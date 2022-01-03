@@ -1,7 +1,10 @@
 from . import alignment
 from . import _atom_selectors
+from . import rosettaScripts
 
 import os
+import shutil
+import numpy as np
 from Bio import PDB
 from Bio.PDB.DSSP import DSSP
 
@@ -79,6 +82,69 @@ class proteinModels:
 
         # # Perform a multiple sequence aligment of models
         # self.calculateMSA()
+
+
+    def addResidueToModel(self, model, chain_id, resname, atom_names, coordinates, elements=None):
+        """
+        Add a residue to a specific model.
+
+        Parameters
+        ==========
+        model : str
+            Model name to edit
+        chain_id : str
+            Chain ID to which the residue will be added.
+        resname : str
+            Name of the residue to be added.
+        atom_names : list ot tuple
+            Atom names of each atom in the residue to add.
+        coordinates : numpy.ndarray
+            Atom coordinates array, it should match the order in the given
+            atom_names.
+        elements : List of atomic elements. One per each atom.
+        """
+
+        # Check model name
+        if model not in self.structures:
+            raise ValueError('The input model was not found.')
+
+        # Check chain ID
+        chain = [chain for chain in self.structures[model].get_chains() if chain_id == chain.id]
+        if len(chain) != 1:
+            raise ValueError('Chain ID given was not found in the selected model.')
+
+        # Check coordinates correctness
+        if coordinates.shape == ():
+            if np.isnan(coordinates):
+                raise ValueError('Given Coordinate in nan!')
+        elif np.isnan(coordinates.any()):
+            raise ValueError('Some given Coordinates are nan!')
+        if coordinates.shape[0] != 3:
+            raise ValueError('Coordinates must have shape (3,x). X=number of atoms in residue.')
+        if len(coordinates.shape) > 1:
+            if coordinates.shape[1] != len(atom_names):
+                raise ValueError('Mismatch between the number of atom_names and coordinates.')
+        if len(coordinates.shape) == 1:
+                if len(atom_names) != 1:
+                    raise ValueError('Mismatch between the number of atom_names and coordinates.')
+
+        coordinates = coordinates.reshape(len(atom_names), 3)
+        # Create new residue
+        new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+        residue = PDB.Residue.Residue((' ', new_resid, ' '), resname, ' ')
+
+        # Add new atoms to residue
+        serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
+        for i, atnm in enumerate(atom_names):
+            if elements:
+                # print(atom_names[i], coordinates[i], 0, 1.0, '  ', '%-4s' % atom_names[i], serial_number+i, elements[i)
+                atom = PDB.Atom.Atom(atom_names[i], coordinates[i], 0, 1.0, ' ',
+                                     '%-4s' % atom_names[i], serial_number+i, elements[i])
+            else:
+                atom = PDB.Atom.Atom(atom_names[i], coordinates[i], 0, 1.0, ' ',
+                                     '%-4s' % atom_names[i], serial_number+i)
+            residue.add(atom)
+        chain[0].add(residue)
 
     def readModelFromPDB(self, name, pdb_file):
         """
@@ -246,6 +312,51 @@ class proteinModels:
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
+    def setUpRosettaOptimization(self, minimization_folder, nstruct=1, relax_cycles=5,
+                                 output_folder='output_models'):
+        """
+        Set up minimizations using Rosetta FastRelax protocol.
+        """
+
+        # Create minimization job folders
+        if not os.path.exists(minimization_folder):
+            os.mkdir(minimization_folder)
+        if not os.path.exists(minimization_folder+'/input_models'):
+            os.mkdir(minimization_folder+'/input_models')
+        if not os.path.exists(minimization_folder+'/flags'):
+            os.mkdir(minimization_folder+'/flags')
+        if not os.path.exists(minimization_folder+'/xml'):
+            os.mkdir(minimization_folder+'/xml')
+        if not os.path.exists(minimization_folder+'/'+output_folder):
+            os.mkdir(minimization_folder+'/'+output_folder)
+
+        # Save all models
+        self.saveModels(minimization_folder+'/input_models')
+
+        # Create xml minimization protocol
+        xml = rosettaScripts.xmlScript()
+        relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles)
+        xml.addMover(relax)
+        xml.setProtocol([relax])
+        xml.write_xml(minimization_folder+'/xml/relax.xml')
+
+        # Create flags files
+        jobs = []
+        for model in self.models_names:
+            flags = rosettaScripts.flags('xml/relax.xml', nstruct=nstruct,
+                             s='input_models/'+model+'.pdb',
+                             output_silent_file=output_folder+'/'+model+'_relax.out')
+
+            flags.add_relax_options()
+            flags.write_flags(minimization_folder+'/flags/'+model+'_relax.flags')
+
+            command = 'cd '+minimization_folder+'\n'
+            command += 'srun rosetta_scripts.static.linuxgccrelease @ '+'flags/'+model+'_relax.flags\n'
+            command += 'cd ..\n'
+            jobs.append(command)
+
+        return jobs
+
     def saveModels(self, output_folder):
         """
         Save all models as PDBs into the output_folder.
@@ -262,6 +373,19 @@ class proteinModels:
             self._saveStructureToPDB(self.structures[model],
                                 output_folder+'/'+model+'.pdb')
 
+    def removeModel(self, model):
+        """
+        Removes a specific model from this class
+
+        Parameters
+        ==========
+        model : str
+            Model name to remove
+        """
+        self.models_paths.pop(model)
+        self.models_names.remove(model)
+        self.structures.pop(model)
+        self.sequences.pop(model)
 
     def _getChainSequence(self, chain):
         """
