@@ -27,6 +27,7 @@ class flags:
         self.score_only = score_only
         self.flags_files = []
         self.others = {}
+        self.rosetta_db = None
 
         #Protocol specific
         self.relax_cst = False
@@ -45,6 +46,9 @@ class flags:
     def includeFile(self, flags_file):
         self.flags_files.append(flags_file)
 
+    def setRosettaDatabase(self, database_path):
+        self.rosetta_db = database_path
+
     def write_flags(self, file_name):
 
         with open(file_name, 'w') as ff:
@@ -60,6 +64,8 @@ class flags:
                 ff.write('-in:file:fasta '+ self.input_fasta+'\n')
             if self.input_native != None:
                 ff.write('-in:file:native '+ self.input_native+'\n')
+            if self.rosetta_db != None:
+                ff.write('-database '+ self.rosetta_db+'\n')
             if self.output_silent_file != None:
                 if not self.output_silent_file.endswith('.out'):
                     self.output_silent_file = self.output_silent_file+'.out'

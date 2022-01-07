@@ -84,7 +84,8 @@ class proteinModels:
         # self.calculateMSA()
 
 
-    def addResidueToModel(self, model, chain_id, resname, atom_names, coordinates, elements=None):
+    def addResidueToModel(self, model, chain_id, resname, atom_names, coordinates,
+                          elements=None, hetatom=True, water=False):
         """
         Add a residue to a specific model.
 
@@ -101,7 +102,12 @@ class proteinModels:
         coordinates : numpy.ndarray
             Atom coordinates array, it should match the order in the given
             atom_names.
-        elements : List of atomic elements. One per each atom.
+        elements : list
+            List of atomic elements. One per each atom.
+        hetatom : bool
+            Is the residue an hetatm?
+        water : bool
+            Is the residue a water residue?
         """
 
         # Check model name
@@ -131,7 +137,12 @@ class proteinModels:
         coordinates = coordinates.reshape(len(atom_names), 3)
         # Create new residue
         new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
-        residue = PDB.Residue.Residue((' ', new_resid, ' '), resname, ' ')
+        rt_flag = ' ' # Define the residue type flag for complete the residue ID.
+        if hetatom:
+            rt_flag = 'H'
+        if water:
+            rt_flag = 'W'
+        residue = PDB.Residue.Residue((rt_flag, new_resid, ' '), resname, ' ')
 
         # Add new atoms to residue
         serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
@@ -145,6 +156,8 @@ class proteinModels:
                                      '%-4s' % atom_names[i], serial_number+i)
             residue.add(atom)
         chain[0].add(residue)
+
+        return new_resid
 
     def readModelFromPDB(self, name, pdb_file):
         """
@@ -313,7 +326,7 @@ class proteinModels:
         self.calculateSecondaryStructure(_save_structure=True)
 
     def setUpRosettaOptimization(self, minimization_folder, nstruct=1, relax_cycles=5,
-                                 output_folder='output_models'):
+                                 output_folder='output_models', cst_files=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
         """
@@ -333,25 +346,48 @@ class proteinModels:
         # Save all models
         self.saveModels(minimization_folder+'/input_models')
 
-        # Create xml minimization protocol
-        xml = rosettaScripts.xmlScript()
-        relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles)
-        xml.addMover(relax)
-        xml.setProtocol([relax])
-        xml.write_xml(minimization_folder+'/xml/relax.xml')
-
         # Create flags files
         jobs = []
         for model in self.models_names:
-            flags = rosettaScripts.flags('xml/relax.xml', nstruct=nstruct,
-                             s='input_models/'+model+'.pdb',
-                             output_silent_file=output_folder+'/'+model+'_relax.out')
+            # Create xml minimization protocol
+            xml = rosettaScripts.xmlScript()
+
+            # Create all-atom score function
+            if cst_files != None:
+                sfxn = rosettaScripts.scorefunctions.new_scorefunction('ref2015_cst',
+                                                                       weights_file='ref2015_cst')
+            else:
+                sfxn = rosettaScripts.scorefunctions.new_scorefunction('ref2015',
+                                                                       weights_file='ref2015')
+            xml.addScorefunction(sfxn)
+
+            # Create fastrelax mover
+            relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
+            xml.addMover(relax)
+
+            if cst_files != None:
+                if model not in cst_files:
+                    raise ValuError('Model %s is not in the cst_files dictionary!' % model)
+                set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
+                                                                   cst_file='../'+cst_files[model])
+                xml.addMover(set_cst)
+                xml.setProtocol([set_cst, relax])
+            else:
+                xml.setProtocol([relax])
+
+            xml.addOutputScorefunction(sfxn)
+            xml.write_xml(minimization_folder+'/xml/'+model+'_relax.xml')
+
+            # Create options for minimization protocol
+            flags = rosettaScripts.flags('xml/'+model+'_relax.xml',
+                                         nstruct=nstruct, s='input_models/'+model+'.pdb',
+                                         output_silent_file=output_folder+'/'+model+'_relax.out')
 
             flags.add_relax_options()
             flags.write_flags(minimization_folder+'/flags/'+model+'_relax.flags')
 
             command = 'cd '+minimization_folder+'\n'
-            command += 'srun rosetta_scripts.static.linuxgccrelease @ '+'flags/'+model+'_relax.flags\n'
+            command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'flags/'+model+'_relax.flags\n'
             command += 'cd ..\n'
             jobs.append(command)
 

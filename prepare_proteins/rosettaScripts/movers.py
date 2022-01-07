@@ -1087,7 +1087,7 @@ class movers:
             self.root.set('name', self.name)
             self.root.set('cst_file', self.cst_file)
             if self.add_constraints:
-                self.root.set('add_constraints', str(1.0))
+                self.root.set('add_constraints', str(self.add_constraints))
 
     class atomCoordinateCstMover:
 
