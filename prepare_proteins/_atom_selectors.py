@@ -1,6 +1,7 @@
 from Bio import PDB
 
 class notHydrogen(PDB.Select):
+
     def accept_atom(self, atom):
         """
         Verify if atom is not Hydrogen.
@@ -13,6 +14,7 @@ class notHydrogen(PDB.Select):
             return 1
 
 class notWater(PDB.Select):
+
     def accept_residue(self, residue):
         """
         Verify if residue is water.
@@ -25,12 +27,33 @@ class notWater(PDB.Select):
 
 class onlyProtein(PDB.Select):
 
+    def __init__(self, keep_residues, *args, **kwargs):
+        """
+        Pass a list of non-protein residues to keep.
+
+        Parameters
+        ==========
+        keep_residues : list
+            List of non proteins residues to keep: the list should contain tuples
+            of the form (chain_id, residue_id), e.g., ('A', 203).
+        """
+        super(PDB.Select, self).__init__(*args, **kwargs)
+        self.keep_residues = keep_residues
+
     def accept_residue(self, residue):
         """
         Verify if residues are protein.
         """
         _restype = residue.id[0]
+        _residue_chain = residue.get_parent().id
+        _residue_id = residue.id[1]
+        _match_residue = (_residue_chain, _residue_id)
+
         if _restype != ' ':
-            return 0
+            if _match_residue in self.keep_residues:
+                print('keeping residue', residue)
+                return 1
+            else:
+                return 0
         else:
             return 1

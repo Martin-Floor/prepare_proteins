@@ -8,6 +8,8 @@ import numpy as np
 from Bio import PDB
 from Bio.PDB.DSSP import DSSP
 
+import pandas as pd
+
 import uuid
 
 class proteinModels:
@@ -25,7 +27,7 @@ class proteinModels:
     sequences : dict
         Contains the sequence of each model.
     structures : dict
-        Contains the Bio.PDB structure object to each model.
+        Contains the Bio.PDB.Structure object to each model.
 
     Methods
     =======
@@ -70,7 +72,7 @@ class proteinModels:
         self.ss = {} # secondary structure strings are stored here
 
         # Read PDB structures into Biopython
-        for model in self.models_paths:
+        for model in sorted(self.models_paths):
             self.models_names.append(model)
             self.readModelFromPDB(model, self.models_paths[model])
 
@@ -82,7 +84,6 @@ class proteinModels:
 
         # # Perform a multiple sequence aligment of models
         # self.calculateMSA()
-
 
     def addResidueToModel(self, model, chain_id, resname, atom_names, coordinates,
                           elements=None, hetatom=True, water=False):
@@ -190,7 +191,7 @@ class proteinModels:
         sequences : dict
             Contains the sequences of all models.
         """
-        multi_chain = False
+        self.multi_chain = False
         # Add sequence information
         for model in self.models_names:
             chains = [c for c in self.structures[model].get_chains()]
@@ -201,13 +202,10 @@ class proteinModels:
                 self.sequences[model] = {}
                 for c in chains:
                     self.sequences[model][c.id] = self._getChainSequence(c)
-                multi_chain = True
+                # If any model has more than one chain set multi_chain to True.
+                self.multi_chain = True
 
         return self.sequences
-
-        # If any model has more than one chain set multi_chain to True.
-        if multi_chain:
-            self.multi_chain = True
 
     def calculateMSA(self):
         """
@@ -262,6 +260,29 @@ class proteinModels:
             self.ss[model] = ss
 
         return self.ss
+
+    def keepModelChains(self, model, chains):
+        """
+        Only keep the specified chains for the selected model.
+
+        Parameters
+        ==========
+        model : str
+            Model name
+        chains : list or tuple or str
+            Chain IDs to keep.
+        """
+        if isinstance(chains, str):
+            chains = list(chains)
+
+        remove = []
+        for chain in self.structures[model].get_chains():
+            if chain.id not in chains:
+                remove.append(chain)
+
+        model = [*self.structures[model].get_models()][0]
+        for chain in remove:
+            model.detach_child(chain.id)
 
     def removeTerminalUnstructuredRegions(self, n_hanging=3):
         """
@@ -325,26 +346,31 @@ class proteinModels:
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def setUpRosettaOptimization(self, minimization_folder, nstruct=1, relax_cycles=5,
+    def setUpRosettaOptimization(self, relax_folder, nstruct=1, relax_cycles=5,
                                  output_folder='output_models', cst_files=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
+
+        Parameters
+        ==========
+        relax_folder : str
+            Folder path where to place the relax job.
         """
 
         # Create minimization job folders
-        if not os.path.exists(minimization_folder):
-            os.mkdir(minimization_folder)
-        if not os.path.exists(minimization_folder+'/input_models'):
-            os.mkdir(minimization_folder+'/input_models')
-        if not os.path.exists(minimization_folder+'/flags'):
-            os.mkdir(minimization_folder+'/flags')
-        if not os.path.exists(minimization_folder+'/xml'):
-            os.mkdir(minimization_folder+'/xml')
-        if not os.path.exists(minimization_folder+'/'+output_folder):
-            os.mkdir(minimization_folder+'/'+output_folder)
+        if not os.path.exists(relax_folder):
+            os.mkdir(relax_folder)
+        if not os.path.exists(relax_folder+'/input_models'):
+            os.mkdir(relax_folder+'/input_models')
+        if not os.path.exists(relax_folder+'/flags'):
+            os.mkdir(relax_folder+'/flags')
+        if not os.path.exists(relax_folder+'/xml'):
+            os.mkdir(relax_folder+'/xml')
+        if not os.path.exists(relax_folder+'/'+output_folder):
+            os.mkdir(relax_folder+'/'+output_folder)
 
         # Save all models
-        self.saveModels(minimization_folder+'/input_models')
+        self.saveModels(relax_folder+'/input_models')
 
         # Create flags files
         jobs = []
@@ -376,7 +402,7 @@ class proteinModels:
                 xml.setProtocol([relax])
 
             xml.addOutputScorefunction(sfxn)
-            xml.write_xml(minimization_folder+'/xml/'+model+'_relax.xml')
+            xml.write_xml(relax_folder+'/xml/'+model+'_relax.xml')
 
             # Create options for minimization protocol
             flags = rosettaScripts.flags('xml/'+model+'_relax.xml',
@@ -384,16 +410,119 @@ class proteinModels:
                                          output_silent_file=output_folder+'/'+model+'_relax.out')
 
             flags.add_relax_options()
-            flags.write_flags(minimization_folder+'/flags/'+model+'_relax.flags')
+            flags.write_flags(relax_folder+'/flags/'+model+'_relax.flags')
 
-            command = 'cd '+minimization_folder+'\n'
+            command = 'cd '+relax_folder+'\n'
             command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'flags/'+model+'_relax.flags\n'
             command += 'cd ..\n'
             jobs.append(command)
 
         return jobs
 
-    def saveModels(self, output_folder):
+    def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0):
+        """
+        Set up an structure optimization with the Schrodinger Suite prepwizard.
+
+        Parameters
+        ==========
+        prepare_folder : str
+            Folder name for the prepwizard optimization.
+        """
+        # Create prepare job folders
+        if not os.path.exists(prepare_folder):
+            os.mkdir(prepare_folder)
+        if not os.path.exists(prepare_folder+'/input_models'):
+            os.mkdir(prepare_folder+'/input_models')
+        if not os.path.exists(prepare_folder+'/output_models'):
+            os.mkdir(prepare_folder+'/output_models')
+
+        # Save all input models
+        self.saveModels(prepare_folder+'/input_models')
+
+        # Generate jobs
+        jobs = []
+        for model in self.models_names:
+            # Create model output folder
+            output_folder = prepare_folder+'/output_models/'+model
+            if not os.path.exists(output_folder):
+                os.mkdir(output_folder)
+
+            command = 'cd '+output_folder+'\n'
+            command += '"${SCHRODINGER}/utilities/prepwizard" '
+            command += '../../input_models/'+model+'.pdb '
+            command += model+'.pdb '
+            command += '-fillsidechains '
+            command += '-disulfides '
+            command += '-rehtreat '
+            command += '-epik_pH '+str(pH)+' '
+            command += '-epik_pHt 2.0 '
+            command += '-propka_pH '+str(pH)+' '
+            command += '-f 2005 '
+            command += '-rmsd 0.3 '
+            command += '-samplewater '
+            command += '-delwater_hbond_cutoff 3 '
+            command += '-JOBNAME prepare_'+model+' '
+            command += '-HOST localhost:1\n'
+            command += 'cd ../../..\n'
+            jobs.append(command)
+        return jobs
+
+    def loadModelsFromPrepwizardFolder(self, prepwizard_folder):
+        """
+        Read structures from a Schrodinger calculation.
+
+        Parameters
+        ==========
+        prepwizard_folder : str
+            Path to the output folder from a prepwizard calculation
+        """
+
+        for d in os.listdir(prepwizard_folder):
+            for f in os.listdir(prepwizard_folder+'/'+d):
+                if f.endswith('.pdb'):
+                    model = f.replace('.pdb', '')
+                    self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
+
+    def loadFromSilentFolder(self, silent_folder, filter_score_term='score', min_value=True, relax_run=True):
+        """
+        Load the best energy models from a set of silent files inside a specfic folder.
+        Useful to get the best models from a relaxation run.
+
+        Parameters
+        ==========
+        silent_folder : str
+            Path to folde where a silent file for each model is stored
+        filter_score_term : str
+            Score term used to filter models
+        relax_run : bool
+            Is this a relax run?
+        min_value : bool
+            Grab the minimum score value. Set false to grab the maximum scored value.
+        """
+
+        executable = 'extract_pdbs.linuxgccrelease'
+        # set prefix according to calculation output type
+        if relax_run:
+            suffix = '_relax'
+        else:
+            suffix = ''
+
+        for d in os.listdir(silent_folder):
+            if d.endswith(suffix+'.out'):
+                model = d.replace(suffix+'.out', '')
+                scores = readSilentScores(silent_folder+'/'+d)
+                if min_value:
+                    best_model_tag = scores.idxmin()[filter_score_term]
+                else:
+                    best_model_tag = scores.idxmxn()[filter_score_term]
+                command = executable
+                command += ' -silent '+silent_folder+'/'+d
+                command += ' -tags '+best_model_tag
+                os.system(command)
+                self.readModelFromPDB(model, best_model_tag+'.pdb')
+                os.remove(best_model_tag+'.pdb')
+
+    def saveModels(self, output_folder, keep_residues={}, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -406,8 +535,14 @@ class proteinModels:
             os.mkdir(output_folder)
 
         for model in self.models_names:
+            if model in keep_residues:
+                kr = keep_residues[model]
+            else:
+                kr = []
             self._saveStructureToPDB(self.structures[model],
-                                output_folder+'/'+model+'.pdb')
+                                output_folder+'/'+model+'.pdb',
+                                keep_residues=kr,
+                                **keywords)
 
     def removeModel(self, model):
         """
@@ -471,7 +606,7 @@ class proteinModels:
         return paths
 
     def _saveStructureToPDB(self, structure, output_file, remove_hydrogens=False,
-                            remove_water=False, only_protein=False):
+                            remove_water=False, only_protein=False, keep_residues=[]):
         """
         Saves a structure into a PDB file
 
@@ -485,6 +620,8 @@ class proteinModels:
             Remove water residues from model?
         only_protein : bool
             Remove everything but the protein atoms?
+        keep_residues : list
+            List of residue indexes to keep when using the only_protein selector.
         """
 
         io = PDB.PDBIO()
@@ -496,8 +633,7 @@ class proteinModels:
         elif remove_water:
             selector = _atom_selectors.notWater()
         elif only_protein:
-            selector = _atom_selectors.onlyProtein()
-
+            selector = _atom_selectors.onlyProtein(keep_residues=keep_residues)
         if selector != None:
             io.save(output_file, selector)
         else:
@@ -515,3 +651,41 @@ class proteinModels:
             return self.models_names[self._iter_n]
         else:
             raise StopIteration
+
+def readSilentScores(silent_file):
+    """
+    Read scores from a silent file into a Pandas DataFrame object.
+
+    Parameters
+    ==========
+    silent_file : str
+        Path to the silent file.
+
+    Returns
+    =======
+    scores : Pandas.DataFrame
+        Rosetta score for each model.
+    """
+
+    scores = {}
+    terms = []
+    with open(silent_file) as sf:
+        for l in sf:
+            if l.startswith('SCORE'):
+                if terms == []:
+                    terms = l.strip().split()
+                    for t in terms:
+                        scores[t] = []
+                else:
+                    for i,t in enumerate(terms):
+                        try:
+                            scores[t].append(float(l.strip().split()[i]))
+                        except:
+                            scores[t].append(l.strip().split()[i])
+    scores = pd.DataFrame(scores)
+    scores.pop('SCORE:')
+    scores = pd.DataFrame(scores)
+    scores = scores.set_index('description')
+    scores = scores.sort_index()
+
+    return scores
