@@ -4,13 +4,19 @@ from . import rosettaScripts
 
 import os
 import shutil
+import uuid
+import itertools
+import io
+import subprocess
+import json
+from pkg_resources import resource_stream, Requirement
+
 import numpy as np
 from Bio import PDB
 from Bio.PDB.DSSP import DSSP
-
 import pandas as pd
+import matplotlib.pyplot as plt
 
-import uuid
 
 class proteinModels:
     """
@@ -70,7 +76,8 @@ class proteinModels:
         self.msa = None # multiple sequence alignment
         self.multi_chain = False
         self.ss = {} # secondary structure strings are stored here
-
+        self.docking_data = None # secondary structure strings are stored here
+        self.docking_ligands = {}
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
             self.models_names.append(model)
@@ -223,7 +230,6 @@ class proteinModels:
     def calculateSecondaryStructure(self, _save_structure=False):
         """
         Calculate secondary structure information for each model.
-
         DSSP Code:
         H : Alpha helix (4-12)
         B : Isolated beta-bridge residue
@@ -233,7 +239,6 @@ class proteinModels:
         T : Turn
         S : Bend
         - : None
-
         Parameters
         ==========
         _save_structure : bool
@@ -439,6 +444,9 @@ class proteinModels:
         # Save all input models
         self.saveModels(prepare_folder+'/input_models')
 
+        # Copy control file to prepare folder
+        _copySchrodingerControlFile(prepare_folder)
+
         # Generate jobs
         jobs = []
         for model in self.models_names:
@@ -463,9 +471,272 @@ class proteinModels:
             command += '-delwater_hbond_cutoff 3 '
             command += '-JOBNAME prepare_'+model+' '
             command += '-HOST localhost:1\n'
+            # Add control script command
+            command += 'python3 ../../._schrodinger_control.py '
+            command += model+'.log '
+            command += '--job_type prepwizard\n'
             command += 'cd ../../..\n'
             jobs.append(command)
+
         return jobs
+
+    def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
+                         outerbox=(30,30,30), useflexmae=True):
+        """
+        Setup grid calculation for each model.
+
+        Parameters
+        ==========
+        grid_folder : str
+            Path to grid calculation folder
+        center_atoms : tuple
+        """
+
+        # Create grid job folders
+        if not os.path.exists(grid_folder):
+            os.mkdir(grid_folder)
+
+        if not os.path.exists(grid_folder+'/input_models'):
+            os.mkdir(grid_folder+'/input_models')
+
+        if not os.path.exists(grid_folder+'/grid_inputs'):
+            os.mkdir(grid_folder+'/grid_inputs')
+
+        if not os.path.exists(grid_folder+'/output_models'):
+            os.mkdir(grid_folder+'/output_models')
+
+        # Save all input models
+        self.saveModels(grid_folder+'/input_models')
+
+        # Check that inner and outerbox values are given as integers
+        for v in innerbox:
+            if type(v) != int:
+                raise ValuError('Innerbox values must be given as integers')
+        for v in outerbox:
+            if type(v) != int:
+                raise ValuError('Outerbox values must be given as integers')
+
+        # Copy control file to grid folder
+        _copySchrodingerControlFile(grid_folder)
+
+        # Create grid input files
+        jobs = []
+        for model in self.models_names:
+
+            # Get coordinates of center residue
+            chainid = center_atoms[model][0]
+            resid = center_atoms[model][1]
+            atom_name = center_atoms[model][2]
+
+            for c in self.structures[model].get_chains():
+                if c.id == chainid:
+                    for r in c.get_residues():
+                        if r.id[1] == resid:
+                            for a in r.get_atoms():
+                                if a.name == atom_name:
+                                    x = a.coord[0]
+                                    y = a.coord[1]
+                                    z = a.coord[2]
+
+            # Write grid input file
+            with open(grid_folder+'/grid_inputs/'+model+'.in', 'w') as gif:
+                gif.write('GRID_CENTER %.14f, %.14f, %.14f\n' % (x,y,z))
+                gif.write('GRIDFILE '+model+'.zip\n')
+                gif.write('INNERBOX %s, %s, %s\n' % innerbox)
+                gif.write('OUTERBOX %s, %s, %s\n' % outerbox)
+                gif.write('RECEP_FILE %s\n' % (model+'.mae'))
+                if useflexmae:
+                    gif.write('USEFLEXMAE YES\n')
+
+            command = 'cd '+grid_folder+'/output_models\n'
+
+            # Add convert PDB into mae format command
+            command += '"$SCHRODINGER/utilities/structconvert" '
+            command += '-ipdb ../input_models/'+model+'.pdb'+' '
+            command += '-omae '+model+'.mae\n'
+
+            # Add grid generation command
+            command += '"${SCHRODINGER}/glide" '
+            command += '../grid_inputs/'+model+'.in'+' '
+            command += '-OVERWRITE '
+            command += '-HOST localhost '
+            command += '-TMPLAUNCHDIR\n'
+
+            # Add control script command
+            command += 'python3 ../._schrodinger_control.py '
+            command += model+'.log '
+            command += '--job_type grid\n'
+            command += 'cd ../..\n'
+            jobs.append(command)
+
+        return jobs
+
+    def setUpGlideDocking(self, docking_folder, grids_folder, substrates_folder,
+                          poses_per_lig=100, precision='SP', use_ligand_charges=False):
+        """
+        Set docking calculations for all the proteins and set of substrates located
+        grid_folders and substrates_folder folders, respectively.
+
+        Parameters
+        ==========
+        docking_folder : str
+
+        substrates_folder : str
+            Path to the folder containing the ligands to dock.
+        residues : dict
+            Dictionary with the residues for each model near which to position the
+            ligand as the starting pose.
+        """
+
+        # Create docking job folders
+        if not os.path.exists(docking_folder):
+            os.mkdir(docking_folder)
+
+        if not os.path.exists(docking_folder+'/input_models'):
+            os.mkdir(docking_folder+'/input_models')
+
+        if not os.path.exists(docking_folder+'/output_models'):
+            os.mkdir(docking_folder+'/output_models')
+
+        # Save all input models
+        self.saveModels(docking_folder+'/input_models')
+
+        # Read paths to grid files
+        grids_paths = {}
+        for f in os.listdir(grids_folder+'/output_models'):
+            if f.endswith('.zip'):
+                name = f.replace('.zip','')
+                grids_paths[name] = grids_folder+'/output_models/'+f
+
+        # Read paths to substrates
+        substrates_paths = {}
+        for f in os.listdir(substrates_folder):
+            name = f.replace('.mae','')
+            substrates_paths[name] = substrates_folder+'/'+f
+
+        # Copy control file to grid folder
+        _copySchrodingerControlFile(docking_folder)
+
+        # Set up docking jobs
+        jobs = []
+        for grid in grids_paths:
+            # Create ouput folder
+            if not os.path.exists(docking_folder+'/output_models/'+grid):
+                os.mkdir(docking_folder+'/output_models/'+grid)
+
+            for substrate in substrates_paths:
+
+                # Create glide dock input
+                with open(docking_folder+'/output_models/'+grid+'/'+grid+'_'+substrate+'.in', 'w') as dif:
+                    dif.write('GRIDFILE GRID_PATH/'+grid+'.zip\n')
+                    dif.write('LIGANDFILE ../../../%s\n' % substrates_paths[substrate])
+                    dif.write('POSES_PER_LIG %s\n' % poses_per_lig)
+                    if use_ligand_charges:
+                        dif.write('LIG_MAECHARGES true\n')
+                    dif.write('PRECISION %s\n' % precision)
+
+                # Create commands
+                command = 'cd '+docking_folder+'/output_models/'+grid+'\n'
+
+                # Schrodinger has problem with relative paths to the grid files
+                # This is a quick fix for that (not elegant, but works).
+                command += 'cwd=$(pwd)\n'
+                grid_folder = '/'.join(grids_paths[grid].split('/')[:-1])
+                command += 'cd ../../../%s\n' % grid_folder
+                command += 'gd=$(pwd)\n'
+                command += 'cd $cwd\n'
+                command += 'sed -i "s@GRID_PATH@$gd@" %s \n' % (grid+'_'+substrate+'.in')
+
+                # Add docking command
+                command += '"${SCHRODINGER}/glide" '
+                command += grid+'_'+substrate+'.in'+' '
+                command += '-OVERWRITE '
+                command += '-adjust '
+                command += '-HOST localhost:1 '
+                command += '-TMPLAUNCHDIR\n'
+
+                # Add control script command
+                command += 'python3 ../../._schrodinger_control.py '
+                command += grid+'_'+substrate+'.log '
+                command += '--job_type docking\n'
+                command += 'cd ../../..\n'
+                jobs.append(command)
+
+        return jobs
+
+    def analyseDocking(self, docking_folder, protein_atoms=None):
+        """
+        Missing
+        """
+        # Copy analyse docking script (it depends on schrodinger so we leave it out.)
+        _copyScriptFile(docking_folder, 'analyse_docking.py')
+        script_path = docking_folder+'/._analyse_docking.py'
+
+        # Write protein_atoms dictionary to json file
+        if protein_atoms != None:
+            with open(docking_folder+'/._protein_atoms.json', 'w') as jf:
+                json.dump(protein_atoms, jf)
+
+        # Execute docking analysis
+        os.chdir(docking_folder)
+        if protein_atoms != None:
+            command = 'run ._analyse_docking.py --protein_atoms ._protein_atoms.json'
+        else:
+            command = 'run ._analyse_docking.py'
+        os.system(command)
+
+        # Read the CSV file into pandas
+        self.docking_data = pd.read_csv('._docking_data.csv')
+        # Create multiindex dataframe
+        self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
+
+        # Create dictionary with proteins and ligands
+        for protein in self.docking_data.index.levels[0]:
+            protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
+            self.docking_ligands[protein] = []
+            ligands = [*set(protein_series.index.get_level_values('Ligand'))]
+            for ligand in ligands:
+                self.docking_ligands[protein].append(ligand)
+
+        # Remove tmp files
+        os.remove('._analyse_docking.py')
+        os.remove('._docking_data.csv')
+        os.remove('._protein_atoms.json')
+        os.chdir('..')
+
+    def extractDockingPoses(self, docking_data, docking_folder, output_folder):
+        """
+        Missing
+        """
+        # Copy analyse docking script (it depends on schrodinger so we leave it out.)
+        _copyScriptFile(output_folder, 'extract_docking.py')
+        script_path = output_folder+'/._extract_docking.py'
+
+        if not os.path.exists(output_folder):
+            os.mkdir(folder)
+
+        # Move to output folder
+        os.chdir(output_folder)
+
+        # Save given docking data to csv
+        docking_data.reset_index(inplace=True)
+        docking_data.to_csv('._docking_data.csv', index=False)
+
+        # Execute docking analysis
+        command = 'run ._extract_docking.py ._docking_data.csv ../'+docking_folder
+        os.system(command)
+
+        # Remove docking data
+        # os.remove('._docking_data.csv')
+
+        # move back to folder
+        os.chdir('..')
+
+    def plotDocking(self, protein, ligand, x='RMSD', y='Score', z=None, colormap='Blues_r'):
+        protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
+        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+        ligand_series.plot(kind='scatter', x=x, y=y, c=z, colormap=colormap,)
+        plt.title(protein+' + '+ligand)
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder):
         """
@@ -478,10 +749,11 @@ class proteinModels:
         """
 
         for d in os.listdir(prepwizard_folder):
-            for f in os.listdir(prepwizard_folder+'/'+d):
-                if f.endswith('.pdb'):
-                    model = f.replace('.pdb', '')
-                    self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
+            if os.path.isdir(prepwizard_folder+'/'+d):
+                for f in os.listdir(prepwizard_folder+'/'+d):
+                    if f.endswith('.pdb'):
+                        model = f.replace('.pdb', '')
+                        self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
 
     def loadFromSilentFolder(self, silent_folder, filter_score_term='score', min_value=True, relax_run=True):
         """
@@ -689,3 +961,36 @@ def readSilentScores(silent_file):
     scores = scores.sort_index()
 
     return scores
+
+def _copySchrodingerControlFile(output_folder):
+    """
+    Copy Schrodinger job control file to the specified folder
+    """
+    # Get control script
+    control_script = resource_stream(Requirement.parse("prepare_proteins"),
+                                     "prepare_proteins/_schrodinger_control.py")
+    control_script = io.TextIOWrapper(control_script)
+
+    # Write control script to output folder
+    with open(output_folder+'/._schrodinger_control.py', 'w') as sof:
+        for l in control_script:
+            sof.write(l)
+
+def _copyScriptFile(output_folder, script_name):
+    """
+    Copy a script file from the prepare_proteins package.
+
+    Parameters
+    ==========
+
+    """
+    # Get control script
+    control_script = resource_stream(Requirement.parse("prepare_proteins"),
+                                     "prepare_proteins/scripts/"+script_name)
+
+    control_script = io.TextIOWrapper(control_script)
+
+    # Write control script to output folder
+    with open(output_folder+'/._'+script_name, 'w') as sof:
+        for l in control_script:
+            sof.write(l)
