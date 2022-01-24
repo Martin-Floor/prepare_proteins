@@ -50,6 +50,7 @@ class onlyProtein(PDB.Select):
         _match_residue = (_residue_chain, _residue_id)
 
         if _restype != ' ':
+            print(_restype, _residue_chain, _residue_id, _match_residue)
             if _match_residue in self.keep_residues:
                 print('keeping residue', residue)
                 return 1
