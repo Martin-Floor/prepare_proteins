@@ -31,10 +31,6 @@ def bb_only_score_function(membrane=False):
 
     return bb_only
 
-
-# In[ ]:
-
-
 def abinitio_perturbers(loop_residues, loop_remodel=False):
 
     #define perturbers
@@ -63,10 +59,6 @@ def montecarlo_perturbers(loop_residues):
     p_perturb_dihedrals = rs_movers.generalizedKic.pertubers.perturbDihedrals(residues, atoms1, residues, atoms2, 15.0)
 
     return p_perturb_dihedrals
-
-
-# In[ ]:
-
 
 def add_missing_residues(insertion_point, sequence):
 
@@ -99,10 +91,6 @@ def addBond(insertion_point, neighbours=3):
     prepend_point = insertion_point - 1
     addBond = rs_movers.declareBond(atom1='C', atom2='N', res1=prepend_point+1, res2=prepend_point+2)
     return addBond
-
-
-# In[ ]:
-
 
 def loopRebuild(xml_script, insertion_point, loop_sequence, hanging_residues=1,
                 mc_trials=10, membrane=False, scorefxn='ref2015'):

@@ -17,6 +17,7 @@ from Bio.PDB.DSSP import DSSP
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import prepare_proteins
 
 class proteinModels:
     """
@@ -58,7 +59,7 @@ class proteinModels:
         Get the paths for all PDBs in the input_folder path.
     """
 
-    def __init__(self, models_folder):
+    def __init__(self, models_folder, get_sequences=True, get_ss=True, msa=False):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -78,19 +79,23 @@ class proteinModels:
         self.ss = {} # secondary structure strings are stored here
         self.docking_data = None # secondary structure strings are stored here
         self.docking_ligands = {}
+        self.sequence_differences = {} # Store missing/changed sequence information
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
             self.models_names.append(model)
             self.readModelFromPDB(model, self.models_paths[model])
 
-        # Get sequence information based on stored structure objects
-        self.getModelsSequences()
+        if get_sequences:
+            # Get sequence information based on stored structure objects
+            self.getModelsSequences()
 
-        # Calculate secondary structure inforamtion as strings
-        self.calculateSecondaryStructure()
+        if get_ss:
+            # Calculate secondary structure inforamtion as strings
+            self.calculateSecondaryStructure()
 
         # # Perform a multiple sequence aligment of models
-        # self.calculateMSA()
+        if msa:
+            self.calculateMSA()
 
     def addResidueToModel(self, model, chain_id, resname, atom_names, coordinates,
                           elements=None, hetatom=True, water=False):
@@ -167,13 +172,13 @@ class proteinModels:
 
         return new_resid
 
-    def readModelFromPDB(self, name, pdb_file):
+    def readModelFromPDB(self, model, pdb_file):
         """
         Adds a model from a PDB file.
 
         Parameters
         ----------
-        name : str
+        model : str
             Model name.
         pdb_file : str
             Path to the pdb file.
@@ -183,11 +188,9 @@ class proteinModels:
         structure : Bio.PDB.Structure
             Structure object.
         """
-        parser = PDB.PDBParser()
-        self.structures[name] = parser.get_structure(name, pdb_file)
-        self.models_paths[name] = pdb_file
-
-        return self.structures[name]
+        self.structures[model] = _readPDB(model, pdb_file)
+        self.models_paths[model] = pdb_file
+        return self.structures[model]
 
     def getModelsSequences(self):
         """
@@ -227,6 +230,56 @@ class proteinModels:
 
         return self.msa
 
+    def getConservedMSAPositions(self, msa):
+        """
+        Get all conserved MSA positions.
+
+        Returns
+        =======
+        conserved : list
+            All conserved MSA positions indexes and the conserved amino acid identity.
+        """
+
+        positions = {}
+        conserved = []
+        n_models = len(self.msa)
+        for i in range(self.msa.get_alignment_length()):
+            positions[i] = []
+            for model in self.msa:
+                positions[i].append(model.seq[i])
+            positions[i] = set(positions[i])
+            if len(positions[i]) == 1:
+                conserved.append((i,list(positions[i])[0]))
+
+        return conserved
+
+    def getResidueIndexFromMSAindex(self, msa_index):
+        """
+        Get the individual model residue indexes of a specific MSA positions
+
+        Paramters
+        =========
+        msa_index : int
+            MSA index
+
+        Returns
+        =======
+        residue_indexes : dict
+            Residue indexes for each protein at the MSA position
+        """
+
+        residue_indexes = {}
+        for model in self.models_names:
+            residue_indexes[model] = 0
+
+        for i in range(self.msa.get_alignment_length()):
+            if i == msa_index:
+                break
+            for entry in self.msa:
+                if entry.seq[i] != '-':
+                    residue_indexes[entry.id] += 1
+        return residue_indexes
+
     def calculateSecondaryStructure(self, _save_structure=False):
         """
         Calculate secondary structure information for each model.
@@ -253,7 +306,7 @@ class proteinModels:
             structure_path = self.models_paths[model]
             if _save_structure:
                 structure_path = '.'+str(uuid.uuid4())+'.pdb'
-                self._saveStructureToPDB(self.structures[model], structure_path)
+                _saveStructureToPDB(self.structures[model], structure_path)
 
             dssp = DSSP(self.structures[model][0], structure_path)
             if _save_structure:
@@ -352,7 +405,7 @@ class proteinModels:
         self.calculateSecondaryStructure(_save_structure=True)
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1, relax_cycles=5,
-                                 output_folder='output_models', cst_files=None):
+                                 cst_files=None, mutations=False, models=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -371,17 +424,30 @@ class proteinModels:
             os.mkdir(relax_folder+'/flags')
         if not os.path.exists(relax_folder+'/xml'):
             os.mkdir(relax_folder+'/xml')
-        if not os.path.exists(relax_folder+'/'+output_folder):
-            os.mkdir(relax_folder+'/'+output_folder)
+        if not os.path.exists(relax_folder+'/output_models'):
+            os.mkdir(relax_folder+'/output_models')
 
         # Save all models
         self.saveModels(relax_folder+'/input_models')
 
+        # Check that sequence comparison has been done before adding mutational steps
+        if mutations:
+            if self.sequence_differences == {}:
+                raise ValuError('Mutations have been enabled but no sequence comparison\
+has been carried out. Please run compareSequences() function before setting mutation=True.')
+
         # Create flags files
         jobs = []
         for model in self.models_names:
+
+            # Skip models not in the given list
+            if models != None:
+                if model not in models:
+                    continue
+
             # Create xml minimization protocol
             xml = rosettaScripts.xmlScript()
+            protocol = []
 
             # Create all-atom score function
             if cst_files != None:
@@ -392,35 +458,153 @@ class proteinModels:
                                                                        weights_file='ref2015')
             xml.addScorefunction(sfxn)
 
-            # Create fastrelax mover
-            relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
-            xml.addMover(relax)
+            # Create mutation movers if needed
+            if mutations:
+                if self.sequence_differences[model]['mutations'] != {}:
+                    for m in self.sequence_differences[model]['mutations']:
+                        mutate = rosettaScripts.movers.mutate(name='mutate_'+str(m[0]),
+                                                              target_residue=m[0],
+                                                              new_residue=PDB.Polypeptide.one_to_three(m[1]))
+                        xml.addMover(mutate)
+                        protocol.append(mutate)
 
+            # Add constraint mover if constraint file is given.
             if cst_files != None:
                 if model not in cst_files:
                     raise ValuError('Model %s is not in the cst_files dictionary!' % model)
                 set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
                                                                    cst_file='../'+cst_files[model])
-                xml.addMover(set_cst)
-                xml.setProtocol([set_cst, relax])
-            else:
-                xml.setProtocol([relax])
+                protocol.append(set_cst)
 
+            # Create fastrelax mover
+            relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
+            xml.addMover(relax)
+            protocol.append(relax)
+
+            # Set protocol
+            xml.setProtocol(protocol)
+
+            # Add scorefunction output
             xml.addOutputScorefunction(sfxn)
+
+            # Write XMl protocol file
             xml.write_xml(relax_folder+'/xml/'+model+'_relax.xml')
 
             # Create options for minimization protocol
             flags = rosettaScripts.flags('xml/'+model+'_relax.xml',
                                          nstruct=nstruct, s='input_models/'+model+'.pdb',
-                                         output_silent_file=output_folder+'/'+model+'_relax.out')
+                                         output_silent_file='output_models/'+model+'_relax.out')
 
+            # Add relaxation options and write flags file
             flags.add_relax_options()
             flags.write_flags(relax_folder+'/flags/'+model+'_relax.flags')
 
+            # Create and append execution command
             command = 'cd '+relax_folder+'\n'
             command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'flags/'+model+'_relax.flags\n'
             command += 'cd ..\n'
             jobs.append(command)
+
+        return jobs
+
+    def addMissingLoops(self, job_folder, nstruct=1, sfxn='ref2015'):
+        """
+        Create a Rosetta loop optimization protocol for missing loops in the structure.
+
+        Parameters
+        ==========
+        job_folder : str
+            Loop modeling calculation folder.
+        """
+
+        # Create minimization job folders
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+        if not os.path.exists(job_folder+'/flags'):
+            os.mkdir(job_folder+'/flags')
+        if not os.path.exists(job_folder+'/xml'):
+            os.mkdir(job_folder+'/xml')
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Save all models
+        self.saveModels(job_folder+'/input_models')
+
+        # Check that sequence comparison has been done before checking missing loops
+        if self.sequence_differences == {}:
+            raise ValuError('No sequence comparison has been carried out. Please run \
+compareSequences() function before adding missing loops.')
+
+        # Create flags files
+        jobs = []
+        for model in self.models_names:
+
+            # Check that model has missing loops
+            if self.sequence_differences[model]['missing_loops'] != []:
+
+                missing_loops = self.sequence_differences[model]['missing_loops']
+
+                for loop in missing_loops:
+
+                    loop_name = str(loop[0])+'_'+str(loop[1])
+
+                    if not os.path.exists(job_folder+'/output_models/'+model):
+                        os.mkdir(job_folder+'/output_models/'+model)
+
+                    if not os.path.exists(job_folder+'/output_models/'+model+'/'+loop_name):
+                        os.mkdir(job_folder+'/output_models/'+model+'/'+loop_name)
+
+                    # Create xml minimization protocol
+                    xml = rosettaScripts.xmlScript()
+                    protocol = []
+
+                    # Create score function
+
+                    scorefxn = rosettaScripts.scorefunctions.new_scorefunction(sfxn,
+                                                                               weights_file=sfxn)
+
+                    # Add loop remodel protocol
+                    if len(loop[1]) == 1:
+                        hanging_residues = 3
+                    elif len(loop[1]) == 2:
+                        hanging_residues = 2
+                    else:
+                        hanging_residues = 1
+                    loop_movers = rosettaScripts.loop_modeling.loopRebuild(xml, loop[0], loop[1],
+                                                                           scorefxn=sfxn, hanging_residues=hanging_residues)
+                    for m in loop_movers:
+                        protocol.append(m)
+
+                    # Add idealize step
+                    idealize = rosettaScripts.movers.idealize()
+                    xml.addMover(idealize)
+                    protocol.append(idealize)
+
+                    # Set protocol
+                    xml.setProtocol(protocol)
+
+                    # Add scorefunction output
+                    xml.addOutputScorefunction(scorefxn)
+                    # Write XMl protocol file
+                    xml.write_xml(job_folder+'/xml/'+model+'_'+loop_name+'.xml')
+
+                    # Create options for minimization protocol
+                    output_silent = 'output_models/'+model+'/'+loop_name+'/'+model+'_'+loop_name+'.out'
+                    flags = rosettaScripts.flags('xml/'+model+'_'+loop_name+'.xml',
+                                                 nstruct=nstruct, s='input_models/'+model+'.pdb',
+                                                 output_silent_file=output_silent)
+
+                    # Write flags file
+                    flags.write_flags(job_folder+'/flags/'+model+'_'+loop_name+'.flags')
+
+                    # Create and append execution command
+                    command = 'cd '+job_folder+'\n'
+                    command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'flags/'+model+'_'+loop_name+'.flags\n'
+                    command += 'cd ..\n'
+
+                    jobs.append(command)
 
         return jobs
 
@@ -719,8 +903,8 @@ class proteinModels:
         os.chdir(output_folder)
 
         # Save given docking data to csv
-        docking_data.reset_index(inplace=True)
-        docking_data.to_csv('._docking_data.csv', index=False)
+        dd = docking_data.reset_index()
+        dd.to_csv('._docking_data.csv', index=False)
 
         # Execute docking analysis
         command = 'run ._extract_docking.py ._docking_data.csv ../'+docking_folder
@@ -755,7 +939,7 @@ class proteinModels:
                         model = f.replace('.pdb', '')
                         self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
 
-    def loadFromSilentFolder(self, silent_folder, filter_score_term='score', min_value=True, relax_run=True):
+    def loadModelsFromSilentFolder(self, silent_folder, filter_score_term='score', min_value=True, relax_run=True):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -794,6 +978,76 @@ class proteinModels:
                 self.readModelFromPDB(model, best_model_tag+'.pdb')
                 os.remove(best_model_tag+'.pdb')
 
+    def loadModelsFromMissingLoopBuilding(self, job_folder, filter_score_term='score', min_value=True,):
+        """
+        Load models from addMissingLoops() job calculation output.
+
+        Parameters:
+        job_folder : str
+            Path to the addMissingLoops() calculation folder containing output.
+        """
+
+        # Get silent models paths
+        executable = 'extract_pdbs.linuxgccrelease'
+        output_folder = job_folder+'/output_models'
+
+        # Check loops to rebuild from output folder structure
+        for model in os.listdir(output_folder):
+            model_folder = output_folder+'/'+model
+            loop_models = {}
+            for loop in os.listdir(model_folder):
+                loop_folder = model_folder+'/'+loop
+                for f in os.listdir(loop_folder):
+                    # If rebuilded loops are found get best structures.
+                    if f.endswith('.out'):
+                        scores = readSilentScores(loop_folder+'/'+f)
+                        best_model_tag = scores.idxmin()[filter_score_term]
+                        if min_value:
+                            best_model_tag = scores.idxmin()[filter_score_term]
+                        else:
+                            best_model_tag = scores.idxmxn()[filter_score_term]
+                        command = executable
+                        command += ' -silent '+loop_folder+'/'+f
+                        command += ' -tags '+best_model_tag
+                        os.system(command)
+                        loop = (int(loop.split('_')[0]), loop.split('_')[1])
+                        loop_models[loop] = _readPDB(loop, best_model_tag+'.pdb')
+                        os.remove(best_model_tag+'.pdb')
+
+            # Get original model chains
+            model_chains = [*self.structures[model].get_chains()]
+
+            # Create new structure, model and chains to add rebuilded segments
+            structure = PDB.Structure.Structure(0)
+            _model = PDB.Model.Model(0)
+            chains = {}
+            for model_chain in model_chains:
+                chains[model_chain.id] = PDB.Chain.Chain(model_chain.id)
+
+            # Add missing loop segments to overall model
+            current_residue = 0
+            for loop in loop_models:
+                # Add loop remodel protocol
+                if len(loop[1]) == 1:
+                    hanging_residues = 3
+                elif len(loop[1]) == 2:
+                    hanging_residues = 2
+                else:
+                    hanging_residues = 1
+                larger_loop_residue = loop[0]+len(loop[1])+1+hanging_residues
+                for i,residue in enumerate(loop_models[loop].get_residues()):
+                    if i+1 > current_residue and i+1 <= larger_loop_residue:
+                        chain_id = residue.get_parent().id
+                        chains[chain_id].add(residue)
+                        current_residue += 1
+
+            # Load final model into the library
+            for chain in chains:
+                _model.add(chains[chain])
+            structure.add(_model)
+            _saveStructureToPDB(structure, model+'.pdb')
+            os.remove(model+'.pdb')
+
     def saveModels(self, output_folder, keep_residues={}, **keywords):
         """
         Save all models as PDBs into the output_folder.
@@ -811,7 +1065,7 @@ class proteinModels:
                 kr = keep_residues[model]
             else:
                 kr = []
-            self._saveStructureToPDB(self.structures[model],
+            _saveStructureToPDB(self.structures[model],
                                 output_folder+'/'+model+'.pdb',
                                 keep_residues=kr,
                                 **keywords)
@@ -829,6 +1083,82 @@ class proteinModels:
         self.models_names.remove(model)
         self.structures.pop(model)
         self.sequences.pop(model)
+
+    def compareSequences(self, sequences_file):
+        """
+        Compare models sequences to a set of different sequences and check missing
+        or changed sequence information.
+
+        Parameters
+        ==========
+        sequences_file : str
+            Path to the sequences to compare
+
+        Returns
+        =======
+        sequence_differences : dict
+            Dictionary containing missing or changed information.
+        """
+        sequences = prepare_proteins.alignment.readFastaFile(sequences_file)
+
+        # Iterate models to store sequence differences
+        for model in self.models_names:
+
+            # Create lists for missing information
+            self.sequence_differences[model] = {}
+            self.sequence_differences[model]['n_terminus'] = []
+            self.sequence_differences[model]['mutations'] = []
+            self.sequence_differences[model]['missing_loops'] = []
+            self.sequence_differences[model]['c_terminus'] = []
+
+            # Create a sequence alignement between current and target sequence
+            to_align = {}
+            to_align['current'] = self.sequences[model]
+            to_align['target'] = sequences[model]
+            msa = prepare_proteins.alignment.mafft.multipleSequenceAlignment(to_align)
+
+            # Iterate the alignment to gather sequence differences
+            p = 0
+            n = True
+            loop_sequence = ''
+            loop_start = 0
+
+            # Check for n-terminus, mutations and missing loops
+            for i in range(msa.get_alignment_length()):
+                csp = msa[0].seq[i]
+                tsp = msa[1].seq[i]
+                if csp != '-':
+                    p += 1
+                if csp == '-' and tsp != '-' and n:
+                    self.sequence_differences[model]['n_terminus'].append(tsp)
+                elif csp != '-' and tsp != '-':
+                    n = False
+                    if loop_sequence != '':
+                        self.sequence_differences[model]['missing_loops'].append((loop_start, loop_sequence))
+                    loop_sequence = ''
+                    loop_start = 0
+
+                    if csp != tsp:
+                        self.sequence_differences[model]['mutations'].append((p, tsp))
+                elif csp == '-' and  tsp != '-' and p < len(to_align['current']):
+                    if loop_start == 0:
+                        loop_start = p
+                        loop_sequence += tsp
+
+
+            # Check for c-terminus
+            for i in reversed(range(msa.get_alignment_length())):
+                csp = msa[0].seq[i]
+                tsp = msa[1].seq[i]
+                if csp == '-' and tsp != '-':
+                    self.sequence_differences[model]['c_terminus'].append(tsp)
+                elif csp != '-' and tsp != '-':
+                    break
+
+            self.sequence_differences[model]['n_terminus'] = ''.join(self.sequence_differences[model]['n_terminus'])
+            self.sequence_differences[model]['c_terminus'] = ''.join(reversed(self.sequence_differences[model]['c_terminus']))
+
+        return self.sequence_differences
 
     def _getChainSequence(self, chain):
         """
@@ -876,40 +1206,6 @@ class proteinModels:
                 paths[pdb_name] = self.models_folder+'/'+d
 
         return paths
-
-    def _saveStructureToPDB(self, structure, output_file, remove_hydrogens=False,
-                            remove_water=False, only_protein=False, keep_residues=[]):
-        """
-        Saves a structure into a PDB file
-
-        Parameters
-        ----------
-        structure : list or Bio.PDB.Structure
-            Structure to save
-        remove_hydrogens : bool
-            Remove hydrogen atoms from model?
-        remove_water : bool
-            Remove water residues from model?
-        only_protein : bool
-            Remove everything but the protein atoms?
-        keep_residues : list
-            List of residue indexes to keep when using the only_protein selector.
-        """
-
-        io = PDB.PDBIO()
-        io.set_structure(structure)
-
-        selector = None
-        if remove_hydrogens:
-            selector = _atom_selectors.notHydrogen()
-        elif remove_water:
-            selector = _atom_selectors.notWater()
-        elif only_protein:
-            selector = _atom_selectors.onlyProtein(keep_residues=keep_residues)
-        if selector != None:
-            io.save(output_file, selector)
-        else:
-            io.save(output_file)
 
     def __iter__(self):
         #returning __iter__ object
@@ -961,6 +1257,48 @@ def readSilentScores(silent_file):
     scores = scores.sort_index()
 
     return scores
+
+def _readPDB(name, pdb_file):
+    """
+    Read PDB file a structure object
+    """
+    parser = PDB.PDBParser()
+    structure = parser.get_structure(name, pdb_file)
+    return structure
+
+def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
+                        remove_water=False, only_protein=False, keep_residues=[]):
+    """
+    Saves a structure into a PDB file
+
+    Parameters
+    ----------
+    structure : list or Bio.PDB.Structure
+        Structure to save
+    remove_hydrogens : bool
+        Remove hydrogen atoms from model?
+    remove_water : bool
+        Remove water residues from model?
+    only_protein : bool
+        Remove everything but the protein atoms?
+    keep_residues : list
+        List of residue indexes to keep when using the only_protein selector.
+    """
+
+    io = PDB.PDBIO()
+    io.set_structure(structure)
+
+    selector = None
+    if remove_hydrogens:
+        selector = _atom_selectors.notHydrogen()
+    elif remove_water:
+        selector = _atom_selectors.notWater()
+    elif only_protein:
+        selector = _atom_selectors.onlyProtein(keep_residues=keep_residues)
+    if selector != None:
+        io.save(output_file, selector)
+    else:
+        io.save(output_file)
 
 def _copySchrodingerControlFile(output_folder):
     """

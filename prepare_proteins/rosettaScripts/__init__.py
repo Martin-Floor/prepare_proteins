@@ -4,6 +4,7 @@ from .moveMapFactories import moveMapFactory
 from .selectors import residueSelectors
 from .scorefunctions import scorefunctions
 from .simpleMetrics import simpleMetrics
+from .protocols import *
 
 from .options import flags
 from .movers import movers
