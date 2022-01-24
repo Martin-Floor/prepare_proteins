@@ -1140,10 +1140,11 @@ compareSequences() function before adding missing loops.')
 
                     if csp != tsp:
                         self.sequence_differences[model]['mutations'].append((p, tsp))
+
                 elif csp == '-' and  tsp != '-' and p < len(to_align['current']):
                     if loop_start == 0:
                         loop_start = p
-                        loop_sequence += tsp
+                    loop_sequence += tsp
 
 
             # Check for c-terminus
