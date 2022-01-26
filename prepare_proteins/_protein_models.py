@@ -405,7 +405,8 @@ class proteinModels:
         self.calculateSecondaryStructure(_save_structure=True)
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1, relax_cycles=5,
-                                 cst_files=None, mutations=False, models=None):
+                                 cst_files=None, mutations=False, models=None,
+                                 membrane=False, membrane_thickness=15):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -428,7 +429,7 @@ class proteinModels:
             os.mkdir(relax_folder+'/output_models')
 
         # Save all models
-        self.saveModels(relax_folder+'/input_models')
+        self.saveModels(relax_folder+'/input_models', models=models)
 
         # Check that sequence comparison has been done before adding mutational steps
         if mutations:
@@ -445,17 +446,41 @@ has been carried out. Please run compareSequences() function before setting muta
                 if model not in models:
                     continue
 
+            if not os.path.exists(relax_folder+'/output_models/'+model):
+                os.mkdir(relax_folder+'/output_models/'+model)
+
             # Create xml minimization protocol
             xml = rosettaScripts.xmlScript()
             protocol = []
 
-            # Create all-atom score function
-            if cst_files != None:
-                sfxn = rosettaScripts.scorefunctions.new_scorefunction('ref2015_cst',
-                                                                       weights_file='ref2015_cst')
+            # Create membrane scorefucntion
+            if membrane:
+                # Create all-atom score function
+                sfxn = rosettaScripts.scorefunctions.new_scorefunction('mpframework_smooth_fa_2012',
+                                                                       weights_file='mpframework_smooth_fa_2012')
+                # Add constraint weights to membrane score function
+                if cst_files != None:
+                    reweights = (('chainbreak', 1.0),
+                                ('coordinate_constraint', 1.0),
+                                ('atom_pair_constraint', 1.0),
+                                ('angle_constraint', 1.0),
+                                ('dihedral_constraint', 1.0),
+                                ('res_type_constraint', 1.0),
+                                ('metalbinding_constraint', 1.0))
+
+                    for rw in reweights:
+                        sfxn.addReweight(rw[0],rw[1])
+
+            # Create all-atom scorefucntion
             else:
-                sfxn = rosettaScripts.scorefunctions.new_scorefunction('ref2015',
-                                                                       weights_file='ref2015')
+                score_fxn_name = 'ref2015'
+                # Check if constraints are given
+                if cst_files != None:
+                    score_fxn_name += score_fxn_name+'_cst'
+
+                # Create all-atom score function
+                sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
+                                                                       weights_file=score_fxn_name)
             xml.addScorefunction(sfxn)
 
             # Create mutation movers if needed
@@ -473,8 +498,18 @@ has been carried out. Please run compareSequences() function before setting muta
                 if model not in cst_files:
                     raise ValuError('Model %s is not in the cst_files dictionary!' % model)
                 set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
-                                                                   cst_file='../'+cst_files[model])
+                                                                   cst_file='../../../'+cst_files[model])
+                xml.addMover(set_cst)
                 protocol.append(set_cst)
+
+            if membrane:
+                add_membrane = rosettaScripts.rosetta_MP.movers.addMembraneMover()
+                xml.addMover(add_membrane)
+                protocol.append(add_membrane)
+
+                init_membrane = rosettaScripts.rosetta_MP.movers.membranePositionFromTopologyMover()
+                xml.addMover(init_membrane)
+                protocol.append(init_membrane)
 
             # Create fastrelax mover
             relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
@@ -491,18 +526,78 @@ has been carried out. Please run compareSequences() function before setting muta
             xml.write_xml(relax_folder+'/xml/'+model+'_relax.xml')
 
             # Create options for minimization protocol
-            flags = rosettaScripts.flags('xml/'+model+'_relax.xml',
-                                         nstruct=nstruct, s='input_models/'+model+'.pdb',
-                                         output_silent_file='output_models/'+model+'_relax.out')
+            flags = rosettaScripts.flags('../../xml/'+model+'_relax.xml',
+                                         nstruct=nstruct, s='../../input_models/'+model+'.pdb',
+                                         output_silent_file=model+'_relax.out')
 
             # Add relaxation options and write flags file
             flags.add_relax_options()
+            if membrane:
+                flags.addOption('mp::setup::spans_from_structure', 'true')
+                # flags.addOption('relax:constrain_relax_to_start_coords', '')
             flags.write_flags(relax_folder+'/flags/'+model+'_relax.flags')
 
             # Create and append execution command
-            command = 'cd '+relax_folder+'\n'
-            command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'flags/'+model+'_relax.flags\n'
-            command += 'cd ..\n'
+            command = 'cd '+relax_folder+'/output_models/'+model+'\n'
+            command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_relax.flags\n'
+            command += 'cd ../../..\n'
+            jobs.append(command)
+
+        return jobs
+
+    def setUpMembranePositioning(self, job_folder, membrane_thickness=15, models=None):
+        """
+        """
+        # Create minimization job folders
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+        if not os.path.exists(job_folder+'/flags'):
+            os.mkdir(job_folder+'/flags')
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Save all models
+        self.saveModels(job_folder+'/input_models', models=models)
+
+        # Copy embeddingToMembrane.py script
+        # Copy analyse docking script (it depends on schrodinger so we leave it out.)
+        _copyScriptFile(job_folder, 'embeddingToMembrane.py')
+
+        # Create flags files
+        jobs = []
+        for model in self.models_names:
+
+            # Skip models not in the given list
+            if models != None:
+                if model not in models:
+                    continue
+
+            if not os.path.exists(job_folder+'/output_models/'+model):
+                os.mkdir(job_folder+'/output_models/'+model)
+
+            flag_file = job_folder+'/flags/mp_span_from_pdb_'+model+'.flags'
+            with open(flag_file, 'w') as flags:
+                flags.write('-mp::thickness '+str(membrane_thickness)+'\n')
+                flags.write('-s model.pdb\n')
+                flags.write('-out:path:pdb .\n')
+
+            flag_file = job_folder+'/flags/mp_transform_'+model+'.flags'
+            with open(flag_file, 'w') as flags:
+                flags.write('-s ../../input_models/'+model+'.pdb\n')
+                flags.write('-mp:transform:optimize_embedding true\n')
+                flags.write('-mp:setup:spanfiles '+model+'.span\n')
+                flags.write('-out:no_nstruct_label\n')
+
+            command = 'cd '+job_folder+'/output_models/'+model+'\n'
+            command += 'cp ../../input_models/'+model+'.pdb model.pdb\n'
+            command += 'mp_span_from_pdb.linuxgccrelease @ ../../flags/mp_span_from_pdb_'+model+'.flags\n'
+            command += 'rm model.pdb \n'
+            command += 'mv model.span '+model+'.span\n'
+            command += 'mp_transform.linuxgccrelease @ ../../flags/mp_transform_'+model+'.flags\n'
+            command += 'python ../../._embeddingToMembrane.py'+' '+model+'.pdb\n'
+            command += 'cd ../../..\n'
             jobs.append(command)
 
         return jobs
@@ -848,7 +943,7 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def analyseDocking(self, docking_folder, protein_atoms=None):
+    def analyseDocking(self, docking_folder, protein_atoms=None, skip_chains=False):
         """
         Missing
         """
@@ -864,7 +959,10 @@ compareSequences() function before adding missing loops.')
         # Execute docking analysis
         os.chdir(docking_folder)
         if protein_atoms != None:
-            command = 'run ._analyse_docking.py --protein_atoms ._protein_atoms.json'
+            if skip_chains:
+                command = 'run ._analyse_docking.py --protein_atoms ._protein_atoms.json --skip_chains'
+            else:
+                command = 'run ._analyse_docking.py --protein_atoms ._protein_atoms.json'
         else:
             command = 'run ._analyse_docking.py'
         os.system(command)
@@ -885,7 +983,8 @@ compareSequences() function before adding missing loops.')
         # Remove tmp files
         os.remove('._analyse_docking.py')
         os.remove('._docking_data.csv')
-        os.remove('._protein_atoms.json')
+        if os.path.exists('._protein_atoms.json'):
+            os.remove('._protein_atoms.json')
         os.chdir('..')
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder):
@@ -918,7 +1017,13 @@ compareSequences() function before adding missing loops.')
 
     def plotDocking(self, protein, ligand, x='RMSD', y='Score', z=None, colormap='Blues_r'):
         protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
+        if protein_series.empty:
+            print('Model %s not found in Docking data' % protein)
+            return None
         ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+        if ligand_series.empty:
+            print('Ligand %s not found in Docking data for protein %s' % (ligand, protein))
+            return None
         ligand_series.plot(kind='scatter', x=x, y=y, c=z, colormap=colormap,)
         plt.title(protein+' + '+ligand)
 
@@ -1048,7 +1153,14 @@ compareSequences() function before adding missing loops.')
             _saveStructureToPDB(structure, model+'.pdb')
             os.remove(model+'.pdb')
 
-    def saveModels(self, output_folder, keep_residues={}, **keywords):
+    def loadModelsFromMembranePositioning(self, job_folder):
+        """
+        """
+        for model in os.listdir(job_folder+'/output_models'):
+            pdb_path = job_folder+'/output_models/'+model+'/'+model+'.pdb'
+            self.readModelFromPDB(model, pdb_path)
+
+    def saveModels(self, output_folder, keep_residues={}, models=None, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -1061,10 +1173,18 @@ compareSequences() function before adding missing loops.')
             os.mkdir(output_folder)
 
         for model in self.models_names:
+
+            # Skip models not in the given list
+            if models != None:
+                if model not in models:
+                    continue
+
+            # Get residues to keep
             if model in keep_residues:
                 kr = keep_residues[model]
             else:
                 kr = []
+
             _saveStructureToPDB(self.structures[model],
                                 output_folder+'/'+model+'.pdb',
                                 keep_residues=kr,

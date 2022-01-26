@@ -1344,7 +1344,6 @@ class rosetta_MP:
                 self.structure_based = structure_based
                 self.spanfile = spanfile
 
-
             def generateXml(self):
                 self.xml = ElementTree
                 self.root = self.xml.Element('MembranePositionFromTopologyMover')

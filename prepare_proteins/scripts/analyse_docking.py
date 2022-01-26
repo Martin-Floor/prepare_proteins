@@ -9,9 +9,13 @@ import json
 # ## Define input variables
 parser = argparse.ArgumentParser()
 parser.add_argument('--protein_atoms', default=None, help='Dictionary json file including protein_atoms for distance calculations.')
+parser.add_argument('--atom_pairs', default=None, help='Dictionary json file including protein_atoms for distance calculations.')
+parser.add_argument('--skip_chains', default=False, action='store_true', help='Skip chain comparison and select only by residue ID and atom name.')
 args=parser.parse_args()
 
 protein_atoms = args.protein_atoms
+atom_pairs = args.atom_pairs
+skip_chains = args.skip_chains
 
 def RMSD(ref_coord, curr_coord):
     sq_distances = np.linalg.norm(ref_coord - curr_coord, axis=1)**2
@@ -98,15 +102,31 @@ for model in mae_output:
                             protein_atoms[model] = [protein_atoms[model]]
                         for pa in protein_atoms[model]:
                             protein = st
-                            residue_id = pa[0]
-                            atom_name = pa[1]
-                            target_residue = None
-                            for r in protein.residue:
-                                if r.resnum == residue_id:
-                                    for a in r.atom:
-                                        if a.pdbname == atom_name:
-                                            p_coordinates.append(a.xyz)
+                            if skip_chains:
+                                residue_id = pa[0]
+                                atom_name = pa[1]
+                            else:
+                                chain_id = pa[0]
+                                residue_id = pa[1]
+                                atom_name = pa[2]
 
+                            if skip_chains:
+                                for residue in protein.residue:
+                                    if residue.resnum == residue_id:
+                                        for atom in residue.atom:
+                                            if atom.pdbname.strip() == atom_name:
+                                                p_coordinates.append(atom.xyz)
+                            else:
+                                for chain in protein.chain:
+                                    if chain.name == chain_id:
+                                        for residue in protein.residue:
+                                            if residue.resnum == residue_id:
+                                                for atom in residue.atom:
+                                                    if atom.pdbname.strip() == atom_name:
+                                                        p_coordinates.append(atom.xyz)
+
+                        if p_coordinates == []:
+                            raise ValueError('Error. Protein atoms were not found in model %s!' % model)
                         p_coordinates = np.array(p_coordinates)
 
 data = pd.DataFrame(data)
