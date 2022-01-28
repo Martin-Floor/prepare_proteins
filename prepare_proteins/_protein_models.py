@@ -942,6 +942,83 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
+    def setUpSiteMapCalculation(self, job_folder, poses_folder, site_box=10, resolution='fine'):
+        """
+        Generates a SiteMap calculation for Docking poses outputed by the extractDockingPoses()
+        function.
+
+        Parameters
+        ==========
+        job_folder : str
+            Path to the calculation folder
+        poses_folder : str
+            Path to docking poses folder.
+        """
+
+        # Create site map job folders
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Copy control file to grid folder
+        _copySchrodingerControlFile(job_folder)
+        # Copy script to generate protein and ligand mae inputs, separately.
+        _copyScriptFile(job_folder, 'separateProteinAndLigand.py')
+        script_path = job_folder+'/._separateProteinAndLigand.py'
+
+        # Create input files
+        jobs = []
+        for model in os.listdir(poses_folder):
+            if not os.path.isdir(poses_folder+'/'+model):
+                continue
+            if not os.path.exists(job_folder+'/input_models/'+model):
+                os.mkdir(job_folder+'/input_models/'+model)
+            if not os.path.exists(job_folder+'/output_models/'+model):
+                os.mkdir(job_folder+'/output_models/'+model)
+
+            for pose in os.listdir(poses_folder+'/'+model):
+                if pose.endswith('.pdb'):
+                    pose_name = pose.replace('.pdb','')
+
+                    # Generate input protein and ligand files
+                    input_ligand = job_folder+'/input_models/'+model+'/'+model+'_ligand.mae'
+                    input_protein = job_folder+'/input_models/'+model+'/'+model+'_protein.mae'
+                    if not os.path.exists(input_ligand) or not os.path.exists(input_protein):
+                        command = 'run '+script_path+' '
+                        command += poses_folder+'/'+model+'/'+pose+' '
+                        command += job_folder+'/input_models/'+model
+                        os.system(command)
+
+                    # Write Site Map input file
+                    with open(job_folder+'/output_models/'+model+'/'+pose_name+'.in', 'w') as smi:
+                        smi.write('PROTEIN ../../input_models/'+model+'/'+pose+'_ligand.mae\n')
+                        smi.write('LIGMAE ../../input_models/'+model+'/'+pose+'_protein.mae\n')
+                        smi.write('SITEBOX '+str(site_box)+'\n')
+                        smi.write('RESOLUTION '+resolution+'\n')
+                        smi.write('REPORTSIZE 100\n')
+                        smi.write('KEEPVOLPTS yes\n')
+                        smi.write('KEEPLOGS yes\n')
+
+                    # Add site map command
+                    command = 'cd '+job_folder+'/output_models/'+model+'\n'
+                    command += '"${SCHRODINGER}/sitemap" '
+                    command += pose_name+'.in'+' '
+                    command += '-HOST localhost:1 '
+                    command += '-TMPLAUNCHDIR\n'
+
+                    # Add control script command
+                    command += 'python3 ../../._schrodinger_control.py '
+                    command += pose_name+'.log ' # Check
+                    command += '--job_type sitemap\n'
+                    command += 'cd ../../..\n'
+                    jobs.append(command)
+        return jobs
+
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None, skip_chains=False):
         """
         Missing

@@ -16,7 +16,8 @@ job_type = args.job_type
 implemented_calculations = [
 'prepwizard',
 'grid',
-'docking'
+'docking',
+'sitemap'
 ]
 
 if job_type not in implemented_calculations:
@@ -33,6 +34,8 @@ elif job_type == 'grid':
     print('as a Glide Grid calculation.')
 elif job_type == 'docking':
     print('as a Glide Docking calculation.')
+elif job_type == 'sitemap':
+    print('as a Site Map calculation.')
 
 # Create function to parse log file
 def checkLogFile(log_file, calculation_type):
@@ -58,6 +61,9 @@ def checkLogFile(log_file, calculation_type):
     elif calculation_type == 'docking':
         finish_line = 'Finished at:'
         error_line = 'GLIDE FATAL ERROR:'
+    elif calculation_type == 'sitemap':
+        finish_line = 'Finished at:' # Check
+        error_line = 'SITEMAP FATAL ERROR:' # Check
 
     with open(log_file) as lf:
         for l in lf:
