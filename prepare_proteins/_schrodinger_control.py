@@ -62,7 +62,7 @@ def checkLogFile(log_file, calculation_type):
         finish_line = 'Finished at:'
         error_line = 'GLIDE FATAL ERROR:'
     elif calculation_type == 'sitemap':
-        finish_line = 'Finished at:' # Check
+        finish_line = 'Job finished:' # Check
         error_line = 'SITEMAP FATAL ERROR:' # Check
 
     with open(log_file) as lf:
