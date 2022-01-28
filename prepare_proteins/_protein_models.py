@@ -986,8 +986,8 @@ compareSequences() function before adding missing loops.')
                     pose_name = pose.replace('.pdb','')
 
                     # Generate input protein and ligand files
-                    input_ligand = job_folder+'/input_models/'+model+'/'+model+'_ligand.mae'
-                    input_protein = job_folder+'/input_models/'+model+'/'+model+'_protein.mae'
+                    input_ligand = job_folder+'/input_models/'+model+'/'+pose_name+'_ligand.mae'
+                    input_protein = job_folder+'/input_models/'+model+'/'+pose_name+'_protein.mae'
                     if not os.path.exists(input_ligand) or not os.path.exists(input_protein):
                         command = 'run '+script_path+' '
                         command += poses_folder+'/'+model+'/'+pose+' '
