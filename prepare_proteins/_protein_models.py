@@ -476,7 +476,7 @@ has been carried out. Please run compareSequences() function before setting muta
                 score_fxn_name = 'ref2015'
                 # Check if constraints are given
                 if cst_files != None:
-                    score_fxn_name += score_fxn_name+'_cst'
+                    score_fxn_name = score_fxn_name+'_cst'
 
                 # Create all-atom score function
                 sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
@@ -562,7 +562,6 @@ has been carried out. Please run compareSequences() function before setting muta
         self.saveModels(job_folder+'/input_models', models=models)
 
         # Copy embeddingToMembrane.py script
-        # Copy analyse docking script (it depends on schrodinger so we leave it out.)
         _copyScriptFile(job_folder, 'embeddingToMembrane.py')
 
         # Create flags files
@@ -943,11 +942,11 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def analyseDocking(self, docking_folder, protein_atoms=None, skip_chains=False):
+    def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None, skip_chains=False):
         """
         Missing
         """
-        # Copy analyse docking script (it depends on schrodinger so we leave it out.)
+        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(docking_folder, 'analyse_docking.py')
         script_path = docking_folder+'/._analyse_docking.py'
 
@@ -956,9 +955,21 @@ compareSequences() function before adding missing loops.')
             with open(docking_folder+'/._protein_atoms.json', 'w') as jf:
                 json.dump(protein_atoms, jf)
 
+        # Write protein_atoms dictionary to json file
+        if atom_pairs != None:
+            with open(docking_folder+'/._atom_pairs.json', 'w') as jf:
+                json.dump(atom_pairs, jf)
+
         # Execute docking analysis
         os.chdir(docking_folder)
-        if protein_atoms != None:
+
+        if atom_pairs != None:
+            if skip_chains:
+                command = 'run ._analyse_docking.py --atom_pairs ._atom_pairs.json --skip_chains'
+            else:
+                command = 'run ._analyse_docking.py --atom_pairs ._atom_pairs.json'
+
+        elif protein_atoms != None:
             if skip_chains:
                 command = 'run ._analyse_docking.py --protein_atoms ._protein_atoms.json --skip_chains'
             else:
@@ -996,7 +1007,7 @@ compareSequences() function before adding missing loops.')
         script_path = output_folder+'/._extract_docking.py'
 
         if not os.path.exists(output_folder):
-            os.mkdir(folder)
+            os.mkdir(output_folder)
 
         # Move to output folder
         os.chdir(output_folder)
@@ -1010,7 +1021,7 @@ compareSequences() function before adding missing loops.')
         os.system(command)
 
         # Remove docking data
-        # os.remove('._docking_data.csv')
+        os.remove('._docking_data.csv')
 
         # move back to folder
         os.chdir('..')

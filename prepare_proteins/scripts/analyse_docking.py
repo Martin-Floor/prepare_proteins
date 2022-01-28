@@ -27,6 +27,10 @@ if protein_atoms != None:
     with open(protein_atoms) as paf:
         protein_atoms = json.load(paf)
 
+if atom_pairs != None:
+    with open(atom_pairs) as apf:
+        atom_pairs = json.load(apf)
+
 # Get path to outputfiles
 subjobs = {}
 mae_output = {}
@@ -90,10 +94,15 @@ for model in mae_output:
                     rmsd = RMSD(r_coordinates, c_coordinates)
                     data["RMSD"].append(rmsd)
 
+                    # Calculate protein to ligand distances
+                    if atom_pairs != None:
+                        atom_pairs
+
                     #Get closest ligand distance to protein atoms
                     if protein_atoms != None:
                         M = distance_matrix(p_coordinates,c_coordinates)
                         data["Closest distance"].append(np.amin(M))
+
                 else:
                     if protein_atoms != None:
                         # Get protein atom coordinates
