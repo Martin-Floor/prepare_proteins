@@ -18,7 +18,7 @@ input_name = input_pdb.split('/')[-1]
 # Search ligand in structure
 ligands = asl_searcher.search(st)
 for lig in ligands:
-    st.write(output_folder+'/'+input_name.replace('.pdb','_ligand.mae'))
+    lig.st.write(output_folder+'/'+input_name.replace('.pdb','_ligand.mae'))
     for residue in lig.st.residue:
         ligand_name = residue.pdbres
     break
