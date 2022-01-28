@@ -996,8 +996,8 @@ compareSequences() function before adding missing loops.')
 
                     # Write Site Map input file
                     with open(job_folder+'/output_models/'+model+'/'+pose_name+'.in', 'w') as smi:
-                        smi.write('PROTEIN ../../input_models/'+model+'/'+pose+'_ligand.mae\n')
-                        smi.write('LIGMAE ../../input_models/'+model+'/'+pose+'_protein.mae\n')
+                        smi.write('PROTEIN ../../input_models/'+model+'/'+pose_name+'_ligand.mae\n')
+                        smi.write('LIGMAE ../../input_models/'+model+'/'+pose_name+'_protein.mae\n')
                         smi.write('SITEBOX '+str(site_box)+'\n')
                         smi.write('RESOLUTION '+resolution+'\n')
                         smi.write('REPORTSIZE 100\n')
