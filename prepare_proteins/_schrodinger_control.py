@@ -54,16 +54,16 @@ def checkLogFile(log_file, calculation_type):
     finished = False
     if calculation_type == 'prepwizard':
         finish_line = 'DONE. Output file:'
-        error_line = 'ERROR'
+        error_line = 'ERROR'  # Check
     elif calculation_type == 'grid':
         finish_line = 'Exiting Glide'
-        error_line = 'GLIDE FATAL ERROR:'
+        error_line = 'GLIDE FATAL ERROR:' # Check
     elif calculation_type == 'docking':
         finish_line = 'Finished at:'
-        error_line = 'GLIDE FATAL ERROR:'
+        error_line = 'GLIDE FATAL ERROR:'  # Check
     elif calculation_type == 'sitemap':
         finish_line = 'Job finished:' # Check
-        error_line = 'SITEMAP FATAL ERROR:' # Check
+        error_line = '<FailureLog>' # Check
 
     with open(log_file) as lf:
         for l in lf:
@@ -76,6 +76,8 @@ def checkLogFile(log_file, calculation_type):
                     raise ValueError('Grid Glide calculation failed for model '+log_file.replace('.log',''))
                 elif calculation_type == 'grid':
                     raise ValueError('Docking Glide calculation failed for model '+log_file.replace('.log',''))
+                elif calculation_type == 'sitemap':
+                    raise ValueError('Site Map calculation failed for model '+log_file.replace('.log',''))
     return finished
 
 while True:

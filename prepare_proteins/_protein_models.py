@@ -942,7 +942,7 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def setUpSiteMapCalculation(self, job_folder, poses_folder, site_box=10, resolution='fine'):
+    def setUpSiteMapCalculation(self, job_folder, poses_folder, site_box=10, resolution='fine', overwrite=False):
         """
         Generates a SiteMap calculation for Docking poses outputed by the extractDockingPoses()
         function.
@@ -968,8 +968,8 @@ compareSequences() function before adding missing loops.')
         # Copy control file to grid folder
         _copySchrodingerControlFile(job_folder)
         # Copy script to generate protein and ligand mae inputs, separately.
-        _copyScriptFile(job_folder, 'separateProteinAndLigand.py')
-        script_path = job_folder+'/._separateProteinAndLigand.py'
+        _copyScriptFile(job_folder, 'prepareForSiteMap.py')
+        script_path = job_folder+'/._prepareForSiteMap.py'
 
         # Create input files
         jobs = []
@@ -988,7 +988,7 @@ compareSequences() function before adding missing loops.')
                     # Generate input protein and ligand files
                     input_ligand = job_folder+'/input_models/'+model+'/'+pose_name+'_ligand.mae'
                     input_protein = job_folder+'/input_models/'+model+'/'+pose_name+'_protein.mae'
-                    if not os.path.exists(input_ligand) or not os.path.exists(input_protein):
+                    if not os.path.exists(input_ligand) or not os.path.exists(input_protein) or overwrite:
                         command = 'run '+script_path+' '
                         command += poses_folder+'/'+model+'/'+pose+' '
                         command += job_folder+'/input_models/'+model
