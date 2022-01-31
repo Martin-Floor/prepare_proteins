@@ -140,8 +140,8 @@ class proteinModels:
                 raise ValueError('Given Coordinate in nan!')
         elif np.isnan(coordinates.any()):
             raise ValueError('Some given Coordinates are nan!')
-        if coordinates.shape[0] != 3:
-            raise ValueError('Coordinates must have shape (3,x). X=number of atoms in residue.')
+        if coordinates.shape[1] != 3:
+            raise ValueError('Coordinates must have shape (x,3). X=number of atoms in residue.')
         if len(coordinates.shape) > 1:
             if coordinates.shape[1] != len(atom_names):
                 raise ValueError('Mismatch between the number of atom_names and coordinates.')
@@ -149,7 +149,6 @@ class proteinModels:
                 if len(atom_names) != 1:
                     raise ValueError('Mismatch between the number of atom_names and coordinates.')
 
-        coordinates = coordinates.reshape(len(atom_names), 3)
         # Create new residue
         new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
         rt_flag = ' ' # Define the residue type flag for complete the residue ID.
