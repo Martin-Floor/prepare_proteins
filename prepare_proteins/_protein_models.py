@@ -143,7 +143,7 @@ class proteinModels:
         if coordinates.shape[1] != 3:
             raise ValueError('Coordinates must have shape (x,3). X=number of atoms in residue.')
         if len(coordinates.shape) > 1:
-            if coordinates.shape[1] != len(atom_names):
+            if coordinates.shape[0] != len(atom_names):
                 raise ValueError('Mismatch between the number of atom_names and coordinates.')
         if len(coordinates.shape) == 1:
                 if len(atom_names) != 1:
@@ -405,24 +405,31 @@ class proteinModels:
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    # def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
-    #                               trajectory_chain_indexes=None, reference_chain_indexes=None):
-    #     """
-    #     Align all models to a reference PDB based on a sequence alignemnt.
-    #
-    #     The chains are specified using their indexes. When the trajectories have
-    #     corresponding chains use the option chain_indexes to specify the list of
-    #     chains to align. Otherwise, specify the chains with trajectory_chain_indexes
-    #     and reference_chain_indexes options. Note that the list of chain indexes
-    #     must be corresponding.
-    #
-    #     Parameters
-    #     ==========
-    #     reference : str
-    #         Path to the reference PDB
-    #     output_folder : str
-    #         Path to the output folder to store models
-    #     """
+    def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
+                                  trajectory_chain_indexes=None, reference_chain_indexes=None):
+        """
+        Align all models to a reference PDB based on a sequence alignemnt.
+
+        The chains are specified using their indexes. When the trajectories have
+        corresponding chains use the option chain_indexes to specify the list of
+        chains to align. Otherwise, specify the chains with trajectory_chain_indexes
+        and reference_chain_indexes options. Note that the list of chain indexes
+        must be corresponding.
+
+        Parameters
+        ==========
+        reference : str
+            Path to the reference PDB
+        output_folder : str
+            Path to the output folder to store models
+        """
+
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        reference = md.load(output_folder)
+        for model in self.models_names:
+            traj =
     #     if not os.path.exists(output_folder):
     #         os.mkdir(output_folder)
     #     reference = md.load(reference)
