@@ -423,8 +423,7 @@ class proteinModels:
         output_folder : str
             Path to the output folder to store models
         """
-
-        if not os.path.exists(output_folder):
+        if not os.path.exists(output_folder):
             os.mkdir(output_folder)
         reference = md.load(reference)
         for model in self.models_paths:
