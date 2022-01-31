@@ -424,11 +424,13 @@ class proteinModels:
             Path to the output folder to store models
         """
         if not os.path.exists(output_folder):
-            os.mkdir(output_folder)
+            os.mkdir(output_folder)
         reference = md.load(reference)
         for model in self.models_paths:
             traj = md.load(self.models_paths[model])
-            MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=0)
+            MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=0,
+                                                  trajectory_chain_indexes=trajectory_chain_indexes,
+                                                  reference_chain_indexes=reference_chain_indexes)
             traj.save(output_folder+'/'+model+'.pdb')
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1, relax_cycles=5,
