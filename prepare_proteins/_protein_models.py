@@ -1,6 +1,7 @@
 from . import alignment
 from . import _atom_selectors
 from . import rosettaScripts
+from . import MD
 
 import os
 import shutil
@@ -16,6 +17,7 @@ from Bio import PDB
 from Bio.PDB.DSSP import DSSP
 import pandas as pd
 import matplotlib.pyplot as plt
+import mdtraj as md
 
 import prepare_proteins
 
@@ -403,6 +405,25 @@ class proteinModels:
 
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
+
+    def alignModelsToReferencePDB(self, reference, output_folder):
+        """
+        Align all models to a reference PDB based on a sequence alignemnt.
+
+        Parameters
+        ==========
+        reference : str
+            Path to the reference PDB
+        output_folder : str
+            Path to the output folder to store models
+        """
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+        reference = md.load(reference)
+        for model in self.models_paths:
+            traj = md.load(self.models_paths[model])
+            MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=0)
+            traj.save(output_folder+'/'+model+'.pdb')
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None,
