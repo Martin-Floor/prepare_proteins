@@ -406,9 +406,16 @@ class proteinModels:
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def alignModelsToReferencePDB(self, reference, output_folder):
+    def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
+                                  trajectory_chain_indexes=None, reference_chain_indexes=None):
         """
         Align all models to a reference PDB based on a sequence alignemnt.
+
+        The chains are specified using their indexes. When the trajectories have
+        corresponding chains use the option chain_indexes to specify the list of
+        chains to align. Otherwise, specify the chains with trajectory_chain_indexes
+        and reference_chain_indexes options. Note that the list of chain indexes
+        must be corresponding.
 
         Parameters
         ==========
