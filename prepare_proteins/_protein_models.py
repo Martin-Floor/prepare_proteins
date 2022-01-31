@@ -429,7 +429,7 @@ class proteinModels:
 
         reference = md.load(output_folder)
         for model in self.models_names:
-            traj =
+            traj = md.load(self)
     #     if not os.path.exists(output_folder):
     #         os.mkdir(output_folder)
     #     reference = md.load(reference)
