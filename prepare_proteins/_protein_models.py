@@ -20,6 +20,7 @@ import matplotlib.pyplot as plt
 import mdtraj as md
 
 import prepare_proteins
+import bsc_calculations
 
 class proteinModels:
     """
@@ -173,7 +174,7 @@ class proteinModels:
 
         return new_resid
 
-    def readModelFromPDB(self, model, pdb_file):
+    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False):
         """
         Adds a model from a PDB file.
 
@@ -190,6 +191,12 @@ class proteinModels:
             Structure object.
         """
         self.structures[model] = _readPDB(model, pdb_file)
+
+        if wat_to_hoh:
+            for residue in self.structures[model].get_residues():
+                if residue.resname == 'WAT':
+                    residue.resname = 'HOH'
+
         self.models_paths[model] = pdb_file
         return self.structures[model]
 
@@ -218,7 +225,7 @@ class proteinModels:
 
         return self.sequences
 
-    def calculateMSA(self):
+    def calculateMSA(self, chains=None):
         """
         Calculate a Multiple Sequence Alignment from the current models' sequences.
 
@@ -226,8 +233,26 @@ class proteinModels:
         =======
         alignment : Bio.AlignIO
             Multiple sequence alignment in Biopython format.
+        chains : dict
+            Dictionary specifying which chain to use for each model
         """
-        self.msa = alignment.mafft.multipleSequenceAlignment(self.sequences)
+
+        for model in self.models_names:
+            if isinstance(self.sequences[model], dict) and chains == None:
+                raise ValueError('There are multiple chains in model %s. Specify which \
+chain to use for each model with the chains option.' % model)
+
+        if chains != None:
+            sequences = {}
+            for model in self.models_names:
+                if isinstance(self.sequences[model], dict):
+                    sequences[model] = self.sequences[model][chains[model]]
+                else:
+                    sequences[model] = self.sequences[model]
+
+            self.msa = alignment.mafft.multipleSequenceAlignment(sequences)
+        else:
+            self.msa = alignment.mafft.multipleSequenceAlignment(self.sequences)
 
         return self.msa
 
@@ -261,7 +286,7 @@ class proteinModels:
         Paramters
         =========
         msa_index : int
-            MSA index
+            Zero-based MSA index
 
         Returns
         =======
@@ -342,6 +367,8 @@ class proteinModels:
         model = [*self.structures[model].get_models()][0]
         for chain in remove:
             model.detach_child(chain.id)
+
+        self.getModelsSequences()
 
     def removeTerminalUnstructuredRegions(self, n_hanging=3):
         """
@@ -427,22 +454,16 @@ class proteinModels:
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
 
-        reference = md.load(output_folder)
+        reference = md.load(reference)
         for model in self.models_names:
-            traj = md.load(self)
-    #     if not os.path.exists(output_folder):
-    #         os.mkdir(output_folder)
-    #     reference = md.load(reference)
-    #     for model in self.models_paths:
-    #         traj = md.load(self.models_paths[model])
-    #         MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=0,
-    #                                               trajectory_chain_indexes=trajectory_chain_indexes,
-    #                                               reference_chain_indexes=reference_chain_indexes)
-    #                                               traj.save(output_folder+'/'+model+'.pdb')
+            traj = md.load(self.models_paths[model])
+            MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
+                                                  trajectory_chain_indexes=trajectory_chain_indexes)
+            traj.save(output_folder+'/'+model+'.pdb')
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None,
-                                 membrane=False, membrane_thickness=15):
+                                 membrane=False, membrane_thickness=15, param_files=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -568,6 +589,20 @@ has been carried out. Please run compareSequences() function before setting muta
 
             # Add relaxation options and write flags file
             flags.add_relax_options()
+
+            # Add path to params files
+            if param_files != None:
+
+                if not os.path.exists(relax_folder+'/params'):
+                    os.mkdir(relax_folder+'/params')
+
+                if isinstance(param_files, str):
+                    param_files = [param_files]
+                for param in param_files:
+                    param_name = param.split('/')[-1]
+                    shutil.copyfile(param, relax_folder+'/params/'+param_name)
+                flags.addOption('in:file:extra_res_path', '../../params')
+
             if membrane:
                 flags.addOption('mp::setup::spans_from_structure', 'true')
                 # flags.addOption('relax:constrain_relax_to_start_coords', '')
@@ -738,7 +773,8 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0):
+    def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
+                                    epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -756,7 +792,7 @@ compareSequences() function before adding missing loops.')
             os.mkdir(prepare_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(prepare_folder+'/input_models')
+        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens)
 
         # Copy control file to prepare folder
         _copySchrodingerControlFile(prepare_folder)
@@ -775,16 +811,22 @@ compareSequences() function before adding missing loops.')
             command += model+'.pdb '
             command += '-fillsidechains '
             command += '-disulfides '
-            command += '-rehtreat '
-            command += '-epik_pH '+str(pH)+' '
-            command += '-epik_pHt 2.0 '
+            if remove_hydrogens:
+                command += '-rehtreat '
+            if epik_pH:
+                command += '-epik_pH '+str(pH)+' '
+            if epik_pHt:
+                command += '-epik_pHt '+str(epik_pHt)+' '
             command += '-propka_pH '+str(pH)+' '
             command += '-f 2005 '
             command += '-rmsd 0.3 '
-            command += '-samplewater '
-            command += '-delwater_hbond_cutoff 3 '
+            if samplewater:
+                command += '-samplewater '
+            if delwater_hbond_cutoff:
+                command += '-delwater_hbond_cutoff '+str(delwater_hbond_cutoff)+' '
             command += '-JOBNAME prepare_'+model+' '
             command += '-HOST localhost:1\n'
+
             # Add control script command
             command += 'python3 ../../._schrodinger_control.py '
             command += model+'.log '
@@ -885,17 +927,19 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def setUpGlideDocking(self, docking_folder, grids_folder, substrates_folder,
-                          poses_per_lig=100, precision='SP', use_ligand_charges=False):
+    def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
+                          poses_per_lig=100, precision='SP', use_ligand_charges=False,
+                          energy_by_residue=False):
         """
-        Set docking calculations for all the proteins and set of substrates located
-        grid_folders and substrates_folder folders, respectively.
+        Set docking calculations for all the proteins and set of ligands located
+        grid_folders and ligands_folder folders, respectively. The ligands must be provided
+        in MAE format.
 
         Parameters
         ==========
         docking_folder : str
 
-        substrates_folder : str
+        ligands_folder : str
             Path to the folder containing the ligands to dock.
         residues : dict
             Dictionary with the residues for each model near which to position the
@@ -924,9 +968,10 @@ compareSequences() function before adding missing loops.')
 
         # Read paths to substrates
         substrates_paths = {}
-        for f in os.listdir(substrates_folder):
-            name = f.replace('.mae','')
-            substrates_paths[name] = substrates_folder+'/'+f
+        for f in os.listdir(ligands_folder):
+            if f.endswith('.mae'):
+                name = f.replace('.mae','')
+                substrates_paths[name] = ligands_folder+'/'+f
 
         # Copy control file to grid folder
         _copySchrodingerControlFile(docking_folder)
@@ -948,6 +993,8 @@ compareSequences() function before adding missing loops.')
                     if use_ligand_charges:
                         dif.write('LIG_MAECHARGES true\n')
                     dif.write('PRECISION %s\n' % precision)
+                    if energy_by_residue:
+                        dif.write('WRITE_RES_INTERACTION true\n')
 
                 # Create commands
                 command = 'cd '+docking_folder+'/output_models/'+grid+'\n'
@@ -1055,7 +1102,203 @@ compareSequences() function before adding missing loops.')
                     jobs.append(command)
         return jobs
 
-    def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None, skip_chains=False):
+    def setUpCofactorParameterization(self, job_folder, cofactor_pdbs, include_terminal_rotamers=True,
+                                      rotamer_resolution=10, charge_method='opls2005', forcefield='opls2005'):
+        """
+        Run PELE platform for ligand parameterization
+
+        Parameters
+        ==========
+        job_folder : str
+            Path to the job input folder
+        cofactor_pdbs : list
+            PDBs for the cofactors to parameterize
+        """
+
+        charge_methods = ['opls2005', 'am1bcc', 'gasteiger', 'dummy']
+        if charge_method not in charge_methods:
+            raise ValuError('Wrong charge method. Available: '+', '.join(charge_methods))
+
+        # Create PELE job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+        if isinstance(cofactor_pdbs, str):
+            cofactor_pdbs = [cofactor_pdbs]
+
+        jobs = []
+        for pdb in cofactor_pdbs:
+            pdb_name = pdb.split('/')[-1].replace('.pdb', '')
+            structure = _readPDB(pdb_name, pdb)
+
+            if not os.path.exists(job_folder+'/'+pdb_name):
+                os.mkdir(job_folder+'/'+pdb_name)
+
+            # for residue in structure.get_residues():
+            #     chain = residue.get_parent()
+            #     chain.id  = 'L'
+            #     residue.id = ('_H', 1, residue.id[2])
+
+            # _saveStructureToPDB(structure, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
+            shutil.copyfile(pdb, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
+
+            # Create command
+            command = 'cd '+job_folder+'/'+pdb_name+'\n'
+            command += 'python -m peleffy.main '+pdb_name+'.pdb '
+            # command += '--chain L '
+            command += '-o "'+pdb_name+'_params" '
+            command += '-r '+str(rotamer_resolution)+' '
+            command += '-f '+str(forcefield)+' '
+            if include_terminal_rotamers:
+                command += '--include_terminal_rotamers '
+            command += '-c '+charge_method+'\n'
+            command += 'cd ../..'
+            jobs.append(command)
+
+        return jobs
+
+    def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, distances=None,
+                             steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
+                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False,
+                             analysis=False):
+        """
+        Generates a PELE calculation for extracted poses. The function reads all the
+        protein ligand poses and creates input for a PELE platform set up run.
+
+        Parameters
+        ==========
+        pele_folder : str
+            Path to the folder where PELE calcualtions will be located
+        models_folder : str
+            Path to input docking poses folder.
+        input_yaml : str
+            Path to the input YAML file to be used as template for all the runs.
+
+        Missing!
+        """
+
+        # Create PELE job folder
+        if not os.path.exists(pele_folder):
+            os.mkdir(pele_folder)
+
+        # Read docking poses information from models_folder and create pele input
+        # folders.
+        jobs = []
+        for d in os.listdir(models_folder):
+            if os.path.isdir(models_folder+'/'+d):
+                models = {}
+                ligand_pdb_name = {}
+                for f in os.listdir(models_folder+'/'+d):
+                    fs = f.split(separator)
+                    protein = fs[0]
+                    ligand = fs[1]
+                    pose = fs[2].replace('.pdb','')
+
+                    # Create PELE job folder for each docking
+                    if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
+                        os.mkdir(pele_folder+'/'+protein+'_'+ligand)
+
+                    structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+
+                    # Change water names if any
+                    for residue in structure.get_residues():
+                        if residue.id[0] == 'W':
+                            residue.resname = 'HOH'
+
+                        if residue.get_parent().id == 'L':
+                            ligand_pdb_name[ligand] = residue.resname
+
+                    _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
+
+                    if (protein, ligand) not in models:
+                        models[(protein,ligand)] = []
+                    models[(protein,ligand)].append(f)
+
+                # Create YAML file
+                for model in models:
+                    protein, ligand = model
+                    keywords = ['system', 'chain', 'resname', 'steps', 'iterations',
+                                'cpus', 'equilibration', 'equilibration_steps', 'traj',
+                                'usesrun', 'use_peleffy', 'debug']
+
+                    with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
+                        if energy_by_residue:
+                            # Use new PELE version with implemented energy_by_residue
+                            iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/bin/PELE-1.7.2_mpi"\n')
+                            iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Data"\n')
+                            iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
+                        iyf.write("system: '"+" ".join(models[model])+"'\n")
+                        iyf.write("chain: 'L'\n")
+                        iyf.write("resname: '"+ligand_pdb_name[ligand]+"'\n")
+                        iyf.write("steps: "+str(steps)+"\n")
+                        iyf.write("iterations: "+str(iterations)+"\n")
+                        iyf.write("cpus: "+str(cpus)+"\n")
+                        iyf.write("equilibration: true\n")
+                        iyf.write("equilibration_steps: "+str(equilibration_steps)+"\n")
+                        iyf.write("traj: trajectory.xtc\n")
+                        iyf.write("working_folder: 'output'\n")
+                        if usesrun:
+                            iyf.write("usesrun: true\n")
+                        else:
+                            iyf.write("usesrun: false\n")
+                        if use_peleffy:
+                            iyf.write("use_peleffy: true\n")
+                        else:
+                            iyf.write("use_peleffy: false\n")
+                        if analysis:
+                            iyf.write("analyse: true\n")
+                        else:
+                            iyf.write("analyse: false\n")
+                        # energy by residue is not implemented in PELE platform, therefore
+                        # a scond script will modify the PELE.conf file to set up the energy
+                        # by residue calculation.
+                        if debug or energy_by_residue:
+                            iyf.write("debug: true\n")
+
+                        if distances != None:
+                            iyf.write("atom_dist:\n")
+                            for d in distances[protein][ligand]:
+                                if isinstance(d[0], str):
+                                    d1 = "- 'L:1:"+d[0]+"'\n"
+                                else:
+                                    d1 = "- '"+d[0][0]+":"+str(d[0][1])+":"+d[0][2]+"'\n"
+                                if isinstance(d[1], str):
+                                    d2 = "- 'L:1:"+d[1]+"'\n"
+                                else:
+                                    d2 = "- '"+d[1][0]+":"+str(d[1][1])+":"+d[1][2]+"'\n"
+                                iyf.write(d1)
+                                iyf.write(d2)
+
+                        iyf.write('\n')
+                        iyf.write("#Options gathered from "+input_yaml+'\n')
+
+                        with open(input_yaml) as tyf:
+                            for l in tyf:
+                                if not l.startswith('#'):
+                                    if l.split()[0].replace(':', '') not in keywords:
+                                        iyf.write(l)
+
+                    if energy_by_residue:
+                        _copyScriptFile(pele_folder, 'addEnergyByResidueToPELEconf.py')
+                        script_name = '._addEnergyByResidueToPELEconf.py'
+
+                    # Create command
+                    command = 'cd '+pele_folder+'/'+protein+'_'+ligand+'\n'
+                    command += 'python -m pele_platform.main input.yaml\n'
+                    if energy_by_residue:
+                        command += 'python ../'+script_name+' output\n'
+                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
+                                for l in iyml:
+                                    if 'debug: true' in l:
+                                        l = 'restart: true\n'
+                                    oyml.write(l)
+                        command += 'python -m pele_platform.main input_restart.yaml\n'
+                    command += 'cd ../..'
+                    jobs.append(command)
+
+        return jobs
+
+    def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None, skip_chains=False, return_failed=False):
         """
         Missing
         """
@@ -1076,19 +1319,15 @@ compareSequences() function before adding missing loops.')
         # Execute docking analysis
         os.chdir(docking_folder)
 
+        command = 'run ._analyse_docking.py'
         if atom_pairs != None:
-            if skip_chains:
-                command = 'run ._analyse_docking.py --atom_pairs ._atom_pairs.json --skip_chains'
-            else:
-                command = 'run ._analyse_docking.py --atom_pairs ._atom_pairs.json'
-
+            command += ' --atom_pairs ._atom_pairs.json'
         elif protein_atoms != None:
-            if skip_chains:
-                command = 'run ._analyse_docking.py --protein_atoms ._protein_atoms.json --skip_chains'
-            else:
-                command = 'run ._analyse_docking.py --protein_atoms ._protein_atoms.json'
-        else:
-            command = 'run ._analyse_docking.py'
+            command += ' --protein_atoms ._protein_atoms.json'
+        if skip_chains:
+            command += ' --skip_chains'
+        if return_failed:
+            command += ' --return_failed'
         os.system(command)
 
         # Read the CSV file into pandas
@@ -1109,18 +1348,131 @@ compareSequences() function before adding missing loops.')
         os.remove('._docking_data.csv')
         if os.path.exists('._protein_atoms.json'):
             os.remove('._protein_atoms.json')
+
+        if return_failed:
+            with open('._failed_dockings.json') as jifd:
+                failed_dockings = json.load(jifd)
+            os.remove('._failed_dockings.json')
+            os.chdir('..')
+            return failed_dockings
+
         os.chdir('..')
+
+    def convertLigandPDBtoMae(self, ligands_folder):
+        """
+        Convert ligand PDBs into MAE files.
+
+        Parameters
+        ==========
+        ligands_folder : str
+            Path to the folder where ligands are in PDB format
+        """
+
+        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
+        _copyScriptFile(ligands_folder, 'PDBtoMAE.py')
+        script_name = '._PDBtoMAE.py'
+
+        cwd = os.getcwd()
+        os.chdir(ligands_folder)
+        os.system('run ._PDBtoMAE.py')
+        os.chdir(cwd)
+
+    def addCatalyticDistance(self, exclude=None):
+        """
+        Add the catalytic distance to the docking data DataFrame by taking the minimum value of all non-nan columns.
+
+        Parameters
+        ==========
+        exclude : list
+            Columns to be excluded from the catalytic distance calculation.
+        """
+
+        if exclude != None:
+            exclude += ['Score', 'RMSD'] + exclude
+        else:
+            exclude = ['Score', 'RMSD']
+
+        catalytic_distances = {}
+        for model in self.docking_ligands:
+            catalytic_distances[model] = {}
+            protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
+            for ligand in self.docking_ligands[model]:
+                catalytic_distances[model][ligand] = {}
+                ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+                ligand_data = ligand_data.dropna(axis=1, how='all')
+                labels = [label for label in ligand_data if label not in exclude]
+                for i, row in ligand_data[labels].min(axis=1).iteritems():
+                    catalytic_distances[model][ligand][i[2]] = row
+
+        cd = []
+        for i in self.docking_data.index:
+            cd.append(catalytic_distances[i[0]][i[1]][i[2]])
+
+        self.docking_data['Catalytic distance'] = cd
+
+    def getBestDockingPoses(self, n_models=1, filter_by=None, filter_value=None,
+                            filter_type='lower', return_failed=False):
+        """
+        Get best models based on the SCORE and (optionally) a specific column.
+        The option filter_by allows to first filter all models by a specific filter_value
+        and then select all models with the lowest score after the filter has been
+        applied.
+
+        Parameters
+        ==========
+        n_models : int
+            The number of models to select for each protein + ligand docking.
+        filter_by : str
+            Name of the column to apply the filter.
+        filter_value : float
+            Threshold for the filter.
+        filter_type : str
+            If the models are lower or equal than (lower) or larger or equa than (larger)
+            the specified filter_value.
+        return_failed : bool
+            Whether to return a list of the dockings without any models fulfilling
+            the selection criteria. It is returned as a tuple alongside the filtered
+            data frame.
+        """
+        best_poses = pd.DataFrame()
+        bp = []
+        failed = []
+        for model in self.docking_ligands:
+            protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
+            for ligand in self.docking_ligands[model]:
+                ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+                if filter_by != None:
+                    if filter_value == None:
+                        raise ValueError('When filtering by column you need to specify a filter_value.')
+                    if filter_type == 'lower':
+                        ligand_data = ligand_data[ligand_data[filter_by] <= filter_value]
+                    elif filter_type == 'larger':
+                        ligand_data = ligand_data[ligand_data[filter_by] >= filter_value]
+
+                if ligand_data.empty:
+                    failed.append((model, ligand))
+                    continue
+                if ligand_data.shape[0] < n_models:
+                    print('WARNING: less than %s models available for docking %s + %s' % (n_models, model, ligand))
+                for i in ligand_data['Score'].nsmallest(n_models).index:
+                    bp.append(i)
+
+        if return_failed:
+
+            return failed, self.docking_data[self.docking_data.index.isin(bp)]
+
+        return self.docking_data[self.docking_data.index.isin(bp)]
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder):
         """
         Missing
         """
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
         # Copy analyse docking script (it depends on schrodinger so we leave it out.)
         _copyScriptFile(output_folder, 'extract_docking.py')
         script_path = output_folder+'/._extract_docking.py'
-
-        if not os.path.exists(output_folder):
-            os.mkdir(output_folder)
 
         # Move to output folder
         os.chdir(output_folder)
@@ -1139,7 +1491,13 @@ compareSequences() function before adding missing loops.')
         # move back to folder
         os.chdir('..')
 
-    def plotDocking(self, protein, ligand, x='RMSD', y='Score', z=None, colormap='Blues_r'):
+    def plotDocking(self, protein, ligand, x='RMSD', y='Score', z=None, colormap='Blues_r', output_folder=None, extension='.png',
+                    dpi=200):
+
+        if output_folder != None:
+            if not os.path.exists(output_folder):
+                os.mkdir(output_folder)
+
         protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
         if protein_series.empty:
             print('Model %s not found in Docking data' % protein)
@@ -1148,8 +1506,17 @@ compareSequences() function before adding missing loops.')
         if ligand_series.empty:
             print('Ligand %s not found in Docking data for protein %s' % (ligand, protein))
             return None
-        ligand_series.plot(kind='scatter', x=x, y=y, c=z, colormap=colormap,)
+
+        fig, ax = plt.subplots()
+        if z != None:
+            ligand_series.plot(kind='scatter', x=x, y=y, c=z, colormap=colormap, ax=ax)
+        else:
+            ligand_series.plot(kind='scatter', x=x, y=y, ax=ax)
+
         plt.title(protein+' + '+ligand)
+        if output_folder != None:
+            plt.savefig(output_folder+'/'+protein+'_'+ligand+extension, dpi=dpi)
+            plt.close()
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder):
         """
@@ -1168,15 +1535,15 @@ compareSequences() function before adding missing loops.')
                         model = f.replace('.pdb', '')
                         self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
 
-    def loadModelsFromSilentFolder(self, silent_folder, filter_score_term='score', min_value=True, relax_run=True):
+    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
 
         Parameters
         ==========
-        silent_folder : str
-            Path to folde where a silent file for each model is stored
+        optimization_folder : str
+            Path to folder where the Rosetta optimization files are contained
         filter_score_term : str
             Score term used to filter models
         relax_run : bool
@@ -1186,26 +1553,35 @@ compareSequences() function before adding missing loops.')
         """
 
         executable = 'extract_pdbs.linuxgccrelease'
-        # set prefix according to calculation output type
-        if relax_run:
-            suffix = '_relax'
-        else:
-            suffix = ''
+        models = []
 
-        for d in os.listdir(silent_folder):
-            if d.endswith(suffix+'.out'):
-                model = d.replace(suffix+'.out', '')
-                scores = readSilentScores(silent_folder+'/'+d)
-                if min_value:
-                    best_model_tag = scores.idxmin()[filter_score_term]
-                else:
-                    best_model_tag = scores.idxmxn()[filter_score_term]
-                command = executable
-                command += ' -silent '+silent_folder+'/'+d
-                command += ' -tags '+best_model_tag
-                os.system(command)
-                self.readModelFromPDB(model, best_model_tag+'.pdb')
-                os.remove(best_model_tag+'.pdb')
+        # Check if params were given
+        params = None
+        if os.path.exists(optimization_folder+'/params'):
+            params = optimization_folder+'/params'
+
+        for d in os.listdir(optimization_folder+'/output_models'):
+            if os.path.isdir(optimization_folder+'/output_models/'+d):
+                for f in os.listdir(optimization_folder+'/output_models/'+d):
+                    if f.endswith('_relax.out'):
+                        model = d
+                        scores = readSilentScores(optimization_folder+'/output_models/'+d+'/'+f)
+                        if min_value:
+                            best_model_tag = scores.idxmin()[filter_score_term]
+                        else:
+                            best_model_tag = scores.idxmxn()[filter_score_term]
+                        command = executable
+                        command += ' -silent '+optimization_folder+'/output_models/'+d+'/'+f
+                        if params != None:
+                            command += ' -extra_res_path '+params+' '
+                        command += ' -tags '+best_model_tag
+                        os.system(command)
+                        self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=True)
+                        os.remove(best_model_tag+'.pdb')
+                        models.append(model)
+
+        missing_models = set(self.models_names) - set(models)
+        print(', '.join(missing_models))
 
     def loadModelsFromMissingLoopBuilding(self, job_folder, filter_score_term='score', min_value=True,):
         """

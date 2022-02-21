@@ -1,4 +1,5 @@
 from Bio import PDB
+import re
 
 class notHydrogen(PDB.Select):
 

@@ -20,6 +20,10 @@ implemented_calculations = [
 'sitemap'
 ]
 
+if not os.path.exists(log_file):
+    print('Log file %s does not exists!' % log_file)
+    print('Calculation will run indefinitely...')
+
 if job_type not in implemented_calculations:
     raise ValueError(job_type+' not implemented in the Schrodinger control script.')
 
@@ -89,5 +93,7 @@ while True:
             print('Grid Glide calculation succeeded for model '+log_file.replace('.log','')+'\n')
         elif job_type == 'docking':
             print('Glide Docking succeeded for model '+log_file.replace('.log','')+'\n')
+        elif job_type == 'sitemap':
+            print('SiteMap succeeded for model '+log_file.replace('.log','')+'\n')
         break
     time.sleep(1)
