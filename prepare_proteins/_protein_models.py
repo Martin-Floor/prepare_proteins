@@ -587,8 +587,8 @@ has been carried out. Please run compareSequences() function before setting muta
                                          nstruct=nstruct, s='../../input_models/'+model+'.pdb',
                                          output_silent_file=model+'_relax.out')
 
-            # Add relaxation options and write flags file
-            flags.add_relax_options()
+            # Add relaxation with constraints options and write flags file
+            flags.add_relax_cst_options()
 
             # Add path to params files
             if param_files != None:
@@ -1535,7 +1535,7 @@ compareSequences() function before adding missing loops.')
                         model = f.replace('.pdb', '')
                         self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
 
-    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True):
+    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True, tags=None):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -1566,7 +1566,10 @@ compareSequences() function before adding missing loops.')
                     if f.endswith('_relax.out'):
                         model = d
                         scores = readSilentScores(optimization_folder+'/output_models/'+d+'/'+f)
-                        if min_value:
+                        if tags != None and model in tags:
+                            print('Reading model %s from the given tag %s' % (model, tags[model]))
+                            best_model_tag = tags[model]
+                        elif min_value:
                             best_model_tag = scores.idxmin()[filter_score_term]
                         else:
                             best_model_tag = scores.idxmxn()[filter_score_term]
@@ -1581,7 +1584,8 @@ compareSequences() function before adding missing loops.')
                         models.append(model)
 
         missing_models = set(self.models_names) - set(models)
-        print(', '.join(missing_models))
+        print('Mssing models in relaxation folder:')
+        print('\t'+', '.join(missing_models))
 
     def loadModelsFromMissingLoopBuilding(self, job_folder, filter_score_term='score', min_value=True,):
         """
