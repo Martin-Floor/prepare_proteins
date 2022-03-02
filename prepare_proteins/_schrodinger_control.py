@@ -22,7 +22,8 @@ implemented_calculations = [
 
 if not os.path.exists(log_file):
     print('Log file %s does not exists!' % log_file)
-    print('Calculation will run indefinitely...')
+    print('Calculation failed to initialize properly')
+    exit()
 
 if job_type not in implemented_calculations:
     raise ValueError(job_type+' not implemented in the Schrodinger control script.')

@@ -62,7 +62,7 @@ for model in subjobs:
                     failed_dockings.append((model, ligand))
                     print('Docking for %s + %s failed' % (model, ligand))
 
-print('%s of %s models failed (%.2f%%)' % (failed_count, total, 100*failed_count/total))
+print('%s of %s models failed (%.2f)' % (failed_count, total, 100*failed_count/total))
 
 # Write failed dockings to file
 if return_failed:
