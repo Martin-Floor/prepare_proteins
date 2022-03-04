@@ -380,6 +380,7 @@ chain to use for each model with the chains option.' % model)
         remove = []
         for chain in self.structures[model].get_chains():
             if chain.id not in chains:
+                print('From model %s Removing chain %s' % (model, chain.id))
                 remove.append(chain)
 
         model = [*self.structures[model].get_models()][0]
@@ -949,7 +950,7 @@ compareSequences() function before adding missing loops.')
 
     def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
                           poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                          energy_by_residue=False, peptide=False):
+                          energy_by_residue=False):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
@@ -995,10 +996,6 @@ compareSequences() function before adding missing loops.')
 
         # Copy control file to grid folder
         _copySchrodingerControlFile(docking_folder)
-
-        # Change peptide-docking flags
-        # if peptide:
-            # precision = 'SP-Peptide'
 
         # Set up docking jobs
         jobs = []
@@ -1183,7 +1180,7 @@ compareSequences() function before adding missing loops.')
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, distances=None,
                              steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False,
-                             analysis=False, energy_by_residue_type='all'):
+                             analysis=False, energy_by_residue_type='all', peptide=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1231,6 +1228,19 @@ compareSequences() function before adding missing loops.')
                         if residue.get_parent().id == 'L':
                             ligand_pdb_name[ligand] = residue.resname
 
+                    ## Add dummy atom if peptide docking ### Strange fix!
+                    if peptide:
+                        for chain in structure.get_chains():
+                            if chain.id == 'L':
+                                # Create new residue
+                                new_resid = max([r.id[1] for r in chain.get_residues()])+1
+                                residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
+                                serial_number = max([a.serial_number for a in chain.get_atoms()])+1
+                                atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
+                                                     '%-4s' % 'X', serial_number+1, 'H')
+                                residue.add(atom)
+                                chain.add(residue)
+
                     _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
 
                     if (protein, ligand) not in models:
@@ -1252,7 +1262,12 @@ compareSequences() function before adding missing loops.')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
                         iyf.write("system: '"+" ".join(models[model])+"'\n")
                         iyf.write("chain: 'L'\n")
-                        iyf.write("resname: '"+ligand_pdb_name[ligand]+"'\n")
+                        if peptide:
+                            iyf.write("resname: 'XXX'\n")
+                            iyf.write("skip_ligand_prep:\n")
+                            iyf.write(" - 'XXX'\n")
+                        else:
+                            iyf.write("resname: '"+ligand_pdb_name[ligand]+"'\n")
                         iyf.write("steps: "+str(steps)+"\n")
                         iyf.write("iterations: "+str(iterations)+"\n")
                         iyf.write("cpus: "+str(cpus)+"\n")
@@ -1309,7 +1324,11 @@ compareSequences() function before adding missing loops.')
                     command = 'cd '+pele_folder+'/'+protein+'_'+ligand+'\n'
                     command += 'python -m pele_platform.main input.yaml\n'
                     if energy_by_residue:
-                        command += 'python ../'+script_name+' output --energy_type '+energy_by_residue_type+'\n'
+                        command += 'python ../'+script_name+' output --energy_type '+energy_by_residue_type
+                        if peptide:
+                            command += '--peptide \n'
+                        else:
+                            command += '\n'
                         with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
                             with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
                                 for l in iyml:
@@ -1355,6 +1374,10 @@ compareSequences() function before adding missing loops.')
         os.system(command)
 
         # Read the CSV file into pandas
+        if not os.path.exists('._docking_data.csv'):
+            os.chdir('..')
+            raise ValueError('Docking analysis failed. Check the ouput of the analyse_docking.py script.')
+
         self.docking_data = pd.read_csv('._docking_data.csv')
         # Create multiindex dataframe
         self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
