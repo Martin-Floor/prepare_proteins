@@ -170,7 +170,7 @@ for model in sorted(mae_output):
                     if protein_atoms != None:
                         M = distance_matrix(p_coordinates, c_coordinates)
                         data["Closest distance"].append(np.amin(M))
-                        data["Closest atom"].append(atom_names[np.where(M == np.amin(M))[1]])
+                        data["Closest atom"].append(atom_names[np.where(M == np.amin(M))[1][0]])
                 else:
                     if protein_atoms != None:
                         # Get protein atom coordinates
