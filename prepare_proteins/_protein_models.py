@@ -461,7 +461,7 @@ chain to use for each model with the chains option.' % model)
                                                   trajectory_chain_indexes=trajectory_chain_indexes)
             traj.save(output_folder+'/'+model+'.pdb')
 
-    def setUpRosettaOptimization(self, relax_folder, nstruct=1, relax_cycles=5,
+    def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None,
                                  membrane=False, membrane_thickness=15, param_files=None):
         """
@@ -774,7 +774,7 @@ compareSequences() function before adding missing loops.')
         return jobs
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
-                                    epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False):
+                                    epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
