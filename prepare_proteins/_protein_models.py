@@ -70,6 +70,16 @@ class proteinModels:
         ==========
         models_folder : str
             Path to the folder containing the PDB models.
+        get_sequences : bool
+            Get the sequences from the structure. They will be separated by chain and
+            can be accessed through the .sequences attribute.
+        get_ss : bool
+            Get the strign representing the secondary structure of the models. they
+            can be accessed through the .ss attribute.
+        msa : bool
+            Calculate a multiple sequence alignment for the models. Only works for
+            single-chain structures at startup, othewise look for the calculateMSA()
+            method.
         """
 
         self.models_folder = models_folder
@@ -98,7 +108,11 @@ class proteinModels:
 
         # # Perform a multiple sequence aligment of models
         if msa:
-            self.calculateMSA()
+            if self.multichain:
+                print('MSA cannot be calculated at startup when multichain models \
+are given. See the calculateMSA() method for selecting which chains will be algined.')
+            else:
+                self.calculateMSA()
 
     def addResidueToModel(self, model, chain_id, resname, atom_names, coordinates,
                           elements=None, hetatom=True, water=False):
@@ -184,6 +198,9 @@ class proteinModels:
             Model name.
         pdb_file : str
             Path to the pdb file.
+        wat_to_hoh : bool
+            Change the water name from WAT to HOH. Specially useful when resing from
+            Rosetta optimization output files containing water.
 
         Returns
         -------
@@ -202,7 +219,8 @@ class proteinModels:
 
     def getModelsSequences(self):
         """
-        Get sequence information for all stored models.
+        Get sequence information for all stored models. It modifies the self.multi_chain
+        option to True if more than one chain is found in the models.
 
         Returns
         =======
@@ -362,6 +380,7 @@ chain to use for each model with the chains option.' % model)
         remove = []
         for chain in self.structures[model].get_chains():
             if chain.id not in chains:
+                print('From model %s Removing chain %s' % (model, chain.id))
                 remove.append(chain)
 
         model = [*self.structures[model].get_models()][0]
@@ -587,8 +606,8 @@ has been carried out. Please run compareSequences() function before setting muta
                                          nstruct=nstruct, s='../../input_models/'+model+'.pdb',
                                          output_silent_file=model+'_relax.out')
 
-            # Add relaxation options and write flags file
-            flags.add_relax_options()
+            # Add relaxation with constraints options and write flags file
+            flags.add_relax_cst_options()
 
             # Add path to params files
             if param_files != None:
@@ -837,7 +856,7 @@ compareSequences() function before adding missing loops.')
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
-                         outerbox=(30,30,30), useflexmae=True):
+                         outerbox=(30,30,30), useflexmae=True, peptide=False):
         """
         Setup grid calculation for each model.
 
@@ -901,6 +920,8 @@ compareSequences() function before adding missing loops.')
                 gif.write('INNERBOX %s, %s, %s\n' % innerbox)
                 gif.write('OUTERBOX %s, %s, %s\n' % outerbox)
                 gif.write('RECEP_FILE %s\n' % (model+'.mae'))
+                if peptide:
+                    gif.write('PEPTIDE True\n')
                 if useflexmae:
                     gif.write('USEFLEXMAE YES\n')
 
@@ -1159,7 +1180,7 @@ compareSequences() function before adding missing loops.')
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, distances=None,
                              steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False,
-                             analysis=False):
+                             analysis=False, energy_by_residue_type='all', peptide=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1207,6 +1228,19 @@ compareSequences() function before adding missing loops.')
                         if residue.get_parent().id == 'L':
                             ligand_pdb_name[ligand] = residue.resname
 
+                    ## Add dummy atom if peptide docking ### Strange fix!
+                    if peptide:
+                        for chain in structure.get_chains():
+                            if chain.id == 'L':
+                                # Create new residue
+                                new_resid = max([r.id[1] for r in chain.get_residues()])+1
+                                residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
+                                serial_number = max([a.serial_number for a in chain.get_atoms()])+1
+                                atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
+                                                     '%-4s' % 'X', serial_number+1, 'H')
+                                residue.add(atom)
+                                chain.add(residue)
+
                     _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
 
                     if (protein, ligand) not in models:
@@ -1228,7 +1262,12 @@ compareSequences() function before adding missing loops.')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
                         iyf.write("system: '"+" ".join(models[model])+"'\n")
                         iyf.write("chain: 'L'\n")
-                        iyf.write("resname: '"+ligand_pdb_name[ligand]+"'\n")
+                        if peptide:
+                            iyf.write("resname: 'XXX'\n")
+                            iyf.write("skip_ligand_prep:\n")
+                            iyf.write(" - 'XXX'\n")
+                        else:
+                            iyf.write("resname: '"+ligand_pdb_name[ligand]+"'\n")
                         iyf.write("steps: "+str(steps)+"\n")
                         iyf.write("iterations: "+str(iterations)+"\n")
                         iyf.write("cpus: "+str(cpus)+"\n")
@@ -1285,7 +1324,11 @@ compareSequences() function before adding missing loops.')
                     command = 'cd '+pele_folder+'/'+protein+'_'+ligand+'\n'
                     command += 'python -m pele_platform.main input.yaml\n'
                     if energy_by_residue:
-                        command += 'python ../'+script_name+' output\n'
+                        command += 'python ../'+script_name+' output --energy_type '+energy_by_residue_type
+                        if peptide:
+                            command += '--peptide \n'
+                        else:
+                            command += '\n'
                         with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
                             with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
                                 for l in iyml:
@@ -1331,6 +1374,10 @@ compareSequences() function before adding missing loops.')
         os.system(command)
 
         # Read the CSV file into pandas
+        if not os.path.exists('._docking_data.csv'):
+            os.chdir('..')
+            raise ValueError('Docking analysis failed. Check the ouput of the analyse_docking.py script.')
+
         self.docking_data = pd.read_csv('._docking_data.csv')
         # Create multiindex dataframe
         self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
@@ -1528,14 +1575,20 @@ compareSequences() function before adding missing loops.')
             Path to the output folder from a prepwizard calculation
         """
 
+        models = []
         for d in os.listdir(prepwizard_folder):
             if os.path.isdir(prepwizard_folder+'/'+d):
                 for f in os.listdir(prepwizard_folder+'/'+d):
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
+                        models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
+        missing_models = set(self.models_names) - set(models)
+        if missing_models != set():
+            print('Missing models in relaxation folder:')
+            print('\t'+', '.join(missing_models))
 
-    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True):
+    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True, tags=None):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -1566,7 +1619,10 @@ compareSequences() function before adding missing loops.')
                     if f.endswith('_relax.out'):
                         model = d
                         scores = readSilentScores(optimization_folder+'/output_models/'+d+'/'+f)
-                        if min_value:
+                        if tags != None and model in tags:
+                            print('Reading model %s from the given tag %s' % (model, tags[model]))
+                            best_model_tag = tags[model]
+                        elif min_value:
                             best_model_tag = scores.idxmin()[filter_score_term]
                         else:
                             best_model_tag = scores.idxmxn()[filter_score_term]
@@ -1581,7 +1637,9 @@ compareSequences() function before adding missing loops.')
                         models.append(model)
 
         missing_models = set(self.models_names) - set(models)
-        print(', '.join(missing_models))
+        if missing_models != set():
+            print('Missing models in relaxation folder:')
+            print('\t'+', '.join(missing_models))
 
     def loadModelsFromMissingLoopBuilding(self, job_folder, filter_score_term='score', min_value=True,):
         """

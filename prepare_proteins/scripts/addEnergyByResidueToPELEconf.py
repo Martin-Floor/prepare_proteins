@@ -7,8 +7,13 @@ import shutil
 # ## Define input variables
 parser = argparse.ArgumentParser()
 parser.add_argument('pele_output', default=None, help='Path to the PELE output folder.')
+parser.add_argument('--energy_type', default=None, help='Path to the PELE output folder.')
+parser.add_argument('--peptide', action='store_true', default=False, help='Is this a peptide run?')
+
 args=parser.parse_args()
 pele_output = args.pele_output
+energy_type = args.energy_type
+peptide = args.peptide
 
 # Modify pele.conf file to remove unquoted words
 pele_words = ['COMPLEXES', 'PELE_STEPS', 'SEED']
@@ -32,22 +37,39 @@ metrics_list = json_conf['commands'][0]['PeleTasks'][0]['metrics']
 parser = PDB.PDBParser()
 structure = parser.get_structure('receptor', pele_output+'/input/receptor.pdb')
 
+if peptide:
+    ligand_selection = 'L'
+else:
+    ligand_selection = 'L:1'
+
 for residue in structure.get_residues():
     chain = residue.get_parent().id
     resid = residue.id[1]
     resname = residue.resname
+
     # Add energy by residue metrics
-    metric = {
-    'type': 'energyBySelection',
-    'tag' : 'L:1_'+chain+':'+str(resid)+'_'+resname,
-    'typeOfContribution' : 'all',
-    'selection_group_1' : {
-        'links': {'ids': ['L:1']},
-        },
-    'selection_group_2' : {
-        'links': {'ids': [chain+':'+str(resid)]},
+    if energy_type == 'all':
+        ebrt = ['lennard_jones', 'electrostatic', 'sgb']
+    elif energy_type == 'lennard_jones':
+        ebrt = ['lennard_jones']
+    elif energy_type == 'electrostatic':
+        ebrt = ['electrostatic']
+    elif energy_type == 'sgb':
+        ebrt = ['sgb']
+
+    for et in ebrt:
+        metric = {
+        'type': 'energyBySelection',
+        'tag' : ligand_selection+'_'+chain+':'+str(resid)+'_'+resname+'_'+et,
+        'typeOfContribution' : et,
+        'selection_group_1' : {
+            'links': {'ids': [ligand_selection]},
+            },
+        'selection_group_2' : {
+            'links': {'ids': [chain+':'+str(resid)]},
+            }
         }
-    }
+
     metrics_list.append(metric)
 
 # Write pele.conf

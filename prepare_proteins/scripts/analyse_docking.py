@@ -62,7 +62,7 @@ for model in subjobs:
                     failed_dockings.append((model, ligand))
                     print('Docking for %s + %s failed' % (model, ligand))
 
-print('%s of %s models failed (%.2f%%)' % (failed_count, total, 100*failed_count/total))
+print('%s of %s models failed (%.2f)' % (failed_count, total, 100*failed_count/total))
 
 # Write failed dockings to file
 if return_failed:
@@ -109,21 +109,45 @@ for model in mae_output:
                     if atom_pairs != None:
                         for i,pair in enumerate(atom_pairs[model][ligand]):
                             atom_names = [atom.pdbname.strip() for atom in st.atom]
-                            if pair[1] not in atom_names:
-                                print('Ligand atoms: '+', '.join(atom_names))
-                                raise ValueError('Atom name %s not found in ligand %s' % (pair[1], ligand))
-                            for j,atom in enumerate(st.atom):
-                                if atom.pdbname.strip() == pair[1]:
-                                    d = np.linalg.norm(p_coordinates[i]-c_coordinates[j])
-                                    label = '_'.join([str(x) for x in pair[0]])+'-'+ligand+'_'+atom.pdbname.strip()
-                                    if label not in data:
-                                        data[label] = []
-                                        atom_pairs_labels.add(label)
-                                    delta = len(data["Pose"])-len(data[label])
-                                    if delta > 1:
-                                        for x in range(delta-1):
-                                            data[label].append(None)
-                                    data[label].append(d)
+                            if isinstance(pair[1], str):
+                                ligand_atom_name = pair[1]
+                                if ligand_atom_name not in atom_names:
+                                    print('Ligand atoms: '+', '.join(atom_names))
+                                    raise ValueError('Atom name %s not found in ligand %s' % (pair[1], ligand))
+                                for j,atom in enumerate(st.atom):
+                                    if atom.pdbname.strip() == pair[1]:
+                                        d = np.linalg.norm(p_coordinates[i]-c_coordinates[j])
+                                        label = '_'.join([str(x) for x in pair[0]])+'-'+ligand+'_'+atom.pdbname.strip()
+                                        if label not in data:
+                                            data[label] = []
+                                            atom_pairs_labels.add(label)
+                                        delta = len(data["Pose"])-len(data[label])
+                                        if delta > 1:
+                                            for x in range(delta-1):
+                                                data[label].append(None)
+                                        data[label].append(d)
+
+                            elif isinstance(pair[1], tuple) or isinstance(pair[1], list):
+                                ligand_chain_id = pair[1][0]
+                                ligand_residue_index = pair[1][1]
+                                ligand_atom_name = pair[1][2]
+
+                                if ligand_atom_name not in atom_names:
+                                    print('Ligand atoms: '+', '.join(atom_names))
+                                    raise ValueError('Atom name %s not found in ligand %s' % (ligand_atom_name, ligand))
+                                residue = st.findResidue(ligand_chain_id+':'+str(ligand_residue_index))
+                                for j,atom in enumerate(residue.atom):
+                                    if atom.pdbname.strip() == ligand_atom_name:
+                                        d = np.linalg.norm(p_coordinates[i]-c_coordinates[j])
+                                        label = '_'.join([str(x) for x in pair[0]])+'-'+'_'.join([str(x) for x in pair[1]])
+                                        if label not in data:
+                                            data[label] = []
+                                            atom_pairs_labels.add(label)
+                                        delta = len(data["Pose"])-len(data[label])
+                                        if delta > 1:
+                                            for x in range(delta-1):
+                                                data[label].append(None)
+                                        data[label].append(d)
 
                     #Get closest ligand distance to protein atoms
                     if protein_atoms != None:
