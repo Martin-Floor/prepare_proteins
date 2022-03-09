@@ -37,11 +37,6 @@ metrics_list = json_conf['commands'][0]['PeleTasks'][0]['metrics']
 parser = PDB.PDBParser()
 structure = parser.get_structure('receptor', pele_output+'/input/receptor.pdb')
 
-if peptide:
-    ligand_selection = 'L'
-else:
-    ligand_selection = 'L:1'
-
 for residue in structure.get_residues():
     chain = residue.get_parent().id
     resid = residue.id[1]
@@ -58,17 +53,31 @@ for residue in structure.get_residues():
         ebrt = ['sgb']
 
     for et in ebrt:
-        metric = {
-        'type': 'energyBySelection',
-        'tag' : ligand_selection+'_'+chain+':'+str(resid)+'_'+resname+'_'+et,
-        'typeOfContribution' : et,
-        'selection_group_1' : {
-            'links': {'ids': [ligand_selection]},
-            },
-        'selection_group_2' : {
-            'links': {'ids': [chain+':'+str(resid)]},
+        if peptide:
+            if chain != 'L':
+                metric = {
+                'type': 'energyBySelection',
+                'tag' : 'Peptide_'+chain+':'+str(resid)+'_'+resname+'_'+et,
+                'typeOfContribution' : et,
+                'selection_group_1' : {
+                    'chains': {'names': ['L']},
+                    },
+                'selection_group_2' : {
+                    'links': {'ids': [chain+':'+str(resid)]},
+                    }
+                }
+        else:
+            metric = {
+            'type': 'energyBySelection',
+            'tag' : 'L:1_'+chain+':'+str(resid)+'_'+resname+'_'+et,
+            'typeOfContribution' : et,
+            'selection_group_1' : {
+                'links': {'ids': ['L:1']},
+                },
+            'selection_group_2' : {
+                'links': {'ids': [chain+':'+str(resid)]},
+                }
             }
-        }
 
     metrics_list.append(metric)
 

@@ -691,7 +691,7 @@ has been carried out. Please run compareSequences() function before setting muta
 
         return jobs
 
-    def addMissingLoops(self, job_folder, nstruct=1, sfxn='ref2015'):
+    def addMissingLoops(self, job_folder, nstruct=1, sfxn='ref2015', param_files=None):
         """
         Create a Rosetta loop optimization protocol for missing loops in the structure.
 
@@ -779,6 +779,18 @@ compareSequences() function before adding missing loops.')
                     flags = rosettaScripts.flags('xml/'+model+'_'+loop_name+'.xml',
                                                  nstruct=nstruct, s='input_models/'+model+'.pdb',
                                                  output_silent_file=output_silent)
+
+                    # Add path to params files
+                    if param_files != None:
+                        if not os.path.exists(job_folder+'/params'):
+                            os.mkdir(job_folder+'/params')
+
+                        if isinstance(param_files, str):
+                            param_files = [param_files]
+                        for param in param_files:
+                            param_name = param.split('/')[-1]
+                            shutil.copyfile(param, job_folder+'/params/'+param_name)
+                        flags.addOption('in:file:extra_res_path', '../../params')
 
                     # Write flags file
                     flags.write_flags(job_folder+'/flags/'+model+'_'+loop_name+'.flags')
@@ -1177,8 +1189,8 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, distances=None,
-                             steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
+    def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None,
+                             box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False,
                              analysis=False, energy_by_residue_type='all', peptide=False):
         """
@@ -1193,7 +1205,6 @@ compareSequences() function before adding missing loops.')
             Path to input docking poses folder.
         input_yaml : str
             Path to the input YAML file to be used as template for all the runs.
-
         Missing!
         """
 
@@ -1228,7 +1239,7 @@ compareSequences() function before adding missing loops.')
                         if residue.get_parent().id == 'L':
                             ligand_pdb_name[ligand] = residue.resname
 
-                    ## Add dummy atom if peptide docking ### Strange fix!
+                    ## Add dummy atom if peptide docking ### Strange fix =)
                     if peptide:
                         for chain in structure.get_chains():
                             if chain.id == 'L':
@@ -1252,7 +1263,7 @@ compareSequences() function before adding missing loops.')
                     protein, ligand = model
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj',
-                                'usesrun', 'use_peleffy', 'debug']
+                                'usesrun', 'use_peleffy', 'debug', 'box_radius']
 
                     with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
                         if energy_by_residue:
@@ -1287,10 +1298,18 @@ compareSequences() function before adding missing loops.')
                             iyf.write("analyse: true\n")
                         else:
                             iyf.write("analyse: false\n")
+
+                        iyf.write("box_radius: "+str(box_radius)+"\n")
+                        if isinstance(box_centers, type(None)) and peptide:
+                            raise ValuError('You must give per-protein box_centers when docking peptides!')
+                        if not isinstance(box_centers, type(None)):
+                            box_center = ':'.join([str(x) for x in box_centers[protein]])
+                            iyf.write("box_center: '"+box_center+"'\n")
+
                         # energy by residue is not implemented in PELE platform, therefore
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
-                        if debug or energy_by_residue:
+                        if debug or energy_by_residue or peptide:
                             iyf.write("debug: true\n")
 
                         if distances != None:
@@ -1318,17 +1337,31 @@ compareSequences() function before adding missing loops.')
 
                     if energy_by_residue:
                         _copyScriptFile(pele_folder, 'addEnergyByResidueToPELEconf.py')
-                        script_name = '._addEnergyByResidueToPELEconf.py'
+                        ebr_script_name = '._addEnergyByResidueToPELEconf.py'
+
+                    if peptide:
+                        _copyScriptFile(pele_folder, 'modifyPelePlatformForPeptide.py')
+                        peptide_script_name = '._modifyPelePlatformForPeptide.py'
 
                     # Create command
                     command = 'cd '+pele_folder+'/'+protein+'_'+ligand+'\n'
                     command += 'python -m pele_platform.main input.yaml\n'
                     if energy_by_residue:
-                        command += 'python ../'+script_name+' output --energy_type '+energy_by_residue_type
+                        command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
                         if peptide:
-                            command += '--peptide \n'
+                            command += ' --peptide \n'
+                            command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         else:
                             command += '\n'
+                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
+                                for l in iyml:
+                                    if 'debug: true' in l:
+                                        l = 'restart: true\n'
+                                    oyml.write(l)
+                        command += 'python -m pele_platform.main input_restart.yaml\n'
+                    elif peptide:
+                        command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
                             with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
                                 for l in iyml:
@@ -1641,7 +1674,7 @@ compareSequences() function before adding missing loops.')
             print('Missing models in relaxation folder:')
             print('\t'+', '.join(missing_models))
 
-    def loadModelsFromMissingLoopBuilding(self, job_folder, filter_score_term='score', min_value=True,):
+    def loadModelsFromMissingLoopBuilding(self, job_folder, filter_score_term='score', min_value=True, param_files=None):
         """
         Load models from addMissingLoops() job calculation output.
 
@@ -1653,6 +1686,11 @@ compareSequences() function before adding missing loops.')
         # Get silent models paths
         executable = 'extract_pdbs.linuxgccrelease'
         output_folder = job_folder+'/output_models'
+
+        # Check if params were given
+        params = None
+        if os.path.exists(job_folder+'/params'):
+            params = job_folder+'/params'
 
         # Check loops to rebuild from output folder structure
         for model in os.listdir(output_folder):
@@ -1671,6 +1709,8 @@ compareSequences() function before adding missing loops.')
                             best_model_tag = scores.idxmxn()[filter_score_term]
                         command = executable
                         command += ' -silent '+loop_folder+'/'+f
+                        if params != None:
+                            command += ' -extra_res_path '+params+' '
                         command += ' -tags '+best_model_tag
                         os.system(command)
                         loop = (int(loop.split('_')[0]), loop.split('_')[1])

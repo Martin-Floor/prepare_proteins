@@ -7,13 +7,15 @@ import shutil
 # ## Define input variables
 parser = argparse.ArgumentParser()
 parser.add_argument('pele_output', default=None, help='Path to the PELE output folder.')
+parser.add_argument('input_pdb', default=None, help='Name of input PDB')
 args=parser.parse_args()
 pele_output = args.pele_output
+input_pdb = args.input_pdb
 
-# Modify pele.conf file to remove unquoted words
+# Modify adaptive.conf file to remove unquoted words
 pele_words = ['COMPLEXES', 'PELE_STEPS', 'SEED']
-with open(pele_output+'/pele.conf.tmp', 'w') as tmp:
-    with open(pele_output+'/pele.conf') as pc:
+with open(pele_output+'/adaptive.conf.tmp', 'w') as tmp:
+    with open(pele_output+'/adaptive.conf') as pc:
         for l in pc:
             for w in pele_words:
                 if w in l:
@@ -25,42 +27,9 @@ with open(pele_output+'/pele.conf.tmp', 'w') as tmp:
 with open(pele_output+'/adaptive.conf.tmp') as tmp:
     json_conf = json.load(tmp)
 
-# # Modify json parameters
-# metrics_list = json_conf['commands'][0]['PeleTasks'][0]['metrics']
-#
-# # Read receptor structure
-# parser = PDB.PDBParser()
-# structure = parser.get_structure('receptor', pele_output+'/input/receptor.pdb')
-#
-# for residue in structure.get_residues():
-#     chain = residue.get_parent().id
-#     resid = residue.id[1]
-#     resname = residue.resname
-#
-#     # Add energy by residue metrics
-#     if energy_type == 'all':
-#         ebrt = ['lennard_jones', 'electrostatic', 'sgb']
-#     elif energy_type == 'lennard_jones':
-#         ebrt = ['lennard_jones']
-#     elif energy_type == 'electrostatic':
-#         ebrt = ['electrostatic']
-#     elif energy_type == 'sgb':
-#         ebrt = ['sgb']
-#
-#     for et in ebrt:
-#         metric = {
-#         'type': 'energyBySelection',
-#         'tag' : 'L:1_'+chain+':'+str(resid)+'_'+resname+'_'+et,
-#         'typeOfContribution' : et,
-#         'selection_group_1' : {
-#             'links': {'ids': ['L:1']},
-#             },
-#         'selection_group_2' : {
-#             'links': {'ids': [chain+':'+str(resid)]},
-#             }
-#         }
-#
-#     metrics_list.append(metric)
+# Modify json parameters
+del json_conf['clustering']['params']['ligandResname']
+json_conf['clustering']['params']['ligandChain'] = 'L'
 
 # Write pele.conf
 with open(pele_output+'/adaptive.conf.tmp', 'w') as tmp:
@@ -76,3 +45,59 @@ with open(pele_output+'/adaptive.conf', 'w') as pc:
             pc.write(l)
 
 os.remove(pele_output+'/adaptive.conf.tmp')
+
+# Remove phantom ligand from processed PDB
+processed = pele_output+'/input/'+input_pdb.replace('.pdb', '_processed.pdb')
+peptide_residues = []
+with open(processed+'.tmp', 'w') as tpf:
+    with open(processed) as pf:
+        for l in pf:
+            if 'XXX' not in l:
+                tpf.write(l)
+            # Get peptide residues ids
+            if len(l) > 5:
+                chain = l.split()[4]
+                if chain == 'L':
+                    resid = l.split()[5]
+                    peptide_residues.append(int(resid))
+peptide_residues = list(set(peptide_residues))
+
+shutil.move(processed+'.tmp', processed)
+
+# Modify pele.conf file to remove unquoted words
+pele_words = ['COMPLEXES', 'PELE_STEPS', 'SEED']
+with open(pele_output+'/pele.conf.tmp', 'w') as tmp:
+    with open(pele_output+'/pele.conf') as pc:
+        for l in pc:
+            for w in pele_words:
+                if w in l:
+                    l = l.replace('$'+w, '"$'+w+'"')
+                    break
+            tmp.write(l)
+
+# Load modified pele.conf as json
+with open(pele_output+'/pele.conf.tmp') as tmp:
+    json_conf = json.load(tmp)
+
+# Modify JSON parameters
+# Omit peptide links from ANM
+linksToOmit = {}
+linksToOmit['links'] = {}
+linksToOmit['links']['ranges'] = ['L:'+str(min(peptide_residues))+' '+'L:'+str(max(peptide_residues))]
+ANM_dict = json_conf['commands'][0]['ANM']
+ANM_dict['linksToOmit'] = linksToOmit
+
+# Write pele.conf
+with open(pele_output+'/pele.conf.tmp', 'w') as tmp:
+    json.dump(json_conf, tmp, indent=1)
+
+# Add quotes to pele reserved words
+with open(pele_output+'/pele.conf', 'w') as pc:
+    with open(pele_output+'/pele.conf.tmp') as tmp:
+        for l in tmp:
+            for w in pele_words:
+                if w in l:
+                    l = l.replace('"$'+w+'"','$'+w)
+            pc.write(l)
+
+os.remove(pele_output+'/pele.conf.tmp')
