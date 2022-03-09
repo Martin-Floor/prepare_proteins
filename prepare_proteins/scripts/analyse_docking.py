@@ -83,9 +83,9 @@ if atom_pairs != None:
     atom_pairs_labels = set()
 
 # Calculate and add scores
-for model in mae_output:
+for model in sorted(mae_output):
     if mae_output[model] != {}:
-        for ligand in mae_output[model]:
+        for ligand in sorted(mae_output[model]):
             pose_count = 0
             for st in structure.StructureReader(mae_output[model][ligand]):
                 if 'r_i_glide_gscore' in st.property:
@@ -117,7 +117,7 @@ for model in mae_output:
                                 for j,atom in enumerate(st.atom):
                                     if atom.pdbname.strip() == pair[1]:
                                         d = np.linalg.norm(p_coordinates[i]-c_coordinates[j])
-                                        label = '_'.join([str(x) for x in pair[0]])+'-'+ligand+'_'+atom.pdbname.strip()
+                                        label = '_'.join([str(x) for x in pair[0]])+'-'+pair[1]
                                         if label not in data:
                                             data[label] = []
                                             atom_pairs_labels.add(label)

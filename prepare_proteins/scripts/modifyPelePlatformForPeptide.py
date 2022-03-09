@@ -87,6 +87,13 @@ linksToOmit['links']['ranges'] = ['L:'+str(min(peptide_residues))+' '+'L:'+str(m
 ANM_dict = json_conf['commands'][0]['ANM']
 ANM_dict['linksToOmit'] = linksToOmit
 
+# Remove constraints added for peptide
+keep_cst = []
+for cst in json_conf['commands'][0]['constraints']:
+    if not cst['constrainThisAtom'].startswith('L:'):
+        keep_cst.append(cst)
+json_conf['commands'][0]['constraints'] = keep_cst
+
 # Write pele.conf
 with open(pele_output+'/pele.conf.tmp', 'w') as tmp:
     json.dump(json_conf, tmp, indent=1)

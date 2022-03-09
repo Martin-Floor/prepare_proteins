@@ -1457,38 +1457,57 @@ compareSequences() function before adding missing loops.')
         os.system('run ._PDBtoMAE.py')
         os.chdir(cwd)
 
-    def addCatalyticDistance(self, exclude=None):
+    def getDockingDistances(self, protein, ligand):
         """
-        Add the catalytic distance to the docking data DataFrame by taking the minimum value of all non-nan columns.
+        Get the distances related to a protein and ligand docking.
+        """
+        protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
+        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+        if not ligand_series.empty:
+            distances = []
+            for d in ligand_series:
+                if d not in ['Score', 'RMSD', 'Catalytic distance']:
+                    if not ligand_series[d].dropna().empty:
+                        distances.append(d)
+            return distances
+        else:
+            return None
+
+    def combineDistancesIntoMetrics(self, catalytic_labels, exclude=None):
+        """
+        Combine different equivalent distances into specific named metrics. The function
+        takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
+
+            catalytic_labels = {
+                metric_name = {
+                    protein = {
+                        ligand = distances_list}}}
+
+        The innermost distances_list object contains all equivalent distance names for
+        a specific protein and ligand pair to be combined under the same metric_name column.
+
+        The combination is done by taking the minimum value of all equivalent distances.
 
         Parameters
         ==========
-        exclude : list
-            Columns to be excluded from the catalytic distance calculation.
+        catalytic_labels : dict
+            Dictionary defining which distances will be combined under a common name.
+            (for details see above).
         """
 
-        if exclude != None:
-            exclude += ['Score', 'RMSD'] + exclude
-        else:
-            exclude = ['Score', 'RMSD']
-
-        catalytic_distances = {}
-        for model in self.docking_ligands:
-            catalytic_distances[model] = {}
-            protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
-            for ligand in self.docking_ligands[model]:
-                catalytic_distances[model][ligand] = {}
-                ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-                ligand_data = ligand_data.dropna(axis=1, how='all')
-                labels = [label for label in ligand_data if label not in exclude]
-                for i, row in ligand_data[labels].min(axis=1).iteritems():
-                    catalytic_distances[model][ligand][i[2]] = row
-
-        cd = []
-        for i in self.docking_data.index:
-            cd.append(catalytic_distances[i[0]][i[1]][i[2]])
-
-        self.docking_data['Catalytic distance'] = cd
+        for name in catalytic_labels:
+            if 'metric_'+name in self.docking_data.keys() and not overwrite:
+                print('Combined metric %s already added. Give overwrite=True to recombine' % name)
+            else:
+                changed = True
+                values = []
+                for protein in self.docking_data.index.levels[0]:
+                    protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
+                    for ligand in self.docking_data.index.levels[1]:
+                        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+                        distances = catalytic_labels[name][protein][ligand]
+                        values += ligand_series[distances].min(axis=1).tolist()
+                self.docking_data['metric_'+name] = values
 
     def getBestDockingPoses(self, n_models=1, filter_by=None, filter_value=None,
                             filter_type='lower', return_failed=False):
