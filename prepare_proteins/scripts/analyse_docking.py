@@ -12,12 +12,14 @@ parser.add_argument('--protein_atoms', default=None, help='Dictionary json file 
 parser.add_argument('--atom_pairs', default=None, help='Dictionary json file including protein_atoms for distance calculations.')
 parser.add_argument('--skip_chains', default=False, action='store_true', help='Skip chain comparison and select only by residue ID and atom name.')
 parser.add_argument('--return_failed', default=False, action='store_true', help='Output a file containing failed docking models.')
+parser.add_argument('--ignore_hydrogens', default=False, action='store_true', help='Ignore hydrogens for closes distance calculation.')
 args=parser.parse_args()
 
 protein_atoms = args.protein_atoms
 atom_pairs = args.atom_pairs
 skip_chains = args.skip_chains
 return_failed = args.return_failed
+ignore_hydrogens = args.ignore_hydrogens
 
 def RMSD(ref_coord, curr_coord):
     sq_distances = np.linalg.norm(ref_coord - curr_coord, axis=1)**2
@@ -78,6 +80,7 @@ data['RMSD'] = []
 
 if protein_atoms != None:
     data["Closest distance"] = []
+    data["Closest atom"] = []
 
 if atom_pairs != None:
     atom_pairs_labels = set()
@@ -104,6 +107,20 @@ for model in sorted(mae_output):
                     c_coordinates = st.getXYZ()
                     rmsd = RMSD(r_coordinates, c_coordinates)
                     data["RMSD"].append(rmsd)
+
+                    # Get atom names
+                    if ignore_hydrogens:
+                        selected_atoms = []
+                        atom_names = []
+                        for i in range(1,len(st.atom)+1):
+                            if not st.atom[i].pdbname.startswith('H'):
+                                selected_atoms.append(i-1)
+                                atom_names.append(st.atom[i].pdbname)
+                        c_coordinates = c_coordinates[selected_atoms]
+                    else:
+                        atom_names = []
+                        for i in range(1,len(st.atom)+1):
+                            atom_names.append(st.atom[i].pdbname)
 
                     # Calculate protein to ligand distances
                     if atom_pairs != None:
@@ -151,9 +168,9 @@ for model in sorted(mae_output):
 
                     #Get closest ligand distance to protein atoms
                     if protein_atoms != None:
-                        M = distance_matrix(p_coordinates,c_coordinates)
+                        M = distance_matrix(p_coordinates, c_coordinates)
                         data["Closest distance"].append(np.amin(M))
-
+                        data["Closest atom"].append(atom_names[np.where(zeros == np.amin(zeros))[1]])
                 else:
                     if protein_atoms != None:
                         # Get protein atom coordinates

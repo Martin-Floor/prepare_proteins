@@ -1374,7 +1374,8 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None, skip_chains=False, return_failed=False):
+    def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
+                        skip_chains=False, return_failed=False, ignore_hydrogens=False):
         """
         Missing
         """
@@ -1404,6 +1405,8 @@ compareSequences() function before adding missing loops.')
             command += ' --skip_chains'
         if return_failed:
             command += ' --return_failed'
+        if ignore_hydrogens:
+            command += ' --ignore_hydrogens'
         os.system(command)
 
         # Read the CSV file into pandas
