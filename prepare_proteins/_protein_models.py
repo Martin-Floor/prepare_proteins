@@ -87,6 +87,7 @@ class proteinModels:
         self.models_names = [] # Store model names
         self.structures = {} # structures are stored here
         self.sequences = {} # sequences are stored here
+        self.target_sequences = {} # Final sequences are stored here
         self.msa = None # multiple sequence alignment
         self.multi_chain = False
         self.ss = {} # secondary structure strings are stored here
@@ -790,7 +791,7 @@ compareSequences() function before adding missing loops.')
                         for param in param_files:
                             param_name = param.split('/')[-1]
                             shutil.copyfile(param, job_folder+'/params/'+param_name)
-                        flags.addOption('in:file:extra_res_path', '../../params')
+                        flags.addOption('in:file:extra_res_path', 'params')
 
                     # Write flags file
                     flags.write_flags(job_folder+'/flags/'+model+'_'+loop_name+'.flags')
@@ -805,7 +806,8 @@ compareSequences() function before adding missing loops.')
         return jobs
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
-                                    epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False):
+                                    epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
+                                    fill_loops=False):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -814,6 +816,7 @@ compareSequences() function before adding missing loops.')
         prepare_folder : str
             Folder name for the prepwizard optimization.
         """
+
         # Create prepare job folders
         if not os.path.exists(prepare_folder):
             os.mkdir(prepare_folder)
@@ -831,17 +834,35 @@ compareSequences() function before adding missing loops.')
         # Generate jobs
         jobs = []
         for model in self.models_names:
+            if fill_loops:
+                if model not in self.target_sequences:
+                    raise ValuError('Target sequence for model %s was not given. First\
+make sure of reading the target sequences with the function readTargetSequences()' % model)
+                sequence = {}
+                sequence[model] = self.target_sequences[model]
+                fasta_file = prepare_folder+'/input_models/'+model+'.fasta'
+                alignment.writeFastaFile(sequence, fasta_file)
+
             # Create model output folder
             output_folder = prepare_folder+'/output_models/'+model
             if not os.path.exists(output_folder):
                 os.mkdir(output_folder)
 
-            command = 'cd '+output_folder+'\n'
+            if fill_loops:
+                command = 'cd '+prepare_folder+'/input_models/\n'
+                command += 'pwd=$(pwd)\n'
+                command += 'cd ../output_models/'+model+'\n'
+            else:
+                command = 'cd '+output_folder+'\n'
+
             command += '"${SCHRODINGER}/utilities/prepwizard" '
             command += '../../input_models/'+model+'.pdb '
             command += model+'.pdb '
             command += '-fillsidechains '
             command += '-disulfides '
+            if fill_loops:
+                command += '-fillloops '
+                command += '-fasta_file "$pwd"/'+model+'.fasta '
             if remove_hydrogens:
                 command += '-rehtreat '
             if epik_pH:
@@ -1135,8 +1156,7 @@ compareSequences() function before adding missing loops.')
                     jobs.append(command)
         return jobs
 
-    def setUpCofactorParameterization(self, job_folder, cofactor_pdbs, include_terminal_rotamers=True,
-                                      rotamer_resolution=10, charge_method='opls2005', forcefield='opls2005'):
+    def setUpLigandParameterization(self, job_folder, ligands_folder):
         """
         Run PELE platform for ligand parameterization
 
@@ -1144,48 +1164,33 @@ compareSequences() function before adding missing loops.')
         ==========
         job_folder : str
             Path to the job input folder
-        cofactor_pdbs : list
-            PDBs for the cofactors to parameterize
+        ligands_folder : str
+            Path to the folder containing the ligand molecules in PDB format.
         """
-
-        charge_methods = ['opls2005', 'am1bcc', 'gasteiger', 'dummy']
-        if charge_method not in charge_methods:
-            raise ValuError('Wrong charge method. Available: '+', '.join(charge_methods))
 
         # Create PELE job folder
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
-        if isinstance(cofactor_pdbs, str):
-            cofactor_pdbs = [cofactor_pdbs]
+
+        # Copy script to generate protein and ligand mae inputs, separately.
+        _copyScriptFile(job_folder, 'peleffy_ligand.py')
 
         jobs = []
-        for pdb in cofactor_pdbs:
-            pdb_name = pdb.split('/')[-1].replace('.pdb', '')
-            structure = _readPDB(pdb_name, pdb)
+        for pdb in os.listdir(ligands_folder):
+            if pdb.endswith('.pdb'):
+                pdb_name = pdb.replace('.pdb', '')
+                structure = _readPDB(pdb_name, ligands_folder+'/'+pdb)
+                if not os.path.exists(job_folder+'/'+pdb_name):
+                    os.mkdir(job_folder+'/'+pdb_name)
 
-            if not os.path.exists(job_folder+'/'+pdb_name):
-                os.mkdir(job_folder+'/'+pdb_name)
+                # _saveStructureToPDB(structure, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
+                shutil.copyfile(ligands_folder+'/'+pdb, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
 
-            # for residue in structure.get_residues():
-            #     chain = residue.get_parent()
-            #     chain.id  = 'L'
-            #     residue.id = ('_H', 1, residue.id[2])
-
-            # _saveStructureToPDB(structure, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
-            shutil.copyfile(pdb, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
-
-            # Create command
-            command = 'cd '+job_folder+'/'+pdb_name+'\n'
-            command += 'python -m peleffy.main '+pdb_name+'.pdb '
-            # command += '--chain L '
-            command += '-o "'+pdb_name+'_params" '
-            command += '-r '+str(rotamer_resolution)+' '
-            command += '-f '+str(forcefield)+' '
-            if include_terminal_rotamers:
-                command += '--include_terminal_rotamers '
-            command += '-c '+charge_method+'\n'
-            command += 'cd ../..'
-            jobs.append(command)
+                # Create command
+                command = 'cd '+job_folder+'/'+pdb_name+'\n'
+                command += 'python  ../._peleffy_ligand.py '+pdb_name+'.pdb\n'
+                command += 'cd ../..\n'
+                jobs.append(command)
 
         return jobs
 
@@ -1211,6 +1216,13 @@ compareSequences() function before adding missing loops.')
         # Create PELE job folder
         if not os.path.exists(pele_folder):
             os.mkdir(pele_folder)
+
+        # template_path = {}
+        # if not isinstance(ligand_parameters, type(None)):
+        #     for ligand in os.listdir(ligand_parameters):
+        #         template_path[ligand] = {}
+        #         template_path[ligand]['interact'] = ligand_parameters+'/'+ligand+'/'+ligand+'z'
+        #         template_path[ligand]['rotamers'] = ligand_parameters+'/'+ligand+'/'+ligand+'.rot.assign'
 
         # Read docking poses information from models_folder and create pele input
         # folders.
@@ -1512,29 +1524,22 @@ compareSequences() function before adding missing loops.')
                         values += ligand_series[distances].min(axis=1).tolist()
                 self.docking_data['metric_'+name] = values
 
-    def getBestDockingPoses(self, n_models=1, filter_by=None, filter_value=None,
-                            filter_type='lower', return_failed=False):
+    def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
         """
-        Get best models based on the SCORE and (optionally) a specific column.
-        The option filter_by allows to first filter all models by a specific filter_value
-        and then select all models with the lowest score after the filter has been
-        applied.
+        Get best models based on the best SCORE and a set of metrics with specified thresholds.
+        The filter thresholds must be provided with a dictionary using the metric names as keys
+        and the thresholds as the values.
 
         Parameters
         ==========
         n_models : int
             The number of models to select for each protein + ligand docking.
-        filter_by : str
-            Name of the column to apply the filter.
-        filter_value : float
-            Threshold for the filter.
-        filter_type : str
-            If the models are lower or equal than (lower) or larger or equa than (larger)
-            the specified filter_value.
+        filter_values : dict
+            Thresholds for the filter.
         return_failed : bool
             Whether to return a list of the dockings without any models fulfilling
-            the selection criteria. It is returned as a tuple alongside the filtered
-            data frame.
+            the selection criteria. It is returned as a tuple (index 0) alongside
+            the filtered data frame (index 1).
         """
         best_poses = pd.DataFrame()
         bp = []
@@ -1543,14 +1548,8 @@ compareSequences() function before adding missing loops.')
             protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
             for ligand in self.docking_ligands[model]:
                 ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-                if filter_by != None:
-                    if filter_value == None:
-                        raise ValueError('When filtering by column you need to specify a filter_value.')
-                    if filter_type == 'lower':
-                        ligand_data = ligand_data[ligand_data[filter_by] <= filter_value]
-                    elif filter_type == 'larger':
-                        ligand_data = ligand_data[ligand_data[filter_by] >= filter_value]
-
+                for metric in filter_values:
+                    ligand_data = ligand_data[ligand_data['metric_'+metric] < filter_values[metric]]
                 if ligand_data.empty:
                     failed.append((model, ligand))
                     continue
@@ -1560,10 +1559,42 @@ compareSequences() function before adding missing loops.')
                     bp.append(i)
 
         if return_failed:
-
             return failed, self.docking_data[self.docking_data.index.isin(bp)]
-
         return self.docking_data[self.docking_data.index.isin(bp)]
+
+    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5, max_threshold=5.0, step=0.1):
+        extracted = []
+        selected_indexes = []
+
+        for t in np.arange(min_threshold, max_threshold+(step/10), step):
+            filter_values = {m:t for m in metrics}
+            best_poses = self.getBestDockingPoses(filter_values, n_models=1)
+            mask = []
+            if not isinstance(ligands, type(None)):
+                for level in best_poses.index.get_level_values('Ligand'):
+                    if level in ligands:
+                        mask.append(True)
+                    else:
+                        mask.append(False)
+                pele_data = best_poses[mask]
+            else:
+                pele_data = best_poses
+
+            for row in pele_data.index:
+                if row[:2] not in extracted:
+                    selected_indexes.append(row)
+                if row[:2] not in extracted:
+                    extracted.append(row[:2])
+
+        final_mask = []
+        for row in self.docking_data.index:
+            if row in selected_indexes:
+                final_mask.append(True)
+            else:
+                final_mask.append(False)
+        pele_data = self.docking_data[final_mask]
+
+        return pele_data
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder):
         """
@@ -1640,7 +1671,7 @@ compareSequences() function before adding missing loops.')
                         self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
         missing_models = set(self.models_names) - set(models)
         if missing_models != set():
-            print('Missing models in relaxation folder:')
+            print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True, tags=None):
@@ -1708,6 +1739,7 @@ compareSequences() function before adding missing loops.')
         # Get silent models paths
         executable = 'extract_pdbs.linuxgccrelease'
         output_folder = job_folder+'/output_models'
+        models = []
 
         # Check if params were given
         params = None
@@ -1738,40 +1770,53 @@ compareSequences() function before adding missing loops.')
                         loop = (int(loop.split('_')[0]), loop.split('_')[1])
                         loop_models[loop] = _readPDB(loop, best_model_tag+'.pdb')
                         os.remove(best_model_tag+'.pdb')
+                        models.append(model)
 
-            # Get original model chains
-            model_chains = [*self.structures[model].get_chains()]
+            if len(loop_models) > 1:
+                # Get original model chains
+                model_chains = [*self.structures[model].get_chains()]
 
-            # Create new structure, model and chains to add rebuilded segments
-            structure = PDB.Structure.Structure(0)
-            _model = PDB.Model.Model(0)
-            chains = {}
-            for model_chain in model_chains:
-                chains[model_chain.id] = PDB.Chain.Chain(model_chain.id)
+                # Create new structure, model and chains to add rebuilded segments
+                structure = PDB.Structure.Structure(0)
+                _model = PDB.Model.Model(0)
+                chains = {}
+                for model_chain in model_chains:
+                    chains[model_chain.id] = PDB.Chain.Chain(model_chain.id)
 
-            # Add missing loop segments to overall model
-            current_residue = 0
-            for loop in loop_models:
-                # Add loop remodel protocol
-                if len(loop[1]) == 1:
-                    hanging_residues = 3
-                elif len(loop[1]) == 2:
-                    hanging_residues = 2
-                else:
-                    hanging_residues = 1
-                larger_loop_residue = loop[0]+len(loop[1])+1+hanging_residues
-                for i,residue in enumerate(loop_models[loop].get_residues()):
-                    if i+1 > current_residue and i+1 <= larger_loop_residue:
-                        chain_id = residue.get_parent().id
-                        chains[chain_id].add(residue)
-                        current_residue += 1
+                # Add missing loop segments to overall model
+                current_residue = 0
 
-            # Load final model into the library
-            for chain in chains:
-                _model.add(chains[chain])
-            structure.add(_model)
-            _saveStructureToPDB(structure, model+'.pdb')
+                for loop in loop_models:
+                    # Add loop remodel protocol
+                    if len(loop[1]) == 1:
+                        hanging_residues = 3
+                    elif len(loop[1]) == 2:
+                        hanging_residues = 2
+                    else:
+                        hanging_residues = 1
+                    larger_loop_residue = loop[0]+len(loop[1])+1+hanging_residues
+                    for i,residue in enumerate(loop_models[loop].get_residues()):
+                        if i+1 > current_residue and i+1 <= larger_loop_residue:
+                            chain_id = residue.get_parent().id
+                            chains[chain_id].add(residue)
+                            current_residue += 1
+
+                # Load final model into the library
+                for chain in chains:
+                    _model.add(chains[chain])
+                structure.add(_model)
+                _saveStructureToPDB(structure, model+'.pdb')
+            else:
+                for loop in loop_models:
+                    _saveStructureToPDB(loop_models[loop], model+'.pdb')
+
+            self.readModelFromPDB(model, model+'.pdb')
             os.remove(model+'.pdb')
+
+        missing_models = set(self.models_names) - set(models)
+        if missing_models != set():
+            print('Missing models in loop rebuild folder:')
+            print('\t'+', '.join(missing_models))
 
     def loadModelsFromMembranePositioning(self, job_folder):
         """
@@ -1824,6 +1869,22 @@ compareSequences() function before adding missing loops.')
         self.structures.pop(model)
         self.sequences.pop(model)
 
+    def readTargetSequences(self, fasta_file):
+        """
+        Read the set of target sequences for the protein models
+        """
+        # Read sequences and store them in target_sequence attributes
+        sequences = prepare_proteins.alignment.readFastaFile(fasta_file)
+        for sequence in sequences:
+            if sequence not in self.models_names:
+                raise ValueError('Given sequence name %s does not matches any protein model' % sequence)
+            self.target_sequences[sequence] = sequences[sequence]
+
+        missing_models = set(self.models_names) - set(self.target_sequences)
+        if missing_models != set():
+            print('Missing sequences in the given fasta file:')
+            print('\t'+', '.join(missing_models))
+
     def compareSequences(self, sequences_file):
         """
         Compare models sequences to a set of different sequences and check missing
@@ -1839,7 +1900,8 @@ compareSequences() function before adding missing loops.')
         sequence_differences : dict
             Dictionary containing missing or changed information.
         """
-        sequences = prepare_proteins.alignment.readFastaFile(sequences_file)
+
+        self.readTargetSequences(sequences_file)
 
         # Iterate models to store sequence differences
         for model in self.models_names:
@@ -1854,7 +1916,7 @@ compareSequences() function before adding missing loops.')
             # Create a sequence alignement between current and target sequence
             to_align = {}
             to_align['current'] = self.sequences[model]
-            to_align['target'] = sequences[model]
+            to_align['target'] = self.target_sequences[model]
             msa = prepare_proteins.alignment.mafft.multipleSequenceAlignment(to_align)
 
             # Iterate the alignment to gather sequence differences
@@ -2066,7 +2128,6 @@ def _copyScriptFile(output_folder, script_name):
     # Get control script
     control_script = resource_stream(Requirement.parse("prepare_proteins"),
                                      "prepare_proteins/scripts/"+script_name)
-
     control_script = io.TextIOWrapper(control_script)
 
     # Write control script to output folder

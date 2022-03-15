@@ -44,7 +44,7 @@ for residue in structure.get_residues():
 
     # Add energy by residue metrics
     if energy_type == 'all':
-        ebrt = ['lennard_jones', 'electrostatic', 'sgb']
+        ebrt = ['all', 'lennard_jones', 'electrostatic', 'sgb']
     elif energy_type == 'lennard_jones':
         ebrt = ['lennard_jones']
     elif energy_type == 'electrostatic':
@@ -79,7 +79,7 @@ for residue in structure.get_residues():
                 }
             }
 
-    metrics_list.append(metric)
+        metrics_list.append(metric)
 
 # Write pele.conf
 with open(pele_output+'/pele.conf.tmp', 'w') as tmp:
