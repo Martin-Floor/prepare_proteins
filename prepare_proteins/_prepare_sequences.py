@@ -5,7 +5,7 @@ class sequenceModels:
 
     def __init__(self, models_fasta):
 
-        self.sequences = alignment.readFastaFile(models_fasta)
+        self.sequences = alignment.readFastaFile(models_fasta, replace_slash=True)
 
     def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm'):
         """

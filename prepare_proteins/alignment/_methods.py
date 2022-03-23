@@ -1,6 +1,6 @@
 from Bio import SeqIO, AlignIO
 
-def readFastaFile(fasta_file):
+def readFastaFile(fasta_file, replace_slash=False):
     """
     Read a fasta file and get the sequences as a dictionary
 
@@ -13,11 +13,17 @@ def readFastaFile(fasta_file):
     -------
     sequences : dict
         Dictionary containing the IDs and squences in the fasta file.
+    replace_slash : bool
+        If a slash symbol is found in name, raplaces it for a middle dash.
     """
 
     sequences = {}
     for record in SeqIO.parse(fasta_file, "fasta"):
-        sequences[record.id] = str(record.seq)
+        if replace_slash:
+            sequences[record.id.replace('/','-')] = str(record.seq)
+        else:
+            sequences[record.id] = str(record.seq)
+
 
     return sequences
 

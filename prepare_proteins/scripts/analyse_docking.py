@@ -196,7 +196,7 @@ for model in sorted(mae_output):
                             else:
                                 for chain in protein.chain:
                                     if chain.name == chain_id:
-                                        for residue in protein.residue:
+                                        for residue in chain.residue:
                                             if residue.resnum == residue_id:
                                                 for atom in residue.atom:
                                                     if atom.pdbname.strip() == atom_name:
@@ -214,7 +214,7 @@ for model in sorted(mae_output):
                             if skip_chains:
                                 residue_id = pair[0][0]
                                 atom_name = pair[0][1]
-                                for residue in protein.residue:
+                                for residue in chain.residue:
                                     if residue.resnum == residue_id:
                                         for atom in residue.atom:
                                             if atom.pdbname.strip() == atom_name:
@@ -225,7 +225,7 @@ for model in sorted(mae_output):
                                 atom_name = pair[0][2]
                                 for chain in protein.chain:
                                     if chain.name == chain_id:
-                                        for residue in protein.residue:
+                                        for residue in chain.residue:
                                             if residue.resnum == residue_id:
                                                 for atom in residue.atom:
                                                     if atom.pdbname.strip() == atom_name:

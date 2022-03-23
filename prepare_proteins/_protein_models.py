@@ -1674,7 +1674,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
 
-    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True, tags=None):
+    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True, tags=None, wat_to_hoh=True):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -1718,7 +1718,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += ' -extra_res_path '+params+' '
                         command += ' -tags '+best_model_tag
                         os.system(command)
-                        self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=True)
+                        self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
@@ -1877,8 +1877,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         sequences = prepare_proteins.alignment.readFastaFile(fasta_file)
         for sequence in sequences:
             if sequence not in self.models_names:
-                raise ValueError('Given sequence name %s does not matches any protein model' % sequence)
-            self.target_sequences[sequence] = sequences[sequence]
+                print('Given sequence name %s does not matches any protein model' % sequence)
+            else:
+                self.target_sequences[sequence] = sequences[sequence]
 
         missing_models = set(self.models_names) - set(self.target_sequences)
         if missing_models != set():
