@@ -877,7 +877,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if delwater_hbond_cutoff:
                 command += '-delwater_hbond_cutoff '+str(delwater_hbond_cutoff)+' '
 
-            if not isintance(protonation_states, type(None)):
+            if not isinstance(protonation_states, type(None)):
                 for ps in protonation_states[model]:
                     command += '--force '+str(ps[0])+" "+str(ps[1])
 
