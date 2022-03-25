@@ -54,15 +54,18 @@ for model in os.listdir('output_models'):
 failed_count = 0
 total = 0
 failed_dockings = []
+
+failed_lines = ['SKIP LIG', 'No poses met the energy criterion for evaluating GlideScore']
 for model in subjobs:
     for ligand in subjobs[model]:
         total += 1
         with open(subjobs[model][ligand]) as sjf:
             for l in sjf:
-                if 'SKIP LIG' in l:
-                    failed_count += 1
-                    failed_dockings.append((model, ligand))
-                    print('Docking for %s + %s failed' % (model, ligand))
+                for fl in failed_lines:
+                    if fl in l:
+                        failed_count += 1
+                        failed_dockings.append((model, ligand))
+                        print('Docking for %s + %s failed' % (model, ligand))
 
 print('%s of %s models failed (%.2f)' % (failed_count, total, 100*failed_count/total))
 

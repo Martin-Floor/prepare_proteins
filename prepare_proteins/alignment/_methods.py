@@ -83,3 +83,34 @@ def ReadMsaFromFastaFile(alignment_file):
     msa = AlignIO.read(alignment_file, 'fasta')
 
     return msa
+
+def msaPositionsFromSequencePositions(msa, sequence_id, sequence_indexes):
+    """
+    Get the multiple sequence alignment position indexes matching those positions of a specific sequence target.
+
+    Parameters
+    ==========
+    msa : Bio.AlignIO
+        Multiple sequence aligment in Biopython format.
+    sequence_id : str
+        ID of the target sequence
+    sequence_indexes : list
+        Target sequence positions to match.
+
+    Returns
+    =======
+    msa_indexes : list
+        MSA indexes matching the target sequence positions
+    """
+
+    msa_indexes = []
+    p = 0
+    for i in range(msa.get_alignment_length()):
+        if p in sequence_indexes:
+            msa_indexes.append(i)
+        for a in msa:
+            if a.id == sequence_id:
+                if a.seq[i] != '-':
+                    p += 1
+
+    return msa_indexes

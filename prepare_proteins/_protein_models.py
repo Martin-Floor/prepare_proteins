@@ -807,7 +807,7 @@ compareSequences() function before adding missing loops.')
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
-                                    fill_loops=False):
+                                    fill_loops=False, protonation_states=None):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -876,6 +876,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-samplewater '
             if delwater_hbond_cutoff:
                 command += '-delwater_hbond_cutoff '+str(delwater_hbond_cutoff)+' '
+
+            if not isintance(protonation_states, type(None)):
+                for ps in protonation_states[model]:
+                    command += '--force '+str(ps[0])+" "+str(ps[1])
+
             command += '-JOBNAME prepare_'+model+' '
             command += '-HOST localhost:1\n'
 
@@ -1623,6 +1628,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # move back to folder
         os.chdir('..')
+
+    def getSingleDockingData(self, protein, ligand):
+        """
+        Get the docking data for a particular combination of protein and ligand
+        """
+
+        if ligand not in self.docking_data[protein]:
+            raise ValueError('has no docking data')
+
+        protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
+        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+
+        return ligand_data
 
     def plotDocking(self, protein, ligand, x='RMSD', y='Score', z=None, colormap='Blues_r', output_folder=None, extension='.png',
                     dpi=200):
