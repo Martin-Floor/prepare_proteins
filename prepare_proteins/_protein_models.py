@@ -806,7 +806,7 @@ compareSequences() function before adding missing loops.')
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
-                                    fill_loops=False, protonation_states=None):
+                                    fill_loops=False, protonation_states=None, schrodinger_control=True):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -828,7 +828,8 @@ compareSequences() function before adding missing loops.')
         self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens)
 
         # Copy control file to prepare folder
-        _copySchrodingerControlFile(prepare_folder)
+        if schrodinger_control:
+            _copySchrodingerControlFile(prepare_folder)
 
         # Generate jobs
         jobs = []
@@ -880,14 +881,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for ps in protonation_states[model]:
                     command += '--force '+str(ps[0])+" "+str(ps[1])+' '
 
-            command += '-JOBNAME prepare_'+model+' '
-            command += '-HOST localhost:1\n'
+            command += '-JOBNAME '+model+' '
+            command += '-HOST localhost:1 '
+            command += '-WAIT\n'
 
-            # Add control script command
-            command += 'python3 ../../._schrodinger_control.py '
-            command += model+'.log '
-            command += '--job_type prepwizard\n'
-            command += 'cd ../../..\n'
+            if schrodinger_control:
+                # Add control script command
+                command += 'python3 ../../._schrodinger_control.py '
+                command += model+'.log '
+                command += '--job_type prepwizard\n'
+                command += 'cd ../../..\n'
+
             jobs.append(command)
 
         return jobs
