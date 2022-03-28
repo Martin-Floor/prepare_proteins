@@ -20,7 +20,6 @@ import matplotlib.pyplot as plt
 import mdtraj as md
 
 import prepare_proteins
-import bsc_calculations
 
 class proteinModels:
     """
@@ -879,7 +878,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if not isinstance(protonation_states, type(None)):
                 for ps in protonation_states[model]:
-                    command += '--force '+str(ps[0])+" "+str(ps[1])
+                    command += '--force '+str(ps[0])+" "+str(ps[1])+' '
 
             command += '-JOBNAME prepare_'+model+' '
             command += '-HOST localhost:1\n'

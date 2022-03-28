@@ -6,5 +6,4 @@ from . import rosettaScripts
 from . import PDB
 from . import clustering
 from . import MD
-from . import calculations
 from . import trajectory_calculations
