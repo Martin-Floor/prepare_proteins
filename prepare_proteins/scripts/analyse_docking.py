@@ -150,16 +150,14 @@ for model in sorted(mae_output):
 
                                         # Fill with None until match the index count
                                         delta = index_count-len(data[label])
-                                        for x in range(delta):
+                                        for x in range(delta-1):
                                             data[label].append(None)
 
+                                        # Append distance
                                         data[label].append(d)
-                                        print()
-                                        print(len(data['Pose']))
-                                        print(len(data[label]))
 
+                                        # Assert same length for label data
                                         assert len(data[label]) == len(data['Pose'])
-
 
                             elif isinstance(pair[1], tuple) or isinstance(pair[1], list):
                                 ligand_chain_id = pair[1][0]
@@ -174,14 +172,20 @@ for model in sorted(mae_output):
                                     if atom.pdbname.strip() == ligand_atom_name:
                                         d = np.linalg.norm(p_coordinates[i]-c_coordinates[j])
                                         label = '_'.join([str(x) for x in pair[0]])+'-'+'_'.join([str(x) for x in pair[1]])
+
+                                        # Add label to dictionary if not in it
                                         if label not in data:
                                             data[label] = []
                                             atom_pairs_labels.add(label)
+
+                                        # Fill with None until match the index count
                                         delta = len(data["Pose"])-len(data[label])
-                                        if delta > 1:
-                                            for x in range(delta-1):
-                                                data[label].append(None)
+                                        for x in range(delta-1):
+                                            data[label].append(None)
                                         data[label].append(d)
+
+                                        # Assert same length for label data
+                                        assert len(data[label]) == len(data['Pose'])
 
                     #Get closest ligand distance to protein atoms
                     if protein_atoms != None:
@@ -252,16 +256,12 @@ for model in sorted(mae_output):
                             raise ValueError('Error. Protein atoms were not found in model %s!' % model)
                         p_coordinates = np.array(p_coordinates)
 
-# # Add missing values in distance label entries
-# if atom_pairs != None:
-#     for label in atom_pairs_labels:
-#         delta = len(data['Pose'])-len(data[label])
-#         for x in range(delta):
-#             data[label].append(None)
-
-print(len(data['Pose']))
-for label in atom_pairs_labels:
-    print(len(data[label]))
+# Add missing values in distance label entries
+if atom_pairs != None:
+    for label in atom_pairs_labels:
+        delta = len(data['Pose'])-len(data[label])
+        for x in range(delta):
+            data[label].append(None)
 
 data = pd.DataFrame(data)
 # Create multiindex dataframe
