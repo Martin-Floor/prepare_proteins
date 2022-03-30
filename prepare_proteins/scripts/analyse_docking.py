@@ -88,6 +88,7 @@ if protein_atoms != None:
 if atom_pairs != None:
     atom_pairs_labels = set()
 
+index_count = 0
 # Calculate and add scores
 for model in sorted(mae_output):
     if mae_output[model] != {}:
@@ -98,10 +99,13 @@ for model in sorted(mae_output):
                     if pose_count == 0:
                         r_coordinates = st.getXYZ()
                     pose_count += 1
+
                     # Store data
+                    index_count += 1
                     data["Protein"].append(model)
                     data["Ligand"].append(ligand)
                     data["Pose"].append(pose_count)
+
                     # Get Glide score
                     score = st.property['r_i_glide_gscore']
                     data["Score"].append(score)
@@ -138,14 +142,24 @@ for model in sorted(mae_output):
                                     if atom.pdbname.strip() == pair[1]:
                                         d = np.linalg.norm(p_coordinates[i]-c_coordinates[j])
                                         label = '_'.join([str(x) for x in pair[0]])+'-'+pair[1]
+
+                                        # Add label to dictionary if not in it
                                         if label not in data:
                                             data[label] = []
                                             atom_pairs_labels.add(label)
-                                        delta = len(data["Pose"])-len(data[label])
-                                        if delta > 1:
-                                            for x in range(delta-1):
-                                                data[label].append(None)
+
+                                        # Fill with None until match the index count
+                                        delta = index_count-len(data[label])
+                                        for x in range(delta):
+                                            data[label].append(None)
+
                                         data[label].append(d)
+                                        print()
+                                        print(len(data['Pose']))
+                                        print(len(data[label]))
+
+                                        assert len(data[label]) == len(data['Pose'])
+
 
                             elif isinstance(pair[1], tuple) or isinstance(pair[1], list):
                                 ligand_chain_id = pair[1][0]
@@ -238,12 +252,16 @@ for model in sorted(mae_output):
                             raise ValueError('Error. Protein atoms were not found in model %s!' % model)
                         p_coordinates = np.array(p_coordinates)
 
-# Add missing values in distance label entries
-if atom_pairs != None:
-    for label in atom_pairs_labels:
-        delta = len(data['Pose'])-len(data[label])
-        for x in range(delta):
-            data[label].append(None)
+# # Add missing values in distance label entries
+# if atom_pairs != None:
+#     for label in atom_pairs_labels:
+#         delta = len(data['Pose'])-len(data[label])
+#         for x in range(delta):
+#             data[label].append(None)
+
+print(len(data['Pose']))
+for label in atom_pairs_labels:
+    print(len(data[label]))
 
 data = pd.DataFrame(data)
 # Create multiindex dataframe

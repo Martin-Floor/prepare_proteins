@@ -93,6 +93,8 @@ class proteinModels:
         self.docking_data = None # secondary structure strings are stored here
         self.docking_ligands = {}
         self.sequence_differences = {} # Store missing/changed sequence information
+        self.conect_lines = {} # Store the conect lines for each model
+
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
             self.models_names.append(model)
@@ -187,6 +189,26 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         chain[0].add(residue)
 
         return new_resid
+
+    def removeModelAtoms(self, model, atoms_list):
+        """
+        Remove specific atoms of a model. Atoms to delete are given as a list of tuples.
+        Each tuple contains three positions specifying (chain_id, residue_id, atom_name).
+
+        Paramters
+        =========
+        atom_lists : list
+            Specifies the list of atoms to delete for the particular model.
+        """
+        for remove_atom in atoms_list:
+            for chain in self.structures[model].get_chains():
+                if chain.id == remove_atom[0]:
+                    for residue in chain:
+                        if residue.id[1] == remove_atom[1]:
+                            for atom in residue:
+                                if atom.name == remove_atom[2]:
+                                    print('Removing atom: '+str(remove_atom)+' from model '+model)
+                                    residue.detach_child(atom.id)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False):
         """
@@ -313,15 +335,29 @@ chain to use for each model with the chains option.' % model)
         """
 
         residue_indexes = {}
+        residue_ids = {}
+
+        # Gather dictionary between sequence position and residue PDB index
         for model in self.models_names:
             residue_indexes[model] = 0
+            residue_ids[model] = {}
+            for i,r in enumerate(self.structures[model].get_residues()):
+                residue_ids[model][i+1] = r.id[1]
 
+        # Gather sequence indexes for the given MSA index
         for i in range(self.msa.get_alignment_length()):
             if i == msa_index:
+                for entry in self.msa:
+                    if entry.seq[i] == '-':
+                        residue_indexes[entry.id] = None
+                    else:
+                        residue_indexes[entry.id] = residue_ids[entry.id][residue_indexes[entry.id]]
                 break
+
             for entry in self.msa:
                 if entry.seq[i] != '-':
                     residue_indexes[entry.id] += 1
+
         return residue_indexes
 
     def calculateSecondaryStructure(self, _save_structure=False):
@@ -481,7 +517,7 @@ chain to use for each model with the chains option.' % model)
             traj.save(output_folder+'/'+model+'.pdb')
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
-                                 cst_files=None, mutations=False, models=None,
+                                 cst_files=None, mutations=False, models=None, cst_optimization=False,
                                  membrane=False, membrane_thickness=15, param_files=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
@@ -607,7 +643,10 @@ has been carried out. Please run compareSequences() function before setting muta
                                          output_silent_file=model+'_relax.out')
 
             # Add relaxation with constraints options and write flags file
-            flags.add_relax_cst_options()
+            if cst_optimization:
+                flags.add_relax_cst_options()
+            else:
+                flags.add_relax_options()
 
             # Add path to params files
             if param_files != None:
@@ -624,7 +663,7 @@ has been carried out. Please run compareSequences() function before setting muta
 
             if membrane:
                 flags.addOption('mp::setup::spans_from_structure', 'true')
-                # flags.addOption('relax:constrain_relax_to_start_coords', '')
+                flags.addOption('relax:constrain_relax_to_start_coords', '')
             flags.write_flags(relax_folder+'/flags/'+model+'_relax.flags')
 
             # Create and append execution command
@@ -806,7 +845,8 @@ compareSequences() function before adding missing loops.')
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
-                                    fill_loops=False, protonation_states=None, schrodinger_control=True):
+                                    fill_loops=False, protonation_states=None, schrodinger_control=True,
+                                    write_conect=False, no_epik=False, use_new_version=False):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -826,6 +866,20 @@ compareSequences() function before adding missing loops.')
 
         # Save all input models
         self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens)
+        if write_conect:
+            for model in self.models_names:
+                if model in self.conect_lines:
+                    with open(prepare_folder+'/input_models/'+model+'.pdb') as pdb:
+                        with open(prepare_folder+'/input_models/'+model+'.pdb.tmp', 'w') as ipdbf:
+                            for l in pdb:
+                                if not l.startswith('END'):
+                                    ipdbf.write(l)
+                            for l in self.conect_lines[model]:
+                                ipdbf.write(l)
+                    shutil.move(prepare_folder+'/input_models/'+model+'.pdb.tmp',
+                                prepare_folder+'/input_models/'+model+'.pdb')
+                else:
+                    print('WARNING: No CONECT lines are stored for model %s' % model)
 
         # Copy control file to prepare folder
         if schrodinger_control:
@@ -865,10 +919,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-fasta_file "$pwd"/'+model+'.fasta '
             if remove_hydrogens:
                 command += '-rehtreat '
-            if epik_pH:
-                command += '-epik_pH '+str(pH)+' '
-            if epik_pHt:
-                command += '-epik_pHt '+str(epik_pHt)+' '
+            if no_epik:
+                command += '-no_epik '
+            else:
+                if epik_pH:
+                    command += '-epik_pH '+str(pH)+' '
+                if epik_pHt:
+                    command += '-epik_pHt '+str(epik_pHt)+' '
             command += '-propka_pH '+str(pH)+' '
             command += '-f 2005 '
             command += '-rmsd 0.3 '
@@ -879,7 +936,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if not isinstance(protonation_states, type(None)):
                 for ps in protonation_states[model]:
-                    command += '--force '+str(ps[0])+" "+str(ps[1])+' '
+                    if use_new_version:
+                        command += '-force '+str(ps[0])+" "+str(ps[1])+' '
+                    else:
+                        command += '--force '+str(ps[0])+" "+str(ps[1])+' '
 
             command += '-JOBNAME '+model+' '
             command += '-HOST localhost:1 '
@@ -896,8 +956,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
-                         outerbox=(30,30,30), useflexmae=True, peptide=False):
+    def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10), use_new_version=False, write_conect=False,
+                         outerbox=(30,30,30), useflexmae=True, peptide=False, schrodinger_control=True):
         """
         Setup grid calculation for each model.
 
@@ -923,6 +983,20 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Save all input models
         self.saveModels(grid_folder+'/input_models')
+        if write_conect:
+            for model in self.models_names:
+                if model in self.conect_lines:
+                    with open(grid_folder+'/input_models/'+model+'.pdb') as pdb:
+                        with open(grid_folder+'/input_models/'+model+'.pdb.tmp', 'w') as ipdbf:
+                            for l in pdb:
+                                if not l.startswith('END'):
+                                    ipdbf.write(l)
+                            for l in self.conect_lines[model]:
+                                ipdbf.write(l)
+                    shutil.move(grid_folder+'/input_models/'+model+'.pdb.tmp',
+                                grid_folder+'/input_models/'+model+'.pdb')
+                else:
+                    print('WARNING: No CONECT lines are stored for model %s' % model)
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -933,7 +1007,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 raise ValuError('Outerbox values must be given as integers')
 
         # Copy control file to grid folder
-        _copySchrodingerControlFile(grid_folder)
+        if schrodinger_control:
+            _copySchrodingerControlFile(grid_folder)
 
         # Create grid input files
         jobs = []
@@ -944,6 +1019,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             resid = center_atoms[model][1]
             atom_name = center_atoms[model][2]
 
+            x = None
             for c in self.structures[model].get_chains():
                 if c.id == chainid:
                     for r in c.get_residues():
@@ -953,6 +1029,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     x = a.coord[0]
                                     y = a.coord[1]
                                     z = a.coord[2]
+
+            # Check if any atom center was found.
+            if x == None:
+                raise ValueError('Given atom center not found for model %s' % model)
 
             # Write grid input file
             with open(grid_folder+'/grid_inputs/'+model+'.in', 'w') as gif:
@@ -970,21 +1050,30 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Add convert PDB into mae format command
             command += '"$SCHRODINGER/utilities/structconvert" '
-            command += '-ipdb ../input_models/'+model+'.pdb'+' '
-            command += '-omae '+model+'.mae\n'
+            if use_new_version:
+                command += '-i ../input_models/'+model+'.pdb'+' '
+                command += '-o '+model+'.mae\n'
+            else:
+                command += '-ipdb ../input_models/'+model+'.pdb'+' '
+                command += '-omae '+model+'.mae\n'
 
             # Add grid generation command
             command += '"${SCHRODINGER}/glide" '
             command += '../grid_inputs/'+model+'.in'+' '
             command += '-OVERWRITE '
             command += '-HOST localhost '
-            command += '-TMPLAUNCHDIR\n'
+            command += '-TMPLAUNCHDIR '
+            if schrodinger_control:
+                command += '-\n'
+            else:
+                command += '-WAIT\n'
 
-            # Add control script command
-            command += 'python3 ../._schrodinger_control.py '
-            command += model+'.log '
-            command += '--job_type grid\n'
-            command += 'cd ../..\n'
+            if schrodinger_control:
+                # Add control script command
+                command += 'python3 ../._schrodinger_control.py '
+                command += model+'.log '
+                command += '--job_type grid\n'
+                command += 'cd ../..\n'
             jobs.append(command)
 
         return jobs
@@ -1408,7 +1497,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(docking_folder+'/._protein_atoms.json', 'w') as jf:
                 json.dump(protein_atoms, jf)
 
-        # Write protein_atoms dictionary to json file
+        # Write atom_pairs dictionary to json file
         if atom_pairs != None:
             with open(docking_folder+'/._atom_pairs.json', 'w') as jf:
                 json.dump(atom_pairs, jf)
@@ -1637,7 +1726,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         Get the docking data for a particular combination of protein and ligand
         """
 
-        if ligand not in self.docking_data[protein]:
+        if ligand not in self.docking_ligands[protein]:
             raise ValueError('has no docking data')
 
         protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
@@ -1672,7 +1761,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             plt.savefig(output_folder+'/'+protein+'_'+ligand+extension, dpi=dpi)
             plt.close()
 
-    def loadModelsFromPrepwizardFolder(self, prepwizard_folder):
+    def loadModelsFromPrepwizardFolder(self, prepwizard_folder, keep_conect=False):
         """
         Read structures from a Schrodinger calculation.
 
@@ -1683,19 +1772,58 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         models = []
-        for d in os.listdir(prepwizard_folder):
-            if os.path.isdir(prepwizard_folder+'/'+d):
-                for f in os.listdir(prepwizard_folder+'/'+d):
+        for d in os.listdir(prepwizard_folder+'/output_models'):
+            if os.path.isdir(prepwizard_folder+'/output_models/'+d):
+                for f in os.listdir(prepwizard_folder+'/output_models/'+d):
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
                         models.append(model)
-                        self.readModelFromPDB(model, prepwizard_folder+'/'+d+'/'+f)
+                        self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f)
+                        if keep_conect:
+                            self.conect_lines[model] = _getPDBConectLines(prepwizard_folder+'/output_models/'+d+'/'+f)
+
         missing_models = set(self.models_names) - set(models)
+
         if missing_models != set():
             print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
 
-    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score', min_value=True, tags=None, wat_to_hoh=True):
+    def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None):
+        """
+        Analyse Rosetta calculation
+
+        Parameters
+        ==========
+        rosetta_folder : str
+            Path to the Rosetta Calculation Folder.
+        """
+
+        # Write atom_pairs dictionary to json file
+        if atom_pairs != None:
+            with open(rosetta_folder+'/._atom_pairs.json', 'w') as jf:
+                json.dump(atom_pairs, jf)
+
+        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
+        _copyScriptFile(rosetta_folder, 'analyse_calculation.py', subfolder='pyrosetta')
+
+        # Execute docking analysis
+        os.chdir(rosetta_folder)
+        command = 'python ._analyse_calculation.py'
+        if atom_pairs != None:
+            command += ' --atom_pairs ._atom_pairs.json'
+        os.system(command)
+
+        # Read the CSV file into pandas
+        if not os.path.exists('._rosetta_data.csv'):
+            os.chdir('..')
+            raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
+
+        self.docking_data = pd.read_csv('._rosetta_data.csv')
+        # Create multiindex dataframe
+        self.docking_data.set_index('description', inplace=True)
+
+    def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
+                                          min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -1740,7 +1868,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += ' -tags '+best_model_tag
                         os.system(command)
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
-                        os.remove(best_model_tag+'.pdb')
+                        if keep_conect:
+                            self.conect_lines[model] = _getPDBConectLines(best_model_tag+'.pdb')
+                        # os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
         missing_models = set(self.models_names) - set(models)
@@ -1885,10 +2015,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         model : str
             Model name to remove
         """
-        self.models_paths.pop(model)
-        self.models_names.remove(model)
-        self.structures.pop(model)
-        self.sequences.pop(model)
+        try:
+            self.models_paths.pop(model)
+            self.models_names.remove(model)
+            self.structures.pop(model)
+            self.sequences.pop(model)
+        except:
+            raise ValuError('Model  %s is not present' % model)
 
     def readTargetSequences(self, fasta_file):
         """
@@ -2085,11 +2218,22 @@ def readSilentScores(silent_file):
 
 def _readPDB(name, pdb_file):
     """
-    Read PDB file a structure object
+    Read PDB file to a structure object
     """
     parser = PDB.PDBParser()
     structure = parser.get_structure(name, pdb_file)
     return structure
+
+def _getPDBConectLines(pdb_file):
+    """
+    Read PDB file and get connect lines only
+    """
+    lines = []
+    with open(pdb_file) as pdbf:
+        for l in pdbf:
+            if l.startswith('CONECT'):
+                lines.append(l)
+    return lines
 
 def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
                         remove_water=False, only_protein=False, keep_residues=[]):
@@ -2139,7 +2283,7 @@ def _copySchrodingerControlFile(output_folder):
         for l in control_script:
             sof.write(l)
 
-def _copyScriptFile(output_folder, script_name):
+def _copyScriptFile(output_folder, script_name, subfolder=None):
     """
     Copy a script file from the prepare_proteins package.
 
@@ -2148,8 +2292,12 @@ def _copyScriptFile(output_folder, script_name):
 
     """
     # Get control script
+    path = "prepare_proteins/scripts"
+    if subfolder != None:
+        path = path+'/'+subfolder
+
     control_script = resource_stream(Requirement.parse("prepare_proteins"),
-                                     "prepare_proteins/scripts/"+script_name)
+                                     path+'/'+script_name)
     control_script = io.TextIOWrapper(control_script)
 
     # Write control script to output folder
