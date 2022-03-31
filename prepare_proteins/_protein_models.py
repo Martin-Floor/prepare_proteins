@@ -92,6 +92,7 @@ class proteinModels:
         self.ss = {} # secondary structure strings are stored here
         self.docking_data = None # secondary structure strings are stored here
         self.docking_ligands = {}
+        self.rosetta_data = None # Rosetta data is stored here
         self.sequence_differences = {} # Store missing/changed sequence information
         self.conect_lines = {} # Store the conect lines for each model
 
@@ -1808,7 +1809,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         os.chdir(rosetta_folder)
-        command = 'python ._analyse_calculation.py'
+        command = 'python ._analyse_calculation.py .'
         if atom_pairs != None:
             command += ' --atom_pairs ._atom_pairs.json'
         os.system(command)
@@ -1818,9 +1819,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.chdir('..')
             raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
 
-        self.docking_data = pd.read_csv('._rosetta_data.csv')
-        # Create multiindex dataframe
-        self.docking_data.set_index('description', inplace=True)
+        self.rosetta_data = pd.read_csv('._rosetta_data.csv')
+        # Create indexed dataframe
+        self.rosetta_data.set_index('description', inplace=True)
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
