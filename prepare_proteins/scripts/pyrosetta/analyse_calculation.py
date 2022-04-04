@@ -98,33 +98,105 @@ def getPoseCordinates(pose):
         residues = range(lrb, lre+1)
 
         for r in residues:
-            coordinates[chains[chain]][r] = {}
+            resseq = pose.pdb_info().number(r)
+            coordinates[chains[chain]][resseq] = {}
             for i in range(1, pose.residue_type(r).natoms()+1):
                 atom_name = pose.residue_type(r).atom_name(i).strip()
-                coordinates[chains[chain]][r][atom_name] = np.array(pose.residue(r).atom(i).xyz())
+                coordinates[chains[chain]][resseq][atom_name] = np.array(pose.residue(r).atom(i).xyz())
 
     return coordinates
+
+def readScoreFromSilent(score_file, indexing=True):
+    with open(score_file) as sf:
+        lines = [x for x in sf.readlines() if x.startswith('SCORE:')]
+        score_terms = lines[0].split()
+        scores = {}
+        for line in lines[1:]:
+            for i, score in enumerate(score_terms):
+                if score not in scores:
+                    scores[score] = []
+                try:
+                    scores[score].append(float(line.split()[i]))
+                except:
+                    scores[score].append(line.split()[i])
+    scores.pop('SCORE:')
+    for s in scores:
+        scores[s] = np.array(scores[s])
+
+    scores = pd.DataFrame(scores)
+
+    if indexing:
+        scores = scores.set_index('description')
+
+    return scores
 
 # Create dictionary entries for data getPoseCordinates
 data = {}
 data['description'] = []
-if atom_pairs != None:
-    for model in silent_file:
+
+atom_pairs_labels = []
+scores_data = []
+index_count = 0
+
+for model in silent_file:
+
+    # Get all scores from silent file
+    scores = readScoreFromSilent(silent_file[model])
+
+    # Add score terms as keys to the dictionary
+    for score in scores:
+        if score not in data:
+            data[score] = []
+
+    if atom_pairs != None:
         for i,pose in enumerate(readPosesFromSilent(silent_file[model], params)):
             coordinates = getPoseCordinates(pose)
+
+            index_count += 1
             data['description'].append(pose.pdb_info().name())
+            # Add scores
+            for score in scores:
+                data[score].append(scores[score].loc[pose.pdb_info().name()])
+
             for pair in atom_pairs[model]:
                 label = '_'.join([str(x) for x in pair[0]])+'-'
                 label += '_'.join([str(x) for x in pair[1]])
+
+                # Add label to dictionary if not in it
                 if label not in data:
                     data[label] = []
+                    atom_pairs_labels.append(label)
+
+                # Fill with None until match the index count
+                delta = index_count-len(data[label])
+                for x in range(delta-1):
+                    data[label].append(None)
+
+                # Add atom pair distance
                 c1 = coordinates[pair[0][0]][pair[0][1]][pair[0][2]]
                 c2 = coordinates[pair[1][0]][pair[1][1]][pair[1][2]]
                 data[label].append(np.linalg.norm(c1-c2))
-            if i == 10:
-                break
-        break
 
-data = pd.DataFrame(data)
+                # Assert same length for label data
+                assert len(data[label]) == len(data['description'])
+
+    # If no atom pair is given just return the rosetta scores
+    else:
+        scores_data.append(readScoreFromSilent(silent_file[model], indexing=False))
+
+# Add missing values in distance label entries
+if atom_pairs != None:
+    for label in atom_pairs_labels:
+        delta = len(data['description'])-len(data[label])
+        for x in range(delta):
+            data[label].append(None)
+
+    # Convert dictionary to DataFrame
+    data = pd.DataFrame(data)
+
+# Create dataframe from scores only
+else:
+    data = pd.concat(scores_data)
+
 # Create multiindex dataframe
 data.to_csv('._rosetta_data.csv', index=False)

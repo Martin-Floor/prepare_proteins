@@ -92,6 +92,7 @@ class proteinModels:
         self.ss = {} # secondary structure strings are stored here
         self.docking_data = None # secondary structure strings are stored here
         self.docking_ligands = {}
+        self.rosetta_data = None # Rosetta data is stored here
         self.sequence_differences = {} # Store missing/changed sequence information
         self.conect_lines = {} # Store the conect lines for each model
 
@@ -865,21 +866,13 @@ compareSequences() function before adding missing loops.')
             os.mkdir(prepare_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens)
         if write_conect:
-            for model in self.models_names:
-                if model in self.conect_lines:
-                    with open(prepare_folder+'/input_models/'+model+'.pdb') as pdb:
-                        with open(prepare_folder+'/input_models/'+model+'.pdb.tmp', 'w') as ipdbf:
-                            for l in pdb:
-                                if not l.startswith('END'):
-                                    ipdbf.write(l)
-                            for l in self.conect_lines[model]:
-                                ipdbf.write(l)
-                    shutil.move(prepare_folder+'/input_models/'+model+'.pdb.tmp',
-                                prepare_folder+'/input_models/'+model+'.pdb')
-                else:
-                    print('WARNING: No CONECT lines are stored for model %s' % model)
+            if remove_hydrogens:
+                print('write_conect option cannot be used with remove_hydrogens.')
+                print('Switching off remove_hydrogens.')
+                remove_hydrogens = False
+
+        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens, write_conect=write_conect)
 
         # Copy control file to prepare folder
         if schrodinger_control:
@@ -920,7 +913,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if remove_hydrogens:
                 command += '-rehtreat '
             if no_epik:
-                command += '-no_epik '
+                command += '-noepik '
             else:
                 if epik_pH:
                     command += '-epik_pH '+str(pH)+' '
@@ -944,13 +937,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '-JOBNAME '+model+' '
             command += '-HOST localhost:1 '
             command += '-WAIT\n'
-
-            if schrodinger_control:
-                # Add control script command
-                command += 'python3 ../../._schrodinger_control.py '
-                command += model+'.log '
-                command += '--job_type prepwizard\n'
-                command += 'cd ../../..\n'
 
             jobs.append(command)
 
@@ -982,21 +968,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(grid_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(grid_folder+'/input_models')
-        if write_conect:
-            for model in self.models_names:
-                if model in self.conect_lines:
-                    with open(grid_folder+'/input_models/'+model+'.pdb') as pdb:
-                        with open(grid_folder+'/input_models/'+model+'.pdb.tmp', 'w') as ipdbf:
-                            for l in pdb:
-                                if not l.startswith('END'):
-                                    ipdbf.write(l)
-                            for l in self.conect_lines[model]:
-                                ipdbf.write(l)
-                    shutil.move(grid_folder+'/input_models/'+model+'.pdb.tmp',
-                                grid_folder+'/input_models/'+model+'.pdb')
-                else:
-                    print('WARNING: No CONECT lines are stored for model %s' % model)
+        self.saveModels(grid_folder+'/input_models', write_conect=write_conect)
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -1063,17 +1035,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '-OVERWRITE '
             command += '-HOST localhost '
             command += '-TMPLAUNCHDIR '
-            if schrodinger_control:
-                command += '-\n'
-            else:
-                command += '-WAIT\n'
+            command += '-WAIT\n'
 
-            if schrodinger_control:
-                # Add control script command
-                command += 'python3 ../._schrodinger_control.py '
-                command += model+'.log '
-                command += '--job_type grid\n'
-                command += 'cd ../..\n'
+            # if schrodinger_control:
+            #     # Add control script command
+            #     command += 'python3 ../._schrodinger_control.py '
+            #     command += model+'.log '
+            #     command += '--job_type grid\n'
+            #     command += 'cd ../..\n'
             jobs.append(command)
 
         return jobs
@@ -1808,7 +1777,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         os.chdir(rosetta_folder)
-        command = 'python ._analyse_calculation.py'
+        command = 'python ._analyse_calculation.py .'
         if atom_pairs != None:
             command += ' --atom_pairs ._atom_pairs.json'
         os.system(command)
@@ -1818,9 +1787,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.chdir('..')
             raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
 
-        self.docking_data = pd.read_csv('._rosetta_data.csv')
-        # Create multiindex dataframe
-        self.docking_data.set_index('description', inplace=True)
+        self.rosetta_data = pd.read_csv('._rosetta_data.csv')
+        os.chdir('..')
+        # Create indexed dataframe
+        self.rosetta_data.set_index('description', inplace=True)
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
@@ -1976,7 +1946,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder+'/output_models/'+model+'/'+model+'.pdb'
             self.readModelFromPDB(model, pdb_path)
 
-    def saveModels(self, output_folder, keep_residues={}, models=None, **keywords):
+    def saveModels(self, output_folder, keep_residues={}, models=None, write_conect=False, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -2005,6 +1975,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 output_folder+'/'+model+'.pdb',
                                 keep_residues=kr,
                                 **keywords)
+
+            if write_conect:
+                if model in self.conect_lines:
+                    _addConectLines(output_folder+'/'+model+'.pdb',
+                                    self.conect_lines[model])
+                else:
+                    print('WARNING: No CONECT lines are stored for model %s' % model)
 
     def removeModel(self, model):
         """
@@ -2234,6 +2211,20 @@ def _getPDBConectLines(pdb_file):
             if l.startswith('CONECT'):
                 lines.append(l)
     return lines
+
+def _addConectLines(pdb_file, conect_lines):
+    """
+    Add connect lines to a PDB file.
+    """
+    with open(pdb_file) as pdb:
+        with open(pdb_file+'.tmp', 'w') as ipdbf:
+            for l in pdb:
+                if not l.startswith('END'):
+                    ipdbf.write(l)
+            for l in conect_lines:
+                ipdbf.write(l)
+    shutil.move(pdb_file+'.tmp',
+                pdb_file)
 
 def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
                         remove_water=False, only_protein=False, keep_residues=[]):
