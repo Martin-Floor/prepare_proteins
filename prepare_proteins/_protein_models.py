@@ -1788,7 +1788,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
 
         self.rosetta_data = pd.read_csv('._rosetta_data.csv')
+<<<<<<< HEAD
         os.chdir('..')
+=======
+>>>>>>> 10c4ea7e9b01e64f050ba9f67cd4cb6478182c37
         # Create indexed dataframe
         self.rosetta_data.set_index('description', inplace=True)
 
