@@ -943,7 +943,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10), use_new_version=False, write_conect=False,
-                         outerbox=(30,30,30), useflexmae=True, peptide=False, schrodinger_control=True):
+                         outerbox=(30,30,30), useflexmae=True, peptide=False, proteins=None, schrodinger_control=True):
         """
         Setup grid calculation for each model.
 
@@ -985,6 +985,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create grid input files
         jobs = []
         for model in self.models_names:
+
+            # If a list of proteins is given
+            if proteins != None:
+                # Only include proteins in the list
+                if model not in proteins:
+                    continue
 
             # Get coordinates of center residue
             chainid = center_atoms[model][0]
@@ -1049,7 +1055,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
                           poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                          energy_by_residue=False):
+                          energy_by_residue=False, proteins=None, ligands=None):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
@@ -1099,11 +1105,23 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Set up docking jobs
         jobs = []
         for grid in grids_paths:
+
+            # If a list of proteins is given
+            if proteins != None:
+                # Only include proteins in the list
+                if grid not in proteins:
+                    continue
+
             # Create ouput folder
             if not os.path.exists(docking_folder+'/output_models/'+grid):
                 os.mkdir(docking_folder+'/output_models/'+grid)
 
             for substrate in substrates_paths:
+                # If a list of proteins is given
+                if ligands != None:
+                    # Only include proteins in the list
+                    if substrate not in ligands:
+                        continue
 
                 # Create glide dock input
                 with open(docking_folder+'/output_models/'+grid+'/'+grid+'_'+substrate+'.in', 'w') as dif:
@@ -1134,12 +1152,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-OVERWRITE '
                 command += '-adjust '
                 command += '-HOST localhost:1 '
-                command += '-TMPLAUNCHDIR\n'
+                command += '-TMPLAUNCHDIR '
+                command += '-WAIT\n'
 
-                # Add control script command
-                command += 'python3 ../../._schrodinger_control.py '
-                command += grid+'_'+substrate+'.log '
-                command += '--job_type docking\n'
+                # # Add control script command
+                # command += 'python3 ../../._schrodinger_control.py '
+                # command += grid+'_'+substrate+'.log '
+                # command += '--job_type docking\n'
+
                 command += 'cd ../../..\n'
                 jobs.append(command)
 
@@ -1519,7 +1539,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         os.chdir('..')
 
-    def convertLigandPDBtoMae(self, ligands_folder):
+    def convertLigandPDBtoMae(self, ligands_folder, residue_names=None):
         """
         Convert ligand PDBs into MAE files.
 
@@ -1535,7 +1555,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         cwd = os.getcwd()
         os.chdir(ligands_folder)
-        os.system('run ._PDBtoMAE.py')
+        command = 'run ._PDBtoMAE.py '
+        if isinstance(residue_names, dict):
+            command = '--residue_names '+residue_names+' '
+        os.system(command)
         os.chdir(cwd)
 
     def getDockingDistances(self, protein, ligand):
@@ -1586,8 +1609,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
                     for ligand in self.docking_data.index.levels[1]:
                         ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-                        distances = catalytic_labels[name][protein][ligand]
-                        values += ligand_series[distances].min(axis=1).tolist()
+                        if not ligand_series.empty:
+                            distances = catalytic_labels[name][protein][ligand]
+                            values += ligand_series[distances].min(axis=1).tolist()
+
                 self.docking_data['metric_'+name] = values
 
     def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
@@ -1690,18 +1715,31 @@ make sure of reading the target sequences with the function readTargetSequences(
         # move back to folder
         os.chdir('..')
 
-    def getSingleDockingData(self, protein, ligand):
+    def getSingleDockingData(self, protein, ligand, data_frame=None):
         """
-        Get the docking data for a particular combination of protein and ligand
+        Get the docking data for a particular combination of protein and ligand.
+        You can use a filtered data frame by giving it with the data_frame option.
+
+        Parameters
+        ==========
+        protein : str
+            Protein model name
+        ligand : str
+            Ligand name
+        data_frame : pandas.DataFrame
+            An optional docking_data dataframe.
         """
+
+        if isinstance(data_frame , type(None)):
+            data_frame = self.docking_data
 
         if ligand not in self.docking_ligands[protein]:
             raise ValueError('has no docking data')
 
-        protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
+        protein_series = data_frame[data_frame.index.get_level_values('Protein') == protein]
         ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
 
-        return ligand_data
+        return ligand_series
 
     def plotDocking(self, protein, ligand, x='RMSD', y='Score', z=None, colormap='Blues_r', output_folder=None, extension='.png',
                     dpi=200):
@@ -1789,6 +1827,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         self.rosetta_data = pd.read_csv('._rosetta_data.csv')
         os.chdir('..')
+
         # Create indexed dataframe
         self.rosetta_data.set_index('description', inplace=True)
 
@@ -1840,7 +1879,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         if keep_conect:
                             self.conect_lines[model] = _getPDBConectLines(best_model_tag+'.pdb')
-                        # os.remove(best_model_tag+'.pdb')
+                        os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
         missing_models = set(self.models_names) - set(models)
