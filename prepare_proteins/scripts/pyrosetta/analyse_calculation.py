@@ -8,9 +8,12 @@ import pandas as pd
 parser = argparse.ArgumentParser()
 parser.add_argument('rosetta_folder', help='Path to json file containing the atom pairs to calculate distances.')
 parser.add_argument('--atom_pairs', help='Path to json file containing the atom pairs to calculate distances.')
+parser.add_argument('--energy_by_residue', action='store_true', default=False, help='Get energy by residue information?')
+
 args=parser.parse_args()
 rosetta_folder = args.rosetta_folder
 atom_pairs = args.atom_pairs
+energy_by_residue = args.energy_by_residue
 
 # Initialise PyRosetta environment
 init()
@@ -38,12 +41,14 @@ def readPosesFromSilent(silent_file, params_dir=None):
 
     Arguments:
     ==========
-    silent_file : (str)
+    silent_file : str
         Path to the input silent file.
+    params_dir : list
+        List of params files to be read if needed.
 
     Returns:
     ========
-        Generator object for the poses in the silen file.
+        Generator object for the poses in the silent file.
     """
     # Get param files
     params = []
@@ -78,6 +83,16 @@ def getPoseCordinates(pose):
     """
     Generate a dictionary to call specific coordinates from the poses. The dictionary
     is called by chain, then residue, and, finally, the atom name.
+
+    Parameters
+    ==========
+    pose : pyrosetta.rosetta.core.pose.Pose
+        Input pose.
+
+    Returns
+    =======
+    coordinates : dict
+        Pose coordinates
     """
 
     # Get chain letter in pose
@@ -107,6 +122,18 @@ def getPoseCordinates(pose):
     return coordinates
 
 def readScoreFromSilent(score_file, indexing=True):
+    """
+    Generates an iterator from the poses in the silent file
+
+    Arguments:
+    ==========
+    silent_file : (str)
+        Path to the input silent file.
+
+    Returns:
+    ========
+        Generator object for the poses in the silen file.
+    """
     with open(score_file) as sf:
         lines = [x for x in sf.readlines() if x.startswith('SCORE:')]
         score_terms = lines[0].split()
@@ -130,13 +157,79 @@ def readScoreFromSilent(score_file, indexing=True):
 
     return scores
 
-# Create dictionary entries for data getPoseCordinates
+def getResidueEnergies(pose, decompose_bb_hb_into_pair_energies=False):
+    """
+    Get energy by residue information for the given pose.
+
+    Parameters
+    ==========
+    pose : pyrosetta.rosetta.core.pose.Pose
+        Input pose to calculate energies by residues.
+    decompose_bb_hb_into_pair_energies : bool
+        Store backbone hydrogen bonds in the energy graph on a per-residue basis
+        (this doubles the number of calculations, so is off by default).
+
+    Returns
+    =======
+    residues_energies : dict
+        Dictionary containing the residue energies separated by score terms.
+    """
+
+    sfxn = get_fa_scorefxn()
+
+    # ### Define energy method for decomposing hbond energies into pairs
+    if decompose_bb_hb_into_pair_energies:
+        emo = rosetta.core.scoring.methods.EnergyMethodOptions()
+        emo.hbond_options().decompose_bb_hb_into_pair_energies( True )
+        sfxn.set_energy_method_options(emo)
+
+    # Score pose
+    sfxn(pose)
+
+    # Get energy table for pose
+    energies = pose.energies()
+
+    # Get residue energies
+    Er = {}
+    for r in range(1, pose.total_residue()+1):
+        Er[r] = energies.residue_total_energies(r)
+
+    # Generate dictionary entries per score term and for the total score
+    residues_energies = {}
+    for st in sfxn.get_nonzero_weighted_scoretypes():
+        residues_energies[st.name] = {}
+    residues_energies['total_score'] = {}
+
+    # Store residue energy data
+    for st in sfxn.get_nonzero_weighted_scoretypes():
+        for r in range(1, pose.total_residue()+1):
+            residues_energies[st.name][r] = Er[r].get(st)*sfxn.get_weight(st)
+
+            if r not in residues_energies['total_score']:
+                # Add all weigthed score terms and store the residue energy
+                residues_energies['total_score'][r] = np.sum([Er[r].get(st)*sfxn.get_weight(st)
+                                                      for st in sfxn.get_nonzero_weighted_scoretypes()])
+
+    return residues_energies
+
+# Check whether silent files will be read
+read_silent = False
+if atom_pairs != None or energy_by_residue:
+    read_silent = True
+
+# Create dictionary entries for data
 data = {}
 data['description'] = []
 
 atom_pairs_labels = []
 scores_data = []
 index_count = 0
+
+if energy_by_residue:
+    # Create dictionary entries
+    ebr_data = {}
+    ebr_data['description'] = []
+    ebr_data['residue'] = []
 
 for model in silent_file:
 
@@ -148,40 +241,61 @@ for model in silent_file:
         if score not in data:
             data[score] = []
 
-    if atom_pairs != None:
+    if read_silent:
         for i,pose in enumerate(readPosesFromSilent(silent_file[model], params)):
-            coordinates = getPoseCordinates(pose)
 
-            index_count += 1
-            data['description'].append(pose.pdb_info().name())
-            # Add scores
-            for score in scores:
-                data[score].append(scores[score].loc[pose.pdb_info().name()])
+            if atom_pairs != None:
+                # Get pose coordinates
+                coordinates = getPoseCordinates(pose)
 
-            for pair in atom_pairs[model]:
-                label = '_'.join([str(x) for x in pair[0]])+'-'
-                label += '_'.join([str(x) for x in pair[1]])
+                # Update count and create index description entry
+                index_count += 1
+                data['description'].append(pose.pdb_info().name())
 
-                # Add label to dictionary if not in it
-                if label not in data:
-                    data[label] = []
-                    atom_pairs_labels.append(label)
+                # Add scores
+                for score in scores:
+                    data[score].append(scores[score].loc[pose.pdb_info().name()])
 
-                # Fill with None until match the index count
-                delta = index_count-len(data[label])
-                for x in range(delta-1):
-                    data[label].append(None)
+                # Get atom pair distances
+                for pair in atom_pairs[model]:
+                    label = '_'.join([str(x) for x in pair[0]])+'-'
+                    label += '_'.join([str(x) for x in pair[1]])
 
-                # Add atom pair distance
-                c1 = coordinates[pair[0][0]][pair[0][1]][pair[0][2]]
-                c2 = coordinates[pair[1][0]][pair[1][1]][pair[1][2]]
-                data[label].append(np.linalg.norm(c1-c2))
+                    # Add label to dictionary if not in it
+                    if label not in data:
+                        data[label] = []
+                        atom_pairs_labels.append(label)
 
-                # Assert same length for label data
-                assert len(data[label]) == len(data['description'])
+                    # Fill with None until match the index count
+                    delta = index_count-len(data[label])
+                    for x in range(delta-1):
+                        data[label].append(None)
+
+                    # Add atom pair distance
+                    c1 = coordinates[pair[0][0]][pair[0][1]][pair[0][2]]
+                    c2 = coordinates[pair[1][0]][pair[1][1]][pair[1][2]]
+                    data[label].append(np.linalg.norm(c1-c2))
+
+                    # Assert same length for label data
+                    assert len(data[label]) == len(data['description'])
+
+            if energy_by_residue:
+                tag = pose.pdb_info().name()
+                residue_energies = getResidueEnergies(pose)
+                # Add energy to data
+                for r in residue_energies['total_score']:
+                    ebr_data['description'].append(tag)
+                    ebr_data['residue'].append(r)
+                    for st in residue_energies:
+                        if st not in ebr_data:
+                            ebr_data[st] = []
+                        ebr_data[st].append(residue_energies[st][r])
+
+            break
 
     # If no atom pair is given just return the rosetta scores
     else:
+        print(scores_data)
         scores_data.append(readScoreFromSilent(silent_file[model], indexing=False))
 
 # Add missing values in distance label entries
@@ -193,10 +307,15 @@ if atom_pairs != None:
 
     # Convert dictionary to DataFrame
     data = pd.DataFrame(data)
-
 # Create dataframe from scores only
 else:
     data = pd.concat(scores_data)
 
-# Create multiindex dataframe
+# Save rosetta analysis data
 data.to_csv('._rosetta_data.csv', index=False)
+
+# Write energy by residue data
+if energy_by_residue:
+    # Write pandas dictionary
+    ebr_data = pd.DataFrame(ebr_data)
+    ebr_data.to_csv('._rosetta_energy_residue_data.csv', index=False)
