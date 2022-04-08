@@ -231,6 +231,10 @@ if energy_by_residue:
     ebr_data['description'] = []
     ebr_data['residue'] = []
 
+print(bool(atom_pairs))
+print(energy_by_residue)
+print(read_silent)
+
 for model in silent_file:
 
     # Get all scores from silent file
@@ -278,6 +282,11 @@ for model in silent_file:
 
                     # Assert same length for label data
                     assert len(data[label]) == len(data['description'])
+            else:
+                data['description'].append(pose.pdb_info().name())
+                # Add scores
+                for score in scores:
+                    data[score].append(scores[score].loc[pose.pdb_info().name()])
 
             if energy_by_residue:
                 tag = pose.pdb_info().name()
@@ -291,12 +300,10 @@ for model in silent_file:
                             ebr_data[st] = []
                         ebr_data[st].append(residue_energies[st][r])
 
-            break
-
     # If no atom pair is given just return the rosetta scores
     else:
-        print(scores_data)
         scores_data.append(readScoreFromSilent(silent_file[model], indexing=False))
+        print(scores_data)
 
 # Add missing values in distance label entries
 if atom_pairs != None:
@@ -305,11 +312,12 @@ if atom_pairs != None:
         for x in range(delta):
             data[label].append(None)
 
-    # Convert dictionary to DataFrame
-    data = pd.DataFrame(data)
 # Create dataframe from scores only
-else:
+elif not read_silent:
     data = pd.concat(scores_data)
+
+# Convert dictionary to DataFrame
+data = pd.DataFrame(data)
 
 # Save rosetta analysis data
 data.to_csv('._rosetta_data.csv', index=False)
