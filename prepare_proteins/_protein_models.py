@@ -846,7 +846,7 @@ compareSequences() function before adding missing loops.')
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
-                                    fill_loops=False, protonation_states=None, schrodinger_control=True,
+                                    fill_loops=False, protonation_states=None, schrodinger_control=False,
                                     write_conect=False, no_epik=False, use_new_version=False):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
@@ -1812,7 +1812,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         command = 'python ._analyse_calculation.py .'
         if atom_pairs != None:
             command += ' --atom_pairs ._atom_pairs.json'
-        os.system(command)
+        try:
+            os.system(command)
+        except:
+            os.chdir('..')
+            raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
 
         # Read the CSV file into pandas
         if not os.path.exists('._rosetta_data.csv'):
