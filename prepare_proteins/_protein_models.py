@@ -1795,7 +1795,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
 
-    def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None):
+    def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False):
         """
         Analyse Rosetta calculation
 
@@ -1803,7 +1803,21 @@ make sure of reading the target sequences with the function readTargetSequences(
         ==========
         rosetta_folder : str
             Path to the Rosetta Calculation Folder.
+        energy_by_residue : bool
+            Get energy by residue information?
         """
+
+        def readAnalysis():
+            # Read analysis data
+            self.rosetta_data = pd.read_csv('._rosetta_data.csv')
+            # Create multiindexed dataframe
+            self.rosetta_data.set_index('description', inplace=True)
+
+        def readEnergyByResidue():
+            # Read energy by residue data
+            self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
+            # Create multiindexed dataframe
+            self.rosetta_ebr_data.set_index(['description', 'residue'], inplace=True)
 
         # Write atom_pairs dictionary to json file
         if atom_pairs != None:
@@ -1815,21 +1829,44 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         os.chdir(rosetta_folder)
-        command = 'python ._analyse_calculation.py .'
-        if atom_pairs != None:
-            command += ' --atom_pairs ._atom_pairs.json'
-        os.system(command)
 
-        # Read the CSV file into pandas
-        if not os.path.exists('._rosetta_data.csv'):
-            os.chdir('..')
-            raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
+        analyse = True
+        if os.path.exists('_rosetta_data.csv'):
+            readAnalysis()
+            atom_pairs = None
+            analyse = False
 
-        self.rosetta_data = pd.read_csv('._rosetta_data.csv')
+        if energy_by_residue:
+            if os.path.exists('_rosetta_energy_residue_data.csv'):
+                readEnergyByResidue()
+                energy_by_residue = False
+                analyse = False
+            else:
+                analyse = True
+
+        if analyse:
+            command = 'python ._analyse_calculation.py . '
+            if atom_pairs != None:
+                command += '--atom_pairs ._atom_pairs.json '
+            if energy_by_residue:
+                command += '--energy_by_residue '
+            os.system(command)
+
+            # Read the CSV file into pandas
+            if not os.path.exists('._rosetta_data.csv'):
+                os.chdir('..')
+                raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
+
+            # Read analysis data
+            readAnalysis()
+
+            if energy_by_residue:
+                if not os.path.exists('._rosetta_energy_residue_data.csv'):
+                    raise ValueError('Rosetta energy by residue analysis failed. Check the ouput of the analyse_calculation.py script.')
+                # Read energy by residue
+                readEnergyByResidue()
+                
         os.chdir('..')
-
-        # Create indexed dataframe
-        self.rosetta_data.set_index('description', inplace=True)
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
