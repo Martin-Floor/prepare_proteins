@@ -1457,10 +1457,91 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
+    def setUpMDSimulations(md_folder, program='gromacs'):
+        """
+        Sets up MD simulations for each model. The current state only allows to set
+        up simulations for apo proteins and using the Gromacs software.
+
+        Parameters
+        ==========
+        md_folder : str
+            Path to the job folder where the MD input files are located.
+        """
+
+        available_programs = ['gromacs']
+
+        if program not in available_programs:
+            raise ValueError('The program %s is not available for setting MD simulations.' % program)
+
+        # Create MD job folders
+        if not os.path.exists(md_folder):
+            os.mkdir(md_folder)
+        if not os.path.exists(md_folder+'/scripts'):
+            os.mkdir(md_folder+'/scripts')
+        if not os.path.exists(md_folder+'/ff'):
+            os.mkdir(md_folder+'/ff')
+        if not os.path.exists(md_folder+'/input_models'):
+            os.mkdir(md_folder+'/input_models')
+        if not os.path.exists(md_folder+'/output_models'):
+            os.mkdir(md_folder+'/output_models')
+
+        # Save all input models
+        self.saveModels(md_folder+'/input_models')
+
+        # Copy script files
+        if program == 'gromacs'
+            _copyScriptFile(md_folder+'/scripts', 'some_script.py', subfoler='md/gromacs')
+
+
+        jobs = []
+        for model in self.models_names:
+
+            # Create additional folders
+            if not os.path.exists(md_folder+'/output_models/'+model):
+                os.mkdir(md_folder+'/output_models/'+model)
+
+            # Set up commands
+            command = 'cd '+md_folder+'/output_models/'+model
+            command += 'cd ../../../'
+            jobs.append(command)
+
+        return jobs
+
+
+
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
                         skip_chains=False, return_failed=False, ignore_hydrogens=False):
         """
-        Missing
+        Analyse a Glide Docking simulation. The function allows to calculate ligand
+        distances with the options protein_atoms or protein_pairs. With the first option
+        the analysis will calculate the closest distance between the protein atoms given
+        and any ligand atom (or heavy atom if ignore_hydrogens=True). The analysis will
+        also return which ligand atom is the closest for each pose. On the other hand, with
+        the atom_pairs option only distances for the specific atom pairs between the
+        protein and the ligand will be calculated.
+
+        The protein_atoms dictionary must contain as keys the model names (see iterable of this class),
+        and as values a list of tuples, with each tuple representing a protein atom:
+            {model1_name: [(chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name), ...], model2_name:...}
+
+        The atom pairs must be given in a dicionary with each key representing the name
+        of a model and each value a list of the atom pairs to calculate in the format:
+            {model1_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], model2_name:...}
+
+        Paramaeters
+        ===========
+        docking_folder : str
+            Path to the folder where the docking resuts are (the format comes from the setUpGlideDocking() function.
+        protein_atoms : dict
+            Protein atoms to use for the closest distance calculation.
+        atom_pairs : dict
+            Protein and ligand atoms to use for distances calculation.
+        skip_chains : bool
+            Consider chains when atom tuples are given?
+        return_failed : bool
+            Return failed dockings as a list?
+        ignore_hydrogens : bool
+            With this option ligand hydrogens will be ignored for the closest distance (i.e., protein_atoms) calculation.
         """
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(docking_folder, 'analyse_docking.py')
@@ -1775,21 +1856,29 @@ make sure of reading the target sequences with the function readTargetSequences(
             print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
 
-    def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False, overwrite=False):
+    def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
+                                  interacting_residues=False, query_residues=None, overwrite=False,
+                                  decompose_bb_hb_into_pair_energies=False):
         """
-        Analyse Rosetta calculation folder. The analysis read the enrgies and calculate distances
+        Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
+        Additionally, it can analyse the interaction between specific residues (query_residues option)and
+        their neighbouring sidechains by mutating the neighbour residues to glycines.
+
         The atom pairs must be given in a dicionary with each key representing the name
         of a model and each value a list of the atom pairs to calculate in the format:
             {model_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], ...}
 
         The main analysis is stored at self.rosetta_data
         The energy by residue analysis is soterd at self.rosetta_ebr_data
+        Sidechain interaction analysis is stored at self.rosetta_interacting_residues
 
         Data is also stored in csv files inside the Rosetta folder for easy retrieving the data if found:
 
         The main analysis is stored at ._rosetta_data.csv
         The energy by residue analysis is soterd at ._rosetta_energy_residue_data.csv
+        Sidechain interaction analysis is stored at ._rosetta_interacting_residues_data.csv
+
 
         The overwrite option forces recalcualtion of the data.
 
@@ -1803,6 +1892,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             Calculate energy by residue data?
         overwrite : bool
             Force the data calculation from the files.
+        interacting_residues : str
+            Calculate interacting energies between residues
+        query_residues : list
+            Residues to query neoghbour atoms. Leave None for all residues (not recommended, too slow!)
+        decompose_bb_hb_into_pair_energies : bool
+            Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
+            number of calculations, so is off by default).
         """
 
         # Write atom_pairs dictionary to json file
@@ -1827,7 +1923,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         if energy_by_residue and not overwrite:
             if os.path.exists('._rosetta_energy_residue_data.csv'):
                 self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
-                self.rosetta_ebr_data.set_index(['description', 'residue'], inplace=True)
+                self.rosetta_ebr_data.set_index(['description', 'chain', 'residue'], inplace=True)
+            else:
+                analyse = True
+
+        if interacting_residues and not overwrite:
+            if os.path.exists('._rosetta_interacting_residues_data.csv'):
+                self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
+                self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
             else:
                 analyse = True
 
@@ -1836,7 +1939,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             if atom_pairs != None:
                 command += '--atom_pairs ._atom_pairs.json '
             if energy_by_residue:
-                command += '--energy_by_residue'
+                command += '--energy_by_residue '
+            if interacting_residues:
+                command += '--interacting_residues '
+                if query_residues != None:
+                    command += '--query_residues '
+                    command += ','.join([str(r) for r in query_residues])+' '
+            if decompose_bb_hb_into_pair_energies:
+                command += '--decompose_bb_hb_into_pair_energies'
             try:
                 os.system(command)
             except:
@@ -1848,15 +1958,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                 os.chdir('..')
                 raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
 
-        # Read the CSV file into pandas
-        self.rosetta_data = pd.read_csv('._rosetta_data.csv')
-        self.rosetta_data.set_index('description', inplace=True)
+            # Read the CSV file into pandas
+            self.rosetta_data = pd.read_csv('._rosetta_data.csv')
+            self.rosetta_data.set_index('description', inplace=True)
 
-        if energy_by_residue:
-            if not os.path.exists('._rosetta_energy_residue_data.csv'):
-                raise ValueError('Rosetta energy by reisdue analysis failed. Check the ouput of the analyse_calculation.py script.')
-            self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
-            self.rosetta_ebr_data.set_index(['description', 'residue'], inplace=True)
+            if energy_by_residue:
+                if not os.path.exists('._rosetta_energy_residue_data.csv'):
+                    raise ValueError('Rosetta energy by reisdue analysis failed. Check the ouput of the analyse_calculation.py script.')
+                self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
+                self.rosetta_ebr_data.set_index(['description', 'chain', 'residue'], inplace=True)
+
+            if interacting_residues:
+                if not os.path.exists('._rosetta_energy_residue_data.csv'):
+                    raise ValueError('Rosetta interacting reisdues analysis failed. Check the ouput of the analyse_calculation.py script.')
+                self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
+                self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
 
         os.chdir('..')
 
