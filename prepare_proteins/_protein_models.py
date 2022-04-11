@@ -846,8 +846,8 @@ compareSequences() function before adding missing loops.')
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
-                                    fill_loops=False, protonation_states=None, schrodinger_control=False,
-                                    write_conect=False, no_epik=False, use_new_version=False):
+                                    fill_loops=False, protonation_states=None, write_conect=False,
+                                    no_epik=False, use_new_version=False):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -868,10 +868,6 @@ compareSequences() function before adding missing loops.')
         # Save all input models
         self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens,
                         write_conect=write_conect)
-
-        # Copy control file to prepare folder
-        if schrodinger_control:
-            _copySchrodingerControlFile(prepare_folder)
 
         # Generate jobs
         jobs = []
@@ -932,20 +928,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '-JOBNAME '+model+' '
             command += '-HOST localhost:1 '
             command += '-WAIT\n'
-
-            if schrodinger_control:
-                # Add control script command
-                command += 'python3 ../../._schrodinger_control.py '
-                command += model+'.log '
-                command += '--job_type prepwizard\n'
-                command += 'cd ../../..\n'
-
+            command += 'cd ../..\n'
             jobs.append(command)
 
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10), use_new_version=False, write_conect=False,
-                         outerbox=(30,30,30), useflexmae=True, peptide=False, schrodinger_control=True):
+                         outerbox=(30,30,30), useflexmae=True, peptide=False):
         """
         Setup grid calculation for each model.
 
@@ -979,10 +968,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         for v in outerbox:
             if type(v) != int:
                 raise ValuError('Outerbox values must be given as integers')
-
-        # Copy control file to grid folder
-        if schrodinger_control:
-            _copySchrodingerControlFile(grid_folder)
 
         # Create grid input files
         jobs = []
@@ -1037,17 +1022,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '-OVERWRITE '
             command += '-HOST localhost '
             command += '-TMPLAUNCHDIR '
-            if schrodinger_control:
-                command += '-\n'
-            else:
-                command += '-WAIT\n'
+            command += '-WAIT\n'
 
-            if schrodinger_control:
-                # Add control script command
-                command += 'python3 ../._schrodinger_control.py '
-                command += model+'.log '
-                command += '--job_type grid\n'
-                command += 'cd ../..\n'
+            command += 'cd ../..\n'
+
             jobs.append(command)
 
         return jobs
@@ -1098,9 +1076,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 name = f.replace('.mae','')
                 substrates_paths[name] = ligands_folder+'/'+f
 
-        # Copy control file to grid folder
-        _copySchrodingerControlFile(docking_folder)
-
         # Set up docking jobs
         jobs = []
         for grid in grids_paths:
@@ -1139,12 +1114,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-OVERWRITE '
                 command += '-adjust '
                 command += '-HOST localhost:1 '
-                command += '-TMPLAUNCHDIR\n'
-
-                # Add control script command
-                command += 'python3 ../../._schrodinger_control.py '
-                command += grid+'_'+substrate+'.log '
-                command += '--job_type docking\n'
+                command += '-TMPLAUNCHDIR '
+                command += '-WAIT\n'
                 command += 'cd ../../..\n'
                 jobs.append(command)
 
@@ -1173,8 +1144,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(job_folder+'/output_models'):
             os.mkdir(job_folder+'/output_models')
 
-        # Copy control file to grid folder
-        _copySchrodingerControlFile(job_folder)
         # Copy script to generate protein and ligand mae inputs, separately.
         _copyScriptFile(job_folder, 'prepareForSiteMap.py')
         script_path = job_folder+'/._prepareForSiteMap.py'
@@ -1217,12 +1186,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += '"${SCHRODINGER}/sitemap" '
                     command += pose_name+'.in'+' '
                     command += '-HOST localhost:1 '
-                    command += '-TMPLAUNCHDIR\n'
-
-                    # Add control script command
-                    command += 'python3 ../../._schrodinger_control.py '
-                    command += pose_name+'.log ' # Check
-                    command += '--job_type sitemap\n'
+                    command += '-TMPLAUNCHDIR '
+                    command += '-WAIT\n'
                     command += 'cd ../../..\n'
                     jobs.append(command)
         return jobs
@@ -1489,9 +1454,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.saveModels(md_folder+'/input_models')
 
         # Copy script files
-        if program == 'gromacs'
+        if program == 'gromacs':
             _copyScriptFile(md_folder+'/scripts', 'some_script.py', subfoler='md/gromacs')
-
+        # Copy forcefield files
+            _copyScriptFile(md_folder+'/ff', 'some_script.py', subfoler='md/gromacs')
 
         jobs = []
         for model in self.models_names:
@@ -1502,12 +1468,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Set up commands
             command = 'cd '+md_folder+'/output_models/'+model
+
+            ### MD code goes here ##
+            #command +=
+
             command += 'cd ../../../'
             jobs.append(command)
 
         return jobs
-
-
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
                         skip_chains=False, return_failed=False, ignore_hydrogens=False):
@@ -2452,20 +2420,6 @@ def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
     else:
         io.save(output_file)
 
-def _copySchrodingerControlFile(output_folder):
-    """
-    Copy Schrodinger job control file to the specified folder
-    """
-    # Get control script
-    control_script = resource_stream(Requirement.parse("prepare_proteins"),
-                                     "prepare_proteins/_schrodinger_control.py")
-    control_script = io.TextIOWrapper(control_script)
-
-    # Write control script to output folder
-    with open(output_folder+'/._schrodinger_control.py', 'w') as sof:
-        for l in control_script:
-            sof.write(l)
-
 def _copyScriptFile(output_folder, script_name, subfolder=None):
     """
     Copy a script file from the prepare_proteins package.
@@ -2474,16 +2428,16 @@ def _copyScriptFile(output_folder, script_name, subfolder=None):
     ==========
 
     """
-    # Get control script
+    # Get script
     path = "prepare_proteins/scripts"
     if subfolder != None:
         path = path+'/'+subfolder
 
-    control_script = resource_stream(Requirement.parse("prepare_proteins"),
+    script_file = resource_stream(Requirement.parse("prepare_proteins"),
                                      path+'/'+script_name)
-    control_script = io.TextIOWrapper(control_script)
+    script_file = io.TextIOWrapper(script_file)
 
     # Write control script to output folder
     with open(output_folder+'/._'+script_name, 'w') as sof:
-        for l in control_script:
+        for l in script_file:
             sof.write(l)
