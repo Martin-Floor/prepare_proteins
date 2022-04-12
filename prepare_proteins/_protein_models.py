@@ -2510,5 +2510,5 @@ def _copyScriptFile(output_folder, script_name,no_py=False,subfolder=None):
         script_name = script_name[:-3]
 
     with open(output_folder+'/'+script_name, 'w') as sof:
-        for l in control_script:
+        for l in script_file:
             sof.write(l)
