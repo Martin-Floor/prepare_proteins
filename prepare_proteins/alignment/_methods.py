@@ -84,9 +84,9 @@ def ReadMsaFromFastaFile(alignment_file):
 
     return msa
 
-def msaPositionsFromSequencePositions(msa, sequence_id, sequence_indexes):
+def msaIndexesFromSequencePositions(msa, sequence_id, sequence_positions):
     """
-    Get the multiple sequence alignment position indexes matching those positions of a specific sequence target.
+    Get the multiple sequence alignment position indexes matching those positions (zero-based) of a specific target sequence.
 
     Parameters
     ==========
@@ -94,23 +94,23 @@ def msaPositionsFromSequencePositions(msa, sequence_id, sequence_indexes):
         Multiple sequence aligment in Biopython format.
     sequence_id : str
         ID of the target sequence
-    sequence_indexes : list
-        Target sequence positions to match.
+    sequence_positions : list
+        Target sequence positions to match (one-based indexes)
 
     Returns
     =======
     msa_indexes : list
-        MSA indexes matching the target sequence positions
+        MSA indexes matching the target sequence positions (zero-based indexes)
     """
 
     msa_indexes = []
     p = 0
     for i in range(msa.get_alignment_length()):
-        if p in sequence_indexes:
-            msa_indexes.append(i)
         for a in msa:
             if a.id == sequence_id:
                 if a.seq[i] != '-':
                     p += 1
+        if p in sequence_positions:
+            msa_indexes.append(i)
 
     return msa_indexes
