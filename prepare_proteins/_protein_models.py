@@ -1458,7 +1458,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Copy script files
         if program == 'gromacs':
-<<<<<<< HEAD
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/mdp'):
                 if not file.startswith("__"):
                     _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp')
@@ -1470,11 +1469,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         md_file = MDP(md_folder+'/scripts/md.mdp')
         md_file['nsteps'] = int(sim_time/frags)
         md_file.write()
-=======
-            _copyScriptFile(md_folder+'/scripts', 'some_script.py', subfoler='md/gromacs')
-        # Copy forcefield files
-            _copyScriptFile(md_folder+'/ff', 'some_script.py', subfoler='md/gromacs')
->>>>>>> 03ab0bf21174092903f6426ce27e8671f92304d8
 
         jobs = []
         for model in self.models_names:
@@ -1487,7 +1481,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += "export GMXLIB=$(pwd)/FF" +'\n'
 
             # Set up commands
-<<<<<<< HEAD
             if not os.path.exists(md_folder+'/output_models/'+model+"/topol/prot_ions.pdb"):
                 command += 'mkdir output_models/'+model+'/topol'+'\n'
                 command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
@@ -1548,14 +1541,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'gmx grompp -f ../../../scripts/md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr'+'\n'
                         command += 'gmx mdrun -v -deffnm prot_md_'+str(i)+'\n'
 
-=======
-            command = 'cd '+md_folder+'/output_models/'+model
-
-            ### MD code goes here ##
-            #command +=
-
-            command += 'cd ../../../'
->>>>>>> 03ab0bf21174092903f6426ce27e8671f92304d8
             jobs.append(command)
 
         return jobs
@@ -2521,11 +2506,6 @@ def _copyScriptFile(output_folder, script_name, subfolder=None):
     script_file = io.TextIOWrapper(script_file)
 
     # Write control script to output folder
-<<<<<<< HEAD
     with open(output_folder+'/'+script_name[:-3], 'w') as sof:
         for l in control_script:
-=======
-    with open(output_folder+'/._'+script_name, 'w') as sof:
-        for l in script_file:
->>>>>>> 03ab0bf21174092903f6426ce27e8671f92304d8
             sof.write(l)
