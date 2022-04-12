@@ -1460,11 +1460,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         if program == 'gromacs':
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/mdp'):
                 if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp')
+                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp',no_py=True)
 
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/ff/'+ff):
                 if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff)
+                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff,no_py=True)
 
         md_file = MDP(md_folder+'/scripts/md.mdp')
         md_file['nsteps'] = int(sim_time/frags)
@@ -2488,7 +2488,7 @@ def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
     else:
         io.save(output_file)
 
-def _copyScriptFile(output_folder, script_name, subfolder=None):
+def _copyScriptFile(output_folder, script_name,no_py=False,subfolder=None):
     """
     Copy a script file from the prepare_proteins package.
 
@@ -2506,6 +2506,9 @@ def _copyScriptFile(output_folder, script_name, subfolder=None):
     script_file = io.TextIOWrapper(script_file)
 
     # Write control script to output folder
-    with open(output_folder+'/'+script_name[:-3], 'w') as sof:
+    if no_py == True:
+        script_name = script_name[:-3]
+
+    with open(output_folder+'/'+script_name, 'w') as sof:
         for l in control_script:
             sof.write(l)
