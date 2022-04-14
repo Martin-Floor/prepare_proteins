@@ -1561,8 +1561,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             {model1_name: [(chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name), ...], model2_name:...}
 
         The atom pairs must be given in a dicionary with each key representing the name
-        of a model and each value a list of the atom pairs to calculate in the format:
-            {model1_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], model2_name:...}
+        of a model and each value  a sub dicionary with the ligands as keys and a list of the atom pairs
+        to calculate in the format:
+            {model1_name: { ligand_name : [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...],...} model2_name:...}
 
         Paramaeters
         ===========
