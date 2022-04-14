@@ -18,7 +18,7 @@ from Bio.PDB.DSSP import DSSP
 import pandas as pd
 import matplotlib.pyplot as plt
 import mdtraj as md
-from gromacs.fileformats import MDP
+# from gromacs.fileformats import MDP
 
 import prepare_proteins
 
