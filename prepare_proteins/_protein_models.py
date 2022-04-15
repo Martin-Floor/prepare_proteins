@@ -489,6 +489,47 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
+    def removeTerminiByConfidenceScore(self):
+        """
+        Remove terminal regions with low confidence scores from models.
+        """
+
+        ## Warning only single chain implemented
+        for model in self.models_names:
+
+            atoms = [a for a in self.structures[model].get_atoms()]
+            n_terminus = set()
+            for a in atoms:
+                if a.bfactor < 50:
+                    n_terminus.add(a.get_parent().id[1])
+                else:
+                    break
+            c_terminus = set()
+
+            for a in reversed(atoms):
+                if a.bfactor < 50:
+                    c_terminus.add(a.get_parent().id[1])
+                else:
+                    break
+            n_terminus = sorted(list(n_terminus))
+            c_terminus = sorted(list(c_terminus))
+
+            remove_this = []
+            for c in self.structures[model].get_chains():
+                for r in c.get_residues():
+                    if r.id[1] in n_terminus or r.id[1] in c_terminus:
+                        remove_this.append(r)
+                chain = c
+
+            # Remove residues
+            for r in remove_this:
+                chain.detach_child(r.id)
+
+        self.getModelsSequences()
+        self.calculateSecondaryStructure(_save_structure=True)
+
+        # Missing save models and reload them to take effect.
+
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
                                   trajectory_chain_indexes=None, reference_chain_indexes=None):
         """
@@ -519,7 +560,7 @@ chain to use for each model with the chains option.' % model)
             traj.save(output_folder+'/'+model+'.pdb')
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
-                                 cst_files=None, mutations=False, models=None, cst_optimization=False,
+                                 cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
