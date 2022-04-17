@@ -1275,7 +1275,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False,
-                             analysis=False, energy_by_residue_type='all', peptide=False):
+                             analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot'):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1373,6 +1373,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         iyf.write("iterations: "+str(iterations)+"\n")
                         iyf.write("cpus: "+str(cpus)+"\n")
                         iyf.write("equilibration: true\n")
+                        iyf.write("equilibration_mode: '"+equilibration_mode+"'\n")
                         iyf.write("equilibration_steps: "+str(equilibration_steps)+"\n")
                         iyf.write("traj: trajectory.xtc\n")
                         iyf.write("working_folder: 'output'\n")
@@ -2530,7 +2531,7 @@ def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
     else:
         io.save(output_file)
 
-def _copyScriptFile(output_folder, script_name,no_py=False,subfolder=None):
+def _copyScriptFile(output_folder, script_name, no_py=False, subfolder=None, hidden=True):
     """
     Copy a script file from the prepare_proteins package.
 
@@ -2551,6 +2552,11 @@ def _copyScriptFile(output_folder, script_name,no_py=False,subfolder=None):
     if no_py == True:
         script_name = script_name[:-3]
 
-    with open(output_folder+'/'+script_name, 'w') as sof:
+    if hidden:
+        output_path = output_folder+'/._'+script_name
+    else:
+        output_path = output_folder+'/'+script_name
+
+    with open(output_path, 'w') as sof:
         for l in script_file:
             sof.write(l)
