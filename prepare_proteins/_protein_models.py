@@ -2103,7 +2103,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         if keep_conect:
                             self.conect_lines[model] = _getPDBConectLines(best_model_tag+'.pdb')
-                        # os.remove(best_model_tag+'.pdb')
+                        os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
         missing_models = set(self.models_names) - set(models)

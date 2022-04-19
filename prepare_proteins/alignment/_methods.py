@@ -105,6 +105,13 @@ def msaIndexesFromSequencePositions(msa, sequence_id, sequence_positions):
 
     msa_indexes = []
     p = 0
+
+    # Check whether the given ID is presetnin the MSA.
+    msa_ids = [x.id for x in msa]
+    if sequence_id not in msa_ids:
+        raise ValueError('Entry %s not found in MSA' % sequence_id)
+
+    # Gather MSA index positions mathing the target sequence positions.
     for i in range(msa.get_alignment_length()):
         for a in msa:
             if a.id == sequence_id:
