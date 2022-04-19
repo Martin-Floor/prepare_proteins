@@ -336,12 +336,12 @@ chain to use for each model with the chains option.' % model)
             Residue indexes for each protein at the MSA position
         """
 
-        residue_indexes = {}
+        residue_positions = {}
         residue_ids = {}
 
         # Gather dictionary between sequence position and residue PDB index
         for model in self.models_names:
-            residue_indexes[model] = 0
+            residue_positions[model] = 0
             residue_ids[model] = {}
             for i,r in enumerate(self.structures[model].get_residues()):
                 residue_ids[model][i+1] = r.id[1]
@@ -352,18 +352,18 @@ chain to use for each model with the chains option.' % model)
             # Count structure positions
             for entry in self.msa:
                 if entry.seq[i] != '-':
-                    residue_indexes[entry.id] += 1
+                    residue_positions[entry.id] += 1
 
             # Get residue positions matching the MSA indexes
             if i == msa_index:
                 for entry in self.msa:
                     if entry.seq[i] == '-':
-                        residue_indexes[entry.id] = None
+                        residue_positions[entry.id] = None
                     else:
-                        residue_indexes[entry.id] = residue_ids[entry.id][residue_indexes[entry.id]]
+                        residue_positions[entry.id] = residue_ids[entry.id][residue_positions[entry.id]]
                 break
 
-        return residue_indexes
+        return residue_positions
 
     def calculateSecondaryStructure(self, _save_structure=False):
         """
