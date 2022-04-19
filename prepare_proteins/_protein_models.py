@@ -892,7 +892,7 @@ compareSequences() function before adding missing loops.')
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
                                     fill_loops=False, protonation_states=None, write_conect=False,
-                                    no_epik=False, use_new_version=False):
+                                    no_epik=False, use_new_version=False, **kwargs):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -912,14 +912,14 @@ compareSequences() function before adding missing loops.')
 
         # Save all input models
         self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens,
-                        write_conect=write_conect)
+                        write_conect=write_conect, **kwargs)
 
         # Generate jobs
         jobs = []
         for model in self.models_names:
             if fill_loops:
                 if model not in self.target_sequences:
-                    raise ValuError('Target sequence for model %s was not given. First\
+                    raise ValueError('Target sequence for model %s was not given. First\
 make sure of reading the target sequences with the function readTargetSequences()' % model)
                 sequence = {}
                 sequence[model] = self.target_sequences[model]
@@ -973,7 +973,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '-JOBNAME '+model+' '
             command += '-HOST localhost:1 '
             command += '-WAIT\n'
-            command += 'cd ../..\n'
+            command += 'cd ../../..\n'
             jobs.append(command)
 
         return jobs
