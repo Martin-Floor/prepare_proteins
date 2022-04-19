@@ -321,9 +321,9 @@ chain to use for each model with the chains option.' % model)
 
         return conserved
 
-    def getResidueIndexFromMSAindex(self, msa_index):
+    def getStructurePositionFromMSAindex(self, msa_index):
         """
-        Get the individual model residue indexes of a specific MSA positions
+        Get the individual model residue structure positions of a specific MSA index
 
         Paramters
         =========
@@ -348,6 +348,13 @@ chain to use for each model with the chains option.' % model)
 
         # Gather sequence indexes for the given MSA index
         for i in range(self.msa.get_alignment_length()):
+
+            # Count structure positions
+            for entry in self.msa:
+                if entry.seq[i] != '-':
+                    residue_indexes[entry.id] += 1
+
+            # Get residue positions matching the MSA indexes
             if i == msa_index:
                 for entry in self.msa:
                     if entry.seq[i] == '-':
@@ -355,10 +362,6 @@ chain to use for each model with the chains option.' % model)
                     else:
                         residue_indexes[entry.id] = residue_ids[entry.id][residue_indexes[entry.id]]
                 break
-
-            for entry in self.msa:
-                if entry.seq[i] != '-':
-                    residue_indexes[entry.id] += 1
 
         return residue_indexes
 
