@@ -2,7 +2,7 @@ import os
 
 class mdp:
     """
-    Container for functions to generate Gromacs Molecular Dynamics Protocol files.
+    Container for functions to generate Gromacs Molecular Dynamics Protocol files
     """
     def write_mdp_file(output_file,
                         integrator='steep'
