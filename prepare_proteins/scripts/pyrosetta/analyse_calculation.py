@@ -9,11 +9,20 @@ parser = argparse.ArgumentParser()
 parser.add_argument('rosetta_folder', help='Path to json file containing the atom pairs to calculate distances.')
 parser.add_argument('--atom_pairs', help='Path to json file containing the atom pairs to calculate distances.')
 parser.add_argument('--energy_by_residue', action='store_true', default=False, help='Get energy by residue information?')
+parser.add_argument('--interacting_residues', action='store_true', default=False, help='Calculate interacting neighbour residues')
+parser.add_argument('--query_residues',
+                    help='Comma separated (no spaces) list of residues to calculate interacting neighbours. Works together with --interacting_residues')
+parser.add_argument('--decompose_bb_hb_into_pair_energies', action='store_true', default=False,
+                    help='Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the number of calculations, so is off by default).')
 
 args=parser.parse_args()
 rosetta_folder = args.rosetta_folder
 atom_pairs = args.atom_pairs
 energy_by_residue = args.energy_by_residue
+interacting_residues = args.interacting_residues
+query_residues = args.query_residues
+query_residues = [int(r) for r in query_residues.split(',')]
+decompose_bb_hb_into_pair_energies = args.decompose_bb_hb_into_pair_energies
 
 # Initialise PyRosetta environment
 init()
@@ -212,9 +221,87 @@ def getResidueEnergies(pose, decompose_bb_hb_into_pair_energies=False):
 
     return residues_energies
 
+def getResidueNeighbours(pose, residues, distance=5):
+    """
+    Get residues neighbours to a specific residue.
+
+    Paramters
+    =========
+    pose : pyrosetta.rosetta.core.pose.Pose
+        Input pose.
+    residue : int
+        Residue index.
+    distance : float
+        Distance at which neighbours are considered.
+    """
+
+    if isinstance(residues, int):
+        residues = [residues]
+
+    selector = rosetta.core.select.residue_selector.ResidueIndexSelector()
+    for r in residues:
+        selector.set_index(r)
+    NeighborhoodResidueSelector = pyrosetta.rosetta.core.select.residue_selector.NeighborhoodResidueSelector
+    ns = NeighborhoodResidueSelector(selector, distance=distance, include_focus_in_subset=False)
+    sel_vec = ns.apply(pose)
+    n_residues = [r for r in range(1, pose.total_residue()+1) if sel_vec[r]]
+
+    return n_residues
+
+def deltaEMutation(pose, mutant_position, mutant_aa, by_residue=False,
+                   decompose_bb_hb_into_pair_energies=False):
+    """
+    Calculate the energy difference between the pose and its mutant.
+
+    Parameters
+    ==========
+    pose : pyrosetta.rosetta.core.pose.Pose
+        Input pose.
+    mutant_position : int
+        Residue index of the positions to mutate.
+    mutant_aa : str
+        One-letter code of the target mutations identity.
+    by_residue : bool
+        Return the energy differences decomposed by residue.
+    decompose_bb_hb_into_pair_energies : bool
+        Store backbone hydrogen bonds in the energy graph on a per-residue basis
+        (this doubles the number of calculations, so is off by default).
+    """
+
+    # Create a copy of the pose
+    clone_pose = Pose()
+    clone_pose.assign(pose)
+
+    # Mutate clone pose
+    toolbox.mutants.mutate_residue(clone_pose, mutant_position, mutant_aa, pack_radius=0)
+
+    # Create scorefunction
+    sfxn = get_fa_scorefxn()
+
+    # Score poses with scorefunction
+    Eo = sfxn(pose)
+    Em = sfxn(clone_pose)
+
+    if by_residue:
+        # Get the energy by residue of both poses
+        Eo = getResidueEnergies(pose, decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
+        Em = getResidueEnergies(clone_pose, decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
+
+        De = {}
+        for st in Eo:
+            De[st] = {}
+            for r in Eo[st]:
+                De[st][r] = Em[st][r] - Eo[st][r]
+
+    else:
+        De = Em - Eo
+
+    return De
+
+
 # Check whether silent files will be read
 read_silent = False
-if atom_pairs != None or energy_by_residue:
+if atom_pairs != None or energy_by_residue or interacting_residues:
     read_silent = True
 
 # Create dictionary entries for data
@@ -229,7 +316,26 @@ if energy_by_residue:
     # Create dictionary entries
     ebr_data = {}
     ebr_data['description'] = []
+    ebr_data['chain'] = []
     ebr_data['residue'] = []
+
+if interacting_residues:
+    # Create scorefunction
+    sfxn = get_fa_scorefxn()
+    neighbours_data = {}
+    neighbours_data['description'] = []
+    neighbours_data['chain'] = []
+    neighbours_data['residue'] = []
+    neighbours_data['neighbour chain'] = []
+    neighbours_data['neighbour residue'] = []
+
+    # Add energy entries
+    for st in sfxn.get_nonzero_weighted_scoretypes():
+         neighbours_data[st.name] = []
+    neighbours_data['total_score'] = []
+
+    # Define residue to mutate to
+    mutate_to = 'G'
 
 for model in silent_file:
 
@@ -242,7 +348,9 @@ for model in silent_file:
             data[score] = []
 
     if read_silent:
-        for i,pose in enumerate(readPosesFromSilent(silent_file[model], params)):
+        for pose in readPosesFromSilent(silent_file[model], params):
+
+            tag = pose.pdb_info().name()
 
             if atom_pairs != None:
                 # Get pose coordinates
@@ -278,44 +386,98 @@ for model in silent_file:
 
                     # Assert same length for label data
                     assert len(data[label]) == len(data['description'])
+            else:
+                data['description'].append(tag)
+                # Add scores
+                for score in scores:
+                    data[score].append(scores[score].loc[pose.pdb_info().name()])
 
             if energy_by_residue:
-                tag = pose.pdb_info().name()
-                residue_energies = getResidueEnergies(pose)
+                residue_energies = getResidueEnergies(pose, decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
                 # Add energy to data
                 for r in residue_energies['total_score']:
+                    res_info = pose.pdb_info().pose2pdb(r)
+                    res = res_info.split()[0]
+                    chain = res_info.split()[1]
+
                     ebr_data['description'].append(tag)
-                    ebr_data['residue'].append(r)
+                    ebr_data['chain'].append(chain)
+                    ebr_data['residue'].append(res)
                     for st in residue_energies:
                         if st not in ebr_data:
                             ebr_data[st] = []
                         ebr_data[st].append(residue_energies[st][r])
 
-            break
+            if interacting_residues:
+                # Get neighbour residues for each residue
+                all_residues = set()
+                neighbours = {}
+                for r in range(1, pose.total_residue()+1):
+                    if query_residues != None:
+                        if r not in query_residues:
+                            continue
+                    neighbours[r] = getResidueNeighbours(pose, r)
+                    for n in neighbours[r]:
+                        all_residues.add(n)
+
+                # Calculate mutational energies
+                dM = {}
+                for i,r in enumerate(all_residues):
+                    dM[r] = deltaEMutation(pose, r, mutate_to, by_residue=True,
+                            decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
+
+                # Add energy entries
+                for r in range(1, pose.total_residue()+1):
+                    if query_residues != None:
+                        if r not in query_residues:
+                            continue
+
+                    res_info = pose.pdb_info().pose2pdb(r)
+                    res = res_info.split()[0]
+                    chain = res_info.split()[1]
+
+                    for n in neighbours[r]:
+                        # Store only interacting residues
+                        if dM[n]['total_score'][r] != 0:
+                            n_res_info = pose.pdb_info().pose2pdb(n)
+                            n_res = res_info.split()[0]
+                            n_chain = res_info.split()[1]
+                            neighbours_data['description'].append(tag)
+                            neighbours_data['chain'].append(chain)
+                            neighbours_data['residue'].append(res)
+                            neighbours_data['neighbour chain'].append(n_chain)
+                            neighbours_data['neighbour residue'].append(n_res)
+
+                            for st in dM[n]:
+                                neighbours_data[st].append(dM[n][st][r])
 
     # If no atom pair is given just return the rosetta scores
     else:
-        print(scores_data)
         scores_data.append(readScoreFromSilent(silent_file[model], indexing=False))
+        print(scores_data)
 
 # Add missing values in distance label entries
-if atom_pairs != None:
+if atom_pairs != None and read_silent:
     for label in atom_pairs_labels:
         delta = len(data['description'])-len(data[label])
         for x in range(delta):
             data[label].append(None)
 
-    # Convert dictionary to DataFrame
-    data = pd.DataFrame(data)
 # Create dataframe from scores only
-else:
+elif not read_silent:
     data = pd.concat(scores_data)
+
+# Convert dictionary to DataFrame
+data = pd.DataFrame(data)
 
 # Save rosetta analysis data
 data.to_csv('._rosetta_data.csv', index=False)
 
 # Write energy by residue data
 if energy_by_residue:
-    # Write pandas dictionary
     ebr_data = pd.DataFrame(ebr_data)
     ebr_data.to_csv('._rosetta_energy_residue_data.csv', index=False)
+
+if interacting_residues:
+    neighbours_data = pd.DataFrame(neighbours_data)
+    neighbours_data.to_csv('._rosetta_interacting_residues_data.csv', index=False)

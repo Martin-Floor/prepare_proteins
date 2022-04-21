@@ -100,7 +100,7 @@ class mafft:
                 iff.write(str(name.seq)+'\n')
 
         # Calculate alignment
-        command = 'mafft'
+        command = 'mafft '
         if anysymbol:
             command += ' --anysymbol'
         command += ' --add sequences.fasta.tmp'
