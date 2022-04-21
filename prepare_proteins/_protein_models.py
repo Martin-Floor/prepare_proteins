@@ -866,21 +866,7 @@ compareSequences() function before adding missing loops.')
             os.mkdir(prepare_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens)
-        if write_conect:
-            for model in self.models_names:
-                if model in self.conect_lines:
-                    with open(prepare_folder+'/input_models/'+model+'.pdb') as pdb:
-                        with open(prepare_folder+'/input_models/'+model+'.pdb.tmp', 'w') as ipdbf:
-                            for l in pdb:
-                                if not l.startswith('END'):
-                                    ipdbf.write(l)
-                            for l in self.conect_lines[model]:
-                                ipdbf.write(l)
-                    shutil.move(prepare_folder+'/input_models/'+model+'.pdb.tmp',
-                                prepare_folder+'/input_models/'+model+'.pdb')
-                else:
-                    print('WARNING: No CONECT lines are stored for model %s' % model)
+        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens, write_conect=write_conect)
 
         # Copy control file to prepare folder
         if schrodinger_control:
@@ -983,21 +969,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(grid_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(grid_folder+'/input_models')
-        if write_conect:
-            for model in self.models_names:
-                if model in self.conect_lines:
-                    with open(grid_folder+'/input_models/'+model+'.pdb') as pdb:
-                        with open(grid_folder+'/input_models/'+model+'.pdb.tmp', 'w') as ipdbf:
-                            for l in pdb:
-                                if not l.startswith('END'):
-                                    ipdbf.write(l)
-                            for l in self.conect_lines[model]:
-                                ipdbf.write(l)
-                    shutil.move(grid_folder+'/input_models/'+model+'.pdb.tmp',
-                                grid_folder+'/input_models/'+model+'.pdb')
-                else:
-                    print('WARNING: No CONECT lines are stored for model %s' % model)
+        self.saveModels(grid_folder+'/input_models', write_conect=write_conect)
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -1618,8 +1590,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
                     for ligand in self.docking_data.index.levels[1]:
                         ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-                        distances = catalytic_labels[name][protein][ligand]
-                        values += ligand_series[distances].min(axis=1).tolist()
+                        if not ligand_series.empty:
+                            distances = catalytic_labels[name][protein][ligand]
+                            values += ligand_series[distances].min(axis=1).tolist()
                 self.docking_data['metric_'+name] = values
 
     def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
@@ -1733,7 +1706,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
         ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
 
-        return ligand_data
+        return ligand_series
 
     def plotDocking(self, protein, ligand, x='RMSD', y='Score', z=None, colormap='Blues_r', output_folder=None, extension='.png',
                     dpi=200):
@@ -1981,7 +1954,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder+'/output_models/'+model+'/'+model+'.pdb'
             self.readModelFromPDB(model, pdb_path)
 
-    def saveModels(self, output_folder, keep_residues={}, models=None, **keywords):
+    def saveModels(self, output_folder, keep_residues={}, models=None, write_conect=False, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -2010,6 +1983,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 output_folder+'/'+model+'.pdb',
                                 keep_residues=kr,
                                 **keywords)
+
+            if write_conect:
+                # Write CONECT lines
+                if model in self.conect_lines:
+                    with open(output_folder+'/'+model+'.pdb') as pdb:
+                        with open(output_folder+'/'+model+'.pdb.tmp', 'w') as ipdbf:
+                            for l in pdb:
+                                if not l.startswith('END'):
+                                    ipdbf.write(l)
+                            for l in self.conect_lines[model]:
+                                ipdbf.write(l)
+                    shutil.move(output_folder+'/'+model+'.pdb.tmp',
+                                output_folder+'/'+model+'.pdb')
+                else:
+                    print('WARNING: No CONECT lines are stored for model %s' % model)
 
     def removeModel(self, model):
         """
