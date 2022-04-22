@@ -23,8 +23,8 @@ nstlog              	= 25    		; frequency for writing energies to log file
 nstenergy           	= 25		  	; frequency for writing energies to energy file
 nstxout-compressed      =  0    		; frequency for writing coords to xtc traj
 ; Groups
-xtc_grps            	= Protein Non-Protein ; group(s) whose coords are to be written in xtc traj
-energygrps          	= Protein Non-Protein ; group(s) whose energy is to be written in energy file
+xtc_grps            	= System ; group(s) whose coords are to be written in xtc traj
+energygrps          	= System ; group(s) whose energy is to be written in energy file
 ; Electrostatics
 coulombtype         	= PME		  	; truncation for minimisation, with large cutoff
 pme-order		= 4
