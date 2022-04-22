@@ -531,7 +531,7 @@ chain to use for each model with the chains option.' % model)
                 chain.detach_child(r.id)
 
         self.getModelsSequences()
-        self.calculateSecondaryStructure(_save_structure=True)
+        # self.calculateSecondaryStructure(_save_structure=True)
 
         # Missing save models and reload them to take effect.
 
@@ -2267,8 +2267,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder+'/output_models/'+model+'/'+model+'.pdb'
             self.readModelFromPDB(model, pdb_path)
 
-    def saveModels(self, output_folder, keep_residues={}, models=None, write_conect=False,
-                   **keywords):
+    def saveModels(self, output_folder, keep_residues={}, models=None, write_conect=False, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
