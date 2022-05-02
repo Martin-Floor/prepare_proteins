@@ -1833,7 +1833,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder):
         """
-        Missing
+        Extract docking poses present in a docking_data dataframe. The docking DataFrame
+        contains the same structure as the self.docking_data dataframe, parameter of
+        this class. This dataframe makes reference to the docking_folder where the
+        docking results are contained.
+
+        Parameters
+        ==========
+        dockign_data : pandas.DataFrame
+            Datframe containing the poses to be extracted
+        docking_folder : str
+            Path the folder containing the docking results
+        output_folder : str
+            Path to the folder where the docking structures will be saved.
         """
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
@@ -1940,7 +1952,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
-                                  decompose_bb_hb_into_pair_energies=False):
+                                  protonation_states=False, decompose_bb_hb_into_pair_energies=False):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -2016,6 +2028,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 analyse = True
 
+        if protonation_states and not overwrite:
+            if os.path.exists('._rosetta_protonation_data.csv'):
+                self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
+                self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
+            else:
+                analyse = True
+
         if analyse:
             command = 'python ._analyse_calculation.py . '
             if atom_pairs != None:
@@ -2027,6 +2046,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if query_residues != None:
                     command += '--query_residues '
                     command += ','.join([str(r) for r in query_residues])+' '
+            if protonation_states:
+                command += '--protonation_states '
             if decompose_bb_hb_into_pair_energies:
                 command += '--decompose_bb_hb_into_pair_energies'
             try:
@@ -2055,6 +2076,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     raise ValueError('Rosetta interacting reisdues analysis failed. Check the ouput of the analyse_calculation.py script.')
                 self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
                 self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
+
+            if protonation_states:
+                self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
+                self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
 
         os.chdir('..')
 
