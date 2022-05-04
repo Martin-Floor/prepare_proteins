@@ -377,7 +377,8 @@ for model in silent_file:
 
                 # Get atom pair distances
                 for pair in atom_pairs[model]:
-                    label = '_'.join([str(x) for x in pair[0]])+'-'
+                    label = 'distance_'
+                    label += '_'.join([str(x) for x in pair[0]])+'-'
                     label += '_'.join([str(x) for x in pair[1]])
 
                     # Add label to dictionary if not in it

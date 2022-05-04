@@ -592,7 +592,7 @@ chain to use for each model with the chains option.' % model)
         # Check that sequence comparison has been done before adding mutational steps
         if mutations:
             if self.sequence_differences == {}:
-                raise ValuError('Mutations have been enabled but no sequence comparison\
+                raise ValueError('Mutations have been enabled but no sequence comparison\
 has been carried out. Please run compareSequences() function before setting mutation=True.')
 
         # Create flags files
@@ -2320,6 +2320,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Dictionary containing missing or changed information.
         """
 
+        if self.multi_chain:
+            raise ValueError('PDBs contain multiple chains. Please select one chain.')
         self.readTargetSequences(sequences_file)
 
         # Iterate models to store sequence differences
