@@ -7,7 +7,7 @@ nsteps				= 50000		; Maximum number of (minimization) steps to perform
 ; Neighbor search
 cutoff-scheme		= Verlet
 verlet-buffer-tolerance	= -1 	; use rlist
-;rlist				= 1.1		; Cut-off distance for the short-range neighbor list
+rlist				= 1.1		; Cut-off distance for the short-range neighbor list
 pbc		        	= xyz 		; Periodic Boundary Conditions
 
 ; Electrostatics and vdW

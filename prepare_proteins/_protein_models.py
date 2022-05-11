@@ -1533,9 +1533,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
                 if line.strip().startswith('nsteps'):
                     line = 'nsteps = '+ str(int(sim_time/frags)) + '\n'
-                if water_traj == True:
-                    if line.strip().startswith('compressed-x-grps'):
-                        line = 'compressed_x_grps = '+'System'+ '\n'
+                #if water_traj == True:
+                #    if line.strip().startswith('compressed-x-grps'):
+                #        line = 'compressed_x_grps = '+'System'+ '\n'
 
                 sys.stdout.write(line)
 
@@ -1621,9 +1621,23 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def removeBoundaryConditions(self,path,command,step='md'):
+
+    def getTrajectoryPaths(self,path,step='md',traj_name='prot_md_cat_noPBC.xtc'):
         """
-        Remove boundary conditions from gromacs simulation trajectory file and gets their paths.
+        """
+        output_paths = []
+        for folder in os.listdir(path+'/output_models/'):
+            if folder in self.models_names:
+                traj_path = path+'/output_models/'+folder+'/'+step
+                output_paths.append(traj_path+'/'+traj_name)
+
+        return(output_paths)
+
+
+
+    def removeBoundaryConditions(self,path,command,step='md',remove_water=False):
+        """
+        Remove boundary conditions from gromacs simulation trajectory file
 
         Parameters
         ==========
@@ -1632,18 +1646,25 @@ make sure of reading the target sequences with the function readTargetSequences(
         command : str
             Command to call program.
         """
-        output_paths = []
-
         for folder in os.listdir(path+'/output_models/'):
             if folder in self.models_names:
                 traj_path = path+'/output_models/'+folder+'/'+step
                 for file in os.listdir(traj_path):
                     if file.endswith('.xtc') and not file.endswith('_noPBC.xtc') and not os.path.exists(traj_path+'/'+file.split(".")[0]+'_noPBC.xtc'):
-                        os.system('echo 0 | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
-                        output_paths.append(traj_path+file)
-                    elif file.endswith('_noPBC.xtc'):
-                        output_paths.append(traj_path+file)
-        return(output_paths)
+                        if remove_water == True:
+                            option = '1'
+                        else:
+                            option = '0'
+                        os.system('echo '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
+
+                if not os.path.exists(traj_path+'/prot_md_cat_noPBC.xtc'):
+                    os.system(command+' trjcat -f '+traj_path+'/*_noPBC.xtc -o '+traj_path+'/prot_md_cat_noPBC.xtc -cat')
+
+                ### md_1 or npt_10
+
+                if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro') and remove_water == True:
+                    os.system('echo 1 | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro')
+
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
                         skip_chains=False, return_failed=False, ignore_hydrogens=False):

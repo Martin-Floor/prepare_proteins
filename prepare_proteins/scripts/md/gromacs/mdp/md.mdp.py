@@ -10,7 +10,6 @@ nstenergy               = 25000         ; save energies every 100 ps
 nstlog                  = 25000         ; update log file every 100 ps
 compressed-x-grps       = Protein        ; write xtc for the whole system
 nstxout-compressed      = 25000         ; write coordinates every 100 ps to .xtc file
-energygrps          	= Protein   	; group(s) whose energy is to be written in energy file
 ; Bond parameters
 continuation	    	= yes		; Restarting after NPT
 constraint_algorithm    = lincs	    	; holonomic constraints
@@ -30,9 +29,9 @@ pme_order	    	= 4		; cubic interpolation
 fourierspacing		= 0.12		; grid spacing for FFT
 ; Temperature coupling is on
 tcoupl			= V-rescale	; modified Berendsen thermostat
-tc-grps			= System	; two coupling groups - more accurate
-tau_t			= 0.1	  	; time constant, in ps
-ref_t			= 300 	  	; reference temperature, one for each group, in K
+tc-grps			= Protein Non-Protein	; two coupling groups - more accurate
+tau_t			= 0.1	  0.1	; time constant, in ps
+ref_t			= 300 	  300	; reference temperature, one for each group, in K
 ; Pressure coupling is on
 pcoupl	        	= Parrinello-Rahman ; Pressure coupling on in NPT
 pcoupltype        	= isotropic	; uniform scaling of box vectors

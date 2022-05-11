@@ -5,7 +5,7 @@ nsteps              	= 2000     		; number of steps
 emtol               	= 1000 			; convergence criterion
 emstep              	= 0.001   		; intial step size
 ; Constraints
-constraints             = all-bonds
+constraints             = h-bonds
 constraint-algorithm    = lincs
 lincs-order             = 6			; normally 4, but 6 is needed for 4 fs timestep
 continuation            = no
@@ -23,8 +23,8 @@ nstlog              	= 25    		; frequency for writing energies to log file
 nstenergy           	= 25		  	; frequency for writing energies to energy file
 nstxout-compressed      =  0    		; frequency for writing coords to xtc traj
 ; Groups
-xtc_grps            	= System ; group(s) whose coords are to be written in xtc traj
-energygrps          	= System ; group(s) whose energy is to be written in energy file
+xtc_grps            	= Protein ; group(s) whose coords are to be written in xtc traj
+energygrps          	= Protein ; group(s) whose energy is to be written in energy file
 ; Electrostatics
 coulombtype         	= PME		  	; truncation for minimisation, with large cutoff
 pme-order		= 4
