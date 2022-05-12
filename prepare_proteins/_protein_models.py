@@ -1722,7 +1722,154 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             return None
 
-    def combineDistancesIntoMetrics(self, catalytic_labels, exclude=None):
+    def calculateModelsDistances(self, atom_pairs):
+        """
+        Calculate models distances for a set of atom pairs.
+
+        The atom pairs must be given in a dicionary with each key representing the name
+        of a model and each value a list of the atom pairs to calculate in the format:
+            {model_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], ...}
+
+        Paramters
+        =========
+        atom_pairs : dict
+            Atom pairs to calculate for each model
+        """
+
+        self.distance_data = {}
+        self.distance_data['model'] = []
+
+        ### Add all label entries to dictionary
+        for model in self.structures:
+            for d in atom_pairs[model]:
+                # Generate label for distance
+                label = 'distance_'
+                label += '_'.join([str(x) for x in d[0]])+'-'
+                label += '_'.join([str(x) for x in d[1]])
+                if label not in self.distance_data:
+                    self.distance_data[label] = []
+
+        for model in self.structures:
+
+            self.distance_data['model'].append(model)
+
+            # Get atoms in atom_pairs as dictionary
+            atoms = {}
+            for d in atom_pairs[model]:
+                for t in d:
+                    if t[0] not in atoms:
+                        atoms[t[0]] = {}
+                    if t[1] not in atoms[t[0]]:
+                        atoms[t[0]][t[1]] = []
+                    if t[2] not in atoms[t[0]][t[1]]:
+                        atoms[t[0]][t[1]].append(t[2])
+
+            # Get atom coordinates for each atom in atom_pairs
+            coordinates = {}
+            for chain in self.structures[model].get_chains():
+                if chain.id in atoms:
+                    coordinates[chain.id] = {}
+                    for r in chain:
+                        if r.id[1] in atoms[chain.id]:
+                            coordinates[chain.id][r.id[1]] = {}
+                            for atom in r:
+                                if atom.name in atoms[chain.id][r.id[1]]:
+                                    coordinates[chain.id][r.id[1]][atom.name] = atom.coord
+
+            # Calculate atom distances
+            for d in atom_pairs[model]:
+
+                # Generate label for distance
+                label = 'distance_'
+                label += '_'.join([str(x) for x in d[0]])+'-'
+                label += '_'.join([str(x) for x in d[1]])
+
+                # Calculate distance
+                atom1 = d[0]
+                atom2 = d[1]
+                coord1 = coordinates[atom1[0]][atom1[1]][atom1[2]]
+                coord2 = coordinates[atom2[0]][atom2[1]][atom2[2]]
+                value = np.linalg.norm(coord1-coord2)
+
+                # Add data to dataframe
+                self.distance_data[label].append(value)
+
+            # Check length of each label
+            for label in self.distance_data:
+                if label not in ['model']:
+                    delta = len(self.distance_data['model'])-len(self.distance_data[label])
+                    for x in range(delta):
+                        self.distance_data[label].append(None)
+
+        self.distance_data = pd.DataFrame(self.distance_data)
+        self.distance_data.set_index('model', inplace=True)
+
+        return self.distance_data
+
+    def getModelDistances(self, model):
+        """
+        Get the distances associated with a specific model included in the
+        self.distance_data atrribute. This attribute must be calculated in advance
+        by running the calculateModelsDistances() function.
+
+        Parameters
+        ==========
+        model : str
+            model name
+        """
+
+        model_data = self.distance_data[self.distance_data.index == model]
+        distances = []
+        for d in model_data:
+            if 'distance_' in d:
+                if not model_data[d].dropna().empty:
+                    distances.append(d)
+        return distances
+
+    def combineModelDistancesIntoMetric(self, metric_distances, overwrite=False):
+        """
+        Combine different equivalent distances contained in the self.distance_data
+        attribute into specific named metrics. The function takes as input a
+        dictionary (catalytic_labels) composed of inner dictionaries as follows:
+
+            catalytic_labels = {
+                metric_name = {
+                    protein = distances_list}}}
+
+        The innermost distances_list object contains all equivalent distance names for
+        a specific protein to be combined under the same metric_name column.
+
+        The combination is done by taking the minimum value of all equivalent distances.
+
+        Parameters
+        ==========
+        catalytic_labels : dict
+            Dictionary defining which distances will be combined under a common name.
+            (for details see above).
+        """
+        for name in metric_distances:
+            if 'metric_'+name in self.distance_data.keys() and not overwrite:
+                print('Combined metric %s already added. Give overwrite=True to recombine' % name)
+            else:
+                values = []
+                models = []
+
+                for model in self.models_names:
+                    mask = []
+                    for index in self.distance_data.index:
+                        if model in index:
+                            mask.append(True)
+                        else:
+                            mask.append(False)
+
+                    model_data = self.distance_data[mask]
+                    model_distances = metric_distances[name][model]
+
+                    values += model_data[model_distances].min(axis=1).tolist()
+
+                self.distance_data['metric_'+name] = values
+
+    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None):
         """
         Combine different equivalent distances into specific named metrics. The function
         takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
