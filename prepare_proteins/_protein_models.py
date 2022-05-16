@@ -1869,6 +1869,66 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 self.distance_data['metric_'+name] = values
 
+        return self.distance_data
+
+    def getModelsProtonationStates(self, residues=None):
+        """
+        Get the protonation state of all or specific residues in all protein models.
+
+        For getting the protonation states of only a subset of residues a dictionary must
+        be given with the 'residues' option. The keys of the dictionary are the models'
+        names, and, the values, lists of tuples defining each residue to be query. The
+        residue's tuples are defined as: (chain_id, residue_id).
+
+        Parameters
+        ==========
+        residues : dict
+            Dictionary with lists of tuples of residues (e.g., (chain_id, residue_id)) to query for each model.
+
+        Returns
+        =======
+        protonation_states : pandas.DataFrame
+            Data frame with protonation information.
+        """
+
+        # Set input dictionary to store protonation states
+        self.protonation_states = {}
+        self.protonation_states['model'] = []
+        self.protonation_states['chain'] = []
+        self.protonation_states['residue'] = []
+        self.protonation_states['name'] = []
+        self.protonation_states['state'] = []
+
+        # Iterate all models' structures
+        for model in self.models_names:
+            structure = self.structures[model]
+            for r in structure.get_residues():
+
+                # Skip if a list of residues is given per model
+                if residues != None:
+                    if (r.get_parent().id, r.id[1]) not in residues[model]:
+                        continue
+
+                # Get Histidine protonation states
+                if r.resname == 'HIS':
+                    atoms = [a.name for a in r]
+                    self.protonation_states['model'].append(model)
+                    self.protonation_states['chain'].append(r.get_parent().id)
+                    self.protonation_states['residue'].append(r.id[1])
+                    self.protonation_states['name'].append(r.resname)
+                    if 'HE2' in atoms and 'HD1' in atoms:
+                        self.protonation_states['state'].append('HIP')
+                    elif 'HD1' in atoms:
+                        self.protonation_states['state'].append('HID')
+                    elif 'HE2' in atoms:
+                        self.protonation_states['state'].append('HIE')
+
+        # Convert dictionary to Pandas
+        self.protonation_states = pd.DataFrame(self.protonation_states)
+        self.protonation_states.set_index(['model', 'chain', 'residue'], inplace=True)
+
+        return self.protonation_states
+
     def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None):
         """
         Combine different equivalent distances into specific named metrics. The function
