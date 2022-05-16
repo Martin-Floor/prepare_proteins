@@ -2290,6 +2290,86 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         os.chdir('..')
 
+    def getRosettaModelDistances(self, model):
+        """
+        Get all distances related to a model from the self.rosetta_data DataFrame.
+
+        Parameters
+        ==========
+        model : str
+            Model name
+
+        Return
+        ======
+        distances : list
+            Distances containing non-nan values for the model.
+
+        """
+
+        mask = []
+        for pose in self.rosetta_data.index:
+            model_base_name = '_'.join(pose.split('_')[:-1])
+            if model == model_base_name:
+                mask.append(True)
+            else:
+                mask.append(False)
+        model_data = self.rosetta_data[mask]
+
+        distances = []
+        for d in model_data:
+            if d.startswith('distance_'):
+                if not model_data[d].dropna().empty:
+                    distances.append(d)
+
+        return distances
+
+    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False):
+        """
+        Combine different equivalent distances contained in the self.distance_data
+        attribute into specific named metrics. The function takes as input a
+        dictionary (metric_distances) composed of inner dictionaries as follows:
+
+            metric_labels = {
+                metric_name = {
+                    model = distances_list}}}
+
+        The innermost distances_list object contains all equivalent distance names for
+        a specific protein to be combined under the same metric_name column.
+
+        The combination is done by taking the minimum value of all equivalent distances.
+
+        Parmeters
+        =========
+        metric_labels : dict
+            Dictionary defining which distances will be combined under a common name.
+            (for details see above).
+        """
+
+        for name in metric_distances:
+            if 'metric_'+name in self.rosetta_data.keys() and not overwrite:
+                print('Combined metric %s already added. Give overwrite=True to recombine' % name)
+            else:
+                values = []
+                models = []
+                for model in self.rosetta_data.index:
+                    base_name = '_'.join(model.split('_')[:-1])
+                    if base_name not in models:
+                        models.append(base_name)
+
+                for model in list(models):
+                    mask = []
+                    for index in self.rosetta_data.index:
+                        if model in index:
+                            mask.append(True)
+                        else:
+                            mask.append(False)
+                    model_data = self.rosetta_data[mask]
+                    model_distances = metric_distances[name][model]
+
+                    values += model_data[model_distances].min(axis=1).tolist()
+
+                self.rosetta_data['metric_'+name] = values
+
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
         """
