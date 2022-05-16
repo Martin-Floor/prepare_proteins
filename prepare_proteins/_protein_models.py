@@ -2370,6 +2370,76 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 self.rosetta_data['metric_'+name] = values
 
+    def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
+        """
+        Filter the rosetta_data attribute based on the fufillment of protonation state conditions. Protonations states
+        defintions must be given through the residue_states attribute. The input is a dictionary with model names as keys
+        and as values lists of tuples with the following format: [((chain_id, residue_id), protonation_state), etc.]
+
+        The function is currently implemented to only work with histidine residues.
+
+        Parameters
+        ==========
+        residue_states : dict
+            By model and residue definition of protonation states.
+        inplace : bool
+            Overwrites the self.rosetta_data by the filtered data frame.
+
+        Returns
+        =======
+        filtered_data : pandas.DataFrame
+            self.rosetta_data dataframe filterd by protonation states.
+        """
+
+        data = self.rosetta_protonation_states.reset_index()
+        data.columns = [c.replace(' ', '_') for c in data.columns]
+
+        filtered_models = []
+        filtered_rows = []
+
+        old_model = None
+        histidines = []
+        for index, row in data.iterrows():
+            ti = time.time()
+            model_tag = row.description
+
+            # Empty hisitidine list
+            if model_tag != old_model:
+
+                # Check protonation states are in data
+                keep_model = True
+                if histidines != []:
+                    model_base_name = '_'.join(model_tag.split('_')[:-1])
+                    for rs in residue_states[model_base_name]:
+                        if rs not in histidines:
+                            keep_model = False
+
+                # Store model
+                if keep_model and histidines != []:
+                    filtered_models.append(model_tag)
+
+                histidines = []
+
+            histidines.append(((row.chain, row.residue), (row.residue_state)))
+
+            # Update current model as old
+            old_model = model_tag
+
+        # filter the rosetta_data attribute
+        mask = []
+        rosetta_data = self.rosetta_data.reset_index()
+        for index, row in rosetta_data.iterrows():
+            if row.description in filtered_models:
+                mask.append(True)
+            else:
+                mask.append(False)
+
+        filtered_data = self.rosetta_data[mask]
+        if inplace:
+            self.rosetta_data = filtered_data
+
+        return filtered_data
+
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
         """
