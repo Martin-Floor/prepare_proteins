@@ -2345,7 +2345,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             (for details see above).
         """
 
-        for name in metric_distances:
+        for name in metric_labels:
             if 'metric_'+name in self.rosetta_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
             else:
@@ -2364,7 +2364,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         else:
                             mask.append(False)
                     model_data = self.rosetta_data[mask]
-                    model_distances = metric_distances[name][model]
+                    model_distances = metric_labels[name][model]
 
                     values += model_data[model_distances].min(axis=1).tolist()
 
