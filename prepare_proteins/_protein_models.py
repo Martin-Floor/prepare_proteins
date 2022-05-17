@@ -1547,6 +1547,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists(md_folder+'/output_models/'+model):
                     os.mkdir(md_folder+'/output_models/'+model)
 
+                parser = PDB.PDBParser()
+                structure = parser.get_structure('protein', md_folder+'/input_models/'+model+'.pdb')
+
+                gmx_codes = []
+
+                for mdl in structure:
+                    for chain in mdl:
+                        for residue in chain:
+                            HD1 = False
+                            HE2 = False
+                            if residue.resname == 'HIS':
+                                for atom in residue:
+                                    if atom.name == 'HD1':
+                                        HD1 = True
+                                    if atom.name == 'HE2':
+                                        HE2 = True
+                            if HD1 != False or HE2 != False:
+                                if HD1 == True and HE2 == False:
+                                    number = 0
+                                if HD1 == False and HE2 == True:
+                                    number = 1
+                                if HD1 == True and HE2 == True:
+                                    number = 2
+                                gmx_codes.append(number)
+
+                his_pro = (str(gmx_codes)[1:-1].replace(',',''))
+
                 command = 'cd '+md_folder+'\n'
                 command += "export GMXLIB=$(pwd)/FF" +'\n'
 
@@ -1555,7 +1582,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'mkdir output_models/'+model+'/topol'+'\n'
                     command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
                     command += 'cd output_models/'+model+'/topol'+'\n'
-                    command += 'echo 6 | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
+                    command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
                     command += command_name+ ' editconf -f prot.pdb -o prot_box.pdb -c -d 1.0 -bt octahedron'+'\n'
                     command += command_name+' solvate -cp prot_box.pdb -cs spc216.gro -o prot_solv.pdb -p topol.top'+'\n'
                     command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.pdb -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
