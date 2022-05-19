@@ -594,7 +594,7 @@ chain to use for each model with the chains option.' % model)
         # Check that sequence comparison has been done before adding mutational steps
         if mutations:
             if self.sequence_differences == {}:
-                raise ValuError('Mutations have been enabled but no sequence comparison\
+                raise ValueError('Mutations have been enabled but no sequence comparison\
 has been carried out. Please run compareSequences() function before setting mutation=True.')
 
         # Create flags files
@@ -1825,7 +1825,214 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             return None
 
-    def combineDistancesIntoMetrics(self, catalytic_labels, exclude=None):
+    def calculateModelsDistances(self, atom_pairs):
+        """
+        Calculate models distances for a set of atom pairs.
+
+        The atom pairs must be given in a dicionary with each key representing the name
+        of a model and each value a list of the atom pairs to calculate in the format:
+            {model_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], ...}
+
+        Paramters
+        =========
+        atom_pairs : dict
+            Atom pairs to calculate for each model
+        """
+
+        self.distance_data = {}
+        self.distance_data['model'] = []
+
+        ### Add all label entries to dictionary
+        for model in self.structures:
+            for d in atom_pairs[model]:
+                # Generate label for distance
+                label = 'distance_'
+                label += '_'.join([str(x) for x in d[0]])+'-'
+                label += '_'.join([str(x) for x in d[1]])
+                if label not in self.distance_data:
+                    self.distance_data[label] = []
+
+        for model in self.structures:
+
+            self.distance_data['model'].append(model)
+
+            # Get atoms in atom_pairs as dictionary
+            atoms = {}
+            for d in atom_pairs[model]:
+                for t in d:
+                    if t[0] not in atoms:
+                        atoms[t[0]] = {}
+                    if t[1] not in atoms[t[0]]:
+                        atoms[t[0]][t[1]] = []
+                    if t[2] not in atoms[t[0]][t[1]]:
+                        atoms[t[0]][t[1]].append(t[2])
+
+            # Get atom coordinates for each atom in atom_pairs
+            coordinates = {}
+            for chain in self.structures[model].get_chains():
+                if chain.id in atoms:
+                    coordinates[chain.id] = {}
+                    for r in chain:
+                        if r.id[1] in atoms[chain.id]:
+                            coordinates[chain.id][r.id[1]] = {}
+                            for atom in r:
+                                if atom.name in atoms[chain.id][r.id[1]]:
+                                    coordinates[chain.id][r.id[1]][atom.name] = atom.coord
+
+            # Calculate atom distances
+            for d in atom_pairs[model]:
+
+                # Generate label for distance
+                label = 'distance_'
+                label += '_'.join([str(x) for x in d[0]])+'-'
+                label += '_'.join([str(x) for x in d[1]])
+
+                # Calculate distance
+                atom1 = d[0]
+                atom2 = d[1]
+                coord1 = coordinates[atom1[0]][atom1[1]][atom1[2]]
+                coord2 = coordinates[atom2[0]][atom2[1]][atom2[2]]
+                value = np.linalg.norm(coord1-coord2)
+
+                # Add data to dataframe
+                self.distance_data[label].append(value)
+
+            # Check length of each label
+            for label in self.distance_data:
+                if label not in ['model']:
+                    delta = len(self.distance_data['model'])-len(self.distance_data[label])
+                    for x in range(delta):
+                        self.distance_data[label].append(None)
+
+        self.distance_data = pd.DataFrame(self.distance_data)
+        self.distance_data.set_index('model', inplace=True)
+
+        return self.distance_data
+
+    def getModelDistances(self, model):
+        """
+        Get the distances associated with a specific model included in the
+        self.distance_data atrribute. This attribute must be calculated in advance
+        by running the calculateModelsDistances() function.
+
+        Parameters
+        ==========
+        model : str
+            model name
+        """
+
+        model_data = self.distance_data[self.distance_data.index == model]
+        distances = []
+        for d in model_data:
+            if 'distance_' in d:
+                if not model_data[d].dropna().empty:
+                    distances.append(d)
+        return distances
+
+    def combineModelDistancesIntoMetric(self, metric_distances, overwrite=False):
+        """
+        Combine different equivalent distances contained in the self.distance_data
+        attribute into specific named metrics. The function takes as input a
+        dictionary (catalytic_labels) composed of inner dictionaries as follows:
+
+            catalytic_labels = {
+                metric_name = {
+                    protein = distances_list}}}
+
+        The innermost distances_list object contains all equivalent distance names for
+        a specific protein to be combined under the same metric_name column.
+
+        The combination is done by taking the minimum value of all equivalent distances.
+
+        Parameters
+        ==========
+        catalytic_labels : dict
+            Dictionary defining which distances will be combined under a common name.
+            (for details see above).
+        """
+        for name in metric_distances:
+            if 'metric_'+name in self.distance_data.keys() and not overwrite:
+                print('Combined metric %s already added. Give overwrite=True to recombine' % name)
+            else:
+                values = []
+                models = []
+
+                for model in self.models_names:
+                    mask = []
+                    for index in self.distance_data.index:
+                        if model in index:
+                            mask.append(True)
+                        else:
+                            mask.append(False)
+
+                    model_data = self.distance_data[mask]
+                    model_distances = metric_distances[name][model]
+
+                    values += model_data[model_distances].min(axis=1).tolist()
+
+                self.distance_data['metric_'+name] = values
+
+        return self.distance_data
+
+    def getModelsProtonationStates(self, residues=None):
+        """
+        Get the protonation state of all or specific residues in all protein models.
+
+        For getting the protonation states of only a subset of residues a dictionary must
+        be given with the 'residues' option. The keys of the dictionary are the models'
+        names, and, the values, lists of tuples defining each residue to be query. The
+        residue's tuples are defined as: (chain_id, residue_id).
+
+        Parameters
+        ==========
+        residues : dict
+            Dictionary with lists of tuples of residues (e.g., (chain_id, residue_id)) to query for each model.
+
+        Returns
+        =======
+        protonation_states : pandas.DataFrame
+            Data frame with protonation information.
+        """
+
+        # Set input dictionary to store protonation states
+        self.protonation_states = {}
+        self.protonation_states['model'] = []
+        self.protonation_states['chain'] = []
+        self.protonation_states['residue'] = []
+        self.protonation_states['name'] = []
+        self.protonation_states['state'] = []
+
+        # Iterate all models' structures
+        for model in self.models_names:
+            structure = self.structures[model]
+            for r in structure.get_residues():
+
+                # Skip if a list of residues is given per model
+                if residues != None:
+                    if (r.get_parent().id, r.id[1]) not in residues[model]:
+                        continue
+
+                # Get Histidine protonation states
+                if r.resname == 'HIS':
+                    atoms = [a.name for a in r]
+                    self.protonation_states['model'].append(model)
+                    self.protonation_states['chain'].append(r.get_parent().id)
+                    self.protonation_states['residue'].append(r.id[1])
+                    self.protonation_states['name'].append(r.resname)
+                    if 'HE2' in atoms and 'HD1' in atoms:
+                        self.protonation_states['state'].append('HIP')
+                    elif 'HD1' in atoms:
+                        self.protonation_states['state'].append('HID')
+                    elif 'HE2' in atoms:
+                        self.protonation_states['state'].append('HIE')
+
+        # Convert dictionary to Pandas
+        self.protonation_states = pd.DataFrame(self.protonation_states)
+        self.protonation_states.set_index(['model', 'chain', 'residue'], inplace=True)
+
+        return self.protonation_states
+
+    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None):
         """
         Combine different equivalent distances into specific named metrics. The function
         takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
@@ -1936,7 +2143,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder):
         """
-        Missing
+        Extract docking poses present in a docking_data dataframe. The docking DataFrame
+        contains the same structure as the self.docking_data dataframe, parameter of
+        this class. This dataframe makes reference to the docking_folder where the
+        docking results are contained.
+
+        Parameters
+        ==========
+        dockign_data : pandas.DataFrame
+            Datframe containing the poses to be extracted
+        docking_folder : str
+            Path the folder containing the docking results
+        output_folder : str
+            Path to the folder where the docking structures will be saved.
         """
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
@@ -2043,7 +2262,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
-                                  decompose_bb_hb_into_pair_energies=False):
+                                  protonation_states=False, decompose_bb_hb_into_pair_energies=False):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -2119,6 +2338,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 analyse = True
 
+        if protonation_states and not overwrite:
+            if os.path.exists('._rosetta_protonation_data.csv'):
+                self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
+                self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
+            else:
+                analyse = True
+
         if analyse:
             command = 'python ._analyse_calculation.py . '
             if atom_pairs != None:
@@ -2130,6 +2356,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if query_residues != None:
                     command += '--query_residues '
                     command += ','.join([str(r) for r in query_residues])+' '
+            if protonation_states:
+                command += '--protonation_states '
             if decompose_bb_hb_into_pair_energies:
                 command += '--decompose_bb_hb_into_pair_energies'
             try:
@@ -2159,7 +2387,161 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
                 self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
 
+            if protonation_states:
+                self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
+                self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
+
         os.chdir('..')
+
+    def getRosettaModelDistances(self, model):
+        """
+        Get all distances related to a model from the self.rosetta_data DataFrame.
+
+        Parameters
+        ==========
+        model : str
+            Model name
+
+        Return
+        ======
+        distances : list
+            Distances containing non-nan values for the model.
+
+        """
+
+        mask = []
+        for pose in self.rosetta_data.index:
+            model_base_name = '_'.join(pose.split('_')[:-1])
+            if model == model_base_name:
+                mask.append(True)
+            else:
+                mask.append(False)
+        model_data = self.rosetta_data[mask]
+
+        distances = []
+        for d in model_data:
+            if d.startswith('distance_'):
+                if not model_data[d].dropna().empty:
+                    distances.append(d)
+
+        return distances
+
+    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False):
+        """
+        Combine different equivalent distances contained in the self.distance_data
+        attribute into specific named metrics. The function takes as input a
+        dictionary (metric_distances) composed of inner dictionaries as follows:
+
+            metric_labels = {
+                metric_name = {
+                    model = distances_list}}}
+
+        The innermost distances_list object contains all equivalent distance names for
+        a specific protein to be combined under the same metric_name column.
+
+        The combination is done by taking the minimum value of all equivalent distances.
+
+        Parmeters
+        =========
+        metric_labels : dict
+            Dictionary defining which distances will be combined under a common name.
+            (for details see above).
+        """
+
+        for name in metric_labels:
+            if 'metric_'+name in self.rosetta_data.keys() and not overwrite:
+                print('Combined metric %s already added. Give overwrite=True to recombine' % name)
+            else:
+                values = []
+                models = []
+                for model in self.rosetta_data.index:
+                    base_name = '_'.join(model.split('_')[:-1])
+                    if base_name not in models:
+                        models.append(base_name)
+
+                for model in list(models):
+                    mask = []
+                    for index in self.rosetta_data.index:
+                        if model in index:
+                            mask.append(True)
+                        else:
+                            mask.append(False)
+                    model_data = self.rosetta_data[mask]
+                    model_distances = metric_labels[name][model]
+
+                    values += model_data[model_distances].min(axis=1).tolist()
+
+                self.rosetta_data['metric_'+name] = values
+
+    def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
+        """
+        Filter the rosetta_data attribute based on the fufillment of protonation state conditions. Protonations states
+        defintions must be given through the residue_states attribute. The input is a dictionary with model names as keys
+        and as values lists of tuples with the following format: [((chain_id, residue_id), protonation_state), etc.]
+
+        The function is currently implemented to only work with histidine residues.
+
+        Parameters
+        ==========
+        residue_states : dict
+            By model and residue definition of protonation states.
+        inplace : bool
+            Overwrites the self.rosetta_data by the filtered data frame.
+
+        Returns
+        =======
+        filtered_data : pandas.DataFrame
+            self.rosetta_data dataframe filterd by protonation states.
+        """
+
+        data = self.rosetta_protonation_states.reset_index()
+        data.columns = [c.replace(' ', '_') for c in data.columns]
+
+        filtered_models = []
+        filtered_rows = []
+
+        old_model = None
+        histidines = []
+        for index, row in data.iterrows():
+            ti = time.time()
+            model_tag = row.description
+
+            # Empty hisitidine list
+            if model_tag != old_model:
+
+                # Check protonation states are in data
+                keep_model = True
+                if histidines != []:
+                    model_base_name = '_'.join(model_tag.split('_')[:-1])
+                    for rs in residue_states[model_base_name]:
+                        if rs not in histidines:
+                            keep_model = False
+
+                # Store model
+                if keep_model and histidines != []:
+                    filtered_models.append(model_tag)
+
+                histidines = []
+
+            histidines.append(((row.chain, row.residue), (row.residue_state)))
+
+            # Update current model as old
+            old_model = model_tag
+
+        # filter the rosetta_data attribute
+        mask = []
+        rosetta_data = self.rosetta_data.reset_index()
+        for index, row in rosetta_data.iterrows():
+            if row.description in filtered_models:
+                mask.append(True)
+            else:
+                mask.append(False)
+
+        filtered_data = self.rosetta_data[mask]
+        if inplace:
+            self.rosetta_data = filtered_data
+
+        return filtered_data
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
@@ -2398,6 +2780,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Dictionary containing missing or changed information.
         """
 
+        if self.multi_chain:
+            raise ValueError('PDBs contain multiple chains. Please select one chain.')
         self.readTargetSequences(sequences_file)
 
         # Iterate models to store sequence differences

@@ -10,8 +10,9 @@ parser.add_argument('rosetta_folder', help='Path to json file containing the ato
 parser.add_argument('--atom_pairs', help='Path to json file containing the atom pairs to calculate distances.')
 parser.add_argument('--energy_by_residue', action='store_true', default=False, help='Get energy by residue information?')
 parser.add_argument('--interacting_residues', action='store_true', default=False, help='Calculate interacting neighbour residues')
+parser.add_argument('--protonation_states', action='store_true', default=False, help='Get the protonation states of a group of tritable residues.')
 parser.add_argument('--query_residues',
-                    help='Comma separated (no spaces) list of residues to calculate interacting neighbours. Works together with --interacting_residues')
+                    help='Comma separated (no spaces) list of residues. Works together with --interacting_residues or --protonation_states')
 parser.add_argument('--decompose_bb_hb_into_pair_energies', action='store_true', default=False,
                     help='Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the number of calculations, so is off by default).')
 
@@ -20,8 +21,10 @@ rosetta_folder = args.rosetta_folder
 atom_pairs = args.atom_pairs
 energy_by_residue = args.energy_by_residue
 interacting_residues = args.interacting_residues
+protonation_states = args.protonation_states
 query_residues = args.query_residues
-query_residues = [int(r) for r in query_residues.split(',')]
+if query_residues != None:
+    query_residues = [int(r) for r in query_residues.split(',')]
 decompose_bb_hb_into_pair_energies = args.decompose_bb_hb_into_pair_energies
 
 # Initialise PyRosetta environment
@@ -59,6 +62,7 @@ def readPosesFromSilent(silent_file, params_dir=None):
     ========
         Generator object for the poses in the silent file.
     """
+
     # Get param files
     params = []
     if params_dir != None:
@@ -301,7 +305,7 @@ def deltaEMutation(pose, mutant_position, mutant_aa, by_residue=False,
 
 # Check whether silent files will be read
 read_silent = False
-if atom_pairs != None or energy_by_residue or interacting_residues:
+if atom_pairs != None or energy_by_residue or interacting_residues or protonation_states:
     read_silent = True
 
 # Create dictionary entries for data
@@ -337,6 +341,13 @@ if interacting_residues:
     # Define residue to mutate to
     mutate_to = 'G'
 
+if protonation_states:
+    protonation_data = {}
+    protonation_data['description'] = []
+    protonation_data['chain'] = []
+    protonation_data['residue'] = []
+    protonation_data['residue state'] = []
+
 for model in silent_file:
 
     # Get all scores from silent file
@@ -348,7 +359,7 @@ for model in silent_file:
             data[score] = []
 
     if read_silent:
-        for pose in readPosesFromSilent(silent_file[model], params):
+        for pose in readPosesFromSilent(silent_file[model], params_dir=params):
 
             tag = pose.pdb_info().name()
 
@@ -366,7 +377,8 @@ for model in silent_file:
 
                 # Get atom pair distances
                 for pair in atom_pairs[model]:
-                    label = '_'.join([str(x) for x in pair[0]])+'-'
+                    label = 'distance_'
+                    label += '_'.join([str(x) for x in pair[0]])+'-'
                     label += '_'.join([str(x) for x in pair[1]])
 
                     # Add label to dictionary if not in it
@@ -451,10 +463,28 @@ for model in silent_file:
                             for st in dM[n]:
                                 neighbours_data[st].append(dM[n][st][r])
 
+            # Only implemented for histidines (of course it will be easy todo it for other residues)
+            if protonation_states:
+                for r in range(1, pose.total_residue()+1):
+                    residue =  pose.residue(r)
+                    resname = residue.name()
+                    res_info = pose.pdb_info().pose2pdb(r)
+                    res = res_info.split()[0]
+                    chain = res_info.split()[1]
+
+                    if resname.startswith('HIS'):
+                        if resname == 'HIS_D':
+                            his_type = 'HID'
+                        if resname == 'HIS':
+                            his_type = 'HIE'
+                        protonation_data['description'].append(tag)
+                        protonation_data['chain'].append(chain)
+                        protonation_data['residue'].append(res)
+                        protonation_data['residue state'].append(his_type)
+
     # If no atom pair is given just return the rosetta scores
     else:
         scores_data.append(readScoreFromSilent(silent_file[model], indexing=False))
-        print(scores_data)
 
 # Add missing values in distance label entries
 if atom_pairs != None and read_silent:
@@ -481,3 +511,7 @@ if energy_by_residue:
 if interacting_residues:
     neighbours_data = pd.DataFrame(neighbours_data)
     neighbours_data.to_csv('._rosetta_interacting_residues_data.csv', index=False)
+
+if protonation_states:
+    protonation_data = pd.DataFrame(protonation_data)
+    protonation_data.to_csv('._rosetta_protonation_data.csv', index=False)
