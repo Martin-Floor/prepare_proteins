@@ -968,7 +968,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if use_new_version:
                         command += '-force '+str(ps[0])+" "+str(ps[1])+' '
                     else:
-                        command += '--force '+str(ps[0])+" "+str(ps[1])+' '
+                        command += '-force '+str(ps[0])+" "+str(ps[1])+' '
 
             command += '-JOBNAME '+model+' '
             command += '-HOST localhost:1 '
@@ -1166,7 +1166,70 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpSiteMapCalculation(self, job_folder, poses_folder, site_box=10, resolution='fine', overwrite=False):
+    def setUpSiteMapForModels(self, job_folder, target_residue, site_box=10,
+                              resolution='fine', reportsize=100, overwrite=False):
+        """
+        Generates a SiteMap calculation for model poses (no ligand) near specified residues.
+
+        Parameters
+        ==========
+        job_folder : str
+            Path to the calculation folder
+        """
+
+        # Create site map job folders
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Copy script to generate protein and ligand mae inputs, separately.
+        _copyScriptFile(job_folder, 'prepareForSiteMap.py')
+        script_path = job_folder+'/._prepareForSiteMap.py'
+
+        # Save all input models
+        self.saveModels(job_folder+'/input_models')
+
+        # Create input files
+        jobs = []
+        for model in self.models_names:
+
+            # Createa output folder for each model
+            if not os.path.exists(job_folder+'/output_models/'+model):
+                os.mkdir(job_folder+'/output_models/'+model)
+
+            # Generate input protein and ligand files
+            input_protein = job_folder+'/input_models/'+model+'.pdb'
+            if not os.path.exists(input_protein) or overwrite:
+                command = 'run '+script_path+' '
+                command += input_protein+' '
+                command += job_folder+'/output_models/'+model+' '
+                command += '--protein_only '
+                os.system(command)
+
+            # Add site map command
+            command = 'cd '+job_folder+'/output_models/'+model+'\n'
+            command += '"${SCHRODINGER}/sitemap" '
+            command += '-prot ../../input_models/'+model+'/'+model+'_protein.mae'+' '
+            command += '-sitebox '+str(site_box)+' '
+            command += '-resolution '+str(resolution)+' '
+            command += '-reportsize '+str(reportsize)+' '
+            command += '-keepvolpts yes '
+            command += '-keeplogs yes '
+            command += '-siteasl \"res.num {'+target_residue+'}\" '
+            command += '-HOST localhost:1 '
+            command += '-TMPLAUNCHDIR\n'
+            command += '-WAIT\n'
+            command += 'cd ../../..\n'
+            jobs.append(command)
+
+        return jobs
+
+    def setUpSiteMapForLigands(self, job_folder, poses_folder, site_box=10, resolution='fine', overwrite=False):
         """
         Generates a SiteMap calculation for Docking poses outputed by the extractDockingPoses()
         function.
