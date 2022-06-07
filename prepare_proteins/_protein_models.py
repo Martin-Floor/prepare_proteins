@@ -1340,7 +1340,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
-                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False,
+                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot'):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -1427,6 +1427,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/bin/PELE-1.7.2_mpi"\n')
                             iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Data"\n')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
+                        elif ninety_degrees_version:
+                            # Use new PELE version with implemented energy_by_residue
+                            iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n')
+                            iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Data"\n')
+                            iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Documents/"\n')
                         iyf.write("system: '"+" ".join(models[model])+"'\n")
                         iyf.write("chain: 'L'\n")
                         if peptide:
