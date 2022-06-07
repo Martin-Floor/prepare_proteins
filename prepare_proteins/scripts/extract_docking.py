@@ -8,10 +8,12 @@ from schrodinger import structure
 parser = argparse.ArgumentParser()
 parser.add_argument('docking_data', default=None, help='CSV file containing docking data.')
 parser.add_argument('docking_folder', default=None, help='Docking output folder')
+parser.add_argument('--separator', default=None, help='Separator used to write PDB files')
 
 args=parser.parse_args()
 docking_data = args.docking_data
 docking_folder = args.docking_folder
+separator = args.separator
 
 # Read dockign data to pandas
 docking_data = pd.read_csv(docking_data)
@@ -51,7 +53,7 @@ for model in poses:
             if 'r_i_glide_gscore' in st.property:
                 if pose in poses[model][ligand]:
                     complex = protein.merge(st)
-                    output_pdb = model+'-'+ligand+'-'+str(pose)+'.pdb'
+                    output_pdb = model+separator+ligand+separator+str(pose)+'.pdb'
                     PDBWriter = structure.PDBWriter(model+'/'+output_pdb)
                     PDBWriter.write(complex)
             else:

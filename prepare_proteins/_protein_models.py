@@ -492,7 +492,7 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def removeTerminiByConfidenceScore(self):
+    def removeTerminiByConfidenceScore(self, confidence_threshold=70):
         """
         Remove terminal regions with low confidence scores from models.
         """
@@ -503,14 +503,14 @@ chain to use for each model with the chains option.' % model)
             atoms = [a for a in self.structures[model].get_atoms()]
             n_terminus = set()
             for a in atoms:
-                if a.bfactor < 50:
+                if a.bfactor < confidence_threshold:
                     n_terminus.add(a.get_parent().id[1])
                 else:
                     break
             c_terminus = set()
 
             for a in reversed(atoms):
-                if a.bfactor < 50:
+                if a.bfactor < confidence_threshold:
                     c_terminus.add(a.get_parent().id[1])
                 else:
                     break
@@ -1338,7 +1338,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None,
+    def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot'):
@@ -1473,11 +1473,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("atom_dist:\n")
                             for d in distances[protein][ligand]:
                                 if isinstance(d[0], str):
-                                    d1 = "- 'L:1:"+d[0]+"'\n"
+                                    d1 = "- 'L:"+str(ligand_index)+":"+d[0]+"'\n"
                                 else:
                                     d1 = "- '"+d[0][0]+":"+str(d[0][1])+":"+d[0][2]+"'\n"
                                 if isinstance(d[1], str):
-                                    d2 = "- 'L:1:"+d[1]+"'\n"
+                                    d2 = "- 'L:"+str(ligand_index)+":"+d[1]+"'\n"
                                 else:
                                     d2 = "- '"+d[1][0]+":"+str(d[1][1])+":"+d[1][2]+"'\n"
                                 iyf.write(d1)
@@ -2101,7 +2101,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return pele_data
 
-    def extractDockingPoses(self, docking_data, docking_folder, output_folder):
+    def extractDockingPoses(self, docking_data, docking_folder, output_folder, separator='-'):
         """
         Extract docking poses present in a docking_data dataframe. The docking DataFrame
         contains the same structure as the self.docking_data dataframe, parameter of
@@ -2116,7 +2116,18 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path the folder containing the docking results
         output_folder : str
             Path to the folder where the docking structures will be saved.
+        separator : str
+            Symbol used to separate protein, ligand, and docking pose index.
         """
+
+        # Check the separator is not in model or ligand names
+        for model in self.models_names:
+            if separator in model:
+                raise ValueError('The separator %s was found in model name %s. Please use a different separator symbol.' % (separator, model))
+            for ligand in self.docking_ligands[model]:
+                if separator in ligand:
+                    raise ValueError('The separator %s was found in ligand name %s. Please use a different separator symbol.' % (separator, ligand))
+
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
 
@@ -2132,7 +2143,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         dd.to_csv('._docking_data.csv', index=False)
 
         # Execute docking analysis
-        command = 'run ._extract_docking.py ._docking_data.csv ../'+docking_folder
+        command = 'run ._extract_docking.py ._docking_data.csv ../'+docking_folder+' --separator '+separator
         os.system(command)
 
         # Remove docking data
