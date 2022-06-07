@@ -1769,6 +1769,25 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.system('run ._PDBtoMAE.py')
         os.chdir(cwd)
 
+    def convertLigandMAEtoPDB(self, ligands_folder):
+        """
+        Convert ligand MAEs into PDB files.
+
+        Parameters
+        ==========
+        ligands_folder : str
+            Path to the folder where ligands are in MAE format
+        """
+
+        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
+        _copyScriptFile(ligands_folder, 'MAEtoPDB.py')
+        script_name = '._MAEtoPDB.py'
+
+        cwd = os.getcwd()
+        os.chdir(ligands_folder)
+        os.system('run ._MAEtoPDB.py')
+        os.chdir(cwd)
+
     def getDockingDistances(self, protein, ligand):
         """
         Get the distances related to a protein and ligand docking.
