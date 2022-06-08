@@ -2095,7 +2095,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         extracted = []
         selected_indexes = []
 
-        for t in np.arange(min_threshold, max_threshold+(step/10), step):
+        for t in np.arange(min_threshold, max_threshold+(step_size/10), step_size):
             filter_values = {m:t for m in metrics}
             best_poses = self.getBestDockingPoses(filter_values, n_models=1)
             mask = []
