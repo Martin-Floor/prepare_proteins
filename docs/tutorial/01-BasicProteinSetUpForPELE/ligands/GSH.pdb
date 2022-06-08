@@ -1,0 +1,83 @@
+TITLE     glutathione
+REMARK   4      COMPLIES WITH FORMAT V. 3.0, 1-DEC-2006
+REMARK 888
+REMARK 888 WRITTEN BY MAESTRO (A PRODUCT OF SCHRODINGER, LLC)
+HETATM    1  OX  GSH     0      -5.998   1.067  -0.099  1.00  0.00           O  
+HETATM    2  C1  GSH     0      -4.950   1.330  -0.707  1.00  0.00           C  
+HETATM    3  O2  GSH     0      -4.509   2.488  -0.751  1.00  0.00           O1-
+HETATM    4  C2  GSH     0      -4.175   0.258  -1.414  1.00  0.00           C  
+HETATM    5  N1  GSH     0      -4.648   0.143  -2.791  1.00  0.00           N  
+HETATM    6  C3  GSH     0      -2.718   0.613  -1.414  1.00  0.00           C  
+HETATM    7  C4  GSH     0      -2.232   0.731   0.000  1.00  0.00           C  
+HETATM    8  C5  GSH     0      -0.774   1.085   0.000  1.00  0.00           C  
+HETATM    9  N2  GSH     0       0.000   0.000   0.000  1.00  0.00           N  
+HETATM   10  O3  GSH     0      -0.322   2.227   0.000  1.00  0.00           O  
+HETATM   11  C6  GSH     0       1.460   0.000   0.000  1.00  0.00           C  
+HETATM   12  C7  GSH     0       1.960  -0.707  -1.225  1.00  0.00           C  
+HETATM   13  C8  GSH     0       1.960  -0.707   1.225  1.00  0.00           C  
+HETATM   14  S1  GSH     0       3.740  -0.707   1.225  1.00  0.00           S  
+HETATM   15  N3  GSH     0       2.709   0.091  -1.987  1.00  0.00           N  
+HETATM   16  O4  GSH     0       1.724  -1.876  -1.514  1.00  0.00           O  
+HETATM   17  C9  GSH     0       3.344  -0.291  -3.245  1.00  0.00           C  
+HETATM   18  C10 GSH     0       4.717  -0.829  -2.968  1.00  0.00           C  
+HETATM   19  O5  GSH     0       4.810  -1.830  -2.242  1.00  0.00           O1-
+HETATM   20  O6  GSH     0       5.725  -0.292  -3.451  1.00  0.00           O  
+HETATM   21  H1  GSH     0      -4.318  -0.692  -0.900  1.00  0.00           H  
+HETATM   22  H2  GSH     0      -4.126  -0.578  -3.267  1.00  0.00           H  
+HETATM   23  H3  GSH     0      -5.630  -0.094  -2.791  1.00  0.00           H  
+HETATM   24  H4  GSH     0      -2.154  -0.166  -1.928  1.00  0.00           H  
+HETATM   25  H5  GSH     0      -2.575   1.563  -1.928  1.00  0.00           H  
+HETATM   26  H6  GSH     0      -2.795   1.510   0.514  1.00  0.00           H  
+HETATM   27  H7  GSH     0      -2.374  -0.220   0.514  1.00  0.00           H  
+HETATM   28  H8  GSH     0      -0.329  -0.955   0.000  1.00  0.00           H  
+HETATM   29  H9  GSH     0       1.823   1.028   0.000  1.00  0.00           H  
+HETATM   30  H10 GSH     0       1.597  -0.193   2.115  1.00  0.00           H  
+HETATM   31  H11 GSH     0       1.597  -1.735   1.225  1.00  0.00           H  
+HETATM   32  H12 GSH     0       3.788  -1.375   2.381  1.00  0.00           H  
+HETATM   33  H13 GSH     0       2.928   1.056  -1.787  1.00  0.00           H  
+HETATM   34  H14 GSH     0       2.745  -1.057  -3.737  1.00  0.00           H  
+HETATM   35  H15 GSH     0       3.420   0.583  -3.893  1.00  0.00           H  
+CONECT    1    2
+CONECT    1    2
+CONECT    2    1    3    4
+CONECT    2    1
+CONECT    3    2
+CONECT    4    2    5    6   21
+CONECT    5    4   22   23
+CONECT    6    4    7   24   25
+CONECT    7    6    8   26   27
+CONECT    8    7    9   10
+CONECT    8   10
+CONECT    9    8   11   28
+CONECT   10    8
+CONECT   10    8
+CONECT   11    9   12   13   29
+CONECT   12   11   15   16
+CONECT   12   16
+CONECT   13   11   14   30   31
+CONECT   14   13   32
+CONECT   15   12   17   33
+CONECT   16   12
+CONECT   16   12
+CONECT   17   15   18   34   35
+CONECT   18   17   19   20
+CONECT   18   20
+CONECT   19   18
+CONECT   20   18
+CONECT   20   18
+CONECT   21    4
+CONECT   22    5
+CONECT   23    5
+CONECT   24    6
+CONECT   25    6
+CONECT   26    7
+CONECT   27    7
+CONECT   28    9
+CONECT   29   11
+CONECT   30   13
+CONECT   31   13
+CONECT   32   14
+CONECT   33   15
+CONECT   34   17
+CONECT   35   17
+END   

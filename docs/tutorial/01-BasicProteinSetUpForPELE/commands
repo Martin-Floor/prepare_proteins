@@ -1,2 +1,0 @@
-#!/bin/sh
-for script in commands_?; do nohup bash $script &> ${script%.*}.nohup& done

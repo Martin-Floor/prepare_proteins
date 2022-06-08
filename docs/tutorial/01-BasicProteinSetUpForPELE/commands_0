@@ -1,5 +1,0 @@
-#!/bin/sh
-cd alphafold
-Path=$(pwd)
-bsc_alphafold --fasta_paths $Path/input_sequences/GPX_Bacillus-subtilis.fasta --output_dir=$Path/output_models --model_preset=monomer_ptm --max_template_date=2022-01-01 --random_seed 1
-cd ..
