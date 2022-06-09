@@ -1,5 +1,5 @@
 # prepare_proteins
-A Python package for the BSC-EAPM group to set up protein models calculation.
+A Python package developed for the BSC-EAPM group to set up protein models calculation.
 
 ## Installation and dependencies
 
