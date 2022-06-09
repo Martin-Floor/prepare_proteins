@@ -1,11 +1,5 @@
 # prepare_proteins
-A Python package to fix PDB models for further refinement
-
-
-### Pending implementation
-
-* For prepare protein optimization
-	- Control script for log file monitoring.
+A Python package for the BSC-EAPM group to set up protein models calculation.
 
 ### Bugs / issues 
 
