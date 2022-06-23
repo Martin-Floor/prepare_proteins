@@ -1,11 +1,15 @@
 # prepare_proteins
-A Python package to fix PDB models for further refinement
+A Python package developed for the BSC-EAPM group to set up protein models calculations.
 
+## Installation and dependencies
 
-### Pending implementation
+For instructions, please check the README file located in the dependencies folder.
 
-* For prepare protein optimization
-	- Control script for log file monitoring.
+## Tutorials
+
+A tutorial for basic usage is available in the docs folder:
+
+ * [Basic protein set up for running PELE](https://github.com/Martin-Floor/prepare_proteins/blob/main/docs/tutorial/01-BasicProteinSetUpForPELE/01-BasicProteinSetUpForPELE.ipynb)
 
 ### Bugs / issues 
 
