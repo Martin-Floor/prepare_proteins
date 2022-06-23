@@ -949,7 +949,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if remove_hydrogens:
                 command += '-rehtreat '
             if no_epik:
-                command += '-no_epik '
+                command += '-noepik '
             else:
                 if epik_pH:
                     command += '-epik_pH '+str(pH)+' '
@@ -1339,9 +1339,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
-                             box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100,
+                             box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
-                             analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot'):
+                             analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
+                             spawning='independent'):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1354,6 +1355,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to input docking poses folder.
         input_yaml : str
             Path to the input YAML file to be used as template for all the runs.
+        ligand_energy_groups : dict
+            Additional groups to consider when doing energy by residue reports.
         Missing!
         """
 
@@ -1419,7 +1422,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     protein, ligand = model
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj',
-                                'usesrun', 'use_peleffy', 'debug', 'box_radius']
+                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'spawning']
 
                     with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
                         if energy_by_residue:
@@ -1446,6 +1449,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         iyf.write("equilibration: true\n")
                         iyf.write("equilibration_mode: '"+equilibration_mode+"'\n")
                         iyf.write("equilibration_steps: "+str(equilibration_steps)+"\n")
+                        iyf.write("spawning: '"+str(spawning)+"'\n")
                         iyf.write("traj: trajectory.xtc\n")
                         iyf.write("working_folder: 'output'\n")
                         if usesrun:
@@ -1465,8 +1469,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(box_centers, type(None)) and peptide:
                             raise ValuError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
-                            box_center = ':'.join([str(x) for x in box_centers[protein]])
-                            iyf.write("box_center: '"+box_center+"'\n")
+                            box_center = ''
+                            for coord in box_centers[model]:
+                                if not isinstance(coord, float):
+                                    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
+                                box_center += '  - '+str(coord)+'\n'
+                            iyf.write("box_center: \n"+box_center)
 
                         # energy by residue is not implemented in PELE platform, therefore
                         # a scond script will modify the PELE.conf file to set up the energy
@@ -1500,6 +1508,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if energy_by_residue:
                         _copyScriptFile(pele_folder, 'addEnergyByResidueToPELEconf.py')
                         ebr_script_name = '._addEnergyByResidueToPELEconf.py'
+                        if not isinstance(ligand_energy_groups, type(None)):
+                            if not isinstance(ligand_energy_groups, dict):
+                                raise ValuError('ligand_energy_groups, must be given as a dictionary')
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/ligand_energy_groups.json', 'w') as jf:
+                                json.dump(ligand_energy_groups[ligand], jf)
 
                     if peptide:
                         _copyScriptFile(pele_folder, 'modifyPelePlatformForPeptide.py')
@@ -1510,6 +1523,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'python -m pele_platform.main input.yaml\n'
                     if energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
+                        if isinstance(ligand_energy_groups, dict):
+                            command += ' --ligand_energy_groups ligand_energy_groups.json'
+                            command += ' --ligand_index '+str(ligand_index)
                         if peptide:
                             command += ' --peptide \n'
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
@@ -2091,7 +2107,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             return failed, self.docking_data[self.docking_data.index.isin(bp)]
         return self.docking_data[self.docking_data.index.isin(bp)]
 
-    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5, max_threshold=5.0, step_size=0.1):
+    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5, max_threshold=5.0, step=0.1):
         extracted = []
         selected_indexes = []
 
@@ -2242,6 +2258,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         for d in os.listdir(prepwizard_folder+'/output_models'):
             if os.path.isdir(prepwizard_folder+'/output_models/'+d):
                 for f in os.listdir(prepwizard_folder+'/output_models/'+d):
+                    if f.endswith('.log'):
+                        with open(prepwizard_folder+'/output_models/'+d+'/'+f) as lf:
+                            for l in lf:
+                                if 'error' in l.lower():
+                                    print('Error was found in log file: %s. Please check the calculation!' % f)
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
                         models.append(model)
