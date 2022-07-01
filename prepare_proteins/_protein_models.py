@@ -1342,7 +1342,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent'):
+                             spawning='independent', continuation=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1363,13 +1363,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create PELE job folder
         if not os.path.exists(pele_folder):
             os.mkdir(pele_folder)
-
-        # template_path = {}
-        # if not isinstance(ligand_parameters, type(None)):
-        #     for ligand in os.listdir(ligand_parameters):
-        #         template_path[ligand] = {}
-        #         template_path[ligand]['interact'] = ligand_parameters+'/'+ligand+'/'+ligand+'z'
-        #         template_path[ligand]['rotamers'] = ligand_parameters+'/'+ligand+'/'+ligand+'.rot.assign'
 
         # Read docking poses information from models_folder and create pele input
         # folders.
@@ -1431,7 +1424,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Data"\n')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
                         elif ninety_degrees_version:
-                            # Use new PELE version with implemented energy_by_residue
+                            # Use new PELE version with implemented 90 degrees fix
                             iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n')
                             iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Data"\n')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Documents/"\n')
@@ -1520,8 +1513,21 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Create command
                     command = 'cd '+pele_folder+'/'+protein+'_'+ligand+'\n'
-                    command += 'python -m pele_platform.main input.yaml\n'
-                    if energy_by_residue:
+                    if not continuation:
+                        command += 'python -m pele_platform.main input.yaml\n'
+                    if continuation:
+                        debug_line = False
+                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
+                                for l in iyml:
+                                    if 'debug: true' in l:
+                                        l = 'restart: true\n'
+                                        debug_line = True
+                                    oyml.write(l)
+                                if not debug_line:
+                                    oyml.write('restart: true\n')
+                        command += 'python -m pele_platform.main input_restart.yaml\n'
+                    elif energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
                         if isinstance(ligand_energy_groups, dict):
                             command += ' --ligand_energy_groups ligand_energy_groups.json'
@@ -2107,7 +2113,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             return failed, self.docking_data[self.docking_data.index.isin(bp)]
         return self.docking_data[self.docking_data.index.isin(bp)]
 
-    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5, max_threshold=5.0, step=0.1):
+    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5, max_threshold=5.0, step_size=0.1):
         extracted = []
         selected_indexes = []
 
