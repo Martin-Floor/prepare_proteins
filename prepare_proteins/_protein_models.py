@@ -1428,7 +1428,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n')
                             iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Data"\n')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Documents/"\n')
-                        iyf.write("system: '"+" ".join(models[model])+"'\n")
+                        if len(models[model]) > 1:
+                            equilibration_mode = 'equilibrationCluster'
+                            iyf.write("system: '*.pdb'\n")
+                        else:
+                            iyf.write("system: '"+" ".join(models[model])+"'\n")
                         iyf.write("chain: 'L'\n")
                         if peptide:
                             iyf.write("resname: 'XXX'\n")
