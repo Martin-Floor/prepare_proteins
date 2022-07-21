@@ -1470,8 +1470,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-
-
     def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False):
         """
         Sets up MD simulations for each model. The current state only allows to set
@@ -1853,6 +1851,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     self.distance_data[label] = []
 
         for model in self.structures:
+
 
             self.distance_data['model'].append(model)
 
@@ -2360,6 +2359,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '--protonation_states '
             if decompose_bb_hb_into_pair_energies:
                 command += '--decompose_bb_hb_into_pair_energies'
+            
             try:
                 os.system(command)
             except:
