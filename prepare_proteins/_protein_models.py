@@ -1466,10 +1466,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(box_centers, type(None)) and peptide:
                             raise ValuError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
+                            if not all(isinstance(x, float) for x in box_centers[model]):
+                                # get coordinates from tuple
+                                for chain in self.structures[model[0]].get_chains():
+                                    if chain.id == box_centers[model][0]:
+                                        for r in chain:
+                                            if r.id[1] == box_centers[model][1]:
+                                                for atom in r:
+                                                    if atom.name == box_centers[model][2]:
+                                                        coordinates = atom.coord
+                            else:
+                                coordinates = box_centers[model]
+
                             box_center = ''
-                            for coord in box_centers[model]:
-                                if not isinstance(coord, float):
-                                    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
+                            for coord in coordinates:
+                                #if not isinstance(coord, float):
+                                #    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
                                 box_center += '  - '+str(coord)+'\n'
                             iyf.write("box_center: \n"+box_center)
 
@@ -1918,6 +1930,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.distance_data.set_index('model', inplace=True)
 
         return self.distance_data
+
+
 
     def getModelDistances(self, model):
         """
