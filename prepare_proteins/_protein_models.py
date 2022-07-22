@@ -1970,14 +1970,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for model in self.models_names:
                     mask = []
                     for index in self.distance_data.index:
-                        if model in index:
+                        if model == index:
                             mask.append(True)
                         else:
                             mask.append(False)
 
                     model_data = self.distance_data[mask]
                     model_distances = metric_distances[name][model]
-
                     values += model_data[model_distances].min(axis=1).tolist()
 
                 self.distance_data['metric_'+name] = values
