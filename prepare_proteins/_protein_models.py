@@ -2042,7 +2042,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.protonation_states
 
-    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None):
+    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None,overwrite=False):
         """
         Combine different equivalent distances into specific named metrics. The function
         takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
