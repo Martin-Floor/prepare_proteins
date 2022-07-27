@@ -562,6 +562,133 @@ chain to use for each model with the chains option.' % model)
                                                   trajectory_chain_indexes=trajectory_chain_indexes)
             traj.save(output_folder+'/'+model+'.pdb')
 
+    def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
+                      param_files=None, mpi_command='slurm'):
+        """
+        Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
+        with each protein as the first key and the name of the particular mutant as the second key.
+        The value of each inner dictionary is a list containing the mutations, with each mutation
+        described by a 2-element tuple (residue_id, aa_to_mutate). E.g., (73, 'A').
+
+        Parameters
+        ==========
+        job_folder : str
+            Folder path where to place the mutation job.
+        mutants : dict
+            Dictionary specify the mutants to generate.
+        relax_cycles : int
+            Apply this number of relax cycles (default:0, i.e., no relax).
+        nstruct : int
+            Number of structures to generate when relaxing mutant
+        param_files : list
+            Params file to use when reading model with Rosetta.
+        """
+
+        mpi_commands = ['slurm', 'openmpi', None]
+        if mpi_command not in ['slurm', 'openmpi', None]:
+            raise ValuError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
+
+        # Create mutation job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+        if not os.path.exists(job_folder+'/flags'):
+            os.mkdir(job_folder+'/flags')
+        if not os.path.exists(job_folder+'/xml'):
+            os.mkdir(job_folder+'/xml')
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Save considered models
+        considered_models = list(mutants.keys())
+        self.saveModels(job_folder+'/input_models', models=considered_models)
+
+        jobs = []
+
+        # Create all-atom score function
+        score_fxn_name = 'ref2015'
+        sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
+                                                               weights_file=score_fxn_name)
+
+        for model in self.models_names:
+            # Skip models not in given mutants
+            if model not in considered_models:
+                continue
+
+            if not os.path.exists(job_folder+'/output_models/'+model):
+                os.mkdir(job_folder+'/output_models/'+model)
+
+            # Iterate each mutant
+            for mutant in mutants[model]:
+
+                # Create xml mutation (and minimization) protocol
+                xml = rosettaScripts.xmlScript()
+                protocol = []
+
+                # Add score function
+                xml.addScorefunction(sfxn)
+
+                for m in mutants[model][mutant]:
+                    mutate = rosettaScripts.movers.mutate(name='mutate_'+str(m[0]),
+                                                          target_residue=m[0],
+                                                          new_residue=PDB.Polypeptide.one_to_three(m[1]))
+                    xml.addMover(mutate)
+                    protocol.append(mutate)
+
+                if relax_cycles:
+                    # Create fastrelax mover
+                    relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
+                    xml.addMover(relax)
+                    protocol.append(relax)
+                else:
+                    # Turn off more than one structure when relax is not performed
+                    nstruct = 1
+
+                # Set protocol
+                xml.setProtocol(protocol)
+
+                # Add scorefunction output
+                xml.addOutputScorefunction(sfxn)
+
+                # Write XMl protocol file
+                xml.write_xml(job_folder+'/xml/'+model+'_'+mutant+'.xml')
+
+                # Create options for minimization protocol
+                flags = rosettaScripts.flags('../../xml/'+model+'_'+mutant+'.xml',
+                                             nstruct=nstruct, s='../../input_models/'+model+'.pdb',
+                                             output_silent_file=model+'_'+mutant+'.out')
+
+                # Add relaxation with constraints options and write flags file
+                if cst_optimization:
+                    flags.add_relax_cst_options()
+                else:
+                    flags.add_relax_options()
+
+                # Add path to params files
+                if param_files != None:
+                    if not os.path.exists(job_folder+'/params'):
+                        os.mkdir(job_folder+'/params')
+                    if isinstance(param_files, str):
+                        param_files = [param_files]
+                    for param in param_files:
+                        param_name = param.split('/')[-1]
+                        shutil.copyfile(param, job_folder+'/params/'+param_name)
+                    flags.addOption('in:file:extra_res_path', '../../params')
+
+                flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
+
+                # Create and append execution command
+                if mpi_command == None:
+                    mpi_command = ''
+
+                command = 'cd '+job_folder+'/output_models/'+model+'\n'
+                command += mpi_command+' rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
+                command += 'cd ../../..\n'
+                jobs.append(command)
+
+        return jobs
+
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None):
@@ -2568,6 +2695,66 @@ make sure of reading the target sequences with the function readTargetSequences(
             self.rosetta_data = filtered_data
 
         return filtered_data
+
+    def loadMutantsAsNewModels(self, mutants_folder, filter_score_term='score', tags=None,
+                               min_value=True, wat_to_hoh=True, keep_model_name=True):
+
+        """
+        Load the best energy models from a set of silent files inside a createMutants()
+        calculation folder. The models are added to the list of models and do not replace
+        any previous model already present in the library
+
+        Parameters
+        ==========
+        mutants_folder : str
+            Path to folder where the Mutants output files are contained (see createMutants() function)
+        filter_score_term : str
+            Score term used to filter models
+        tags : dict
+            Tags to extract specific models from the mutant optimization
+        """
+
+        executable = 'extract_pdbs.linuxgccrelease'
+        models = []
+
+        # Check if params were given
+        params = None
+        if os.path.exists(mutants_folder+'/params'):
+            params = mutants_folder+'/params'
+
+        for d in os.listdir(mutants_folder+'/output_models'):
+            if os.path.isdir(mutants_folder+'/output_models/'+d):
+                for f in os.listdir(mutants_folder+'/output_models/'+d):
+                    if f.endswith('.out'):
+                        model = d
+                        mutant = f.replace(model+'_', '').replace('.out', '')
+                        scores = readSilentScores(mutants_folder+'/output_models/'+d+'/'+f)
+                        if tags != None and mutant in tags:
+                            print('Reading mutant model %s from the given tag %s' % (mutant, tags[mutant]))
+                            best_model_tag = tags[mutant]
+                        elif min_value:
+                            best_model_tag = scores.idxmin()[filter_score_term]
+                        else:
+                            best_model_tag = scores.idxmxn()[filter_score_term]
+                        command = executable
+                        command += ' -silent '+mutants_folder+'/output_models/'+d+'/'+f
+                        if params != None:
+                            command += ' -extra_res_path '+params+' '
+                        command += ' -tags '+best_model_tag
+                        os.system(command)
+
+                        # Load mutants to the class
+                        if keep_model_name:
+                            mutant = model+'_'+mutant
+                            
+                        self.models_names.append(mutant)
+                        self.readModelFromPDB(mutant, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
+                        os.remove(best_model_tag+'.pdb')
+                        models.append(mutant)
+
+        self.getModelsSequences()
+        print('Added the following mutants from folder %s:' % mutants_folder)
+        print('\t'+', '.join(models))
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
