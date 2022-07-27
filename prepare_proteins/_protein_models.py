@@ -1469,7 +1469,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False, skip_models=None):
+                             spawning='independent', continuation=False, equilibration=True, skip_models=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1575,9 +1575,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                         iyf.write("steps: "+str(steps)+"\n")
                         iyf.write("iterations: "+str(iterations)+"\n")
                         iyf.write("cpus: "+str(cpus)+"\n")
-                        iyf.write("equilibration: true\n")
-                        iyf.write("equilibration_mode: '"+equilibration_mode+"'\n")
-                        iyf.write("equilibration_steps: "+str(equilibration_steps)+"\n")
+                        if equilibration:
+                            iyf.write("equilibration: true\n")
+                            iyf.write("equilibration_mode: '"+equilibration_mode+"'\n")
+                            iyf.write("equilibration_steps: "+str(equilibration_steps)+"\n")
                         if spawning != None:
                             iyf.write("spawning: '"+str(spawning)+"'\n")
                         iyf.write("traj: trajectory.xtc\n")
