@@ -1504,7 +1504,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ligand = fs[1]
                     pose = fs[2].replace('.pdb','')
 
-                    # Skip given protein models 
+                    # Skip given protein models
                     if skip_models != None:
                         if protein in skip_models:
                             continue
@@ -1578,7 +1578,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         iyf.write("equilibration: true\n")
                         iyf.write("equilibration_mode: '"+equilibration_mode+"'\n")
                         iyf.write("equilibration_steps: "+str(equilibration_steps)+"\n")
-                        iyf.write("spawning: '"+str(spawning)+"'\n")
+                        if spawning != None:
+                            iyf.write("spawning: '"+str(spawning)+"'\n")
                         iyf.write("traj: trajectory.xtc\n")
                         iyf.write("working_folder: 'output'\n")
                         if usesrun:
