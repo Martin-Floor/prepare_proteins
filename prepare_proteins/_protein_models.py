@@ -1593,10 +1593,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(box_centers, type(None)) and peptide:
                             raise ValuError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
+                            if not all(isinstance(x, float) for x in box_centers[model]):
+                                # get coordinates from tuple
+                                for chain in self.structures[model[0]].get_chains():
+                                    if chain.id == box_centers[model][0]:
+                                        for r in chain:
+                                            if r.id[1] == box_centers[model][1]:
+                                                for atom in r:
+                                                    if atom.name == box_centers[model][2]:
+                                                        coordinates = atom.coord
+                            else:
+                                coordinates = box_centers[model]
+
                             box_center = ''
-                            for coord in box_centers[model]:
-                                if not isinstance(coord, float):
-                                    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
+                            for coord in coordinates:
+                                #if not isinstance(coord, float):
+                                #    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
                                 box_center += '  - '+str(coord)+'\n'
                             iyf.write("box_center: \n"+box_center)
 
@@ -2046,6 +2058,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.distance_data
 
+
+
     def getModelDistances(self, model):
         """
         Get the distances associated with a specific model included in the
@@ -2097,14 +2111,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for model in self.models_names:
                     mask = []
                     for index in self.distance_data.index:
-                        if model in index:
+                        if model == index:
                             mask.append(True)
                         else:
                             mask.append(False)
 
                     model_data = self.distance_data[mask]
                     model_distances = metric_distances[name][model]
-
                     values += model_data[model_distances].min(axis=1).tolist()
 
                 self.distance_data['metric_'+name] = values
@@ -2169,7 +2182,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.protonation_states
 
-    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None):
+    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None,overwrite=False):
         """
         Combine different equivalent distances into specific named metrics. The function
         takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
