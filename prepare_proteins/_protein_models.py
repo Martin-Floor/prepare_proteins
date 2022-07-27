@@ -1469,7 +1469,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False):
+                             spawning='independent', continuation=False, skip_models=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1503,6 +1503,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                     protein = fs[0]
                     ligand = fs[1]
                     pose = fs[2].replace('.pdb','')
+
+                    # Skip given protein models 
+                    if skip_models != None:
+                        if protein in skip_models:
+                            continue
 
                     # Create PELE job folder for each docking
                     if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
@@ -2759,7 +2764,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # Load mutants to the class
                         if keep_model_name:
                             mutant = model+'_'+mutant
-                            
+
                         self.models_names.append(mutant)
                         self.readModelFromPDB(mutant, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
