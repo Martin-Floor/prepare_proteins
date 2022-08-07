@@ -62,7 +62,7 @@ class proteinModels:
         Get the paths for all PDBs in the input_folder path.
     """
 
-    def __init__(self, models_folder, get_sequences=True, get_ss=True, msa=False):
+    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -660,7 +660,7 @@ chain to use for each model with the chains option.' % model)
                                              output_silent_file=model+'_'+mutant+'.out')
 
                 # Add relaxation with constraints options and write flags file
-                if cst_optimization:
+                if cst_optimization and relax_cycles:
                     flags.add_relax_cst_options()
                 else:
                     flags.add_relax_options()
@@ -728,7 +728,6 @@ has been carried out. Please run compareSequences() function before setting muta
 
             # Skip models not in the given list
             if models != None:
-                if model not in models:
                     continue
 
             if not os.path.exists(relax_folder+'/output_models/'+model):
