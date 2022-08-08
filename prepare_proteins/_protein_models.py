@@ -1584,6 +1584,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("equilibration: true\n")
                             iyf.write("equilibration_mode: '"+equilibration_mode+"'\n")
                             iyf.write("equilibration_steps: "+str(equilibration_steps)+"\n")
+                        else:
+                            iyf.write("equilibration: false\n")
                         if spawning != None:
                             iyf.write("spawning: '"+str(spawning)+"'\n")
                         iyf.write("traj: trajectory.xtc\n")
