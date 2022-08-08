@@ -1672,15 +1672,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'python -m pele_platform.main input.yaml\n'
                     if continuation:
                         debug_line = False
+                        restart_line = False
                         with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
                             with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
                                 for l in iyml:
                                     if 'debug: true' in l:
-                                        l = 'adaptive_restart: true\n'
                                         debug_line = True
+                                        oyml.write('restart: true\n')
+                                        oyml.write('adaptive_restart: true\n')
+                                    elif 'restart: true' in l:
+                                        continue
                                     oyml.write(l)
                                 if not debug_line:
+                                    oyml.write('restart: true\n')
                                     oyml.write('adaptive_restart: true\n')
+
                         command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
