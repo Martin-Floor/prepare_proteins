@@ -77,7 +77,6 @@ class proteinModels:
             Get the strign representing the secondary structure of the models. they
             can be accessed through the .ss attribute.
         msa : bool
-            Calculate a multiple sequence alignment for the models. Only works for
             single-chain structures at startup, othewise look for the calculateMSA()
             method.
         """
@@ -1543,16 +1542,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 # Create YAML file
                 for model in models:
-
+                    protein, ligand = model
+                    keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
+                                'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
+                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode']
                     # Skip given protein models
                     if skip_models != None:
                         if model in skip_models:
                             continue
-
-                    protein, ligand = model
-                    keywords = ['system', 'chain', 'resname', 'steps', 'iterations',
-                                'cpus', 'equilibration', 'equilibration_steps', 'traj',
-                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'spawning']
 
                     with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
                         if energy_by_residue:
@@ -1651,9 +1648,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         with open(input_yaml) as tyf:
                             for l in tyf:
-                                if not l.startswith('#'):
-                                    if l.split()[0].replace(':', '') not in keywords:
-                                        iyf.write(l)
+                                if l.startswith('#'):
+                                    continue
+                                elif l.startswith('-'):
+                                    continue
+                                elif l.strip() == '':
+                                    continue
+                                if l.split()[0].replace(':', '') not in keywords:
+                                    iyf.write(l)
 
                     if energy_by_residue:
                         _copyScriptFile(pele_folder, 'addEnergyByResidueToPELEconf.py')
@@ -1720,6 +1722,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
 
         return jobs
+
 
     def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',ff='amber99sb-star-ildn'):
         """
@@ -2731,11 +2734,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadMutantsAsNewModels(self, mutants_folder, filter_score_term='score', tags=None,
                                min_value=True, wat_to_hoh=True, keep_model_name=True):
-
         """
         Load the best energy models from a set of silent files inside a createMutants()
         calculation folder. The models are added to the list of models and do not replace
-        any previous model already present in the library
+        any previous model already present in the library.
 
         Parameters
         ==========
