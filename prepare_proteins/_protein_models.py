@@ -81,8 +81,6 @@ class proteinModels:
             method.
         """
 
-        print('hi')
-
         self.models_folder = models_folder
         self.models_paths = self._getModelsPaths()
         self.models_names = [] # Store model names
