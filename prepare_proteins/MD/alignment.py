@@ -1,9 +1,8 @@
 from prepare_proteins.alignment import mafft
-from Bio.PDB.Polypeptide import three_to_one
 
 def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
                                        chain_indexes=None, trajectory_chain_indexes=None,
-                                       reference_chain_indexes=None):
+                                       reference_chain_indexes=None, aligment_mode='exact'):
     """
     Align two trajectories based on a sequence alignment of specific chains. The
     chains are specified using their indexes. When the trajectories have corresponding
@@ -44,6 +43,11 @@ def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
         Chain indexes of the target trajectory to use in the alignment.
     reference_chain_indexes : int
         Chain indexes of the reference trajectory to use in the alignment.
+    aligment_mode : str
+        The mode defines how sequences are aligned. 'exact' for structurally
+        aligning positions with exactly the same aminoacids after the sequence
+        alignemnt or 'aligned' for structurally aligining sequences using all
+        positions aligned in the sequence alignment.
     """
 
     # Check for correct input
@@ -106,7 +110,8 @@ def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
         alignment = mafft.multipleSequenceAlignment(sequences)
 
         # Get coincident positions in the alignment
-        positions = getCommonPositions(alignment[0].seq, alignment[1].seq)
+        positions = getCommonPositions(alignment[0].seq, alignment[1].seq,
+                                       mode=aligment_mode)
 
         # Store common residues
         for p in positions:
@@ -114,10 +119,16 @@ def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
             reference_residues.append(reference_indexes[rci][p[1]])
 
     # Store common alpha-carbon atoms
+    for p in zip(trajectory_residues, reference_residues):
+        trj_ca = trajectory.topology.residue(p[0])
+        ref_ca = trajectory.topology.residue(p[0])
+
     trajectory_atoms = [ a.index for a in trajectory.topology.atoms if a.name == 'CA'\
                          and a.residue.index in trajectory_residues ]
     reference_atoms = [ a.index for a in reference.topology.atoms if a.name == 'CA' \
                         and a.residue.index in reference_residues ]
+
+    assert len(trajectory_atoms) == len(reference_atoms)
 
     # Align trajectory
     trajectory.superpose(reference, frame=reference_frame, atom_indices=trajectory_atoms,
@@ -152,11 +163,14 @@ def getCommonPositions(sequence1, sequence2, mode='exact'):
         raise ValueError('Input sequences are not the same length. Input sequences\
         must have been previously aligned.')
 
+    if len(sequence1) != len(sequence2):
+        raise ValuError('The sequences given must be previously aligned. Chech your input')
+
     positions = []
     # Initialize idependent counters for sequence positions
     s1p = 0
     s2p = 0
-    # Iterate thorugh the aligned positions
+    # Iterate through the aligned positions
     for i in range(len(sequence1)):
         # Compare sequences according to selected mode
         if sequence1[i] != '-' and sequence2[i] != '-':
@@ -165,6 +179,7 @@ def getCommonPositions(sequence1, sequence2, mode='exact'):
                     positions.append((s1p, s2p))
             elif mode == 'aligned':
                 positions.append((s1p, s2p))
+
         # Add to position counters
         if sequence1[i] != '-':
             s1p += 1
@@ -173,7 +188,8 @@ def getCommonPositions(sequence1, sequence2, mode='exact'):
 
     return positions
 
-def getTopologySequence(topology, chain_index, non_protein='X'):
+def getTopologySequence(topology, chain_index, non_protein='X',
+                        only_protein=True):
     """
     Get the sequence of a specfic chain in a topology object.
 
@@ -189,13 +205,21 @@ def getTopologySequence(topology, chain_index, non_protein='X'):
     sequence : str
         Sequence of the topology object
     """
+    three_to_one = {
+        'ALA': 'A', 'CYS': 'C', 'ASP': 'D', 'GLU': 'E', 'PHE': 'F',
+        'GLY': 'G', 'HIS': 'H', 'ILE': 'I', 'LYS': 'K', 'LEU': 'L',
+        'MET': 'M', 'ASN': 'N', 'PRO': 'P', 'GLN': 'Q', 'ARG': 'R',
+        'SER': 'S', 'THR': 'T', 'VAL': 'V', 'TRP': 'W', 'TYR': 'Y'}
 
     sequence = ''
     for r in topology.chain(chain_index).residues:
-        try:
-            sequence += three_to_one(r.name)
-        except:
-            sequence += non_protein
+        if only_protein:
+            if r.name in three_to_one:
+                sequence += three_to_one[r.name]
+            else:
+                if not only_protein:
+                    sequence += non_protein
+
     return sequence
 
 def getChainIndexesToResidueIndexes(topology):

@@ -533,7 +533,8 @@ chain to use for each model with the chains option.' % model)
         # Missing save models and reload them to take effect.
 
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
-                                  trajectory_chain_indexes=None, reference_chain_indexes=None):
+                                  trajectory_chain_indexes=None, reference_chain_indexes=None,
+                                  aligment_mode='aligned'):
         """
         Align all models to a reference PDB based on a sequence alignemnt.
 
@@ -549,6 +550,11 @@ chain to use for each model with the chains option.' % model)
             Path to the reference PDB
         output_folder : str
             Path to the output folder to store models
+        mode : str
+            The mode defines how sequences are aligned. 'exact' for structurally
+            aligning positions with exactly the same aminoacids after the sequence
+            alignemnt or 'aligned' for structurally aligining sequences using all
+            positions aligned in the sequence alignment.
         """
 
         if not os.path.exists(output_folder):
@@ -558,7 +564,9 @@ chain to use for each model with the chains option.' % model)
         for model in self.models_names:
             traj = md.load(self.models_paths[model])
             MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
-                                                  trajectory_chain_indexes=trajectory_chain_indexes)
+                                                  trajectory_chain_indexes=trajectory_chain_indexes,
+                                                  aligment_mode=aligment_mode)
+
             traj.save(output_folder+'/'+model+'.pdb')
 
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
@@ -1406,8 +1414,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Write Site Map input file
                     with open(job_folder+'/output_models/'+model+'/'+pose_name+'.in', 'w') as smi:
-                        smi.write('PROTEIN ../../input_models/'+model+'/'+pose_name+'_ligand.mae\n')
-                        smi.write('LIGMAE ../../input_models/'+model+'/'+pose_name+'_protein.mae\n')
+                        smi.write('PROTEIN ../../input_models/'+model+'/'+pose_name+'_protein.mae\n')
+                        smi.write('LIGMAE ../../input_models/'+model+'/'+pose_name+'_ligand.mae\n')
                         smi.write('SITEBOX '+str(site_box)+'\n')
                         smi.write('RESOLUTION '+resolution+'\n')
                         smi.write('REPORTSIZE 100\n')
@@ -2417,7 +2425,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             plt.savefig(output_folder+'/'+protein+'_'+ligand+extension, dpi=dpi)
             plt.close()
 
-    def loadModelsFromPrepwizardFolder(self, prepwizard_folder, keep_conect=False):
+    def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
+                                       keep_conect=False, return_failed=False):
         """
         Read structures from a Schrodinger calculation.
 
@@ -2428,6 +2437,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         models = []
+        failed_models = []
         for d in os.listdir(prepwizard_folder+'/output_models'):
             if os.path.isdir(prepwizard_folder+'/output_models/'+d):
                 for f in os.listdir(prepwizard_folder+'/output_models/'+d):
@@ -2436,6 +2446,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             for l in lf:
                                 if 'error' in l.lower():
                                     print('Error was found in log file: %s. Please check the calculation!' % f)
+                                    model = f.replace('.log', '')
+                                    failed_models.append(model)
+                                    break
+
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
                         models.append(model)
@@ -2443,11 +2457,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if keep_conect:
                             self.conect_lines[model] = _getPDBConectLines(prepwizard_folder+'/output_models/'+d+'/'+f)
 
-        missing_models = set(self.models_names) - set(models)
+        self.getModelsSequences()
 
+        missing_models = set(self.models_names) - set(models)
         if missing_models != set():
             print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
+
+        if return_missing:
+            return missing_models
+        if return_failed:
+            return failed_models
 
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
@@ -2792,7 +2812,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         print('\t'+', '.join(models))
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
-                                          min_value=True, tags=None, wat_to_hoh=True, keep_conect=False):
+                                          min_value=True, tags=None, wat_to_hoh=True, keep_conect=False,
+                                          return_missing=False):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -2842,10 +2863,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
+        self.getModelsSequences()
         missing_models = set(self.models_names) - set(models)
         if missing_models != set():
             print('Missing models in relaxation folder:')
             print('\t'+', '.join(missing_models))
+            if return_missing:
+                return missing_models
 
     def loadModelsFromMissingLoopBuilding(self, job_folder, filter_score_term='score', min_value=True, param_files=None):
         """
@@ -2993,7 +3017,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             self.structures.pop(model)
             self.sequences.pop(model)
         except:
-            raise ValuError('Model  %s is not present' % model)
+            raise ValueError('Model  %s is not present' % model)
 
     def readTargetSequences(self, fasta_file):
         """
@@ -3034,6 +3058,12 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Iterate models to store sequence differences
         for model in self.models_names:
+
+            if model not in self.target_sequences:
+                message = 'Sequence for model %s not found in the given fasta file! ' % model
+                message += 'Please make sure to include one sequence for each model '
+                message += 'loaded into prepare proteins.'
+                raise ValueError(message)
 
             # Create lists for missing information
             self.sequence_differences[model] = {}
