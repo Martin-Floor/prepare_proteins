@@ -1562,9 +1562,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
+                    
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
-                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode']
+                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode', 'spawning']
+
                     # Skip given protein models
                     if skip_models != None:
                         if model in skip_models:
