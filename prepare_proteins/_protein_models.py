@@ -1475,7 +1475,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False, equilibration=True, skip_models=None):
+                             spawning='independent', continuation=False, equilibration=True, skip_models=None, copy_input_models=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1519,30 +1519,41 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
                         os.mkdir(pele_folder+'/'+protein+'_'+ligand)
 
-                    structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                    # Copy directly the input pdb to PELE folder
+                    # This can avoid connect line problems.
+                    if copy_input_models:
+                        shutil.copyfile(models_folder+'/'+d+'/'+f,
+                        pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                        # Change water names if any
+                        for residue in structure.get_residues():
+                            if residue.get_parent().id == 'L':
+                                ligand_pdb_name[ligand] = residue.resname
+                    else:
+                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
 
-                    # Change water names if any
-                    for residue in structure.get_residues():
-                        if residue.id[0] == 'W':
-                            residue.resname = 'HOH'
+                        # Change water names if any
+                        for residue in structure.get_residues():
+                            if residue.id[0] == 'W':
+                                residue.resname = 'HOH'
 
-                        if residue.get_parent().id == 'L':
-                            ligand_pdb_name[ligand] = residue.resname
+                            if residue.get_parent().id == 'L':
+                                ligand_pdb_name[ligand] = residue.resname
 
-                    ## Add dummy atom if peptide docking ### Strange fix =)
-                    if peptide:
-                        for chain in structure.get_chains():
-                            if chain.id == 'L':
-                                # Create new residue
-                                new_resid = max([r.id[1] for r in chain.get_residues()])+1
-                                residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
-                                serial_number = max([a.serial_number for a in chain.get_atoms()])+1
-                                atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
-                                                     '%-4s' % 'X', serial_number+1, 'H')
-                                residue.add(atom)
-                                chain.add(residue)
+                        ## Add dummy atom if peptide docking ### Strange fix =)
+                        if peptide:
+                            for chain in structure.get_chains():
+                                if chain.id == 'L':
+                                    # Create new residue
+                                    new_resid = max([r.id[1] for r in chain.get_residues()])+1
+                                    residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
+                                    serial_number = max([a.serial_number for a in chain.get_atoms()])+1
+                                    atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
+                                                         '%-4s' % 'X', serial_number+1, 'H')
+                                    residue.add(atom)
+                                    chain.add(residue)
 
-                    _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                        _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
