@@ -1473,7 +1473,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
-                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
+                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True, skip_models=None, copy_input_models=False):
         """
@@ -1492,6 +1492,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             Additional groups to consider when doing energy by residue reports.
         Missing!
         """
+
+        spawnings = ['independent', 'inverselyProportional', 'epsilon', 'variableEpsilon',
+                     'independentMetric', 'UCB', 'FAST', 'ProbabilityMSM', 'MetastabilityMSM',
+                     'IndependentMSM']
+
+        if spawining not in spawnings:
+            message = 'Spawning method %s not found.' % spawning
+            message = 'Allowed options are: '+str(spawnings)
+            raise ValuError(message)
 
         # Create PELE job folder
         if not os.path.exists(pele_folder):
@@ -1562,7 +1571,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
-                    
+
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode', 'spawning']
@@ -1718,6 +1727,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(ligand_energy_groups, dict):
                             command += ' --ligand_energy_groups ligand_energy_groups.json'
                             command += ' --ligand_index '+str(ligand_index)
+                        if ebr_new_flag:
+                            command += ' --new_version '
                         if peptide:
                             command += ' --peptide \n'
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
