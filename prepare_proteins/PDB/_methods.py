@@ -66,3 +66,42 @@ def retrievePDBs(pdb_codes, names=None, pdb_directory='PDB'):
     shutil.rmtree('obsolete')
 
     return pdb_paths
+
+def renumberResidues(structure, by_chain=False):
+    """
+    Renumber residues in a structure object starting from one. Two methods are possible:
+    if by_chain is set to True the renumbering is restarted at the begining of every
+    chain.
+
+    Parameters
+    ----------
+    structure : Bio.PDB.Structure
+        Input structure object
+    by_chain : bool
+        Whether each chain should be renumerated from one.
+
+    Returns
+    -------
+
+    structure_copy : Bio.PDB.Structure
+        Renumbered copy of the input structure
+    """
+
+    count = 0
+    structure_copy = PDB.Structure.Structure(0)
+    model = PDB.Model.Model(0)
+    auxiliar = PDB.Chain.Chain(0)
+
+    for chain in structure.get_chains():
+        new_chain = PDB.Chain.Chain(chain.id)
+        if by_chain:
+            count = 0
+        for residue in chain.get_residues():
+            count += 1
+            residue.set_parent(auxiliar)
+            residue.id = (residue.id[0], count, residue.id[2])
+            new_chain.add(residue)
+        model.add(new_chain)
+    structure_copy.add(model)
+
+    return structure_copy
