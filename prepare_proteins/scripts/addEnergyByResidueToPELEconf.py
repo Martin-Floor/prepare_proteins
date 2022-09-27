@@ -11,6 +11,7 @@ parser.add_argument('--energy_type', default=None, help='Type eneergy by residue
 parser.add_argument('--peptide', action='store_true', default=False, help='Is this a peptide run?')
 parser.add_argument('--ligand_index', default=1, help='Ligand index')
 parser.add_argument('--ligand_energy_groups', help='json file containing the ligand groups to include.')
+parser.add_argument('--new_version', action='store_true', default=False, help='Add the new PELE flag for energy by residue.')
 
 args=parser.parse_args()
 pele_output = args.pele_output
@@ -78,6 +79,11 @@ metrics_list = json_conf['commands'][0]['PeleTasks'][0]['metrics']
 parser = PDB.PDBParser()
 structure = parser.get_structure('receptor', pele_output+'/input/receptor.pdb')
 
+if new_version:
+    byResidueFlag = 'nonBondingEnergyBySelection'
+else:
+    byResidueFlag = 'energyBySelection'
+
 for residue in structure.get_residues():
     chain = residue.get_parent().id
     resid = residue.id[1]
@@ -97,7 +103,7 @@ for residue in structure.get_residues():
         if peptide:
             if chain != 'L':
                 metric = {
-                'type': 'energyBySelection',
+                'type': byResidueFlag,
                 'tag' : 'Peptide_'+chain+':'+str(resid)+'_'+resname+'_'+et,
                 'typeOfContribution' : et,
                 'selection_group_1' : {
@@ -109,7 +115,7 @@ for residue in structure.get_residues():
                 }
         else:
             metric = {
-            'type': 'energyBySelection',
+            'type': byResidueFlag,
             'tag' : 'L:'+str(ligand_index)+'_'+chain+':'+str(resid)+'_'+resname+'_'+et,
             'typeOfContribution' : et,
             'selection_group_1' : {
@@ -126,7 +132,7 @@ for residue in structure.get_residues():
             for group in ligand_energy_groups:
                 # print(['L:'+a for a in ligand_energy_groups[group]])
                 metric = {
-                'type': 'energyBySelection',
+                'type': byResidueFlag,
                 'tag' : 'L:'+group+'_'+chain+':'+str(resid)+'_'+resname+'_'+et,
                 'typeOfContribution' : et,
                 'selection_group_1' : {

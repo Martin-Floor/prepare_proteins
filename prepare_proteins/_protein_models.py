@@ -1473,9 +1473,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
-                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
+                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False, equilibration=True, skip_models=None,skip_ligands=None):
+                             spawning='independent', continuation=False, equilibration=True, skip_models=None,skip_ligands=None,copy_input_models=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1492,6 +1492,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             Additional groups to consider when doing energy by residue reports.
         Missing!
         """
+
+        spawnings = ['independent', 'inverselyProportional', 'epsilon', 'variableEpsilon',
+                     'independentMetric', 'UCB', 'FAST', 'ProbabilityMSM', 'MetastabilityMSM',
+                     'IndependentMSM']
+
+        if spawining not in spawnings:
+            message = 'Spawning method %s not found.' % spawning
+            message = 'Allowed options are: '+str(spawnings)
+            raise ValuError(message)
 
         # Create PELE job folder
         if not os.path.exists(pele_folder):
@@ -1533,30 +1542,41 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
                         os.mkdir(pele_folder+'/'+protein+'_'+ligand)
 
-                    structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                    # Copy directly the input pdb to PELE folder
+                    # This can avoid connect line problems.
+                    if copy_input_models:
+                        shutil.copyfile(models_folder+'/'+d+'/'+f,
+                        pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                        # Change water names if any
+                        for residue in structure.get_residues():
+                            if residue.get_parent().id == 'L':
+                                ligand_pdb_name[ligand] = residue.resname
+                    else:
+                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
 
-                    # Change water names if any
-                    for residue in structure.get_residues():
-                        if residue.id[0] == 'W':
-                            residue.resname = 'HOH'
+                        # Change water names if any
+                        for residue in structure.get_residues():
+                            if residue.id[0] == 'W':
+                                residue.resname = 'HOH'
 
-                        if residue.get_parent().id == 'L':
-                            ligand_pdb_name[ligand] = residue.resname
+                            if residue.get_parent().id == 'L':
+                                ligand_pdb_name[ligand] = residue.resname
 
-                    ## Add dummy atom if peptide docking ### Strange fix =)
-                    if peptide:
-                        for chain in structure.get_chains():
-                            if chain.id == 'L':
-                                # Create new residue
-                                new_resid = max([r.id[1] for r in chain.get_residues()])+1
-                                residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
-                                serial_number = max([a.serial_number for a in chain.get_atoms()])+1
-                                atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
-                                                     '%-4s' % 'X', serial_number+1, 'H')
-                                residue.add(atom)
-                                chain.add(residue)
+                        ## Add dummy atom if peptide docking ### Strange fix =)
+                        if peptide:
+                            for chain in structure.get_chains():
+                                if chain.id == 'L':
+                                    # Create new residue
+                                    new_resid = max([r.id[1] for r in chain.get_residues()])+1
+                                    residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
+                                    serial_number = max([a.serial_number for a in chain.get_atoms()])+1
+                                    atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
+                                                         '%-4s' % 'X', serial_number+1, 'H')
+                                    residue.add(atom)
+                                    chain.add(residue)
 
-                    _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                        _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
@@ -1565,9 +1585,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
+
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
-                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode']
+                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode', 'spawning']
+
                     # Skip given protein models
                     if skip_models != None:
                         if model in skip_models:
@@ -1719,6 +1741,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(ligand_energy_groups, dict):
                             command += ' --ligand_energy_groups ligand_energy_groups.json'
                             command += ' --ligand_index '+str(ligand_index)
+                        if ebr_new_flag:
+                            command += ' --new_version '
                         if peptide:
                             command += ' --peptide \n'
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
@@ -2356,7 +2380,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         # Check the separator is not in model or ligand names
-        for model in self.models_names:
+        for model in self.docking_ligands:
             if separator in model:
                 raise ValueError('The separator %s was found in model name %s. Please use a different separator symbol.' % (separator, model))
             for ligand in self.docking_ligands[model]:
