@@ -1483,8 +1483,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
+<<<<<<< HEAD
                              spawning='independent', continuation=False, equilibration=True, skip_models=None, copy_input_models=False,
                              nord3=False):
+=======
+                             spawning='independent', continuation=False, equilibration=True, skip_models=None,skip_ligands=None,copy_input_models=False):
+>>>>>>> 44727e0973e21a4d79444f7978398bff628733e2
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1532,6 +1536,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if skip_models != None:
                         if protein in skip_models:
                             continue
+
+                    if skip_ligands != None:
+                        ligand_name = ''
+                        for char in ligand:
+                            try:
+                                int(char)
+                                continue
+                            except:
+                                ligand_name += char
+
+                        if ligand_name in skip_ligands:
+                            continue
+
+
 
                     # Create PELE job folder for each docking
                     if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
