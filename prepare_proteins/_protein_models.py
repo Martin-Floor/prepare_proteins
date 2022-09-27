@@ -619,6 +619,7 @@ chain to use for each model with the chains option.' % model)
                                                                weights_file=score_fxn_name)
 
         for model in self.models_names:
+
             # Skip models not in given mutants
             if model not in considered_models:
                 continue
@@ -1433,7 +1434,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def setUpLigandParameterization(self, job_folder, ligands_folder):
+    def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None):
         """
         Run PELE platform for ligand parameterization
 
@@ -1444,6 +1445,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         ligands_folder : str
             Path to the folder containing the ligand molecules in PDB format.
         """
+
+        charge_methods = ['gasteiger', 'am1bcc', 'OPLS']
+        if charge_method == None:
+            charge_method = 'OPLS'
+
+        if charge_method not in charge_methods:
+            raise ValueError('The charge method should be one of: '+str(charge_methods))
 
         # Create PELE job folder
         if not os.path.exists(job_folder):
@@ -1475,7 +1483,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False, equilibration=True, skip_models=None, copy_input_models=False):
+                             spawning='independent', continuation=False, equilibration=True, skip_models=None, copy_input_models=False,
+                             nord3=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1497,7 +1506,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                      'independentMetric', 'UCB', 'FAST', 'ProbabilityMSM', 'MetastabilityMSM',
                      'IndependentMSM']
 
-        if spawining not in spawnings:
+        if spawning not in spawnings:
             message = 'Spawning method %s not found.' % spawning
             message = 'Allowed options are: '+str(spawnings)
             raise ValuError(message)
@@ -1879,7 +1888,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
-                        skip_chains=False, return_failed=False, ignore_hydrogens=False):
+                       skip_chains=False, return_failed=False, ignore_hydrogens=False):
         """
         Analyse a Glide Docking simulation. The function allows to calculate ligand
         distances with the options protein_atoms or protein_pairs. With the first option
