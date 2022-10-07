@@ -1473,7 +1473,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
-                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False,
+                             separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ninety_degrees_version=False, ligand_strain=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True, skip_models=None, copy_input_models=False):
         """
@@ -1581,6 +1581,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n')
                             iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Data"\n')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Documents/"\n')
+                        elif ligand_strain:
+                            # Use new PELE version with implemented energy_by_residue
+                            iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b5/bin/PELE-1.7_mpi"\n')
+                            iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b5/Data"\n')
+                            iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b5/Documents/"\n')
                         if len(models[model]) > 1:
                             equilibration_mode = 'equilibrationCluster'
                             iyf.write("system: '*.pdb'\n")
@@ -1645,7 +1650,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # energy by residue is not implemented in PELE platform, therefore
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
-                        if debug or energy_by_residue or peptide:
+                        if debug or energy_by_residue or peptide or ligand_strain:
                             iyf.write("debug: true\n")
 
                         if distances != None:
