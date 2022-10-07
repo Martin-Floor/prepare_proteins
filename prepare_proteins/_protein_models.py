@@ -1582,7 +1582,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Data"\n')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Documents/"\n')
                         elif ligand_strain:
-                            # Use new PELE version with implemented energy_by_residue
+                            # Use new PELE version with implemented ligand strain
                             iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b5/bin/PELE-1.7_mpi"\n')
                             iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b5/Data"\n')
                             iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b5/Documents/"\n')
