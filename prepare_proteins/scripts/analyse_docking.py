@@ -157,7 +157,7 @@ for model in sorted(mae_output):
                                         data[label].append(d)
 
                                         # Assert same length for label data
-                                        assert len(data[label]) == len(data['Pose'])
+                                        # assert len(data[label]) == len(data['Pose'])
 
                             elif isinstance(pair[1], tuple) or isinstance(pair[1], list):
                                 ligand_chain_id = pair[1][0]

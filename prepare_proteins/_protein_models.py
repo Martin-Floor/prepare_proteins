@@ -1483,8 +1483,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_models=None, copy_input_models=False,
-                             nord3=False):
+                             spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None, copy_input_models=False,
+                             extend_iterations=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1745,6 +1745,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     oyml.write('adaptive_restart: true\n')
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
+
                     elif energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
                         if isinstance(ligand_energy_groups, dict):
@@ -1773,6 +1774,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         l = 'restart: true\n'
                                     oyml.write(l)
                         command += 'python -m pele_platform.main input_restart.yaml\n'
+                    elif extend_iterations and not continuation:
+                        raise ValueEror('extend_iterations must be used together with the continuation keyword')
                     command += 'cd ../..'
                     jobs.append(command)
 
