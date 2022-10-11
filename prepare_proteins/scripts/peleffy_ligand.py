@@ -11,13 +11,13 @@ import argparse
 
 # ## Define input variables
 parser = argparse.ArgumentParser()
-parser.add_argument('pdb_file')
+parser.add_argument('ligand_file')
 parser.add_argument('--rotamer_resolution', default=10)
 parser.add_argument('--include_terminal_rotamers', action='store_false', default=True)
 
 args=parser.parse_args()
 
-pdb_file = args.pdb_file
+ligand_file = args.ligand_file
 rotamer_resolution = args.rotamer_resolution
 include_terminal_rotamers = args.include_terminal_rotamers
 
@@ -26,11 +26,12 @@ if include_terminal_rotamers:
 else:
     exclude_terminal_rotamers = True
 
-ligand_name = pdb_file.replace('.pdb','')
+extension = ligand_file.split('.')[-1]
+ligand_name = ligand_file.replace('.'+extension,'')
 
 os.environ['SCHRODINGER'] = '/gpfs/projects/bsc72/SCHRODINGER_ACADEMIC' # Fill in path to SCHRODINGER
 
-molecule = Molecule(pdb_file,
+molecule = Molecule(ligand_file,
                     allow_undefined_stereo=True,
                     rotamer_resolution=rotamer_resolution,
                     exclude_terminal_rotamers=exclude_terminal_rotamers)
