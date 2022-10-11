@@ -1505,59 +1505,62 @@ make sure of reading the target sequences with the function readTargetSequences(
                 models = {}
                 ligand_pdb_name = {}
                 for f in os.listdir(models_folder+'/'+d):
-                    fs = f.split(separator)
-                    protein = fs[0]
-                    ligand = fs[1]
-                    pose = fs[2].replace('.pdb','')
-
-                    # Skip given protein models
-                    if skip_models != None:
-                        if protein in skip_models:
-                            continue
-
-                    # Create PELE job folder for each docking
-                    if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
-                        os.mkdir(pele_folder+'/'+protein+'_'+ligand)
-
-                    # Copy directly the input pdb to PELE folder
-                    # This can avoid connect line problems.
-                    if copy_input_models:
-                        shutil.copyfile(models_folder+'/'+d+'/'+f,
-                        pele_folder+'/'+protein+'_'+ligand+'/'+f)
-                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
-                        # Change water names if any
-                        for residue in structure.get_residues():
-                            if residue.get_parent().id == 'L':
-                                ligand_pdb_name[ligand] = residue.resname
+                    if f == '.ipynb_checkpoints':
+                        pass
                     else:
-                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                        fs = f.split(separator)
+                        protein = fs[0]
+                        ligand = fs[1]
+                        pose = fs[2].replace('.pdb','')
 
-                        # Change water names if any
-                        for residue in structure.get_residues():
-                            if residue.id[0] == 'W':
-                                residue.resname = 'HOH'
+                        # Skip given protein models
+                        if skip_models != None:
+                            if protein in skip_models:
+                                continue
 
-                            if residue.get_parent().id == 'L':
-                                ligand_pdb_name[ligand] = residue.resname
+                        # Create PELE job folder for each docking
+                        if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
+                            os.mkdir(pele_folder+'/'+protein+'_'+ligand)
 
-                        ## Add dummy atom if peptide docking ### Strange fix =)
-                        if peptide:
-                            for chain in structure.get_chains():
-                                if chain.id == 'L':
-                                    # Create new residue
-                                    new_resid = max([r.id[1] for r in chain.get_residues()])+1
-                                    residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
-                                    serial_number = max([a.serial_number for a in chain.get_atoms()])+1
-                                    atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
-                                                         '%-4s' % 'X', serial_number+1, 'H')
-                                    residue.add(atom)
-                                    chain.add(residue)
+                        # Copy directly the input pdb to PELE folder
+                        # This can avoid connect line problems.
+                        if copy_input_models:
+                            shutil.copyfile(models_folder+'/'+d+'/'+f,
+                            pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                            structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                            # Change water names if any
+                            for residue in structure.get_residues():
+                                if residue.get_parent().id == 'L':
+                                    ligand_pdb_name[ligand] = residue.resname
+                        else:
+                            structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
 
-                        _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                            # Change water names if any
+                            for residue in structure.get_residues():
+                                if residue.id[0] == 'W':
+                                    residue.resname = 'HOH'
 
-                    if (protein, ligand) not in models:
-                        models[(protein,ligand)] = []
-                    models[(protein,ligand)].append(f)
+                                if residue.get_parent().id == 'L':
+                                    ligand_pdb_name[ligand] = residue.resname
+
+                            ## Add dummy atom if peptide docking ### Strange fix =)
+                            if peptide:
+                                for chain in structure.get_chains():
+                                    if chain.id == 'L':
+                                        # Create new residue
+                                        new_resid = max([r.id[1] for r in chain.get_residues()])+1
+                                        residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
+                                        serial_number = max([a.serial_number for a in chain.get_atoms()])+1
+                                        atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
+                                                             '%-4s' % 'X', serial_number+1, 'H')
+                                        residue.add(atom)
+                                        chain.add(residue)
+
+                            _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
+
+                        if (protein, ligand) not in models:
+                            models[(protein,ligand)] = []
+                        models[(protein,ligand)].append(f)
 
                 # Create YAML file
                 for model in models:
