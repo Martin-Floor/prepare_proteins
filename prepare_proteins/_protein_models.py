@@ -4,6 +4,7 @@ from . import rosettaScripts
 from . import MD
 
 import os
+import sys
 import shutil
 import uuid
 import itertools
@@ -18,7 +19,8 @@ from Bio.PDB.DSSP import DSSP
 import pandas as pd
 import matplotlib.pyplot as plt
 import mdtraj as md
-# from gromacs.fileformats import MDP
+import fileinput
+
 
 import prepare_proteins
 
@@ -1781,8 +1783,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-
-    def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',ff='amber99sb-star-ildn'):
+    def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -1791,6 +1792,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         ==========
         md_folder : str
             Path to the job folder where the MD input files are located.
+        sim_time : int
+            Number of simulation steps
+        frags : int
+            Number of fragments to divide the simulation.
+        program : str
+            Program to execute simulation.
+        command : str
+            Command to call program.
+        ff : str
+            Force field to use for simulation.
+
         """
 
         available_programs = ['gromacs']
@@ -1799,6 +1811,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError('The program %s is not available for setting MD simulations.' % program)
 
         # Create MD job folders
+        if benchmark == True:
+            md_folder = md_folder + '_benchmark'
+
         if not os.path.exists(md_folder):
             os.mkdir(md_folder)
         if not os.path.exists(md_folder+'/scripts'):
@@ -1819,90 +1834,175 @@ make sure of reading the target sequences with the function readTargetSequences(
         if program == 'gromacs':
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/mdp'):
                 if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp',no_py=True)
+                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp',no_py=True,hidden=False)
 
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/ff/'+ff):
                 if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff,no_py=True)
+                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff,no_py=True,hidden=False)
 
-        md_file = MDP(md_folder+'/scripts/md.mdp')
-        md_file['nsteps'] = int(sim_time/frags)
-        md_file.write()
 
-        jobs = []
-        for model in self.models_names:
+            for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
+                if line.strip().startswith('nsteps'):
+                    line = 'nsteps = '+ str(int(sim_time/frags)) + '\n'
+                #if water_traj == True:
+                #    if line.strip().startswith('compressed-x-grps'):
+                #        line = 'compressed_x_grps = '+'System'+ '\n'
 
-            # Create additional folders
-            if not os.path.exists(md_folder+'/output_models/'+model):
-                os.mkdir(md_folder+'/output_models/'+model)
+                sys.stdout.write(line)
 
-            command = 'cd '+md_folder+'\n'
-            command += "export GMXLIB=$(pwd)/FF" +'\n'
 
-            # Set up commands
-            if not os.path.exists(md_folder+'/output_models/'+model+"/topol/prot_ions.pdb"):
-                command += 'mkdir output_models/'+model+'/topol'+'\n'
-                command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
-                command += 'cd output_models/'+model+'/topol'+'\n'
-                command += 'echo 6 | gmx pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
-                command += 'gmx editconf -f prot.pdb -o prot_box.pdb -c -d 1.0 -bt cubic'+'\n'
-                command += 'gmx solvate -cp prot_box.pdb -cs spc216.gro -o prot_solv.pdb -p topol.top'+'\n'
-                command += 'gmx grompp -f ../../../scripts/ions.mdp -c prot_solv.pdb -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
-                command += 'echo 13 | gmx genion -s prot_ions.tpr -o prot_ions.pdb -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+            jobs = []
+
+            for model in self.models_names:
+                # Create additional folders
+                if not os.path.exists(md_folder+'/output_models/'+model):
+                    os.mkdir(md_folder+'/output_models/'+model)
+
+                parser = PDB.PDBParser()
+                structure = parser.get_structure('protein', md_folder+'/input_models/'+model+'.pdb')
+
+                gmx_codes = []
+
+                for mdl in structure:
+                    for chain in mdl:
+                        for residue in chain:
+                            HD1 = False
+                            HE2 = False
+                            if residue.resname == 'HIS':
+                                for atom in residue:
+                                    if atom.name == 'HD1':
+                                        HD1 = True
+                                    if atom.name == 'HE2':
+                                        HE2 = True
+                            if HD1 != False or HE2 != False:
+                                if HD1 == True and HE2 == False:
+                                    number = 0
+                                if HD1 == False and HE2 == True:
+                                    number = 1
+                                if HD1 == True and HE2 == True:
+                                    number = 2
+                                gmx_codes.append(number)
+
+                his_pro = (str(gmx_codes)[1:-1].replace(',',''))
+
+                command = 'cd '+md_folder+'\n'
+                command += "export GMXLIB=$(pwd)/FF" +'\n'
+
+                # Set up commands
+                if not os.path.exists(md_folder+'/output_models/'+model+"/topol/prot_ions.pdb"):
+                    command += 'mkdir output_models/'+model+'/topol'+'\n'
+                    command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
+                    command += 'cd output_models/'+model+'/topol'+'\n'
+                    command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
+                    command += command_name+ ' editconf -f prot.pdb -o prot_box.pdb -c -d 1.0 -bt octahedron'+'\n'
+                    command += command_name+' solvate -cp prot_box.pdb -cs spc216.gro -o prot_solv.pdb -p topol.top'+'\n'
+                    command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.pdb -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
+                    command += 'echo 13 | '+command_name+' genion -s prot_ions.tpr -o prot_ions.pdb -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+                    command += 'cd ..'+'\n'
+                else:
+                    command += 'cd output_models/'+model+'\n'
+
+                # Energy minimization
+                if not os.path.exists(md_folder+'/output_models/'+model+"/em/prot_em.tpr"):
+                    command += 'mkdir em'+'\n'
+                    command += 'cd em'+'\n'
+                    command += command_name+' grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.pdb -p ../topol/topol.top -o prot_em.tpr'+'\n'
+                    command += command_name+' mdrun -v -deffnm prot_em'+'\n'
+                    command += 'cd ..'+'\n'
+
+
+                # NVT equilibration
+                if not os.path.exists(md_folder+'/output_models/'+model+"/nvt/prot_nvt.tpr"):
+                    command += 'mkdir nvt'+'\n'
+                    command += 'cd nvt'+'\n'
+                    command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.pdb -o ../topol/posre.itp -fc 1000 1000 1000'+'\n'
+                    command += command_name+' grompp -f ../../../scripts/nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro'+'\n'
+                    command += command_name+' mdrun -v -deffnm prot_nvt'+'\n'
+                    command += 'cd ..'+'\n'
+
+                # NPT equilibration
+                FClist= ('550','300','170','90','50','30','15','10','5')
+                if not os.path.exists(md_folder+'/output_models/'+model+'/npt'):
+                    command += 'mkdir npt'+'\n'
+                command += 'cd npt'+'\n'
+
+
+                for i in range(len(FClist)+1):
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/npt/prot_npt_'+str(i+1)+'.tpr'):
+                        if i == 0:
+                            command += command_name+' grompp -f ../../../scripts/npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro'+'\n'
+                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
+                        else:
+                            command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.pdb -o ../topol/posre.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                            command += command_name+' grompp -f ../../../scripts/npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro'+'\n'
+                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
                 command += 'cd ..'+'\n'
-            else:
-                command += 'cd output_models/'+model+'\n'
 
-            # Energy minimization
-            if not os.path.exists(md_folder+'/output_models/'+model+"/em/prot_em.tpr"):
-                command += 'mkdir em'+'\n'
-                command += 'cd em'+'\n'
-                command += 'gmx grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.pdb -p ../topol/topol.top -o prot_em.tpr'+'\n'
-                command += 'gmx mdrun -v -deffnm prot_em'+'\n'
-                command += 'cd ..'+'\n'
 
-            # NVT equilibration
-            if not os.path.exists(md_folder+'/output_models/'+model+"/nvt/prot_nvt.tpr"):
-                command += 'mkdir nvt'+'\n'
-                command += 'cd nvt'+'\n'
-                command += 'echo 1 | gmx genrestr -f ../topol/prot_ions.pdb -o ../topol/posre.itp -fc 1000 1000 1000'+'\n'
-                command += 'gmx grompp -f ../../../scripts/nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro'+'\n'
-                command += 'gmx mdrun -v -deffnm prot_nvt'+'\n'
-                command += 'cd ..'+'\n'
-
-            # NPT equilibration
-            FClist = ('300','30')
-            #FClist= ('550','300','170','90','50','30','15','10','5')
-            if not os.path.exists(md_folder+'/output_models/'+model+'/npt'):
-                command += 'mkdir npt'+'\n'
-            command += 'cd npt'+'\n'
-            for i in range(len(FClist)+1):
-                if not os.path.exists(md_folder+'/output_models/'+model+'/npt/prot_npt_'+str(i+1)+'.tpr'):
-                    if i == 0:
-                        command += 'gmx grompp -f ../../../scripts/npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro'+'\n'
-                        command += 'gmx mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
+                #Production run
+                if not os.path.exists(md_folder+'/output_models/'+model+'/md'):
+                    command += 'mkdir md'+'\n'
+                command += 'cd md'+'\n'
+                for i in range(1,frags+1):
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'.xtc'):
+                        if i == 1:
+                            command += command_name+' grompp -f ../../../scripts/md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr'+'\n'
+                            command += command_name+' mdrun -v -deffnm prot_md_' + str(i) + '\n'
+                        else:
+                            command += command_name+' grompp -f ../../../scripts/md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr'+'\n'
+                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+'\n'
                     else:
-                        command += 'echo 1 | gmx genrestr -f ../topol/prot_ions.pdb -o ../topol/posre.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
-                        command += 'gmx grompp -f ../../../scripts/npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro'+'\n'
-                        command += 'gmx mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
-            command += 'cd ..'+'\n'
+                        if os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'_prev.cpt'):
+                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+' -cpi prot_md_'+str(i)+'_prev.cpt'+'\n'
 
-            #Production run
-            if not os.path.exists(md_folder+'/output_models/'+model+'/md'):
-                command += 'mkdir md'+'\n'
-            command += 'cd md'+'\n'
-            for i in range(1,frags+1):
-                if not os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'.xtc'):
-                    if i == 1:
-                        command += 'gmx grompp -f ../../../scripts/md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr'+'\n'
-                        command += 'gmx mdrun -v -deffnm prot_md_' + str(i) + '\n'
-                    else:
-                        command += 'gmx grompp -f ../../../scripts/md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr'+'\n'
-                        command += 'gmx mdrun -v -deffnm prot_md_'+str(i)+'\n'
-
-            jobs.append(command)
+                jobs.append(command)
 
         return jobs
+
+
+    def getTrajectoryPaths(self,path,step='md',traj_name='prot_md_cat_noPBC.xtc'):
+        """
+        """
+        output_paths = []
+        for folder in os.listdir(path+'/output_models/'):
+            if folder in self.models_names:
+                traj_path = path+'/output_models/'+folder+'/'+step
+                output_paths.append(traj_path+'/'+traj_name)
+
+        return(output_paths)
+
+
+
+    def removeBoundaryConditions(self,path,command,step='md',remove_water=False):
+        """
+        Remove boundary conditions from gromacs simulation trajectory file
+
+        Parameters
+        ==========
+        path : str
+            Path to the job folder where the MD outputs files are located.
+        command : str
+            Command to call program.
+        """
+        for folder in os.listdir(path+'/output_models/'):
+            if folder in self.models_names:
+                traj_path = path+'/output_models/'+folder+'/'+step
+                for file in os.listdir(traj_path):
+                    if file.endswith('.xtc') and not file.endswith('_noPBC.xtc') and not os.path.exists(traj_path+'/'+file.split(".")[0]+'_noPBC.xtc'):
+                        if remove_water == True:
+                            option = '1'
+                        else:
+                            option = '0'
+                        os.system('echo '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
+
+                if not os.path.exists(traj_path+'/prot_md_cat_noPBC.xtc'):
+                    os.system(command+' trjcat -f '+traj_path+'/*_noPBC.xtc -o '+traj_path+'/prot_md_cat_noPBC.xtc -cat')
+
+                ### md_1 or npt_10
+
+                if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro') and remove_water == True:
+                    os.system('echo 1 | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro')
+
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
                        skip_chains=False, return_failed=False, ignore_hydrogens=False):
@@ -2083,6 +2183,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     self.distance_data[label] = []
 
         for model in self.structures:
+
 
             self.distance_data['model'].append(model)
 
@@ -2619,6 +2720,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '--protonation_states '
             if decompose_bb_hb_into_pair_energies:
                 command += '--decompose_bb_hb_into_pair_energies'
+
             try:
                 os.system(command)
             except:
