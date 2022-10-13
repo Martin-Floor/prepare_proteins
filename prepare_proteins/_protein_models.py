@@ -1545,15 +1545,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Skip given ligand models
                     if skip_ligands != None:
-                        ligand_name = ''
-                        for char in ligand:
-                            try:
-                                int(char)
-                                continue
-                            except:
-                                ligand_name += char
-
-                        if ligand_name in skip_ligands:
+                        if ligand in skip_ligands:
                             continue
 
                     # Skip proteins not in only_proteins list
@@ -1783,9 +1775,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'cd $CWD\n'
                         for tf in templates[ligand]:
                             if tf.endswith('.assign'):
-                                command += "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"+tf+",g input.yaml\n"
-                            else:
-                                command += "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"+tf+",g input.yaml\n"
+                                if continuation:
+                                    yaml_file = 'input_restart.yaml'
+                                else:
+                                    yaml_file = 'input.yaml'
+                                command += "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
+                                command += "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
                     if continuation:
