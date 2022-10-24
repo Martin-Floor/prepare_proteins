@@ -1844,11 +1844,17 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False):
+    def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False,ion_chain=False):
         """
         Sets up MD simulations for each model. The current state only allows to set
-        up simulations for apo proteins and using the Gromacs software.
+        up simulations for apo proteins and using the Gromacs software. WARNING: peptide chain
+        must be named L and ions must be grouped in chain I.
 
+        ######################################
+        ###  TODO:                         ###
+        ### - generalize selection numbers ###
+        ### - fix genrestr itp files       ###
+        ######################################
         Parameters
         ==========
         md_folder : str
@@ -1895,11 +1901,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         if program == 'gromacs':
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/mdp'):
                 if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp',no_py=True,hidden=False)
+                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp',no_py=False,hidden=False)
 
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/ff/'+ff):
                 if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff,no_py=True,hidden=False)
+                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff,no_py=False,hidden=False)
 
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
@@ -1954,20 +1960,36 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'mkdir output_models/'+model+'/topol'+'\n'
                     command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
                     command += 'cd output_models/'+model+'/topol'+'\n'
-                    command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
-                    command += command_name+ ' editconf -f prot.pdb -o prot_box.pdb -c -d 1.0 -bt octahedron'+'\n'
-                    command += command_name+' solvate -cp prot_box.pdb -cs spc216.gro -o prot_solv.pdb -p topol.top'+'\n'
-                    command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.pdb -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
-                    command += 'echo 13 | '+command_name+' genion -s prot_ions.tpr -o prot_ions.pdb -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+                    if ion_chain:
+                        command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.gro -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens -merge all'+'\n'
+                    else:
+                        command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.gro -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
+
+                    command += command_name+ ' editconf -f prot.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
+                    command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
+                    command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
+
+                    if ion_chain:
+                        selector = '15'
+                    else:
+                        selector = '13'
+
+                    command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+
+                    if ion_chain:
+                        command += 'echo  -e "1|13\\nq"| gmx make_ndx -f  prot_ions.gro'+'\n'
+
                     command += 'cd ..'+'\n'
                 else:
                     command += 'cd output_models/'+model+'\n'
+
+
 
                 # Energy minimization
                 if not os.path.exists(md_folder+'/output_models/'+model+"/em/prot_em.tpr"):
                     command += 'mkdir em'+'\n'
                     command += 'cd em'+'\n'
-                    command += command_name+' grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.pdb -p ../topol/topol.top -o prot_em.tpr'+'\n'
+                    command += command_name+' grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
                     command += command_name+' mdrun -v -deffnm prot_em'+'\n'
                     command += 'cd ..'+'\n'
 
@@ -1976,7 +1998,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists(md_folder+'/output_models/'+model+"/nvt/prot_nvt.tpr"):
                     command += 'mkdir nvt'+'\n'
                     command += 'cd nvt'+'\n'
-                    command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.pdb -o ../topol/posre.itp -fc 1000 1000 1000'+'\n'
+                    if ion_chain:
+                        #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_A.itp -fc 1000 1000 1000'+'\n'
+                        #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_L.itp -fc 1000 1000 1000'+'\n'
+                        #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Ion_chain_I.itp -fc 1000 1000 1000'+'\n'
+                        command += 'echo 20 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
+                    else:
+                        command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000'+'\n'
+
                     command += command_name+' grompp -f ../../../scripts/nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro'+'\n'
                     command += command_name+' mdrun -v -deffnm prot_nvt'+'\n'
                     command += 'cd ..'+'\n'
@@ -1994,7 +2023,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += command_name+' grompp -f ../../../scripts/npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro'+'\n'
                             command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
                         else:
-                            command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.pdb -o ../topol/posre.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                            if ion_chain:
+                                #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_A.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_L.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Ion_chain_I.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                command += 'echo 20 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx\n'
+                            else:
+                                command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+
                             command += command_name+' grompp -f ../../../scripts/npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro'+'\n'
                             command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
                 command += 'cd ..'+'\n'
@@ -2018,7 +2054,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 jobs.append(command)
 
-        return jobs
+            return jobs
 
 
     def getTrajectoryPaths(self,path,step='md',traj_name='prot_md_cat_noPBC.xtc'):
@@ -2051,7 +2087,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for file in os.listdir(traj_path):
                     if file.endswith('.xtc') and not file.endswith('_noPBC.xtc') and not os.path.exists(traj_path+'/'+file.split(".")[0]+'_noPBC.xtc'):
                         if remove_water == True:
-                            option = '1'
+                            option = '14'
                         else:
                             option = '0'
                         os.system('echo '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
@@ -2063,6 +2099,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro') and remove_water == True:
                     os.system('echo 1 | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro')
+
 
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,

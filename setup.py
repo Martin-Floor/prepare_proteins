@@ -13,6 +13,8 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="",
     packages=setuptools.find_packages(),
+    package_data = {'':['scripts/md/gromacs/ff/amber99sb-star-ildn/*','scripts/md/gromacs/mdp/*']},
+    include_package_data=True,
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

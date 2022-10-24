@@ -8,7 +8,7 @@ nstvout                 = 0             ; don't write velocities
 nstfout                 = 0             ; don't write forces
 nstenergy               = 25000         ; save energies every 100 ps
 nstlog                  = 25000         ; update log file every 100 ps
-compressed-x-grps       = Protein        ; write xtc for the whole system
+compressed-x-grps       = System        ; write xtc for the whole system
 nstxout-compressed      = 25000         ; write coordinates every 100 ps to .xtc file
 ; Bond parameters
 continuation	    	= yes		; Restarting after NPT
