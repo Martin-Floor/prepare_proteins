@@ -8,8 +8,10 @@ import argparse
 # ## Define input variables
 parser = argparse.ArgumentParser()
 parser.add_argument('--residue_names', default=None, help='Dictionary json file containing the residue names of each ligand.')
+parser.add_argument('--change_ligand_name', default=False, action='store_true', help='Change the name of the ligand residue?')
 args=parser.parse_args()
 residue_names = args.residue_names
+change_ligand_name = args.change_ligand_name
 
 if residue_names != None:
     with open(residue_names) as rnf:
@@ -19,15 +21,23 @@ else:
 
 for pdb in os.listdir():
     if pdb.endswith('.pdb'):
+        
         # Read PDB structure
         for i,st in enumerate(structure.StructureReader(pdb)):
+
+            # Only process the first structure
             if i == 0:
-                for chain in st.chain:
-                    chain.name = 'L'
-                    for residue in chain.residue:
-                        if isinstance(residue_names, str):
-                            residue.pdbres = residue_names
-                        elif isinstance(residue_names, dict):
-                            pdb_name = pdb.replace('.pdb', '')
-                            residue.pdbres = residue_names[pdb_name]
+
+                # Change the ligand name
+                if change_ligand_name:
+                    for chain in st.chain:
+                        chain.name = 'L'
+                        for residue in chain.residue:
+                            if isinstance(residue_names, str):
+                                residue.pdbres = residue_names
+                            elif isinstance(residue_names, dict):
+                                pdb_name = pdb.replace('.pdb', '')
+                                residue.pdbres = residue_names[pdb_name]
+
+                # Write the MAE file
                 st.write(pdb.replace('.pdb', '.mae'))
