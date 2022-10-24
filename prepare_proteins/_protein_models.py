@@ -120,7 +120,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 self.calculateMSA()
 
     def addResidueToModel(self, model, chain_id, resname, atom_names, coordinates,
-                          elements=None, hetatom=True, water=False):
+                          new_resid=None, elements=None, hetatom=True, water=False):
         """
         Add a residue to a specific model.
 
@@ -170,7 +170,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     raise ValueError('Mismatch between the number of atom_names and coordinates.')
 
         # Create new residue
-        new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+        if new_resid == None:
+            new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+
         rt_flag = ' ' # Define the residue type flag for complete the residue ID.
         if hetatom:
             rt_flag = 'H'
@@ -595,7 +597,7 @@ chain to use for each model with the chains option.' % model)
 
         mpi_commands = ['slurm', 'openmpi', None]
         if mpi_command not in ['slurm', 'openmpi', None]:
-            raise ValuError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
+            raise ValueError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
 
         # Create mutation job folder
         if not os.path.exists(job_folder):
@@ -790,7 +792,7 @@ has been carried out. Please run compareSequences() function before setting muta
             # Add constraint mover if constraint file is given.
             if cst_files != None:
                 if model not in cst_files:
-                    raise ValuError('Model %s is not in the cst_files dictionary!' % model)
+                    raise ValueError('Model %s is not in the cst_files dictionary!' % model)
                 set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
                                                                    cst_file='../../../'+cst_files[model])
                 xml.addMover(set_cst)
@@ -939,7 +941,7 @@ has been carried out. Please run compareSequences() function before setting muta
 
         # Check that sequence comparison has been done before checking missing loops
         if self.sequence_differences == {}:
-            raise ValuError('No sequence comparison has been carried out. Please run \
+            raise ValueError('No sequence comparison has been carried out. Please run \
 compareSequences() function before adding missing loops.')
 
         # Create flags files
@@ -1145,10 +1147,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
             if type(v) != int:
-                raise ValuError('Innerbox values must be given as integers')
+                raise ValueError('Innerbox values must be given as integers')
         for v in outerbox:
             if type(v) != int:
-                raise ValuError('Outerbox values must be given as integers')
+                raise ValueError('Outerbox values must be given as integers')
 
         # Create grid input files
         jobs = []
@@ -1496,7 +1498,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None, copy_input_models=False,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None):
+                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1521,7 +1523,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         if spawning not in spawnings:
             message = 'Spawning method %s not found.' % spawning
             message = 'Allowed options are: '+str(spawnings)
-            raise ValuError(message)
+            raise ValueError(message)
 
         # Create PELE job folder
         if not os.path.exists(pele_folder):
@@ -1634,10 +1636,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
-
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
-                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode', 'spawning']
+                                'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
+                                'seed' ,'spawning']
 
                     # Write input yaml
                     with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
@@ -1698,7 +1700,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         iyf.write("box_radius: "+str(box_radius)+"\n")
                         if isinstance(box_centers, type(None)) and peptide:
-                            raise ValuError('You must give per-protein box_centers when docking peptides!')
+                            raise ValueError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
                             if not all(isinstance(x, float) for x in box_centers[model]):
                                 # get coordinates from tuple
@@ -1739,6 +1741,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 iyf.write(d1)
                                 iyf.write(d2)
 
+                        if seed:
+                            iyf.write('seed: '+str(seed)+'\n')
                         iyf.write('\n')
                         iyf.write("#Options gathered from "+input_yaml+'\n')
 
@@ -1758,7 +1762,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         ebr_script_name = '._addEnergyByResidueToPELEconf.py'
                         if not isinstance(ligand_energy_groups, type(None)):
                             if not isinstance(ligand_energy_groups, dict):
-                                raise ValuError('ligand_energy_groups, must be given as a dictionary')
+                                raise ValueError('ligand_energy_groups, must be given as a dictionary')
                             with open(pele_folder+'/'+protein+'_'+ligand+'/ligand_energy_groups.json', 'w') as jf:
                                 json.dump(ligand_energy_groups[ligand], jf)
 
@@ -1776,12 +1780,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'export TMPLT_DIR=$(pwd)\n'
                         command += 'cd $CWD\n'
                         for tf in templates[ligand]:
+                            if continuation:
+                                yaml_file = 'input_restart.yaml'
+                            else:
+                                yaml_file = 'input.yaml'
                             if tf.endswith('.assign'):
-                                if continuation:
-                                    yaml_file = 'input_restart.yaml'
-                                else:
-                                    yaml_file = 'input.yaml'
                                 command += "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
+                            elif tf.endswith('z'):
                                 command += "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
