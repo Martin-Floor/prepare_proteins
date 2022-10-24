@@ -96,7 +96,7 @@ class proteinModels:
         self.docking_ligands = {}
         self.rosetta_data = None # Rosetta data is stored here
         self.sequence_differences = {} # Store missing/changed sequence information
-        self.conect_lines = {} # Store the conect lines for each model
+        self.conects = {} # Store the conection inforamtion for each model
 
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
@@ -215,7 +215,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
 
-    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False):
+    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, read_conect=True):
         """
         Adds a model from a PDB file.
 
@@ -240,6 +240,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             for residue in self.structures[model].get_residues():
                 if residue.resname == 'WAT':
                     residue.resname = 'HOH'
+
+        # Read conect lines
+        self.conects[model] = _readPDBConectLines(pdb_file, self.structures[model][0])
 
         self.models_paths[model] = pdb_file
         return self.structures[model]
@@ -1049,8 +1052,7 @@ compareSequences() function before adding missing loops.')
             os.mkdir(prepare_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens,
-                        write_conect=write_conect, **kwargs)
+        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens, **kwargs)
 
         # Generate jobs
         jobs = []
@@ -1116,7 +1118,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10), use_new_version=False, write_conect=False,
+    def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10), use_new_version=False,
                          outerbox=(30,30,30), useflexmae=True, peptide=False):
         """
         Setup grid calculation for each model.
@@ -1142,7 +1144,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(grid_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(grid_folder+'/input_models', write_conect=write_conect)
+        self.saveModels(grid_folder+'/input_models')
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -1497,7 +1499,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None, copy_input_models=False,
+                             spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -1566,41 +1568,30 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
                         os.mkdir(pele_folder+'/'+protein+'_'+ligand)
 
-                    # Copy directly the input pdb to PELE folder
-                    # This can avoid connect line problems.
-                    if copy_input_models:
-                        shutil.copyfile(models_folder+'/'+d+'/'+f,
-                        pele_folder+'/'+protein+'_'+ligand+'/'+f)
-                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
-                        # Change water names if any
-                        for residue in structure.get_residues():
-                            if residue.get_parent().id == 'L':
-                                ligand_pdb_name[ligand] = residue.resname
-                    else:
-                        structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                    structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
 
-                        # Change water names if any
-                        for residue in structure.get_residues():
-                            if residue.id[0] == 'W':
-                                residue.resname = 'HOH'
+                    # Change water names if any
+                    for residue in structure.get_residues():
+                        if residue.id[0] == 'W':
+                            residue.resname = 'HOH'
 
-                            if residue.get_parent().id == 'L':
-                                ligand_pdb_name[ligand] = residue.resname
+                        if residue.get_parent().id == 'L':
+                            ligand_pdb_name[ligand] = residue.resname
 
-                        ## Add dummy atom if peptide docking ### Strange fix =)
-                        if peptide:
-                            for chain in structure.get_chains():
-                                if chain.id == 'L':
-                                    # Create new residue
-                                    new_resid = max([r.id[1] for r in chain.get_residues()])+1
-                                    residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
-                                    serial_number = max([a.serial_number for a in chain.get_atoms()])+1
-                                    atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
-                                                         '%-4s' % 'X', serial_number+1, 'H')
-                                    residue.add(atom)
-                                    chain.add(residue)
+                    ## Add dummy atom if peptide docking ### Strange fix =)
+                    if peptide:
+                        for chain in structure.get_chains():
+                            if chain.id == 'L':
+                                # Create new residue
+                                new_resid = max([r.id[1] for r in chain.get_residues()])+1
+                                residue = PDB.Residue.Residue(('H', new_resid, ' '), 'XXX', ' ')
+                                serial_number = max([a.serial_number for a in chain.get_atoms()])+1
+                                atom = PDB.Atom.Atom('X', [0,0,0], 0, 1.0, ' ',
+                                                     '%-4s' % 'X', serial_number+1, 'H')
+                                residue.add(atom)
+                                chain.add(residue)
 
-                        _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                    _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
@@ -2675,7 +2666,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             plt.close()
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
-                                       keep_conect=False, return_failed=False):
+                                       return_failed=False):
         """
         Read structures from a Schrodinger calculation.
 
@@ -2703,8 +2694,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                         model = f.replace('.pdb', '')
                         models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f)
-                        if keep_conect:
-                            self.conect_lines[model] = _getPDBConectLines(prepwizard_folder+'/output_models/'+d+'/'+f)
 
         self.getModelsSequences()
 
@@ -3062,7 +3051,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         print('\t'+', '.join(models))
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
-                                          min_value=True, tags=None, wat_to_hoh=True, keep_conect=False,
+                                          min_value=True, tags=None, wat_to_hoh=True,
                                           return_missing=False):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
@@ -3108,8 +3097,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += ' -tags '+best_model_tag
                         os.system(command)
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
-                        if keep_conect:
-                            self.conect_lines[model] = _getPDBConectLines(best_model_tag+'.pdb')
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
@@ -3219,7 +3206,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder+'/output_models/'+model+'/'+model+'.pdb'
             self.readModelFromPDB(model, pdb_path)
 
-    def saveModels(self, output_folder, keep_residues={}, models=None, write_conect=False, **keywords):
+    def saveModels(self, output_folder, keep_residues={}, models=None,
+                   **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -3248,9 +3236,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 output_folder+'/'+model+'.pdb',
                                 keep_residues=kr,
                                 **keywords)
-
-            if write_conect:
-                self._write_conect_lines(model, output_folder+'/'+model+'.pdb')
 
     def removeModel(self, model):
         """
@@ -3383,19 +3368,31 @@ make sure of reading the target sequences with the function readTargetSequences(
         pdb_file : str
             Path to PDB file to modify
         """
-        if model in self.conect_lines:
-            with open(pdb_file) as pdb:
-                with open(pdb_file+'.tmp', 'w') as tmp:
-                    for l in pdb:
-                        if not l.startswith('END'):
-                            tmp.write(l)
-                    for l in self.conect_lines[model]:
-                        tmp.write(l)
 
-            shutil.move(pdb_file+'.tmp',
-                        pdb_file)
-        else:
-            print('WARNING: No CONECT lines are stored for model %s' % model)
+        # Get structure model
+        pdb_model = self.structures[model][0]
+
+        # Get atom indexes map
+        atoms = {a:i+1 for i,a in enumerate(pdb_model.get_atoms())}
+
+        with open(pdb_file+'.tmp', 'w') as tmp:
+            with open(pdb_file) as pdb:
+
+                # Skip END line
+                for line in pdb:
+                    if not line.startswith('END'):
+                        tmp.write(line)
+
+                # Write new conect line mapping
+                for a in self.conects[model]:
+                    line = 'CONECT '
+                    line += str(atoms[a])+' '
+                    for entry in self.conects[model][a]:
+                        line += ' '.join([str(atoms[x]) for x in entry])+'\n'
+                    tmp.write(line)
+
+            tmp.write('END\n')
+        shutil.move(pdb_file+'.tmp', pdb_file)
 
     def _getChainSequence(self, chain):
         """
@@ -3503,16 +3500,21 @@ def _readPDB(name, pdb_file):
     structure = parser.get_structure(name, pdb_file)
     return structure
 
-def _getPDBConectLines(pdb_file):
+def _readPDBConectLines(pdb_file, pdb_model):
     """
-    Read PDB file and get connect lines only
+    Read PDB file and get conect lines only
     """
-    lines = []
+
+    atoms = {i+1:a for i,a in enumerate(pdb_model.get_atoms())}
+    conects = {}
     with open(pdb_file) as pdbf:
         for l in pdbf:
             if l.startswith('CONECT'):
-                lines.append(l)
-    return lines
+                fa = atoms[int(l.split()[1])]
+                conects.setdefault(fa, [])
+                conects[fa].append([atoms[int(x)] for x in l.split()[2:]])
+
+    return conects
 
 def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
                         remove_water=False, only_protein=False, keep_residues=[]):
