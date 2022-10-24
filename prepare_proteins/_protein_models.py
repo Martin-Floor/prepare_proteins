@@ -1436,7 +1436,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None):
+    def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
+                                    only_ligands=None):
         """
         Run PELE platform for ligand parameterization
 
@@ -1463,19 +1464,28 @@ make sure of reading the target sequences with the function readTargetSequences(
         _copyScriptFile(job_folder, 'peleffy_ligand.py')
 
         jobs = []
-        for pdb in os.listdir(ligands_folder):
-            if pdb.endswith('.pdb'):
-                pdb_name = pdb.replace('.pdb', '')
-                structure = _readPDB(pdb_name, ligands_folder+'/'+pdb)
-                if not os.path.exists(job_folder+'/'+pdb_name):
-                    os.mkdir(job_folder+'/'+pdb_name)
+        for ligand in os.listdir(ligands_folder):
 
-                # _saveStructureToPDB(structure, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
-                shutil.copyfile(ligands_folder+'/'+pdb, job_folder+'/'+pdb_name+'/'+pdb_name+'.pdb')
+            extension = ligand.split('.')[-1]
+
+            if extension == 'pdb':
+                ligand_name = ligand.replace('.'+extension, '')
+
+                # Only process ligands given in only_ligands list
+                if only_ligands != None:
+                    if ligand_name not in only_ligands:
+                        continue
+
+                # structure = _readPDB(ligand_name, ligands_folder+'/'+ligand)
+                if not os.path.exists(job_folder+'/'+ligand_name):
+                    os.mkdir(job_folder+'/'+ligand_name)
+
+                # _saveStructureToPDB(structure, job_folder+'/'+pdb_name+'/'+pdb_name+extension)
+                shutil.copyfile(ligands_folder+'/'+ligand, job_folder+'/'+ligand_name+'/'+ligand_name+'.'+extension)
 
                 # Create command
-                command = 'cd '+job_folder+'/'+pdb_name+'\n'
-                command += 'python  ../._peleffy_ligand.py '+pdb_name+'.pdb\n'
+                command = 'cd '+job_folder+'/'+ligand_name+'\n'
+                command += 'python  ../._peleffy_ligand.py '+ligand_name+'.'+extension+'\n'
                 command += 'cd ../..\n'
                 jobs.append(command)
 
@@ -1486,7 +1496,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None, copy_input_models=False,
-                             extend_iterations=False):
+                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1535,19 +1545,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if protein in skip_models:
                             continue
 
+                    # Skip given ligand models
                     if skip_ligands != None:
-                        ligand_name = ''
-                        for char in ligand:
-                            try:
-                                int(char)
-                                continue
-                            except:
-                                ligand_name += char
-
-                        if ligand_name in skip_ligands:
+                        if ligand in skip_ligands:
                             continue
 
+                    # Skip proteins not in only_proteins list
+                    if only_models != None:
+                        if protein not in only_models:
+                            continue
 
+                    # Skip proteins not in only_ligands list
+                    if only_ligands != None:
+                        if ligand not in only_ligands:
+                            continue
 
                     # Create PELE job folder for each docking
                     if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
@@ -1593,6 +1604,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                         models[(protein,ligand)] = []
                     models[(protein,ligand)].append(f)
 
+                # If templates are given for ligands
+                templates = {}
+                if ligand_templates != None:
+
+                    # Create templates folder
+                    if not os.path.exists(pele_folder+'/templates'):
+                        os.mkdir(pele_folder+'/templates')
+
+                    for ligand in os.listdir(ligand_templates):
+
+                        if not os.path.isdir(ligand_templates+'/'+ligand):
+                            continue
+
+                        # Create ligand template folder
+                        if not os.path.exists(pele_folder+'/templates/'+ligand):
+                            os.mkdir(pele_folder+'/templates/'+ligand)
+
+                        templates[ligand] = []
+                        for f in os.listdir(ligand_templates+'/'+ligand):
+                            if f.endswith('.rot.assign') or f.endswith('z'):
+
+                                # Copy template files
+                                shutil.copyfile(ligand_templates+'/'+ligand+'/'+f,
+                                                pele_folder+'/templates/'+ligand+'/'+f)
+
+                                templates[ligand].append(f)
+
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
@@ -1601,11 +1639,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'equilibration_mode', 'spawning']
 
-                    # Skip given protein models
-                    if skip_models != None:
-                        if model in skip_models:
-                            continue
-
+                    # Write input yaml
                     with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
                         if energy_by_residue:
                             # Use new PELE version with implemented energy_by_residue
@@ -1654,6 +1688,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("analyse: true\n")
                         else:
                             iyf.write("analyse: false\n")
+
+                        if ligand in templates:
+                            iyf.write("templates:\n")
+                            iyf.write(' - "LIGAND_TEMPLATE_PATH_ROT"\n')
+                            iyf.write(' - "LIGAND_TEMPLATE_PATH_Z"\n')
+                            iyf.write("skip_ligand_prep:\n")
+                            iyf.write(' - "'+ligand_pdb_name[ligand]+'"\n')
 
                         iyf.write("box_radius: "+str(box_radius)+"\n")
                         if isinstance(box_centers, type(None)) and peptide:
@@ -1727,6 +1768,21 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Create command
                     command = 'cd '+pele_folder+'/'+protein+'_'+ligand+'\n'
+
+                    # Add commands to write template folder absolute paths
+                    if ligand in templates:
+                        command += "export CWD=$(pwd)\n"
+                        command += 'cd ../templates\n'
+                        command += 'export TMPLT_DIR=$(pwd)\n'
+                        command += 'cd $CWD\n'
+                        for tf in templates[ligand]:
+                            if tf.endswith('.assign'):
+                                if continuation:
+                                    yaml_file = 'input_restart.yaml'
+                                else:
+                                    yaml_file = 'input.yaml'
+                                command += "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
+                                command += "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
                     if continuation:
