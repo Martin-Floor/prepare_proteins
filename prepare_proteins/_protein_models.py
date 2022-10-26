@@ -184,7 +184,6 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
         for i, atnm in enumerate(atom_names):
             if elements:
-                # print(atom_names[i], coordinates[i], 0, 1.0, '  ', '%-4s' % atom_names[i], serial_number+i, elements[i)
                 atom = PDB.Atom.Atom(atom_names[i], coordinates[i], 0, 1.0, ' ',
                                      '%-4s' % atom_names[i], serial_number+i, elements[i])
             else:
@@ -215,7 +214,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
 
-    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, read_conect=True):
+    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True):
         """
         Adds a model from a PDB file.
 
@@ -241,10 +240,15 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == 'WAT':
                     residue.resname = 'HOH'
 
+        # Check covalent ligands
+        if covalent_check:
+            self._checkCovalentLigands(model, pdb_file)
+
         # Read conect lines
         self.conects[model] = _readPDBConectLines(pdb_file, self.structures[model][0])
 
         self.models_paths[model] = pdb_file
+
         return self.structures[model]
 
     def getModelsSequences(self):
@@ -1031,9 +1035,8 @@ compareSequences() function before adding missing loops.')
         return jobs
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
-                                    epik_pHt=False, remove_hydrogens=True, delwater_hbond_cutoff=False,
-                                    fill_loops=False, protonation_states=None, write_conect=False,
-                                    no_epik=False, use_new_version=False, **kwargs):
+                                    epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False,
+                                    fill_loops=False, protonation_states=None, no_epik=False, use_new_version=False, **kwargs):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -1052,7 +1055,8 @@ compareSequences() function before adding missing loops.')
             os.mkdir(prepare_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(prepare_folder+'/input_models', remove_hydrogens=remove_hydrogens, **kwargs)
+        self.saveModels(prepare_folder+'/input_models', convert_to_mae=True,
+                        remove_hydrogens=remove_hydrogens, **kwargs)
 
         # Generate jobs
         jobs = []
@@ -1079,7 +1083,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command = 'cd '+output_folder+'\n'
 
             command += '"${SCHRODINGER}/utilities/prepwizard" '
-            command += '../../input_models/'+model+'.pdb '
+            command += '../../input_models/'+model+'.mae '
             command += model+'.pdb '
             command += '-fillsidechains '
             command += '-disulfides '
@@ -1517,6 +1521,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Additional groups to consider when doing energy by residue reports.
         Missing!
         """
+
+        energy_by_residue_types = ['all', 'lennard_jones', 'sgb', 'electrostatic']
+        if energy_by_residue_type not in energy_by_residue_types:
+            raise ValueError('%s not found. Try: %s' % (energy_by_residue_type, energy_by_residue_types))
 
         spawnings = ['independent', 'inverselyProportional', 'epsilon', 'variableEpsilon',
                      'independentMetric', 'UCB', 'FAST', 'ProbabilityMSM', 'MetastabilityMSM',
@@ -2190,7 +2198,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         os.chdir('..')
 
-    def convertLigandPDBtoMae(self, ligands_folder):
+    def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
         """
         Convert ligand PDBs into MAE files.
 
@@ -2206,7 +2214,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         cwd = os.getcwd()
         os.chdir(ligands_folder)
-        os.system('run ._PDBtoMAE.py')
+        command = 'run ._PDBtoMAE.py'
+        if change_ligand_name:
+            command += ' --change_ligand_name'
+        os.system(command)
         os.chdir(cwd)
 
     def convertLigandMAEtoPDB(self, ligands_folder):
@@ -2666,7 +2677,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             plt.close()
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
-                                       return_failed=False):
+                                       return_failed=False, covalent_check=True):
         """
         Read structures from a Schrodinger calculation.
 
@@ -2693,7 +2704,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
                         models.append(model)
-                        self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f)
+                        self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f,
+                                              covalent_check=covalent_check)
 
         self.getModelsSequences()
 
@@ -3206,7 +3218,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder+'/output_models/'+model+'/'+model+'.pdb'
             self.readModelFromPDB(model, pdb_path)
 
-    def saveModels(self, output_folder, keep_residues={}, models=None,
+    def saveModels(self, output_folder, keep_residues={}, models=None, convert_to_mae=False,
                    **keywords):
         """
         Save all models as PDBs into the output_folder.
@@ -3218,6 +3230,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
+
+        if convert_to_mae:
+            _copyScriptFile(output_folder, 'PDBtoMAE.py')
+            script_name = '._PDBtoMAE.py'
 
         for model in self.models_names:
 
@@ -3236,6 +3252,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 output_folder+'/'+model+'.pdb',
                                 keep_residues=kr,
                                 **keywords)
+
+            self._write_conect_lines(model, output_folder+'/'+model+'.pdb')
+
+            if convert_to_mae:
+                cwd = os.getcwd()
+                os.chdir(output_folder)
+                command = 'run ._PDBtoMAE.py'
+                os.system(command)
+                os.chdir(cwd)
+                # os.remove(output_folder+'/'+model+'.pdb')
 
     def removeModel(self, model):
         """
@@ -3329,7 +3355,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     self.sequence_differences[model]['n_terminus'].append(tsp)
                 elif csp != '-' and tsp != '-':
                     n = False
-                    if loop_sequence != '':
+                    if loop_sequence != '' and len(loop_sequence) > 1: # Ignore single-residue loops
                         self.sequence_differences[model]['missing_loops'].append((loop_start, loop_sequence))
                     loop_sequence = ''
                     loop_start = 0
@@ -3341,7 +3367,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if loop_start == 0:
                         loop_start = p
                     loop_sequence += tsp
-
 
             # Check for c-terminus
             for i in reversed(range(msa.get_alignment_length())):
@@ -3373,7 +3398,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         pdb_model = self.structures[model][0]
 
         # Get atom indexes map
-        atoms = {a:i+1 for i,a in enumerate(pdb_model.get_atoms())}
+        atoms = _getAtomIndexes(pdb_model, invert=True)
 
         with open(pdb_file+'.tmp', 'w') as tmp:
             with open(pdb_file) as pdb:
@@ -3422,6 +3447,61 @@ make sure of reading the target sequences with the function readTargetSequences(
             return None
         else:
             return sequence
+
+    def _checkCovalentLigands(self, model, pdb_file):
+        """
+        """
+
+        for c in self.structures[model][0]:
+            indexes = []
+            for r in c:
+                indexes.append(r.id[1])
+
+            gaps2 = []
+            other_gaps = []
+            for i in range(len(indexes)):
+                if i > 0:
+                    if indexes[i]-indexes[i-1] == 2:
+                        gaps2.append((indexes[i-1], indexes[i]))
+                    elif indexes[i]-indexes[i-1] != 1:
+                        other_gaps.append(indexes[i])
+
+            for g2 in gaps2:
+                for og in other_gaps:
+                    if g2[1]-og == 1 and og-g2[0] == 1:
+                        print('Found misplaced residue %s for model %s' % (og, model))
+                        print('Possibly a covalent-link exists for this HETATM residue')
+                        print('Sorting residues by their indexes... to disable pass covalent_check=False.')
+                        self._sortStructureResidues(model, pdb_file)
+
+    def _sortStructureResidues(self, model, pdb_file):
+
+        # Create new structure
+        n_structure = PDB.Structure.Structure(0)
+
+        # Create new model
+        n_model = PDB.Model.Model(self.structures[model][0].id)
+
+        # Iterate chains from old model
+        for chain in self.structures[model][0]:
+            n_chain = PDB.Chain.Chain(chain.id)
+
+            # Gather residues
+            residues = []
+            for r in chain:
+                residues.append(r)
+
+            # Iterate residues orderly by their ID
+            for r in sorted(residues, key=lambda x:x.id[1]):
+                n_chain.add(r)
+
+            n_model.add(n_chain)
+        n_structure.add(n_model)
+
+        _saveStructureToPDB(n_structure, pdb_file)
+        n_structure = _readPDB(model, pdb_file)
+        self.structures[model] = n_structure
+        self._write_conect_lines(model, pdb_file)
 
     def _getModelsPaths(self):
         """
@@ -3500,13 +3580,40 @@ def _readPDB(name, pdb_file):
     structure = parser.get_structure(name, pdb_file)
     return structure
 
+def _getAtomIndexes(model, invert=False):
+
+    atoms = {}
+    i = 0
+    old_r = None
+    new_r = None
+    for chain in model:
+        for a in chain.get_atoms():
+            i += 1
+            # # Check TER lines based on heteroatoms
+            # if a.get_parent().id[0].startswith('H_'):
+            #     new_r = a.get_parent()
+            # if new_r != old_r:
+            #     i += 1
+            # old_r = new_r
+
+            # Add mapping to dictionary
+            if invert:
+                atoms[a] = i
+            else:
+                atoms[i] = a
+
+        i += 1 # Added to account for TER lines
+
+    return atoms
+
 def _readPDBConectLines(pdb_file, pdb_model):
     """
     Read PDB file and get conect lines only
     """
 
-    atoms = {i+1:a for i,a in enumerate(pdb_model.get_atoms())}
+    atoms = _getAtomIndexes(pdb_model)
     conects = {}
+    # Read conect lines as dictionaries linking atoms
     with open(pdb_file) as pdbf:
         for l in pdbf:
             if l.startswith('CONECT'):

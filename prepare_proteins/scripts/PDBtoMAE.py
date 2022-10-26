@@ -21,7 +21,7 @@ else:
 
 for pdb in os.listdir():
     if pdb.endswith('.pdb'):
-        
+
         # Read PDB structure
         for i,st in enumerate(structure.StructureReader(pdb)):
 
