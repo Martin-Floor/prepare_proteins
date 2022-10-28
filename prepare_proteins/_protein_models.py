@@ -242,10 +242,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Check covalent ligands
         if covalent_check:
-            self._checkCovalentLigands(model, pdb_file)
+            covalent = self._checkCovalentLigands(model, pdb_file)
 
         # Read conect lines
-        self.conects[model] = _readPDBConectLines(pdb_file, self.structures[model][0])
+        self.conects[model] = _readPDBConectLines(pdb_file, self.structures[model][0], covalent=covalent)
 
         self.models_paths[model] = pdb_file
 
@@ -3299,13 +3299,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def compareSequences(self, sequences_file):
         """
-        Compare models sequences to a set of different sequences and check missing
+        Compare models sequences to their given sequences and check for missing
         or changed sequence information.
 
         Parameters
         ==========
         sequences_file : str
-            Path to the sequences to compare
+            Path to the fasta file containing the sequences to compare. The model
+            names must match.
 
         Returns
         =======
@@ -3452,13 +3453,23 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         """
 
+        covalent = [] # Store covalent residues
+
+        # Iterate chains in model structure
         for c in self.structures[model][0]:
-            indexes = []
+
+            indexes = [] # Store residue indexes
+            hetero = [] # Store heteroatom residue indexes
+            residues = [] # Store residues orderly (for later)
             for r in c:
                 indexes.append(r.id[1])
+                if r.id[0].startswith('H_'):
+                    hetero.append(r.id[1])
+                residues.append(r)
 
-            gaps2 = []
-            other_gaps = []
+            # Check for individual and other gaps
+            gaps2 = []  # Store individual gaps
+            other_gaps = [] # Store other gaps
             for i in range(len(indexes)):
                 if i > 0:
                     if indexes[i]-indexes[i-1] == 2:
@@ -3466,6 +3477,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     elif indexes[i]-indexes[i-1] != 1:
                         other_gaps.append(indexes[i])
 
+            # Check if individual gaps can be filled with any residue in other_gaps
             for g2 in gaps2:
                 for og in other_gaps:
                     if g2[1]-og == 1 and og-g2[0] == 1:
@@ -3473,6 +3485,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                         print('Possibly a covalent-link exists for this HETATM residue')
                         print('Sorting residues by their indexes... to disable pass covalent_check=False.')
                         self._sortStructureResidues(model, pdb_file)
+
+            # Check if hetero-residue is found between two non-hetero residues
+            for i,r in enumerate(residues):
+                if r.id[1] in hetero:
+                    if i+1  == len(residues):
+                        continue
+                    chain = r.get_parent()
+                    pr = residues[i-1]
+                    nr = residues[i+1]
+                    if pr.get_parent().id == chain.id and nr.get_parent().id == chain.id:
+                        if pr.id[0] == ' ' and nr.id[0] == ' ':
+                            covalent.append(r.id[1])
+
+        return covalent
 
     def _sortStructureResidues(self, model, pdb_file):
 
@@ -3580,21 +3606,28 @@ def _readPDB(name, pdb_file):
     structure = parser.get_structure(name, pdb_file)
     return structure
 
-def _getAtomIndexes(model, invert=False):
+def _getAtomIndexes(model, invert=False, covalent=None):
 
     atoms = {}
     i = 0
     old_r = None
     new_r = None
+
+    # Check for covalent residues
+    if covalent == None:
+        covalent = []
+
     for chain in model:
         for a in chain.get_atoms():
             i += 1
-            # # Check TER lines based on heteroatoms
-            # if a.get_parent().id[0].startswith('H_'):
-            #     new_r = a.get_parent()
-            # if new_r != old_r:
-            #     i += 1
-            # old_r = new_r
+
+            # Check TER lines based on heteroatoms
+            if a.get_parent().id[0].startswith('H_'):
+                new_r = a.get_parent()
+            if new_r != old_r:
+                if new_r.id[1] not in covalent:
+                    i += 1
+            old_r = new_r
 
             # Add mapping to dictionary
             if invert:
@@ -3606,12 +3639,12 @@ def _getAtomIndexes(model, invert=False):
 
     return atoms
 
-def _readPDBConectLines(pdb_file, pdb_model):
+def _readPDBConectLines(pdb_file, pdb_model, covalent=None):
     """
     Read PDB file and get conect lines only
     """
 
-    atoms = _getAtomIndexes(pdb_model)
+    atoms = _getAtomIndexes(pdb_model, covalent=covalent)
     conects = {}
     # Read conect lines as dictionaries linking atoms
     with open(pdb_file) as pdbf:
