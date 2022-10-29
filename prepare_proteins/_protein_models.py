@@ -1504,7 +1504,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345):
+                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1742,6 +1742,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         if seed:
                             iyf.write('seed: '+str(seed)+'\n')
+
+                        if log_file:
+                            iyf.write('log: true\n')
+
                         iyf.write('\n')
                         iyf.write("#Options gathered from "+input_yaml+'\n')
 
