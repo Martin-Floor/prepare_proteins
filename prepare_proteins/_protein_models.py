@@ -97,6 +97,7 @@ class proteinModels:
         self.rosetta_data = None # Rosetta data is stored here
         self.sequence_differences = {} # Store missing/changed sequence information
         self.conects = {} # Store the conection inforamtion for each model
+        self.covalent = {} # Store covalent residues
 
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
@@ -242,10 +243,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Check covalent ligands
         if covalent_check:
-            covalent = self._checkCovalentLigands(model, pdb_file)
+            self._checkCovalentLigands(model, pdb_file)
 
         # Read conect lines
-        self.conects[model] = _readPDBConectLines(pdb_file, self.structures[model][0], covalent=covalent)
+        self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
         self.models_paths[model] = pdb_file
 
@@ -3399,11 +3400,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to PDB file to modify
         """
 
-        # Get structure model
-        pdb_model = self.structures[model][0]
-
         # Get atom indexes map
-        atoms = _getAtomIndexes(pdb_model, invert=True)
+        atoms = self._getAtomIndexes(model, invert=True)
 
         with open(pdb_file+'.tmp', 'w') as tmp:
             with open(pdb_file) as pdb:
@@ -3457,7 +3455,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         """
 
-        covalent = [] # Store covalent residues
+        self.covalent[model] = [] # Store covalent residues
 
         # Iterate chains in model structure
         for c in self.structures[model][0]:
@@ -3489,6 +3487,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         print('Possibly a covalent-link exists for this HETATM residue')
                         print('Sorting residues by their indexes... to disable pass covalent_check=False.')
                         self._sortStructureResidues(model, pdb_file)
+                        self.covalent[model].append(og)
 
             # Check if hetero-residue is found between two non-hetero residues
             for i,r in enumerate(residues):
@@ -3500,9 +3499,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     nr = residues[i+1]
                     if pr.get_parent().id == chain.id and nr.get_parent().id == chain.id:
                         if pr.id[0] == ' ' and nr.id[0] == ' ':
-                            covalent.append(r.id[1])
-
-        return covalent
+                            self.covalent[model].append(r.id[1])
 
     def _sortStructureResidues(self, model, pdb_file):
 
@@ -3532,6 +3529,51 @@ make sure of reading the target sequences with the function readTargetSequences(
         n_structure = _readPDB(model, pdb_file)
         self.structures[model] = n_structure
         self._write_conect_lines(model, pdb_file)
+
+    def _readPDBConectLines(self, pdb_file, model):
+        """
+        Read PDB file and get conect lines only
+        """
+
+        atoms = self._getAtomIndexes(model)
+        conects = {}
+        # Read conect lines as dictionaries linking atoms
+        with open(pdb_file) as pdbf:
+            for l in pdbf:
+                if l.startswith('CONECT'):
+                    fa = atoms[int(l.split()[1])]
+                    conects.setdefault(fa, [])
+                    conects[fa].append([atoms[int(x)] for x in l.split()[2:]])
+
+        return conects
+
+    def _getAtomIndexes(self, model, invert=False):
+
+        atoms = {}
+        i = 0
+        old_r = None
+        new_r = None
+
+        for chain in self.structures[model][0]:
+            for a in chain.get_atoms():
+                i += 1
+                new_r = a.get_parent()
+
+                # Check TER lines based on heteroatoms
+                if new_r != old_r and new_r.id[0].startswith('H_'):
+                    if new_r.id[1] not in self.covalent[model]:
+                        i += 1
+                old_r = new_r
+
+                # Add mapping to dictionary
+                if invert:
+                    atoms[a] = i
+                else:
+                    atoms[i] = a
+
+            i += 1 # Added to account for TER lines
+
+        return atoms
 
     def _getModelsPaths(self):
         """
@@ -3609,56 +3651,6 @@ def _readPDB(name, pdb_file):
     parser = PDB.PDBParser()
     structure = parser.get_structure(name, pdb_file)
     return structure
-
-def _getAtomIndexes(model, invert=False, covalent=None):
-
-    atoms = {}
-    i = 0
-    old_r = None
-    new_r = None
-
-    # Check for covalent residues
-    if covalent == None:
-        covalent = []
-
-    for chain in model:
-        for a in chain.get_atoms():
-            i += 1
-
-            # Check TER lines based on heteroatoms
-            if a.get_parent().id[0].startswith('H_'):
-                new_r = a.get_parent()
-            if new_r != old_r:
-                if new_r.id[1] not in covalent:
-                    i += 1
-            old_r = new_r
-
-            # Add mapping to dictionary
-            if invert:
-                atoms[a] = i
-            else:
-                atoms[i] = a
-
-        i += 1 # Added to account for TER lines
-
-    return atoms
-
-def _readPDBConectLines(pdb_file, pdb_model, covalent=None):
-    """
-    Read PDB file and get conect lines only
-    """
-
-    atoms = _getAtomIndexes(pdb_model, covalent=covalent)
-    conects = {}
-    # Read conect lines as dictionaries linking atoms
-    with open(pdb_file) as pdbf:
-        for l in pdbf:
-            if l.startswith('CONECT'):
-                fa = atoms[int(l.split()[1])]
-                conects.setdefault(fa, [])
-                conects[fa].append([atoms[int(x)] for x in l.split()[2:]])
-
-    return conects
 
 def _saveStructureToPDB(structure, output_file, remove_hydrogens=False,
                         remove_water=False, only_protein=False, keep_residues=[]):
