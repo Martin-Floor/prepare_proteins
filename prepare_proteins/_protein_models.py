@@ -1037,7 +1037,8 @@ compareSequences() function before adding missing loops.')
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False,
-                                    fill_loops=False, protonation_states=None, no_epik=False, use_new_version=False, **kwargs):
+                                    fill_loops=False, protonation_states=None, no_epik=False, mae_input=False,
+                                    use_new_version=False, **kwargs):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
