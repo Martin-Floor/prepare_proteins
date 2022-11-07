@@ -922,7 +922,7 @@ has been carried out. Please run compareSequences() function before setting muta
 
         return jobs
 
-    def addMissingLoops(self, job_folder, nstruct=1, sfxn='ref2015', param_files=None):
+    def addMissingLoops(self, job_folder, nstruct=1, sfxn='ref2015', param_files=None, idealize=True):
         """
         Create a Rosetta loop optimization protocol for missing loops in the structure.
 
@@ -987,15 +987,16 @@ compareSequences() function before adding missing loops.')
                         hanging_residues = 2
                     else:
                         hanging_residues = 1
-                    loop_movers = rosettaScripts.loop_modeling.loopRebuild(xml, loop[0], loop[1],
-                                                                           scorefxn=sfxn, hanging_residues=hanging_residues)
+                    loop_movers = rosettaScripts.loop_modeling.loopRebuild(xml, loop[0], loop[1], scorefxn=sfxn,
+                                                                           hanging_residues=hanging_residues)
                     for m in loop_movers:
                         protocol.append(m)
 
                     # Add idealize step
-                    idealize = rosettaScripts.movers.idealize()
-                    xml.addMover(idealize)
-                    protocol.append(idealize)
+                    if idealize:
+                        idealize = rosettaScripts.movers.idealize()
+                        xml.addMover(idealize)
+                        protocol.append(idealize)
 
                     # Set protocol
                     xml.setProtocol(protocol)
@@ -1057,7 +1058,7 @@ compareSequences() function before adding missing loops.')
             os.mkdir(prepare_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(prepare_folder+'/input_models', convert_to_mae=True,
+        self.saveModels(prepare_folder+'/input_models', convert_to_mae=mae_input,
                         remove_hydrogens=remove_hydrogens, **kwargs)
 
         # Generate jobs
@@ -1085,7 +1086,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command = 'cd '+output_folder+'\n'
 
             command += '"${SCHRODINGER}/utilities/prepwizard" '
-            command += '../../input_models/'+model+'.mae '
+            if mae_input:
+                command += '../../input_models/'+model+'.mae '
+            else:
+                command += '../../input_models/'+model+'.pdb '
             command += model+'.pdb '
             command += '-fillsidechains '
             command += '-disulfides '
@@ -3402,7 +3406,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         # Get atom indexes map
-        atoms = self._getAtomIndexes(model, invert=True)
+        atoms = self._getAtomIndexes(model, pdb_file, invert=True)
 
         with open(pdb_file+'.tmp', 'w') as tmp:
             with open(pdb_file) as pdb:
@@ -3536,7 +3540,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         Read PDB file and get conect lines only
         """
 
-        atoms = self._getAtomIndexes(model)
+        atoms = self._getAtomIndexes(model, pdb_file)
         conects = {}
         # Read conect lines as dictionaries linking atoms
         with open(pdb_file) as pdbf:
@@ -3548,32 +3552,31 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return conects
 
-    def _getAtomIndexes(self, model, invert=False):
+    def _getAtomIndexes(self, model, pdb_file, invert=False):
 
-        atoms = {}
         i = 0
         old_r = None
         new_r = None
 
+        # Read PDB file
+        atom_indexes = {}
+        with open(pdb_file, 'r') as f:
+            for l in f:
+                if l.startswith('ATOM') or l.startswith('HETATM'):
+                    ls = l.split()
+                    index, name, chain, resid = (int(ls[1]), ls[2], ls[4], int(ls[5]))
+                    atom_indexes[(chain, resid, name)] = index
+
+        # Assign PDB indexes to each Bio.PDB atom
+        atoms = {}
         for chain in self.structures[model][0]:
-            for a in chain.get_atoms():
-                i += 1
-                new_r = a.get_parent()
-
-                # Check TER lines based on heteroatoms
-                if new_r != old_r and new_r.id[0].startswith('H_'):
-                    if new_r.id[1] not in self.covalent[model]:
-                        i += 1
-                old_r = new_r
-
-                # Add mapping to dictionary
-                if invert:
-                    atoms[a] = i
-                else:
-                    atoms[i] = a
-
-            i += 1 # Added to account for TER lines
-
+            for residue in chain:
+                for atom in residue:
+                    index = atom_indexes[(chain.id, residue.id[1], atom.name)]
+                    if invert:
+                        atoms[atom] = index
+                    else:
+                        atoms[index] = atom
         return atoms
 
     def _getModelsPaths(self):
