@@ -3563,10 +3563,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         with open(pdb_file, 'r') as f:
             for l in f:
                 if l.startswith('ATOM') or l.startswith('HETATM'):
-                    ls = l.split()
-                    index, name, chain, resid = (int(ls[1]), ls[2], ls[4], int(ls[5]))
+                    index, name, chain, resid = (int(l[7:12]), l[12:17].strip(), l[21], int(l[22:27]))
                     atom_indexes[(chain, resid, name)] = index
-
         # Assign PDB indexes to each Bio.PDB atom
         atoms = {}
         for chain in self.structures[model][0]:
