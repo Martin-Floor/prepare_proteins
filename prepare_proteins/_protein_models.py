@@ -215,7 +215,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
 
-    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True):
+    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
+                         atom_mapping=None):
         """
         Adds a model from a PDB file.
 
@@ -241,11 +242,15 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == 'WAT':
                     residue.resname = 'HOH'
 
+        if model not in self.conects or self.conects[model] == {}:
+            # Read conect lines
+            self.conects[model] = self._readPDBConectLines(pdb_file, model)
+
         # Check covalent ligands
         if covalent_check:
-            self._checkCovalentLigands(model, pdb_file)
+            self._checkCovalentLigands(model, pdb_file, atom_mapping=atom_mapping)
 
-        # Read conect lines
+        # Update conect lines
         self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
         self.models_paths[model] = pdb_file
@@ -1128,8 +1133,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10), use_new_version=False,
-                         outerbox=(30,30,30), useflexmae=True, peptide=False):
+    def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
+                         outerbox=(30,30,30), useflexmae=True, peptide=False, mae_input=True):
         """
         Setup grid calculation for each model.
 
@@ -1154,7 +1159,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(grid_folder+'/output_models')
 
         # Save all input models
-        self.saveModels(grid_folder+'/input_models')
+        self.saveModels(grid_folder+'/input_models', convert_to_mae=mae_input)
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -1194,7 +1199,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 gif.write('GRIDFILE '+model+'.zip\n')
                 gif.write('INNERBOX %s, %s, %s\n' % innerbox)
                 gif.write('OUTERBOX %s, %s, %s\n' % outerbox)
-                gif.write('RECEP_FILE %s\n' % (model+'.mae'))
+                if mae_input:
+                    gif.write('RECEP_FILE %s\n' % ('../input_models/'+model+'.mae'))
+                else:
+                    gif.write('RECEP_FILE %s\n' % ('../input_models/'+model+'.pdb'))
                 if peptide:
                     gif.write('PEPTIDE True\n')
                 if useflexmae:
@@ -1203,13 +1211,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             command = 'cd '+grid_folder+'/output_models\n'
 
             # Add convert PDB into mae format command
-            command += '"$SCHRODINGER/utilities/structconvert" '
-            if use_new_version:
-                command += '-i ../input_models/'+model+'.pdb'+' '
-                command += '-o '+model+'.mae\n'
-            else:
-                command += '-ipdb ../input_models/'+model+'.pdb'+' '
-                command += '-omae '+model+'.mae\n'
+            # command += '"$SCHRODINGER/utilities/structconvert" '
+            # if mae_input:
+            #     command += '-ipdb ../input_models/'+model+'.pdb'+' '
+            #     command += '-omae '+model+'.mae\n'
 
             # Add grid generation command
             command += '"${SCHRODINGER}/glide" '
@@ -1227,7 +1232,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
                           poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                          energy_by_residue=False):
+                          energy_by_residue=False, use_new_version=False,):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
@@ -2687,7 +2692,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             plt.close()
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
-                                       return_failed=False, covalent_check=True):
+                                       return_failed=False, covalent_check=True,
+                                       atom_mapping=None):
         """
         Read structures from a Schrodinger calculation.
 
@@ -2715,7 +2721,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         model = f.replace('.pdb', '')
                         models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f,
-                                              covalent_check=covalent_check)
+                                              covalent_check=covalent_check, atom_mapping=atom_mapping)
 
         self.getModelsSequences()
 
@@ -3271,7 +3277,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command = 'run ._PDBtoMAE.py'
                 os.system(command)
                 os.chdir(cwd)
-                # os.remove(output_folder+'/'+model+'.pdb')
+                os.remove(output_folder+'/'+model+'.pdb')
 
     def removeModel(self, model):
         """
@@ -3393,7 +3399,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.sequence_differences
 
-    def _write_conect_lines(self, model, pdb_file):
+    def _write_conect_lines(self, model, pdb_file, atom_mapping=None):
         """
         Write stored conect lines for a particular model into the given PDB file.
 
@@ -3405,9 +3411,26 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to PDB file to modify
         """
 
+        def check_atom_in_atoms(atom, atoms):
+
+            if atom not in atoms and atom_mapping != None and atom in atom_mapping:
+                if isinstance(atom_mapping[atom], str):
+                    atom = (atom[0], atom[1], atom_mapping[atom])
+                elif isinstance(atom_mapping[atom], tuple) and len(atom_mapping[atom]) == 3:
+                    atom = atom_mapping[atom]
+
+            if atom not in atoms:
+                residue_atoms = ' '.join([ac[-1] for ac in atoms if atom[1] == ac[1]])
+                message = "Conect atom %s not found in %s's topology\n\n" % (atom, pdb_file)
+                message += "Topology's residue %s atom names: %s" % (atom[1], residue_atoms)
+                raise ValueError(message)
+
+            return atom
+
         # Get atom indexes map
         atoms = self._getAtomIndexes(model, pdb_file, invert=True)
 
+        # Check atoms not found in conects
         with open(pdb_file+'.tmp', 'w') as tmp:
             with open(pdb_file) as pdb:
 
@@ -3417,12 +3440,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         tmp.write(line)
 
                 # Write new conect line mapping
-                for a in self.conects[model]:
-                    line = 'CONECT '
-                    line += str(atoms[a])+' '
-                    for entry in self.conects[model][a]:
-                        line += ' '.join([str(atoms[x]) for x in entry])+'\n'
-                    tmp.write(line)
+                for entry in self.conects[model]:
+                    line = 'CONECT'
+                    for x in entry:
+                        x = check_atom_in_atoms(x, atoms)
+                        line += ' '+str(atoms[x])
+                    line += '\n'
+                tmp.write(line)
 
             tmp.write('END\n')
         shutil.move(pdb_file+'.tmp', pdb_file)
@@ -3456,7 +3480,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             return sequence
 
-    def _checkCovalentLigands(self, model, pdb_file):
+    def _checkCovalentLigands(self, model, pdb_file, atom_mapping=None):
         """
         """
 
@@ -3491,7 +3515,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         print('Found misplaced residue %s for model %s' % (og, model))
                         print('Possibly a covalent-link exists for this HETATM residue')
                         print('Sorting residues by their indexes... to disable pass covalent_check=False.')
-                        self._sortStructureResidues(model, pdb_file)
+                        self._sortStructureResidues(model, pdb_file, atom_mapping=atom_mapping)
                         self.covalent[model].append(og)
 
             # Check if hetero-residue is found between two non-hetero residues
@@ -3506,7 +3530,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if pr.id[0] == ' ' and nr.id[0] == ' ':
                             self.covalent[model].append(r.id[1])
 
-    def _sortStructureResidues(self, model, pdb_file):
+    def _sortStructureResidues(self, model, pdb_file, atom_mapping=None):
 
         # Create new structure
         n_structure = PDB.Structure.Structure(0)
@@ -3530,10 +3554,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             n_model.add(n_chain)
         n_structure.add(n_model)
 
-        _saveStructureToPDB(n_structure, pdb_file)
+        _saveStructureToPDB(n_structure, pdb_file+'.tmp')
+        self._write_conect_lines(model, pdb_file+'.tmp', atom_mapping=atom_mapping)
+        shutil.move(pdb_file+'.tmp', pdb_file)
         n_structure = _readPDB(model, pdb_file)
         self.structures[model] = n_structure
-        self._write_conect_lines(model, pdb_file)
 
     def _readPDBConectLines(self, pdb_file, model):
         """
@@ -3541,22 +3566,19 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         atoms = self._getAtomIndexes(model, pdb_file)
-        conects = {}
+        conects = []
         # Read conect lines as dictionaries linking atoms
         with open(pdb_file) as pdbf:
             for l in pdbf:
                 if l.startswith('CONECT'):
-                    fa = atoms[int(l.split()[1])]
-                    conects.setdefault(fa, [])
-                    conects[fa].append([atoms[int(x)] for x in l.split()[2:]])
-
+                    conects.append([atoms[int(x)] for x in l.split()[1:]])
         return conects
 
     def _getAtomIndexes(self, model, pdb_file, invert=False):
 
-        i = 0
-        old_r = None
-        new_r = None
+        # i = 0
+        # old_r = None
+        # new_r = None
 
         # Read PDB file
         atom_indexes = {}
@@ -3573,10 +3595,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             for residue in chain:
                 for atom in residue:
                     index = atom_indexes[(chain.id, residue.id[1], atom.name)]
+                    # index = i
                     if invert:
-                        atoms[atom] = index
+                        atoms[_get_atom_tuple(atom)] = index
                     else:
-                        atoms[index] = atom
+                        atoms[index] = _get_atom_tuple(atom)
+                    # i += 1
         return atoms
 
     def _getModelsPaths(self):
@@ -3719,3 +3743,8 @@ def _copyScriptFile(output_folder, script_name, no_py=False, subfolder=None, hid
     with open(output_path, 'w') as sof:
         for l in script_file:
             sof.write(l)
+
+def _get_atom_tuple(atom):
+    return (atom.get_parent().get_parent().id,
+            atom.get_parent().id[1],
+            atom.name)
