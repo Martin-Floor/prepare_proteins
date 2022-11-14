@@ -2609,7 +2609,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Check the separator is not in model or ligand names
         for model in self.docking_ligands:
-            if separator in model:
+            if separator in str(model):
                 raise ValueError('The separator %s was found in model name %s. Please use a different separator symbol.' % (separator, model))
             for ligand in self.docking_ligands[model]:
                 if separator in ligand:
@@ -2631,6 +2631,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         command = 'run ._extract_docking.py ._docking_data.csv ../'+docking_folder+' --separator '+separator
+        print(command)
         os.system(command)
 
         # Remove docking data

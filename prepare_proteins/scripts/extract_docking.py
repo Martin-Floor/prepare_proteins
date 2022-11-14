@@ -46,15 +46,15 @@ for model in os.listdir(docking_folder+'/output_models'):
 
 # Get and save selected docking poses to PDB
 for model in poses:
-    if not os.path.exists(model):
-        os.mkdir(model)
+    if not os.path.exists(str(model)):
+        os.mkdir(str(model))
     for ligand in poses[model]:
-        for pose,st in enumerate(structure.StructureReader(mae_output[model][ligand])):
+        for pose,st in enumerate(structure.StructureReader(mae_output[str(model)][ligand])):
             if 'r_i_glide_gscore' in st.property:
                 if pose in poses[model][ligand]:
                     complex = protein.merge(st)
-                    output_pdb = model+separator+ligand+separator+str(pose)+'.pdb'
-                    PDBWriter = structure.PDBWriter(model+'/'+output_pdb)
+                    output_pdb = str(model)+separator+ligand+separator+str(pose)+'.pdb'
+                    PDBWriter = structure.PDBWriter(str(model)+'/'+output_pdb)
                     PDBWriter.write(complex)
             else:
                 protein = st
