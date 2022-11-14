@@ -242,7 +242,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == 'WAT':
                     residue.resname = 'HOH'
 
-        if model not in self.conects or self.conects[model] == {}:
+        if model not in self.conects or self.conects[model] == []:
             # Read conect lines
             self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
@@ -2639,6 +2639,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         # move back to folder
         os.chdir('..')
 
+        # Check models for covalent residues
+        for protein in os.listdir(output_folder):
+            if not os.path.isdir(output_folder+'/'+protein):
+                continue
+            for f in os.listdir(output_folder+'/'+protein):
+                self._checkCovalentLigands(protein, output_folder+'/'+protein+'/'+f,
+                                           check_file=True)
+
     def getSingleDockingData(self, protein, ligand, data_frame=None):
         """
         Get the docking data for a particular combination of protein and ligand
@@ -3434,7 +3442,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         with open(pdb_file+'.tmp', 'w') as tmp:
             with open(pdb_file) as pdb:
 
-                # Skip END line
+                # write all lines but skip END line
                 for line in pdb:
                     if not line.startswith('END'):
                         tmp.write(line)
@@ -3446,8 +3454,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         x = check_atom_in_atoms(x, atoms)
                         line += ' '+str(atoms[x])
                     line += '\n'
-                tmp.write(line)
-
+                    tmp.write(line)
             tmp.write('END\n')
         shutil.move(pdb_file+'.tmp', pdb_file)
 
@@ -3480,14 +3487,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             return sequence
 
-    def _checkCovalentLigands(self, model, pdb_file, atom_mapping=None):
+    def _checkCovalentLigands(self, model, pdb_file, atom_mapping=None, check_file=False):
         """
         """
-
         self.covalent[model] = [] # Store covalent residues
+        if check_file:
+            structure = _readPDB(model, pdb_file)
+        else:
+            structure = self.structures[model]
 
         # Iterate chains in model structure
-        for c in self.structures[model][0]:
+        for c in structure[0]:
 
             indexes = [] # Store residue indexes
             hetero = [] # Store heteroatom residue indexes
@@ -3515,7 +3525,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         print('Found misplaced residue %s for model %s' % (og, model))
                         print('Possibly a covalent-link exists for this HETATM residue')
                         print('Sorting residues by their indexes... to disable pass covalent_check=False.')
-                        self._sortStructureResidues(model, pdb_file, atom_mapping=atom_mapping)
+                        self._sortStructureResidues(model, pdb_file, check_file=check_file,
+                                                    atom_mapping=atom_mapping)
                         self.covalent[model].append(og)
 
             # Check if hetero-residue is found between two non-hetero residues
@@ -3530,7 +3541,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if pr.id[0] == ' ' and nr.id[0] == ' ':
                             self.covalent[model].append(r.id[1])
 
-    def _sortStructureResidues(self, model, pdb_file, atom_mapping=None):
+    def _sortStructureResidues(self, model, pdb_file, atom_mapping=None, check_file=False):
 
         # Create new structure
         n_structure = PDB.Structure.Structure(0)
@@ -3538,8 +3549,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create new model
         n_model = PDB.Model.Model(self.structures[model][0].id)
 
+        if check_file:
+            structure = _readPDB(model, pdb_file)
+        else:
+            structure = self.structures[model]
+
         # Iterate chains from old model
-        for chain in self.structures[model][0]:
+        for chain in structure[0]:
             n_chain = PDB.Chain.Chain(chain.id)
 
             # Gather residues
@@ -3558,7 +3574,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         self._write_conect_lines(model, pdb_file+'.tmp', atom_mapping=atom_mapping)
         shutil.move(pdb_file+'.tmp', pdb_file)
         n_structure = _readPDB(model, pdb_file)
-        self.structures[model] = n_structure
+
+        # Update structure model in library
+        if not check_file:
+            self.structures[model] = n_structure
 
     def _readPDBConectLines(self, pdb_file, model):
         """
