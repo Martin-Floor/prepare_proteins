@@ -205,6 +205,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         atom_lists : list
             Specifies the list of atoms to delete for the particular model.
         """
+
+        def checkAtomInConects(self, model, atom):
+            for conect in self.conects[model]:
+                if atom in conect:
+                    print(atom)
+
+
         for remove_atom in atoms_list:
             for chain in self.structures[model].get_chains():
                 if chain.id == remove_atom[0]:
@@ -214,6 +221,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                 if atom.name == remove_atom[2]:
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
+                                    checkAtomInConects(self, model, remove_atom)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
@@ -1510,6 +1518,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
+    def setUpCovalentLigandParameterization(self, model, resname):
+        self
+
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
@@ -2541,7 +2552,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             for ligand in self.docking_ligands[model]:
                 ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
                 for metric in filter_values:
-                    ligand_data = ligand_data[ligand_data['metric_'+metric] < filter_values[metric]]
+
+                    if metric not in ['Score', 'RMSD']:
+                        ligand_data = ligand_data[ligand_data['metric_'+metric] < filter_values[metric]]
+                    else:
+                        ligand_data = ligand_data[ligand_data[metric] < filter_values[metric]]
+
                 if ligand_data.empty:
                     failed.append((model, ligand))
                     continue
@@ -2588,7 +2604,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return pele_data
 
-    def extractDockingPoses(self, docking_data, docking_folder, output_folder, separator='-'):
+    def extractDockingPoses(self, docking_data, docking_folder, output_folder,
+                            separator='-', covalent_check=True):
         """
         Extract docking poses present in a docking_data dataframe. The docking DataFrame
         contains the same structure as the self.docking_data dataframe, parameter of
@@ -2644,8 +2661,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not os.path.isdir(output_folder+'/'+protein):
                 continue
             for f in os.listdir(output_folder+'/'+protein):
-                self._checkCovalentLigands(protein, output_folder+'/'+protein+'/'+f,
-                                           check_file=True)
+                if covalent_check:
+                    self._checkCovalentLigands(protein, output_folder+'/'+protein+'/'+f,
+                                               check_file=True)
 
     def getSingleDockingData(self, protein, ligand, data_frame=None):
         """
@@ -3407,7 +3425,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.sequence_differences
 
-    def _write_conect_lines(self, model, pdb_file, atom_mapping=None):
+    def _write_conect_lines(self, model, pdb_file, atom_mapping=None, check_file=False):
         """
         Write stored conect lines for a particular model into the given PDB file.
 
@@ -3436,7 +3454,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             return atom
 
         # Get atom indexes map
-        atoms = self._getAtomIndexes(model, pdb_file, invert=True)
+        atoms = self._getAtomIndexes(model, pdb_file, invert=True, check_file=check_file)
 
         # Check atoms not found in conects
         with open(pdb_file+'.tmp', 'w') as tmp:
@@ -3522,9 +3540,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             for g2 in gaps2:
                 for og in other_gaps:
                     if g2[1]-og == 1 and og-g2[0] == 1:
-                        print('Found misplaced residue %s for model %s' % (og, model))
+
+                        if check_file:
+                            print('Found misplaced residue %s for file %s' % (og, pdb_file))
+                        else:
+                            print('Found misplaced residue %s for model %s' % (og, model))
+
                         print('Possibly a covalent-link exists for this HETATM residue')
                         print('Sorting residues by their indexes... to disable pass covalent_check=False.')
+
                         self._sortStructureResidues(model, pdb_file, check_file=check_file,
                                                     atom_mapping=atom_mapping)
                         self.covalent[model].append(og)
@@ -3571,7 +3595,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         n_structure.add(n_model)
 
         _saveStructureToPDB(n_structure, pdb_file+'.tmp')
-        self._write_conect_lines(model, pdb_file+'.tmp', atom_mapping=atom_mapping)
+        self._write_conect_lines(model, pdb_file+'.tmp', atom_mapping=atom_mapping, check_file=check_file)
         shutil.move(pdb_file+'.tmp', pdb_file)
         n_structure = _readPDB(model, pdb_file)
 
@@ -3593,7 +3617,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     conects.append([atoms[int(x)] for x in l.split()[1:]])
         return conects
 
-    def _getAtomIndexes(self, model, pdb_file, invert=False):
+    def _getAtomIndexes(self, model, pdb_file, invert=False, check_file=False):
 
         # i = 0
         # old_r = None
@@ -3608,9 +3632,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                     index, name, chain, resid = (int(ls[1]), ls[2], ls[4], int(ls[5]))
                     atom_indexes[(chain, resid, name)] = index
 
+        if check_file:
+            structure = _readPDB(model, pdb_file)
+        else:
+            structure = self.structures[model]
+
         # Assign PDB indexes to each Bio.PDB atom
         atoms = {}
-        for chain in self.structures[model][0]:
+        for chain in structure[0]:
             for residue in chain:
                 for atom in residue:
                     index = atom_indexes[(chain.id, residue.id[1], atom.name)]
