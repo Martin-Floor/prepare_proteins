@@ -2626,7 +2626,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Check the separator is not in model or ligand names
         for model in self.docking_ligands:
-            if separator in model:
+            if separator in str(model):
                 raise ValueError('The separator %s was found in model name %s. Please use a different separator symbol.' % (separator, model))
             for ligand in self.docking_ligands[model]:
                 if separator in ligand:
@@ -2648,6 +2648,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         command = 'run ._extract_docking.py ._docking_data.csv ../'+docking_folder+' --separator '+separator
+        print(command)
         os.system(command)
 
         # Remove docking data
@@ -3628,8 +3629,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         with open(pdb_file, 'r') as f:
             for l in f:
                 if l.startswith('ATOM') or l.startswith('HETATM'):
-                    ls = l.split()
-                    index, name, chain, resid = (int(ls[1]), ls[2], ls[4], int(ls[5]))
+                    index, name, chain, resid = (int(l[7:12]), l[12:17].strip(), l[21], int(l[22:27]))
                     atom_indexes[(chain, resid, name)] = index
 
         if check_file:
