@@ -64,7 +64,7 @@ class proteinModels:
         Get the paths for all PDBs in the input_folder path.
     """
 
-    def __init__(self, models_folder, get_sequences=True, get_ss=True, msa=False):
+    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -2359,7 +2359,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '--protonation_states '
             if decompose_bb_hb_into_pair_energies:
                 command += '--decompose_bb_hb_into_pair_energies'
-            
+
             try:
                 os.system(command)
             except:
