@@ -2200,7 +2200,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 io = PDB.PDBIO()
                 pdb_chains = structure.get_chains()
 
-                num_chains = len(pdb_chains)
+                num_chains = len(list(pdb_chains))
 
                 if num_chains < 2:
                     raise ValueError('Input pdb '+model+' has only one chain. Protein and ligand should be separated in individual chains.')
