@@ -1872,14 +1872,9 @@ make sure of reading the target sequences with the function readTargetSequences(
     def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False,ion_chain=False):
         """
         Sets up MD simulations for each model. The current state only allows to set
-        up simulations for apo proteins and using the Gromacs software. WARNING: peptide chain
-        must be named L and ions must be grouped in chain I.
+        up simulations for apo proteins and using the Gromacs software.
 
-        ######################################
-        ###  TODO:                         ###
-        ### - generalize selection numbers ###
-        ### - fix genrestr itp files       ###
-        ######################################
+        !!! WARNING: selector indexes may vary depending on structure. !!!
 
         Parameters
         ==========
@@ -2080,14 +2075,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,separator='_',ligand_chain='L',multiple_chains='False'):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,separator='_',ligand_chain='L'):
         """
         Sets up MD simulations for each model. The current state only allows to set
-        up simulations for apo proteins and using the Gromacs software. WARNING: peptide chain
-        must be named L and ions must be grouped in chain I.
+        up simulations for apo proteins and using the Gromacs software.
 
-        ### WARNING: Only works for single chain protein, only tested for default force field. ###
-        ### TODO: selectors
+        If the input pdb has additional non aa residues besides ligand (ions,HETATMs,...)
+        they should be separated in individual chains.
+
+        !!! WARNING: setup with multiple chains has not been tested. Proceed with caution. !!!
 
         Parameters
         ==========
@@ -2164,8 +2160,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             jobs = []
 
             for model in self.models_names:
-                protein = model.split('_')[0]
-                #ligand = model.split('_')[1].replace('.pdb','')
+                protein = model.split(separator)[0]
+                ligand_name = model.split(separator)[1].replace('.pdb','')
 
                 # Create additional folders
                 if not os.path.exists(md_folder+'/output_models/'+model):
@@ -2180,7 +2176,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     for chain in mdl:
                         for residue in chain:
                             if chain.get_id() == ligand_chain:
-                                ligand = residue.resname
+                                ligand_res = residue.resname
                             HD1 = False
                             HE2 = False
                             if residue.resname == 'HIS':
@@ -2204,14 +2200,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                 io = PDB.PDBIO()
                 pdb_chains = structure.get_chains()
 
-                if ligand not in os.listdir(md_folder+'/ligand_params'):
-                    os.mkdir(md_folder+'/ligand_params/'+ligand)
+                num_chains = len(pdb_chains)
+
+                if num_chains < 2:
+                    raise ValueError('Input pdb '+model+' has only one chain. Protein and ligand should be separated in individual chains.')
+
+                if ligand_name not in os.listdir(md_folder+'/ligand_params'):
+                    os.mkdir(md_folder+'/ligand_params/'+ligand_name)
                     for chain in pdb_chains:
                         if chain.get_id() == ligand_chain:
                             io.set_structure(chain)
-                            io.save(md_folder+'/ligand_params/'+ligand+'/ligand.pdb')
+                            io.save(md_folder+'/ligand_params/'+ligand_name+'/ligand.pdb')
 
-                    os.chdir(md_folder+'/ligand_params/'+ligand)
+                    os.chdir(md_folder+'/ligand_params/'+ligand_name)
                     os.system('acpype -i ligand.pdb')
                     os.chdir('../../..')
 
@@ -2228,7 +2229,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ### changes ###
                     #command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/model.pdb'+'\n'
                     command += 'cp input_models/'+protein+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
-                    command += 'cp -r ligand_params/'+ligand+'/ligand.acpype output_models/'+model+'/topol/'+'\n'
+                    command += 'cp -r ligand_params/'+ligand_name+'/ligand.acpype output_models/'+model+'/topol/'+'\n'
                     command += 'cd output_models/'+model+'/topol'+'\n'
 
                     command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
@@ -2249,7 +2250,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
 
                     ####
-                    selector = '15'
+                    selector = str(13+num_chains)
                     ####
 
                     command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
@@ -2277,7 +2278,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'mkdir nvt'+'\n'
                     command += 'cd nvt'+'\n'
                     command += 'cp -r ../../../scripts/nvt.mdp .'+'\n'
-                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand+' Water_and_ions\' nvt.mdp'+'\n'
+                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' nvt.mdp'+'\n'
 
                     command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp -fc 1000 1000 1000'+'\n'
                     command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
@@ -2293,7 +2294,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += 'cd npt'+'\n'
 
                 command += 'cp -r ../../../scripts/npt.mdp .'+'\n'
-                command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand+' Water_and_ions\' npt.mdp'+'\n'
+                command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' npt.mdp'+'\n'
 
                 for i in range(len(FClist)+1):
                     if not os.path.exists(md_folder+'/output_models/'+model+'/npt/prot_npt_'+str(i+1)+'.tpr'):
@@ -2315,7 +2316,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += 'cd md'+'\n'
 
                 command += 'cp -r ../../../scripts/md.mdp .'+'\n'
-                command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand+' Water_and_ions\' md.mdp'+'\n'
+                command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' md.mdp'+'\n'
 
                 for i in range(1,frags+1):
                     if not os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'.xtc'):
