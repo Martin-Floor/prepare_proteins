@@ -15,7 +15,7 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads,carbonyls=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',remove_water=True,peptide=False,ligand=False):
+    def __init__(self,path,triads=None,carbonyls=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',remove_water=True,peptide=False,ligand=False):
 
         self.paths = {}
         self.distances = {}
@@ -70,7 +70,6 @@ class md_analysis:
                                     #line = ''
                             line += '\n'
 
-                            ser = self.triads[model][0][1:]
                             os.system('echo q | '+command+' make_ndx -f '+'/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
 
                             with open('/'.join(traj_path.split('/')[:-1])+'/md/index.ndx','a') as f:
@@ -94,6 +93,9 @@ class md_analysis:
             self.paths[model] = (traj_path+'/'+traj_name)
 
     def setupCalculateDistances(self,job_folder='MD_analysis_data',overwrite=False):
+
+        if self.triads == None:
+            raise ValueEror('Triads were not given to the object')
 
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
