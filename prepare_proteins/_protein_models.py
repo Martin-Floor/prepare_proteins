@@ -207,10 +207,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         """
 
         def checkAtomInConects(self, model, atom):
+            """
+            Incomplete function for checking conect lies that should be altered
+            after the atom is deleted. Review when the case arises.
+            """
             for conect in self.conects[model]:
                 if atom in conect:
-                    print(atom)
-
+                    atom
 
         for remove_atom in atoms_list:
             for chain in self.structures[model].get_chains():
@@ -221,7 +224,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                 if atom.name == remove_atom[2]:
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
-                                    checkAtomInConects(self, model, remove_atom)
+                                    # checkAtomInConects(self, model, remove_atom)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
@@ -1051,8 +1054,8 @@ compareSequences() function before adding missing loops.')
 
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
                                     epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False,
-                                    fill_loops=False, protonation_states=None, no_epik=False, mae_input=False,
-                                    use_new_version=False, **kwargs):
+                                    fill_loops=False, protonation_states=None, noepik=False, mae_input=False,
+                                    noprotassign=False, use_new_version=False, **kwargs):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -1111,8 +1114,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-fasta_file "$pwd"/'+model+'.fasta '
             if remove_hydrogens:
                 command += '-rehtreat '
-            if no_epik:
+            if noepik:
                 command += '-noepik '
+            if noprotassign:
+                command += '-noprotassign '
             else:
                 if epik_pH:
                     command += '-epik_pH '+str(pH)+' '
@@ -1518,15 +1523,133 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpCovalentLigandParameterization(self, model, resname):
-        self
+    def _setUpCovalentLigandParameterization(self, model, residue_index, base_aa, output_folder=''):
+        """
+        Add a step of parameterization for a covalent residue in a specific model.
+
+        Parameters
+        ==========
+        model : str
+            Model name
+        resname : str
+            Name of the covalent residue
+        base_aa : dict
+            Three letter identity of the aminoacid upon which the ligand is covalently bound.
+            One entry in the dictionary for residue name, i.e., base_aa={'FAD':'CYS', 'NAD':'ASP', etc.}
+        output_folder : str
+            Output folder where to put the ligand PDB file.
+        """
+        def getAtomsIndexes(pdb_file):
+
+            atoms_indexes = {}
+            with open(pdb_file) as pdb:
+                for l in pdb:
+                    if l.startswith('ATOM') or l.startswith('HETATM'):
+                        index, name, chain, resid = (int(l[7:12]), l[12:17].strip(), l[21], int(l[22:27]))
+                        atoms_indexes[(chain, resid, name)] = index
+            return atoms_indexes
+
+        def addConectLines(model, pdb_file):
+
+            # Add conect lines to ligand structure
+            atoms_indexes = getAtomsIndexes(pdb_file)
+            with open(pdb_file) as pdb:
+                for l in pdb:
+                    if l.startswith('ATOM') or l.startswith('HETATM'):
+                        index, name, chain, resid = (int(l[7:12]), l[12:17].strip(), l[21], int(l[22:27]))
+                        atoms_indexes[(chain, resid, name)] = index
+
+            with open(pdb_file+'.tmp', 'w') as tmp:
+                with open(pdb_file) as pdb:
+                    for l in pdb:
+                        if l.startswith('ATOM') or l.startswith('HETATM'):
+                            if not l.startswith('END'):
+                                tmp.write(l)
+
+                    # count = 0
+                    for conect in self.conects[model]:
+                        if conect[0] in atoms_indexes:
+                            line = 'CONECT'
+                            for atom in conect:
+                                if atom in atoms_indexes:
+                                    line += '%5s' % atoms_indexes[atom]
+                            line += '\n'
+                            tmp.write(line)
+                            # count += 1
+
+                tmp.write('END\n')
+            shutil.move(pdb_file+'.tmp', pdb_file)
+
+        # Define atom names
+        c_atom='C'
+        n_atom='N'
+        o_atom='O'
+
+        ### Create covalent-ligand-only PDB
+        cov_structure = PDB.Structure.Structure(0)
+        cov_model = PDB.Model.Model(0)
+        cov_chain = None
+        for r in self.structures[model].get_residues():
+            if r.id[1] == residue_index:
+                resname = r.resname
+                if resname not in base_aa:
+                    message = 'Residue %s not found in the base_aa dictionary!'
+                    message += "Please give the base of the aminoacid with the 'base_aa' keyword"
+                    raise ValueError(message)
+
+                cov_residue = r
+                cov_chain = PDB.Chain.Chain(r.get_parent().id)
+                cov_chain.add(r)
+                break
+
+        if cov_chain == None:
+            raise ValueError('Residue %s not found in model %s structure' % (resname, model))
+
+        cov_model.add(cov_chain)
+        cov_structure.add(cov_model)
+        _saveStructureToPDB(cov_structure, output_folder+'/'+resname+'.pdb')
+        addConectLines(model, output_folder+'/'+resname+'.pdb')
+
+        # Get atoms to which append hydrogens
+        indexes = getAtomsIndexes(output_folder+'/'+resname+'.pdb')
+        selected_atoms = []
+        for atom in indexes:
+            if atom[-1] == c_atom:
+                c_atom = str(indexes[atom])
+                selected_atoms.append(c_atom)
+            elif atom[-1] == n_atom:
+                n_atom = str(indexes[atom])
+                selected_atoms.append(n_atom)
+            elif atom[-1] == o_atom:
+                o_atom = str(indexes[atom])
+        selected_atoms = ','.join(selected_atoms)
+
+        # Set C-O bond as double bond to secure single hydrogen addition to C atom
+        add_bond = str(c_atom)+','+str(o_atom)+',2'
+
+        _copyScriptFile(output_folder, 'addHydrogens.py')
+
+        ### Add hydrogens to PDB structure
+        print('Replacing covalent bonds with hydrogens at %s residue...' % resname)
+        command = 'run python3 '+output_folder+'/._addHydrogens.py '
+        command += output_folder+'/'+resname+'.pdb '
+        command += output_folder+'/'+resname+'.pdb '
+        command += '--indexes '+selected_atoms+' '
+        command += '--add_bond '+add_bond+' '
+        command += '--covalent'
+        os.system(command)
+
+        # Copy file to avoid the faulty preparation...
+        # shutil.copyfile(output_folder+'/'+resname+'.pdb',
+                        # output_folder+'/'+resname+'_p.pdb')
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False):
+                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
+                             covalent_setup=False, covalent_base_aa=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1622,6 +1745,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 chain.add(residue)
 
                     _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
+                    self._write_conect_lines(protein, pele_folder+'/'+protein+'_'+ligand+'/'+f, check_file=True)
+
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
@@ -1661,6 +1786,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
                                 'seed' ,'spawning']
+
+                    # Generate covalent parameterization setup
+                    if not covalent_setup:
+                        if protein in self.covalent and self.covalent[protein] != []:
+                            print('WARNING: Covalent bound ligands were found. Consider giving covalent_setup=True')
+                    else:
+                        if covalent_base_aa == None:
+                            message = 'You must give the base AA upon which each covalently'
+                            message += "attached ligand is bound. E.g., covalent_base_aa=base_aa={'FAD':'CYS', 'NAD':'ASP', etc.}"
+                            raise ValueError(message)
+
+                        if protein in self.covalent:
+                            for index in self.covalent[protein]:
+                                output_folder = pele_folder+'/'+protein+'_'+ligand+'/output/'
+                                if not os.path.exists(output_folder+'/ligand'):
+                                    os.makedirs(output_folder+'/ligand')
+                                self._setUpCovalentLigandParameterization(protein, index, covalent_base_aa,
+                                                                         output_folder=output_folder+'/ligand')
+
+                                # Copy covalent parameterization script
+                                _copyScriptFile(output_folder, 'covalentLigandParameterization.py')
+
+                                # Define covalent parameterization command
+                                skip_covalent_residue = [r.resname for r in self.structures[protein].get_residues() if r.id[1] == index][0]
+                                covalent_command = 'cd output\n'
+                                covalent_command += 'python ._covalentLigandParameterization.py ligand/'+skip_covalent_residue+'.pdb '+skip_covalent_residue+' '+covalent_base_aa[skip_covalent_residue]+'\n'
+                                covalent_command += 'cd ..\n'
 
                     # Write input yaml
                     with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
@@ -1711,6 +1863,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("analyse: true\n")
                         else:
                             iyf.write("analyse: false\n")
+
+                        if covalent_setup:
+                            iyf.write("skip_ligand_prep:\n")
+                            iyf.write(' - "'+skip_covalent_residue+'"\n')
 
                         if ligand in templates:
                             iyf.write("templates:\n")
@@ -1815,6 +1971,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
+
+                    if covalent_setup:
+                        command += covalent_command
+                        continuation = True
+
                     if continuation:
                         debug_line = False
                         restart_line = False
@@ -1864,6 +2025,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif extend_iterations and not continuation:
                         raise ValueEror('extend_iterations must be used together with the continuation keyword')
+
+                    # Remove debug line from input.yaml for covalent setup (otherwise the Data folder is not copied!)
+                    if covalent_setup:
+                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml.tmp', 'w') as oyf:
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyf:
+                                for l in iyf:
+                                    if not 'debug: true' in l:
+                                        oyf.write(l)
+                        shutil.move(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml.tmp',
+                                    pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml')
+
                     command += 'cd ../..'
                     jobs.append(command)
 
@@ -2901,7 +3073,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         command = 'run ._extract_docking.py ._docking_data.csv ../'+docking_folder+' --separator '+separator
-        print(command)
         os.system(command)
 
         # Remove docking data
@@ -3691,7 +3862,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to PDB file to modify
         """
 
-        def check_atom_in_atoms(atom, atoms):
+        def check_atom_in_atoms(atom, atoms, atom_mapping):
+
+            if atom_mapping != None:
+                atom_mapping = atom_mapping[model]
 
             if atom not in atoms and atom_mapping != None and atom in atom_mapping:
                 if isinstance(atom_mapping[atom], str):
@@ -3723,8 +3897,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for entry in self.conects[model]:
                     line = 'CONECT'
                     for x in entry:
-                        x = check_atom_in_atoms(x, atoms)
-                        line += ' '+str(atoms[x])
+                        x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
+                        line += '%5s' % atoms[x]
                     line += '\n'
                     tmp.write(line)
             tmp.write('END\n')
@@ -3857,25 +4031,28 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not check_file:
             self.structures[model] = n_structure
 
-    def _readPDBConectLines(self, pdb_file, model):
+    def _readPDBConectLines(self, pdb_file, model, only_hetatoms=False):
         """
         Read PDB file and get conect lines only
         """
 
+        # Get atom indexes by tuple and objects
         atoms = self._getAtomIndexes(model, pdb_file)
+        if only_hetatoms:
+            atoms_objects = self._getAtomIndexes(model, pdb_file, return_objects=True)
         conects = []
         # Read conect lines as dictionaries linking atoms
         with open(pdb_file) as pdbf:
             for l in pdbf:
                 if l.startswith('CONECT'):
+                    if only_hetatoms:
+                        het_atoms = [True if atoms_objects[int(x)].get_parent().id[0] != ' ' else False for x in l.split()[1:]]
+                        if True not in het_atoms:
+                            continue
                     conects.append([atoms[int(x)] for x in l.split()[1:]])
         return conects
 
-    def _getAtomIndexes(self, model, pdb_file, invert=False, check_file=False):
-
-        # i = 0
-        # old_r = None
-        # new_r = None
+    def _getAtomIndexes(self, model, pdb_file, invert=False, check_file=False, return_objects=False):
 
         # Read PDB file
         atom_indexes = {}
@@ -3895,13 +4072,21 @@ make sure of reading the target sequences with the function readTargetSequences(
         for chain in structure[0]:
             for residue in chain:
                 for atom in residue:
+
+                    # Get atom PDB index
                     index = atom_indexes[(chain.id, residue.id[1], atom.name)]
-                    # index = i
-                    if invert:
-                        atoms[_get_atom_tuple(atom)] = index
+
+                    # Return atom objects instead of tuples
+                    if return_objects:
+                        _atom = atom
                     else:
-                        atoms[index] = _get_atom_tuple(atom)
-                    # i += 1
+                        _atom = _get_atom_tuple(atom)
+
+                    # Invert the returned dictionary
+                    if invert:
+                        atoms[_atom] = index
+                    else:
+                        atoms[index] = _atom
         return atoms
 
     def _getModelsPaths(self):

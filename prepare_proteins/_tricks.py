@@ -47,33 +47,69 @@ class tricks:
         atom_names : dict
             Mapping the old atom names to the new atom names
         """
+
+        if not isinstance(residue, tuple):
+            raise ValueError('The residue must be a two element tuple (chain, resid)')
+
+        found = {}
+        for atom in atom_names:
+            found[atom] = False
+
         with open(input_pdb+'.tmp', 'w') as tmp:
             with open(input_pdb) as pdb:
                 for l in pdb:
                     if l.startswith('ATOM') or l.startswith('HETATM'):
-                        resname = l.split()[3]
-                        chain = l.split()[4]
-                        if (chain, resname) == residue:
-                            old_atom_name = l.split()[2]
-                            old_atom_length = len(old_atom_name)
+                        index, name, resname, chain, resid = (int(l[7:12]), l[12:16], l[17:20], l[21], int(l[22:27]))
+                        if (chain, resid) == residue:
+                            old_atom_name = name
                             if old_atom_name in atom_names:
                                 new_atom_name = atom_names[old_atom_name]
-                                new_atom_length = len(new_atom_name)
+                                if len(new_atom_name) != len(old_atom_name):
+                                    raise ValueError('The new and old atom names should be the same length.')
+                                found[old_atom_name] = True
+                                l = l.replace(old_atom_name, new_atom_name)
 
-                                if old_atom_length == new_atom_length:
-                                    l = l.replace(old_atom_name, new_atom_name)
-                                elif old_atom_length < new_atom_length:
-                                    d = (new_atom_length - old_atom_length)*' '
-                                    l = l.replace(d+old_atom_name, new_atom_name)
-                                else:
-                                    d = (new_atom_length - old_atom_length)*' '
-                                    l = l.replace(old_atom_name, d+new_atom_name)
+                    tmp.write(l)
+        shutil.move(input_pdb+'.tmp', input_pdb)
+        for atom in found:
+            if not found[atom]:
+                print('Given atom %s was not found in residue %s' % (atom, residue))
+
+    def displaceLigandAtomNames(input_pdb, atom, alignment='right', verbose=False):
+        """
+        Displace the name of the ligand atom name in the PDB.
+
+        Parameters
+        ==========
+        input_pdb : str
+            Path to the target PDB file
+        atom : tuple
+            Residue to change as (resname, atom_name)
+        """
+        if alignment not in ['right', 'left']:
+            raise ValueError('Alignment must be either "left" or "right"')
+
+        with open(input_pdb+'.tmp', 'w') as tmp:
+            with open(input_pdb) as pdb:
+                for l in pdb:
+                    if l.startswith('ATOM') or l.startswith('HETATM'):
+                        atom_name = l.split()[2]
+                        resname = l.split()[3]
+                        if (resname, atom_name) == atom:
+                            if alignment == 'right':
+                                if verbose:
+                                    print('Changing atom name %s-%s to the right' % atom)
+                                l = l.replace(atom_name+' ', ' '+atom_name)
+                            elif alignment == 'left':
+                                if verbose:
+                                    print('Changing atom name %s-%s to the left' % atom)
+                                l = l.replace(' '+atom_name, atom_name+' ')
                     tmp.write(l)
         shutil.move(input_pdb+'.tmp', input_pdb)
 
-    def displaceLigandAtomNames(input_pdb, atom, alignment='right'):
+    def displaceResidueAtomNames(input_pdb, atom, alignment='right'):
         """
-        Displace the name of the atom name in the PDB.
+        Displace the name of the atom name of a specific residue in the PDB.
 
         Parameters
         ==========
