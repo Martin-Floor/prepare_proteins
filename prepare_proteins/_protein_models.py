@@ -597,6 +597,55 @@ chain to use for each model with the chains option.' % model)
 
             traj.save(output_folder+'/'+model+'.pdb')
 
+
+    def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder, separator='-'):
+        """
+        Position a set of ligands into specific protein coordinates.
+
+        Parameters
+        ==========
+        coordinate : tuple or dict
+            New desired coordinates of the ligand
+        ligand_folder : str
+            Path to the ligands folder to store ligand molecules
+        output_folder : str
+            Path to the output folder to store models
+        """
+
+        # Create output directory
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        # Copy script file to output directory
+        _copyScriptFile(output_folder, 'positionLigandAtCoordinate.py')
+
+        for l in os.listdir(ligand_folder):
+            if l.endswith('.mae'):
+                ln = l.replace('.mae', '')
+            elif l.endswith('.pdb'):
+                ln = l.replace('.pdb', '')
+            else:
+                continue
+            for model in self:
+
+                if not os.path.exists(output_folder+'/'+model):
+                    os.mkdir(output_folder+'/'+model)
+
+                _saveStructureToPDB(self.structures[model],
+                                                     output_folder+'/'+model+'/'+model+separator+ln+'.pdb')
+                command = 'run python3 '+output_folder+'/._positionLigandAtCoordinate.py '
+                command += output_folder+'/'+model+'/'+model+separator+ln+'.pdb '
+                command += ligand_folder+'/'+l+' '
+                if isinstance(coordinate, dict):
+                    command += ','.join([str(x) for x in coordinate[model]])
+                elif isinstance(coordinate, tuple) and len(coordinate) == 3:
+                    command += ','.join([str(x) for x in coordinate])
+                else:
+                    raise ValueError('coordinate needs to be a 3-element tuple of integers or dict.')
+                command += ' --separator "'+separator+'" '
+                command += ' --pele_poses\n'
+                os.system(command)
+
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
                       param_files=None, mpi_command='slurm'):
         """
@@ -1370,9 +1419,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not os.path.exists(job_folder+'/output_models/'+model):
                 os.mkdir(job_folder+'/output_models/'+model)
 
-            # Generate input protein and ligand files
+            # Generate input protein files
             input_protein = job_folder+'/input_models/'+model+'.pdb'
-            if not os.path.exists(input_protein) or overwrite:
+            input_mae = input_protein.replace('.pdb', '.mae')
+            if not os.path.exists(input_mae) or overwrite:
                 command = 'run '+script_path+' '
                 command += input_protein+' '
                 command += job_folder+'/output_models/'+model+' '
@@ -1382,15 +1432,20 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Add site map command
             command = 'cd '+job_folder+'/output_models/'+model+'\n'
             command += '"${SCHRODINGER}/sitemap" '
+            command += '-j '+model+' '
             command += '-prot ../../input_models/'+model+'/'+model+'_protein.mae'+' '
             command += '-sitebox '+str(site_box)+' '
             command += '-resolution '+str(resolution)+' '
             command += '-reportsize '+str(reportsize)+' '
             command += '-keepvolpts yes '
             command += '-keeplogs yes '
-            command += '-siteasl \"res.num {'+target_residue+'}\" '
+
+            if isinstance(target_residue, dict):
+                command += '-siteasl \"res.num {'+str(target_residue[model])+'}\" '
+            else:
+                command += '-siteasl \"res.num {'+str(target_residue)+'}\" '
             command += '-HOST localhost:1 '
-            command += '-TMPLAUNCHDIR\n'
+            command += '-TMPLAUNCHDIR '
             command += '-WAIT\n'
             command += 'cd ../../..\n'
             jobs.append(command)
@@ -1640,8 +1695,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.system(command)
 
         # Copy file to avoid the faulty preparation...
-        # shutil.copyfile(output_folder+'/'+resname+'.pdb',
-                        # output_folder+'/'+resname+'_p.pdb')
+        shutil.copyfile(output_folder+'/'+resname+'.pdb',
+                        output_folder+'/'+resname+'_p.pdb')
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
@@ -1812,6 +1867,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 skip_covalent_residue = [r.resname for r in self.structures[protein].get_residues() if r.id[1] == index][0]
                                 covalent_command = 'cd output\n'
                                 covalent_command += 'python ._covalentLigandParameterization.py ligand/'+skip_covalent_residue+'.pdb '+skip_covalent_residue+' '+covalent_base_aa[skip_covalent_residue]+'\n'
+
+                                # Copy modify processed script
+                                _copyScriptFile(output_folder, 'modifyProcessedForCovalentPELE.py')
+                                cov_residues = ','.join([str(x) for x in self.covalent[protein]])
+                                covalent_command += 'python ._modifyProcessedForCovalentPELE.py '+cov_residues+' \n'
+                                covalent_command += 'mv DataLocal/Templates/OPLS2005/Protein/templates_generated/* DataLocal/Templates/OPLS2005/Protein/\n'
                                 covalent_command += 'cd ..\n'
 
                     # Write input yaml
@@ -1943,7 +2004,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         ebr_script_name = '._addEnergyByResidueToPELEconf.py'
                         if not isinstance(ligand_energy_groups, type(None)):
                             if not isinstance(ligand_energy_groups, dict):
-                                raise ValueError('ligand_energy_groups, must be given as a dictionary')
+                                raise ValueError('ligand_energy_groups, covalentmust be given as a dictionary')
                             with open(pele_folder+'/'+protein+'_'+ligand+'/ligand_energy_groups.json', 'w') as jf:
                                 json.dump(ligand_energy_groups[ligand], jf)
 
@@ -1992,6 +2053,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if not debug_line:
                                     oyml.write('restart: true\n')
                                     oyml.write('adaptive_restart: true\n')
+                        if covalent_setup:
+                            continuation = False
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
@@ -4035,7 +4098,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Read PDB file and get conect lines only
         """
-
         # Get atom indexes by tuple and objects
         atoms = self._getAtomIndexes(model, pdb_file)
         if only_hetatoms:
