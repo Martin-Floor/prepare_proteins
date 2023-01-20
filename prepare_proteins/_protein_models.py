@@ -1703,8 +1703,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False, 
-                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None):
+                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
+                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
+                             membrane_residues=None, bias_to_point=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1734,6 +1735,22 @@ make sure of reading the target sequences with the function readTargetSequences(
             message = 'Spawning method %s not found.' % spawning
             message = 'Allowed options are: '+str(spawnings)
             raise ValueError(message)
+
+        if isinstance(membrane_residues, type(None)):
+            membrane_residues = {}
+
+        if isinstance(bias_to_point, type(None)):
+            bias_to_point = {}
+
+        # Check bias_to_point input
+        if isinstance(bias_to_point, (list, tuple)):
+            d = {}
+            for model in self:
+                d[model] = bias_to_point
+            bias_to_point = d
+
+        if not isinstance(bias_to_point, dict):
+            raise ValueError('bias_to_point should be a dictionary or a list.')
 
         # Create PELE job folder
         if not os.path.exists(pele_folder):
@@ -2008,6 +2025,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             with open(pele_folder+'/'+protein+'_'+ligand+'/ligand_energy_groups.json', 'w') as jf:
                                 json.dump(ligand_energy_groups[ligand], jf)
 
+                    if protein in membrane_residues:
+                        _copyScriptFile(pele_folder, 'addMembraneConstraints.py')
+                        mem_res_script = '._addMembraneConstraints.py' #I have added the _
+                        debug = True
+
                     if nonbonded_energy != None:
                         _copyScriptFile(pele_folder, 'addAtomNonBondedEnergyToPELEconf.py')
                         nbe_script_name = '._addAtomNonBondedEnergyToPELEconf.py'
@@ -2015,6 +2037,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             raise ValueError('nonbonded_energy, must be given as a dictionary')
                         with open(pele_folder+'/'+protein+separator+ligand+'/nonbonded_energy_atoms.json', 'w') as jf:
                             json.dump(nonbonded_energy[protein][ligand], jf)
+
+                    if protein in bias_to_point:
+                        _copyScriptFile(pele_folder, 'addBiasToPoint.py')
+                        btp_script = '._addBiasToPoint.py'
+                        debug = True
 
                     if peptide:
                         _copyScriptFile(pele_folder, 'modifyPelePlatformForPeptide.py')
@@ -2038,8 +2065,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
                             elif tf.endswith('z'):
                                 command += "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
+
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
+                        if protein in membrane_residues:
+                            command += "python ../"+mem_res_script+' '
+                            command += "output " # I think we should change this for a variable
+                            command += "--membrane_residues "
+                            command += ",".join([str(x) for x in membrane_residues[protein]])+'\n' #1,2,3,4,5
+                            continuation = True
+                        if protein in bias_to_point:
+                            command += "python ../"+btp_script+' '
+                            command += "output " # I think we should change this for a variable
+                            command += ",".join([str(x) for x in bias_to_point[protein]])+'\n'
+                            continuation = True
 
                     if covalent_setup:
                         command += covalent_command
@@ -2055,6 +2094,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         debug_line = True
                                         oyml.write('restart: true\n')
                                         oyml.write('adaptive_restart: true\n')
+                                        continue
                                     elif 'restart: true' in l:
                                         continue
                                     oyml.write(l)
@@ -2065,6 +2105,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             continuation = False
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
+
+                        if membrane_residues or bias_to_point:
+                            continuation = False
+                            debug = False
 
                     elif energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
