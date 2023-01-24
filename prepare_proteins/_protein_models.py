@@ -206,14 +206,17 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Specifies the list of atoms to delete for the particular model.
         """
 
-        def checkAtomInConects(self, model, atom):
+        def removeAtomInConects(self, model, atom):
             """
-            Incomplete function for checking conect lies that should be altered
+            Incomplete function for checking conect lines that should be altered
             after the atom is deleted. Review when the case arises.
             """
+            to_remove = []
             for conect in self.conects[model]:
                 if atom in conect:
-                    atom
+                    to_remove.append(conect)
+            for conect in to_remove:
+                self.conects[model].remove(conect)
 
         for remove_atom in atoms_list:
             for chain in self.structures[model].get_chains():
@@ -224,7 +227,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                 if atom.name == remove_atom[2]:
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
-                                    # checkAtomInConects(self, model, remove_atom)
+                                    removeAtomInConects(self, model, remove_atom)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
@@ -1699,7 +1702,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         output_folder+'/'+resname+'_p.pdb')
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
-                             box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
+                             box_radius=10, steps=100, debug=False, iterations=5, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
@@ -1892,6 +1895,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 covalent_command += 'mv DataLocal/Templates/OPLS2005/Protein/templates_generated/* DataLocal/Templates/OPLS2005/Protein/\n'
                                 covalent_command += 'cd ..\n'
 
+
+
                     # Write input yaml
                     with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
                         if energy_by_residue or nonbonded_energy != None:
@@ -1979,7 +1984,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # energy by residue is not implemented in PELE platform, therefore
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
-                        if debug or energy_by_residue or peptide  or nonbonded_energy != None:
+                        if debug or energy_by_residue or peptide  or nonbonded_energy != None or membrane_residues or bias_to_point:
                             iyf.write("debug: true\n")
 
                         if distances != None:
@@ -2028,7 +2033,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if protein in membrane_residues:
                         _copyScriptFile(pele_folder, 'addMembraneConstraints.py')
                         mem_res_script = '._addMembraneConstraints.py' #I have added the _
-                        debug = True
 
                     if nonbonded_energy != None:
                         _copyScriptFile(pele_folder, 'addAtomNonBondedEnergyToPELEconf.py')
@@ -2041,7 +2045,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if protein in bias_to_point:
                         _copyScriptFile(pele_folder, 'addBiasToPoint.py')
                         btp_script = '._addBiasToPoint.py'
-                        debug = True
 
                     if peptide:
                         _copyScriptFile(pele_folder, 'modifyPelePlatformForPeptide.py')
