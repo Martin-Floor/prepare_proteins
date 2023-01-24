@@ -206,14 +206,17 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Specifies the list of atoms to delete for the particular model.
         """
 
-        def checkAtomInConects(self, model, atom):
+        def removeAtomInConects(self, model, atom):
             """
-            Incomplete function for checking conect lies that should be altered
+            Incomplete function for checking conect lines that should be altered
             after the atom is deleted. Review when the case arises.
             """
+            to_remove = []
             for conect in self.conects[model]:
                 if atom in conect:
-                    atom
+                    to_remove.append(conect)
+            for conect in to_remove:
+                self.conects[model].remove(conect)
 
         for remove_atom in atoms_list:
             for chain in self.structures[model].get_chains():
@@ -224,7 +227,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                 if atom.name == remove_atom[2]:
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
-                                    # checkAtomInConects(self, model, remove_atom)
+                                    removeAtomInConects(self, model, remove_atom)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
@@ -1703,7 +1706,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False, 
+                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -3953,7 +3956,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         def check_atom_in_atoms(atom, atoms, atom_mapping):
-
             if atom_mapping != None:
                 atom_mapping = atom_mapping[model]
 
