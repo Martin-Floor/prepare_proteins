@@ -35,6 +35,7 @@ with open(pele_output+'/pele.conf.tmp') as tmp:
 
 # Get PELE csts
 pele_tasks = json_conf['commands'][0]['PeleTasks'][0]['metrics']
+random_tasks = [1 for t in pele_tasks if t['type'] == 'random']
 
 # Add to pint bias
 task = {}
@@ -44,7 +45,7 @@ task['atoms'] = {}
 task['atoms']['links'] = {}
 task['atoms']['links']['ids'] = [ligand_chain+':'+str(ligand_index)]
 pele_tasks.append(task)
-task_index = len(pele_tasks)
+task_index = len(pele_tasks) - len(random_tasks) + 4
 
 # Write pele.conf
 with open(pele_output+'/pele.conf.tmp', 'w') as tmp:
