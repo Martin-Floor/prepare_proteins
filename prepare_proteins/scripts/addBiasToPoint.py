@@ -6,10 +6,9 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('pele_output', help='Path to the PELE output folder.')
 parser.add_argument('point', help='Comma-separated xyz coordinate of the target point.')
-parser.add_argument('--epsilon', default=0.25, help='Bias epsilon parameter')
+parser.add_argument('--epsilon', default=0.50, help='Bias epsilon parameter')
 parser.add_argument('--ligand_chain', default='L', help='Ligand chain')
 parser.add_argument('--ligand_index', default=1, help='Ligand index')
-
 args=parser.parse_args()
 
 pele_output = args.pele_output
