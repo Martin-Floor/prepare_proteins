@@ -9,11 +9,15 @@ parser = argparse.ArgumentParser()
 parser.add_argument('docking_data', default=None, help='CSV file containing docking data.')
 parser.add_argument('docking_folder', default=None, help='Docking output folder')
 parser.add_argument('--separator', default=None, help='Separator used to write PDB files')
+parser.add_argument('--ligand_chain', default='L', help='Chain used for the ligand residue')
+parser.add_argument('--ligand_resnum', default=1, help='REsidue index used for the ligand residue')
 
 args=parser.parse_args()
 docking_data = args.docking_data
 docking_folder = args.docking_folder
 separator = args.separator
+ligand_chain = args.ligand_chain
+ligand_resnum = int(args.ligand_resnum)
 
 # Read dockign data to pandas
 docking_data = pd.read_csv(docking_data)
@@ -52,6 +56,10 @@ for model in poses:
         for pose,st in enumerate(structure.StructureReader(mae_output[str(model)][ligand])):
             if 'r_i_glide_gscore' in st.property:
                 if pose in poses[model][ligand]:
+                    for residue in st.residue:
+                        residue.chain = ligand_chain
+                        residue.resnum = ligand_resnum
+
                     complex = protein.merge(st)
                     output_pdb = str(model)+separator+ligand+separator+str(pose)+'.pdb'
                     PDBWriter = structure.PDBWriter(str(model)+'/'+output_pdb)
