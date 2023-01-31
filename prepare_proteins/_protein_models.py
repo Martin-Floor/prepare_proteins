@@ -2,7 +2,7 @@ from . import alignment
 from . import _atom_selectors
 from . import rosettaScripts
 from . import MD
-
+import time
 import os
 import sys
 import shutil
@@ -2143,7 +2143,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if nonbonded_energy == None:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif extend_iterations and not continuation:
-                        raise ValueEror('extend_iterations must be used together with the continuation keyword')
+                        raise ValueError('extend_iterations must be used together with the continuation keyword')
 
                     if nonbonded_energy != None:
                         command += 'python ../'+nbe_script_name+' output --energy_type '+nonbonded_energy_type
