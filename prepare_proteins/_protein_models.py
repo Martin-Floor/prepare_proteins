@@ -202,14 +202,15 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         Paramters
         =========
+        model : str
+            model ID
         atom_lists : list
             Specifies the list of atoms to delete for the particular model.
         """
 
         def removeAtomInConects(self, model, atom):
             """
-            Incomplete function for checking conect lines that should be altered
-            after the atom is deleted. Review when the case arises.
+            Function for removing conect lines involving the deleted atom.
             """
             to_remove = []
             for conect in self.conects[model]:
@@ -228,6 +229,31 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
                                     removeAtomInConects(self, model, remove_atom)
+
+    def removeModelResidues(self, model, residues_list):
+        """
+        Remove a group of residues from the model structure.
+
+        Paramters
+        =========
+        model : str
+            model ID
+        residues_list : list
+            Specifies the list of resdiues to delete for the particular model.
+        """
+
+        # Get all atoms for residues to remove them
+        atoms_to_remove = []
+        for residue in self.structures[model].get_residues():
+            chain = residue.get_parent().id
+            if (chain, residue.id[1]) in residues_list:
+                for atom in residue:
+                    atoms_to_remove.append((chain, residue.id[1], atom.name))
+
+        if atoms_to_remove == []:
+            raise ValueError('No atoms were found for the specified residue!')
+
+        self.removeModelAtoms(model, atoms_to_remove)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
@@ -601,7 +627,7 @@ chain to use for each model with the chains option.' % model)
             traj.save(output_folder+'/'+model+'.pdb')
 
 
-    def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder, separator='-'):
+    def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder, separator='-', overwrite=True):
         """
         Position a set of ligands into specific protein coordinates.
 
@@ -613,6 +639,8 @@ chain to use for each model with the chains option.' % model)
             Path to the ligands folder to store ligand molecules
         output_folder : str
             Path to the output folder to store models
+        overwrite : bool
+            Overwrite if structure file already exists.
         """
 
         # Create output directory
@@ -631,8 +659,14 @@ chain to use for each model with the chains option.' % model)
                 continue
             for model in self:
 
+                self.docking_ligands.setdefault(model, [])
+                self.docking_ligands[model].append(ln)
+
                 if not os.path.exists(output_folder+'/'+model):
                     os.mkdir(output_folder+'/'+model)
+
+                if os.path.exists(output_folder+'/'+model+'/'+model+separator+ln+separator+'0.pdb') and not overwrite:
+                    continue
 
                 _saveStructureToPDB(self.structures[model],
                                                      output_folder+'/'+model+'/'+model+separator+ln+'.pdb')
@@ -1962,7 +1996,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(box_centers, type(None)) and peptide:
                             raise ValueError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
-                            if not all(isinstance(x, float) for x in box_centers[model]):
+                            if not all(isinstance(x, float) for x in box_centers[model]) and \
+                               not all(isinstance(x, int) for x in box_centers[model]):
                                 # get coordinates from tuple
                                 for chain in self.structures[model[0]].get_chains():
                                     if chain.id == box_centers[model][0]:
@@ -1978,7 +2013,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             for coord in coordinates:
                                 #if not isinstance(coord, float):
                                 #    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
-                                box_center += '  - '+str(coord)+'\n'
+                                box_center += '  - '+str(float(coord))+'\n'
                             iyf.write("box_center: \n"+box_center)
 
                         # energy by residue is not implemented in PELE platform, therefore
