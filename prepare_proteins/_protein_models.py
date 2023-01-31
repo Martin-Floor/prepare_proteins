@@ -2,7 +2,7 @@ from . import alignment
 from . import _atom_selectors
 from . import rosettaScripts
 from . import MD
-
+import time
 import os
 import sys
 import shutil
@@ -1997,7 +1997,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             raise ValueError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
                             if not all(isinstance(x, float) for x in box_centers[model]) and \
-                               not all(isinstance(x, int) for x in box_centers[model]):
+                               not all(isinstance(x, int) for x in box_centers[model]) and \
+                               not all(isinstance(x, np.float32) for x in box_centers[model]):
                                 # get coordinates from tuple
                                 for chain in self.structures[model[0]].get_chains():
                                     if chain.id == box_centers[model][0]:
@@ -2178,7 +2179,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if nonbonded_energy == None:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif extend_iterations and not continuation:
-                        raise ValueEror('extend_iterations must be used together with the continuation keyword')
+                        raise ValueError('extend_iterations must be used together with the continuation keyword')
 
                     if nonbonded_energy != None:
                         command += 'python ../'+nbe_script_name+' output --energy_type '+nonbonded_energy_type
@@ -4035,7 +4036,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         def check_atom_in_atoms(atom, atoms, atom_mapping):
-
             if atom_mapping != None:
                 atom_mapping = atom_mapping[model]
 
