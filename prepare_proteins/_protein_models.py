@@ -1943,7 +1943,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(box_centers, type(None)) and peptide:
                             raise ValueError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
-                            if not all(isinstance(x, float) for x in box_centers[model]):
+                            if not all(isinstance(x, float) for x in box_centers[model]) and not all(isinstance(x, np.float32) for x in box_centers[model]):
                                 # get coordinates from tuple
                                 for chain in self.structures[model[0]].get_chains():
                                     if chain.id == box_centers[model][0]:
