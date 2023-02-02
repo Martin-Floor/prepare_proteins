@@ -1759,7 +1759,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
-                             membrane_residues=None, bias_to_point=None):
+                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1805,6 +1805,16 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if not isinstance(bias_to_point, dict):
             raise ValueError('bias_to_point should be a dictionary or a list.')
+
+        # Check COM distance bias inputs
+        if isinstance(com_bias1, type(None)):
+            com_bias1 = {}
+
+        if isinstance(com_bias2, type(None)):
+            com_bias2 = {}
+
+        if com_bias1 != {} and com_bias2 == {} or com_bias1 == {} and com_bias2 != {}:
+            raise ValueError('You must give both COM atom groups to apply a COM distance bias.')
 
         # Create PELE job folder
         if not os.path.exists(pele_folder):
@@ -2037,7 +2047,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # energy by residue is not implemented in PELE platform, therefore
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
-                        if debug or energy_by_residue or peptide  or nonbonded_energy != None or membrane_residues or bias_to_point:
+                        if debug or energy_by_residue or peptide  or nonbonded_energy != None or membrane_residues or bias_to_point or com_bias1:
                             iyf.write("debug: true\n")
 
                         if distances != None:
@@ -2099,6 +2109,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                         _copyScriptFile(pele_folder, 'addBiasToPoint.py')
                         btp_script = '._addBiasToPoint.py'
 
+                    if protein in com_bias1:
+                        _copyScriptFile(pele_folder, 'addComDistancesBias.py')
+                        cbs_script = '._addComDistancesBias.py'
+
                     if peptide:
                         _copyScriptFile(pele_folder, 'modifyPelePlatformForPeptide.py')
                         peptide_script_name = '._modifyPelePlatformForPeptide.py'
@@ -2130,10 +2144,25 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += "--membrane_residues "
                             command += ",".join([str(x) for x in membrane_residues[protein]])+'\n' #1,2,3,4,5
                             continuation = True
+
                         if protein in bias_to_point:
                             command += "python ../"+btp_script+' '
                             command += "output " # I think we should change this for a variable
                             command += ",".join([str(x) for x in bias_to_point[protein]])+'\n'
+                            continuation = True
+
+                        if protein in com_bias1 and ligand in com_bias1[protein]:
+                            # Write both COM groups as json files
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/._com_group1.json', 'w') as jf:
+                                json.dump(com_bias1[protein][ligand], jf)
+
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/._com_group2.json', 'w') as jf:
+                                json.dump(com_bias2[protein][ligand], jf)
+
+                            command += "python ../"+cbs_script+' '
+                            command += "output " # I think we should change this for a variable
+                            command += "._com_group1.json "
+                            command += "._com_group2.json\n"
                             continuation = True
 
                     if covalent_setup:
@@ -2162,7 +2191,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
-                        if membrane_residues or bias_to_point:
+                        if membrane_residues or bias_to_point or com_bias1:
                             continuation = False
                             debug = False
 
