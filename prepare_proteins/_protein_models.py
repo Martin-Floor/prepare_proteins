@@ -548,28 +548,48 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def removeTerminiByConfidenceScore(self, confidence_threshold=70):
+    def removeTerminiByConfidenceScore(self, confidence_threshold=70, verbose=True):
         """
         Remove terminal regions with low confidence scores from models.
         """
 
+        remove_models = set()
         ## Warning only single chain implemented
         for model in self.models_names:
 
             atoms = [a for a in self.structures[model].get_atoms()]
+            bfactors = [a.bfactor for a in atoms]
+
+            print(model, np.average(bfactors))
+            if np.average(bfactors) == 0:
+                if verbose:
+                    print('Warning: model %s has no atom with the selected confidence!' % model)
+
+                remove_models.add(model)
             n_terminus = set()
+            something = False
             for a in atoms:
                 if a.bfactor < confidence_threshold:
                     n_terminus.add(a.get_parent().id[1])
                 else:
+                    something = True
                     break
+
             c_terminus = set()
 
             for a in reversed(atoms):
                 if a.bfactor < confidence_threshold:
                     c_terminus.add(a.get_parent().id[1])
                 else:
+                    something = True
                     break
+
+            if not something:
+                if verbose and model not in remove_models:
+                    print('Warning: model %s has no atom with the selected confidence!' % model)
+                remove_models.add(model)
+                break
+
             n_terminus = sorted(list(n_terminus))
             c_terminus = sorted(list(c_terminus))
 
@@ -583,6 +603,9 @@ chain to use for each model with the chains option.' % model)
             # Remove residues
             for r in remove_this:
                 chain.detach_child(r.id)
+
+        for model in remove_models:
+            self.removeModel(model)
 
         self.getModelsSequences()
         # self.calculateSecondaryStructure(_save_structure=True)
