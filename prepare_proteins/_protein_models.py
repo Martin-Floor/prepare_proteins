@@ -1648,7 +1648,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False, 
+                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -1718,10 +1718,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             continue
 
                     # Create PELE job folder for each docking
-                    if not os.path.exists(pele_folder+'/'+protein+'_'+ligand):
-                        os.mkdir(pele_folder+'/'+protein+'_'+ligand)
+                    if not os.path.exists(pele_folder+'/'+protein+separator+ligand):
+                        os.mkdir(pele_folder+'/'+protein+separator+ligand)
 
-                    structure = _readPDB(protein+'_'+ligand, models_folder+'/'+d+'/'+f)
+                    structure = _readPDB(protein+separator+ligand, models_folder+'/'+d+'/'+f)
 
                     # Change water names if any
                     for residue in structure.get_residues():
@@ -1744,8 +1744,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 residue.add(atom)
                                 chain.add(residue)
 
-                    _saveStructureToPDB(structure, pele_folder+'/'+protein+'_'+ligand+'/'+f)
-                    self._write_conect_lines(protein, pele_folder+'/'+protein+'_'+ligand+'/'+f, check_file=True)
+                    _saveStructureToPDB(structure, pele_folder+'/'+protein+separator+ligand+'/'+f)
+                    self._write_conect_lines(protein, pele_folder+'/'+protein+separator+ligand+'/'+f, check_file=True)
 
 
                     if (protein, ligand) not in models:
@@ -1799,7 +1799,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         if protein in self.covalent:
                             for index in self.covalent[protein]:
-                                output_folder = pele_folder+'/'+protein+'_'+ligand+'/output/'
+                                output_folder = pele_folder+'/'+protein+separator+ligand+'/output/'
                                 if not os.path.exists(output_folder+'/ligand'):
                                     os.makedirs(output_folder+'/ligand')
                                 self._setUpCovalentLigandParameterization(protein, index, covalent_base_aa,
@@ -1815,7 +1815,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 covalent_command += 'cd ..\n'
 
                     # Write input yaml
-                    with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml', 'w') as iyf:
+                    with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml', 'w') as iyf:
                         if energy_by_residue or nonbonded_energy != None:
                             # Use new PELE version with implemented energy_by_residue
                             iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/bin/PELE-1.7.2_mpi"\n')
@@ -1944,7 +1944,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if not isinstance(ligand_energy_groups, type(None)):
                             if not isinstance(ligand_energy_groups, dict):
                                 raise ValueError('ligand_energy_groups, must be given as a dictionary')
-                            with open(pele_folder+'/'+protein+'_'+ligand+'/ligand_energy_groups.json', 'w') as jf:
+                            with open(pele_folder+'/'+protein+separator+ligand+'/ligand_energy_groups.json', 'w') as jf:
                                 json.dump(ligand_energy_groups[ligand], jf)
 
                     if nonbonded_energy != None:
@@ -1960,7 +1960,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         peptide_script_name = '._modifyPelePlatformForPeptide.py'
 
                     # Create command
-                    command = 'cd '+pele_folder+'/'+protein+'_'+ligand+'\n'
+                    command = 'cd '+pele_folder+'/'+protein+separator+ligand+'\n'
 
                     # Add commands to write template folder absolute paths
                     if ligand in templates:
@@ -1987,8 +1987,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if continuation:
                         debug_line = False
                         restart_line = False
-                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
-                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
+                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
                                 for l in iyml:
                                     if 'debug: true' in l:
                                         debug_line = True
@@ -2015,8 +2015,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         else:
                             command += '\n'
-                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
-                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
+                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
                                 for l in iyml:
                                     if 'debug: true' in l:
                                         l = 'restart: true\n'
@@ -2024,8 +2024,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif peptide:
                         command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
-                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input_restart.yaml', 'w') as oyml:
-                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyml:
+                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
                                 for l in iyml:
                                     if 'debug: true' in l:
                                         l = 'restart: true\n'
@@ -2038,8 +2038,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if nonbonded_energy != None:
                         command += 'python ../'+nbe_script_name+' output --energy_type '+nonbonded_energy_type
                         command += ' --target_atoms nonbonded_energy_atoms.json'
-                        protein_chain = [c for c in self.chain_ids[protein][ligand].values() if c != 'L'][0]
-                        command += ' --protein_chain '+protein_chain
+                        protein_chain = [c for c in self.structures[protein].get_chains() if c != 'L'][0]
+                        command += ' --protein_chain '+protein_chain.id
                         if ebr_new_flag or nonbonded_new_flag:
                             command += ' --new_version'
                         command += '\n'
@@ -2055,20 +2055,20 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Remove debug line from input.yaml for covalent setup (otherwise the Data folder is not copied!)
                     if covalent_setup:
-                        with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml.tmp', 'w') as oyf:
-                            with open(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml') as iyf:
+                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml.tmp', 'w') as oyf:
+                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyf:
                                 for l in iyf:
                                     if not 'debug: true' in l:
                                         oyf.write(l)
-                        shutil.move(pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml.tmp',
-                                    pele_folder+'/'+protein+'_'+ligand+'/'+'input.yaml')
+                        shutil.move(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml.tmp',
+                                    pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml')
 
                     command += 'cd ../..'
                     jobs.append(command)
 
         return jobs
 
-    def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False,ion_chain=False):
+    def setUpMDSimulations(self,md_folder,sim_time,replicas=1,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False,ion_chain=False):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2145,6 +2145,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists(md_folder+'/output_models/'+model):
                     os.mkdir(md_folder+'/output_models/'+model)
 
+                for i in range(replicas):
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)):
+                        os.mkdir(md_folder+'/output_models/'+model+'/'+str(i))
+
                 parser = PDB.PDBParser()
                 structure = parser.get_structure('protein', md_folder+'/input_models/'+model+'.pdb')
 
@@ -2172,109 +2176,110 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 his_pro = (str(gmx_codes)[1:-1].replace(',',''))
 
-                command = 'cd '+md_folder+'\n'
-                command += "export GMXLIB=$(pwd)/FF" +'\n'
+                for i in range(replicas):
+                    command = 'cd '+md_folder+'\n'
+                    command += "export GMXLIB=$(pwd)/FF" +'\n'
 
-                # Set up commands
-                if not os.path.exists(md_folder+'/output_models/'+model+"/topol/prot_ions.pdb"):
-                    command += 'mkdir output_models/'+model+'/topol'+'\n'
-                    command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
-                    command += 'cd output_models/'+model+'/topol'+'\n'
-                    if ion_chain:
-                        command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.gro -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens -merge all'+'\n'
-                    else:
-                        command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.gro -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
-
-                    command += command_name+ ' editconf -f prot.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
-                    command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
-                    command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
-
-                    if ion_chain:
-                        selector = '15'
-                    else:
-                        selector = '13'
-
-                    command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
-
-                    if ion_chain:
-                        command += 'echo  -e "1|13\\nq"| '+command_name+' make_ndx -f  prot_ions.gro'+'\n'
-
-                    command += 'cd ..'+'\n'
-                else:
-                    command += 'cd output_models/'+model+'\n'
-
-                # Energy minimization
-                if not os.path.exists(md_folder+'/output_models/'+model+"/em/prot_em.tpr"):
-                    command += 'mkdir em'+'\n'
-                    command += 'cd em'+'\n'
-                    command += command_name+' grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
-                    command += command_name+' mdrun -v -deffnm prot_em'+'\n'
-                    command += 'cd ..'+'\n'
-
-                # NVT equilibration
-                if not os.path.exists(md_folder+'/output_models/'+model+"/nvt/prot_nvt.tpr"):
-                    command += 'mkdir nvt'+'\n'
-                    command += 'cd nvt'+'\n'
-                    if ion_chain:
-                        #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_A.itp -fc 1000 1000 1000'+'\n'
-                        #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_L.itp -fc 1000 1000 1000'+'\n'
-                        #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Ion_chain_I.itp -fc 1000 1000 1000'+'\n'
-                        command += 'echo 20 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
-                    else:
-                        command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000'+'\n'
-
-                    command += command_name+' grompp -f ../../../scripts/nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro'+'\n'
-                    command += command_name+' mdrun -v -deffnm prot_nvt'+'\n'
-                    command += 'cd ..'+'\n'
-
-                # NPT equilibration
-                FClist= ('550','300','170','90','50','30','15','10','5')
-                if not os.path.exists(md_folder+'/output_models/'+model+'/npt'):
-                    command += 'mkdir npt'+'\n'
-                command += 'cd npt'+'\n'
-
-
-                for i in range(len(FClist)+1):
-                    if not os.path.exists(md_folder+'/output_models/'+model+'/npt/prot_npt_'+str(i+1)+'.tpr'):
-                        if i == 0:
-                            command += command_name+' grompp -f ../../../scripts/npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
+                    # Set up commands
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_ions.pdb'):
+                        command += 'mkdir output_models/'+model+'/'+str(i)+'/topol'+'\n'
+                        command += 'cp input_models/'+model+'.pdb output_models/'+model+'/'+str(i)+'/topol/protein.pdb'+'\n'
+                        command += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
+                        if ion_chain:
+                            command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.gro -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens -merge all'+'\n'
                         else:
-                            if ion_chain:
-                                #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_A.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
-                                #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_L.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
-                                #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Ion_chain_I.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
-                                command += 'echo 20 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx\n'
+                            command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.gro -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
+
+                        command += command_name+ ' editconf -f prot.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
+                        command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
+                        command += command_name+' grompp -f ../../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
+
+                        if ion_chain:
+                            selector = '15'
+                        else:
+                            selector = '13'
+
+                        command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+
+                        if ion_chain:
+                            command += 'echo  -e "1|13\\nq"| '+command_name+' make_ndx -f  prot_ions.gro'+'\n'
+
+                        command += 'cd ../'+'\n'
+                    else:
+                        command += 'cd output_models/'+model+'/'+str(i)+'\n'
+
+                    # Energy minimization
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/em/prot_em.tpr"):
+                        command += 'mkdir em'+'\n'
+                        command += 'cd em'+'\n'
+                        command += command_name+' grompp -f ../../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
+                        command += command_name+' mdrun -v -deffnm prot_em'+'\n'
+                        command += 'cd ..'+'\n'
+
+                    # NVT equilibration
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/nvt/prot_nvt.tpr"):
+                        command += 'mkdir nvt'+'\n'
+                        command += 'cd nvt'+'\n'
+                        if ion_chain:
+                            #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_A.itp -fc 1000 1000 1000'+'\n'
+                            #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_L.itp -fc 1000 1000 1000'+'\n'
+                            #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Ion_chain_I.itp -fc 1000 1000 1000'+'\n'
+                            command += 'echo 20 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
+                        else:
+                            command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000'+'\n'
+
+                        command += command_name+' grompp -f ../../../../scripts/nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro'+'\n'
+                        command += command_name+' mdrun -v -deffnm prot_nvt'+'\n'
+                        command += 'cd ..'+'\n'
+
+                    # NPT equilibration
+                    FClist= ('550','300','170','90','50','30','15','10','5')
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/npt'):
+                        command += 'mkdir npt'+'\n'
+                    command += 'cd npt'+'\n'
+
+
+                    for j in range(len(FClist)+1):
+                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/npt/prot_npt_'+str(j+1)+'.tpr'):
+                            if j == 0:
+                                command += command_name+' grompp -f ../../../../scripts/npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_npt_'+str(j+1)+'\n'
                             else:
-                                command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                if ion_chain:
+                                    #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_A.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                    #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Protein_chain_L.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                    #command += 'echo 18 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre_Ion_chain_I.itp -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                    command += 'echo 20 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc '+FClist[j-1]+' '+FClist[j-1]+' '+FClist[j-1]+' -n ../topol/index.ndx\n'
+                                else:
+                                    command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc '+FClist[j-1]+' '+FClist[j-1]+' '+FClist[j-1]+'\n'
 
-                            command += command_name+' grompp -f ../../../scripts/npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
-                command += 'cd ..'+'\n'
+                                command += command_name+' grompp -f ../../../../scripts/npt.mdp -c prot_npt_'+str(j)+'.gro -t prot_npt_'+str(j)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(j+1)+'.tpr -r prot_npt_'+str(j)+'.gro'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_npt_'+str(j+1)+'\n'
+                    command += 'cd ..'+'\n'
 
 
-                #Production run
-                if not os.path.exists(md_folder+'/output_models/'+model+'/md'):
-                    command += 'mkdir md'+'\n'
-                command += 'cd md'+'\n'
-                for i in range(1,frags+1):
-                    if not os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'.xtc'):
-                        if i == 1:
-                            command += command_name+' grompp -f ../../../scripts/md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_md_' + str(i) + '\n'
+                    #Production run
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md'):
+                        command += 'mkdir md'+'\n'
+                    command += 'cd md'+'\n'
+                    for f in range(1,frags+1):
+                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'.xtc'):
+                            if f == 1:
+                                command += command_name+' grompp -f ../../../../scripts/md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(f)+'.tpr'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_md_' + str(f) + '\n'
+                            else:
+                                command += command_name+' grompp -f ../../../../scripts/md.mdp -c prot_md_'+str(f-1)+'.gro -t prot_md_'+str(f-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(f)+'.tpr'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+'\n'
                         else:
-                            command += command_name+' grompp -f ../../../scripts/md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+'\n'
-                    else:
-                        if os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'_prev.cpt'):
-                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+' -cpi prot_md_'+str(i)+'_prev.cpt'+'\n'
+                            if os.path.exists(md_folder+'/output_models/'+model+'/'+str(f)+'/md/prot_md_'+str(f)+'_prev.cpt'):
+                                command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+' -cpi prot_md_'+str(f)+'_prev.cpt'+'\n'
 
-                jobs.append(command)
+                    jobs.append(command)
 
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,separator='_',ligand_chain='L'):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,replicas=3,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,separator='_',ligand_chain='L'):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2362,9 +2367,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 protein = model.split(separator)[0]
                 ligand_name = model.split(separator)[1].replace('.pdb','')
 
+
                 # Create additional folders
-                if not os.path.exists(md_folder+'/output_models/'+model):
-                    os.mkdir(md_folder+'/output_models/'+model)
+                if not os.path.exists(md_folder+'/input_models/'+model):
+                    os.mkdir(md_folder+'/input_models/'+model)
+
+                for i in range(replicas):
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)):
+                        os.mkdir(md_folder+'/output_models/'+model+'/'+str(i))
 
                 parser = PDB.PDBParser()
                 structure = parser.get_structure('protein', md_folder+'/input_models/'+model+'.pdb')
@@ -2404,132 +2414,140 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if num_chains < 2:
                     raise ValueError('Input pdb '+model+' has only one chain. Protein and ligand should be separated in individual chains.')
 
+                io.set_structure(structure)
+                io.save(md_folder+'/input_models/'+model+'/protein.pdb',chainSelect())
+
+                for chain in pdb_chains:
+                    if chain.get_id() == ligand_chain:
+                        ligand_coords = [a.coord for a in chain.get_atoms()]
+                        io.set_structure(chain)
+                        io.save(md_folder+'/input_models/'+model+'/ligand.pdb')
+
                 if ligand_name not in os.listdir(md_folder+'/ligand_params'):
                     os.mkdir(md_folder+'/ligand_params/'+ligand_name)
-                    for chain in pdb_chains:
-                        if chain.get_id() == ligand_chain:
-                            io.set_structure(chain)
-                            io.save(md_folder+'/ligand_params/'+ligand_name+'/ligand.pdb')
-
+                    shutil.copyfile(md_folder+'/input_models/'+model+'/ligand.pdb', md_folder+'/ligand_params/'+ligand_name+'/ligand.pdb')
                     os.chdir(md_folder+'/ligand_params/'+ligand_name)
                     os.system('acpype -i ligand.pdb')
                     os.chdir('../../..')
 
-                if protein not in os.listdir(md_folder+'/input_models'):
-                    io.set_structure(structure)
-                    io.save(md_folder+'/input_models/'+protein+'.pdb',chainSelect())
+                ligand_structure = parser.get_structure('ligand',md_folder+'/ligand_params/'+ligand_name+'/ligand.acpype/ligand_NEW.pdb')
+                for i,atom in enumerate(ligand_structure.get_atoms()):
+                    atom.coord = ligand_coords[i]
+                io.set_structure(ligand_structure)
+                io.save(md_folder+'/input_models/'+model+'/ligand.pdb')
+
+                for i in range(replicas):
+
+                    command = 'cd '+md_folder+'\n'
+                    command += "export GMXLIB=$(pwd)/FF" +'\n'
+                    # Set up commands
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/topol/prot_ions.pdb"):
+                        command += 'mkdir output_models/'+model+'/'+str(i)+'/topol'+'\n'
+                        ### changes ###
+                        #command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/model.pdb'+'\n'
+                        command += 'cp input_models/'+model+'/protein.pdb output_models/'+model+'/'+str(i)+'/topol/protein.pdb'+'\n'
+                        command += 'cp -r ligand_params/'+ligand_name+'/ligand.acpype output_models/'+model+'/'+str(i)+'/topol/'+'\n'
+                        command += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
+
+                        command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
+                        command += 'grep -h ATOM prot.pdb ../../../input_models/'+model+'/ligand.pdb >| complex.pdb'+'\n'
+                        command += command_name+' editconf -f complex.pdb -o complex.gro'+'\n'
+                        command += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a #include "ligand.acpype\/ligand_GMX.itp"\\n#ifdef POSRES\\n#include "ligand.acpype\/posre_ligand.itp"\\n#endif\' topol.top'+'\n'
+                        #\'/^#include "amber99sb-star-ildn.ff\/forcefield.itp"*/a \\n#include "'+ligand+'.acpype\/'+ligand+'_GMX.itp"\n#ifdef POSRES\n#include "'+ligand+'.acpype\/posre_'+ligand+'.itp"\n#endif\'
+
+                        command += 'sed -i -e \'$a'+'ligand'.ljust(20)+'1'+'\' topol.top'+'\n'
+                        #command += 'echo q | gmx make_ndx -f '+ligand+'.acpype/'+ligand+'_GMX.gro -o ligand_index.ndx'
+                        #command += 'echo q | gmx make_ndx -f complex.pdb -o index.ndx'
+
+                        #print(command)
+                        #asda
+
+                        command += command_name+' editconf -f complex.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
+                        command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
+                        command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
+
+                        ####
+                        selector = str(13+num_chains)
+                        ####
+
+                        command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
 
 
-                command = 'cd '+md_folder+'\n'
-                command += "export GMXLIB=$(pwd)/FF" +'\n'
-                # Set up commands
-                if not os.path.exists(md_folder+'/output_models/'+model+"/topol/prot_ions.pdb"):
-                    command += 'mkdir output_models/'+model+'/topol'+'\n'
-                    ### changes ###
-                    #command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/model.pdb'+'\n'
-                    command += 'cp input_models/'+protein+'.pdb output_models/'+model+'/topol/protein.pdb'+'\n'
-                    command += 'cp -r ligand_params/'+ligand_name+'/ligand.acpype output_models/'+model+'/topol/'+'\n'
-                    command += 'cd output_models/'+model+'/topol'+'\n'
-
-                    command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
-                    command += 'grep -h ATOM prot.pdb ligand.acpype/ligand_NEW.pdb >| complex.pdb'+'\n'
-                    command += command_name+' editconf -f complex.pdb -o complex.gro'+'\n'
-                    command += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a #include "ligand.acpype\/ligand_GMX.itp"\\n#ifdef POSRES\\n#include "ligand.acpype\/posre_ligand.itp"\\n#endif\' topol.top'+'\n'
-                    #\'/^#include "amber99sb-star-ildn.ff\/forcefield.itp"*/a \\n#include "'+ligand+'.acpype\/'+ligand+'_GMX.itp"\n#ifdef POSRES\n#include "'+ligand+'.acpype\/posre_'+ligand+'.itp"\n#endif\'
-
-                    command += 'sed -i -e \'$a'+'ligand'.ljust(20)+'1'+'\' topol.top'+'\n'
-                    #command += 'echo q | gmx make_ndx -f '+ligand+'.acpype/'+ligand+'_GMX.gro -o ligand_index.ndx'
-                    #command += 'echo q | gmx make_ndx -f complex.pdb -o index.ndx'
-
-                    #print(command)
-                    #asda
-
-                    command += command_name+' editconf -f complex.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
-                    command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
-                    command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
-
-                    ####
-                    selector = str(13+num_chains)
-                    ####
-
-                    command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+                        command += 'echo -e "0 & ! a H*\\nq"| '+command_name+' make_ndx -f  ligand.acpype/ligand_GMX.gro -o ligand_index.ndx'+'\n'
+                        command += 'echo -e "1|13\\nq"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n'
 
 
-                    command += 'echo -e "0 & ! a H*\\nq"| '+command_name+' make_ndx -f  ligand.acpype/ligand_GMX.gro -o ligand_index.ndx'+'\n'
-                    command += 'echo -e "1|13\\nq"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n'
-
-
-                    command += 'cd ..'+'\n'
-                else:
-                    command += 'cd output_models/'+model+'\n'
-
-                # Energy minimization
-                if not os.path.exists(md_folder+'/output_models/'+model+"/em/prot_em.tpr"):
-                    command += 'mkdir em'+'\n'
-                    command += 'cd em'+'\n'
-                    command += command_name+' grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
-                    command += command_name+' mdrun -v -deffnm prot_em'+'\n'
-                    command += 'cd ..'+'\n'
-
-
-                # NVT equilibration
-                if not os.path.exists(md_folder+'/output_models/'+model+"/nvt/prot_nvt.tpr"):
-                    command += 'mkdir nvt'+'\n'
-                    command += 'cd nvt'+'\n'
-                    command += 'cp -r ../../../scripts/nvt.mdp .'+'\n'
-                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' nvt.mdp'+'\n'
-
-                    command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp -fc 1000 1000 1000'+'\n'
-                    command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
-
-                    command += command_name+' grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx'+'\n'
-                    command += command_name+' mdrun -v -deffnm prot_nvt'+'\n'
-                    command += 'cd ..'+'\n'
-
-                # NPT equilibration
-                FClist= ('550','300','170','90','50','30','15','10','5')
-                if not os.path.exists(md_folder+'/output_models/'+model+'/npt'):
-                    command += 'mkdir npt'+'\n'
-                command += 'cd npt'+'\n'
-
-                command += 'cp -r ../../../scripts/npt.mdp .'+'\n'
-                command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' npt.mdp'+'\n'
-
-                for i in range(len(FClist)+1):
-                    if not os.path.exists(md_folder+'/output_models/'+model+'/npt/prot_npt_'+str(i+1)+'.tpr'):
-                        if i == 0:
-                            command += command_name+' grompp -f npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro -n ../topol/index.ndx'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
-                        else:
-                            command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
-                            command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx'+'\n'
-
-                            command += command_name+' grompp -f npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro -n ../topol/index.ndx'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
-                command += 'cd ..'+'\n'
-
-
-                #Production run
-                if not os.path.exists(md_folder+'/output_models/'+model+'/md'):
-                    command += 'mkdir md'+'\n'
-                command += 'cd md'+'\n'
-
-                command += 'cp -r ../../../scripts/md.mdp .'+'\n'
-                command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' md.mdp'+'\n'
-
-                for i in range(1,frags+1):
-                    if not os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'.xtc'):
-                        if i == 1:
-                            command += command_name+' grompp -f md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_md_' + str(i) + '\n'
-                        else:
-                            command += command_name+' grompp -f md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+'\n'
+                        command += 'cd ..'+'\n'
                     else:
-                        if os.path.exists(md_folder+'/output_models/'+model+'/md/prot_md_'+str(i)+'_prev.cpt'):
-                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+' -cpi prot_md_'+str(i)+'_prev.cpt'+'\n'
+                        command += 'cd output_models/'+model+'/'+str(i)+'\n'
 
-                jobs.append(command)
+                    # Energy minimization
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/em/prot_em.tpr"):
+                        command += 'mkdir em'+'\n'
+                        command += 'cd em'+'\n'
+                        command += command_name+' grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
+                        command += command_name+' mdrun -v -deffnm prot_em'+'\n'
+                        command += 'cd ..'+'\n'
+
+
+                    # NVT equilibration
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/nvt/prot_nvt.tpr"):
+                        command += 'mkdir nvt'+'\n'
+                        command += 'cd nvt'+'\n'
+                        command += 'cp -r ../../../scripts/nvt.mdp .'+'\n'
+                        command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' nvt.mdp'+'\n'
+
+                        command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp -fc 1000 1000 1000'+'\n'
+                        command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
+
+                        command += command_name+' grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx'+'\n'
+                        command += command_name+' mdrun -v -deffnm prot_nvt'+'\n'
+                        command += 'cd ..'+'\n'
+
+                    # NPT equilibration
+                    FClist= ('550','300','170','90','50','30','15','10','5')
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/npt'):
+                        command += 'mkdir npt'+'\n'
+                    command += 'cd npt'+'\n'
+
+                    command += 'cp -r ../../../scripts/npt.mdp .'+'\n'
+                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' npt.mdp'+'\n'
+
+                    for i in range(len(FClist)+1):
+                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/npt/prot_npt_'+str(i+1)+'.tpr'):
+                            if i == 0:
+                                command += command_name+' grompp -f npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro -n ../topol/index.ndx'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
+                            else:
+                                command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx'+'\n'
+
+                                command += command_name+' grompp -f npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro -n ../topol/index.ndx'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
+                    command += 'cd ..'+'\n'
+
+
+                    #Production run
+                    if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md'):
+                        command += 'mkdir md'+'\n'
+                    command += 'cd md'+'\n'
+
+                    command += 'cp -r ../../../scripts/md.mdp .'+'\n'
+                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' md.mdp'+'\n'
+
+                    for i in range(1,frags+1):
+                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'.xtc'):
+                            if i == 1:
+                                command += command_name+' grompp -f md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_md_' + str(i) + '\n'
+                            else:
+                                command += command_name+' grompp -f md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
+                                command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+'\n'
+                        else:
+                            if os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'_prev.cpt'):
+                                command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+' -cpi prot_md_'+str(i)+'_prev.cpt'+'\n'
+
+                    jobs.append(command)
 
             return jobs
 
