@@ -627,7 +627,9 @@ chain to use for each model with the chains option.' % model)
             traj.save(output_folder+'/'+model+'.pdb')
 
 
-    def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder, separator='-', overwrite=True):
+    def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder,
+                                    separator='-', overwrite=True, only_models=None,
+                                    only_ligands=None):
         """
         Position a set of ligands into specific protein coordinates.
 
@@ -647,6 +649,12 @@ chain to use for each model with the chains option.' % model)
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
 
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        if isinstance(only_ligands, str):
+            only_ligands = [only_ligands]
+
         # Copy script file to output directory
         _copyScriptFile(output_folder, 'positionLigandAtCoordinate.py')
 
@@ -657,7 +665,16 @@ chain to use for each model with the chains option.' % model)
                 ln = l.replace('.pdb', '')
             else:
                 continue
+
+            if not isinstance(only_ligands, type(None)):
+                if ln not in only_ligands:
+                    continue
+
             for model in self:
+
+                if not isinstance(only_models, type(None)):
+                    if model not in only_models:
+                        continue
 
                 self.docking_ligands.setdefault(model, [])
                 self.docking_ligands[model].append(ln)
@@ -674,9 +691,9 @@ chain to use for each model with the chains option.' % model)
                 command += output_folder+'/'+model+'/'+model+separator+ln+'.pdb '
                 command += ligand_folder+'/'+l+' '
                 if isinstance(coordinate, dict):
-                    command += ','.join([str(x) for x in coordinate[model]])
+                    command += '"'+','.join([str(x) for x in coordinate[model]])+'"'
                 elif isinstance(coordinate, tuple) and len(coordinate) == 3:
-                    command += ','.join([str(x) for x in coordinate])
+                    command += '"'+','.join([str(x) for x in coordinate])+'"'
                 else:
                     raise ValueError('coordinate needs to be a 3-element tuple of integers or dict.')
                 command += ' --separator "'+separator+'" '
