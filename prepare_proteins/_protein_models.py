@@ -2,7 +2,7 @@ from . import alignment
 from . import _atom_selectors
 from . import rosettaScripts
 from . import MD
-
+import time
 import os
 import sys
 import shutil
@@ -202,18 +202,22 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         Paramters
         =========
+        model : str
+            model ID
         atom_lists : list
             Specifies the list of atoms to delete for the particular model.
         """
 
-        def checkAtomInConects(self, model, atom):
+        def removeAtomInConects(self, model, atom):
             """
-            Incomplete function for checking conect lies that should be altered
-            after the atom is deleted. Review when the case arises.
+            Function for removing conect lines involving the deleted atom.
             """
+            to_remove = []
             for conect in self.conects[model]:
                 if atom in conect:
-                    atom
+                    to_remove.append(conect)
+            for conect in to_remove:
+                self.conects[model].remove(conect)
 
         for remove_atom in atoms_list:
             for chain in self.structures[model].get_chains():
@@ -224,7 +228,32 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                 if atom.name == remove_atom[2]:
                                     print('Removing atom: '+str(remove_atom)+' from model '+model)
                                     residue.detach_child(atom.id)
-                                    # checkAtomInConects(self, model, remove_atom)
+                                    removeAtomInConects(self, model, remove_atom)
+
+    def removeModelResidues(self, model, residues_list):
+        """
+        Remove a group of residues from the model structure.
+
+        Paramters
+        =========
+        model : str
+            model ID
+        residues_list : list
+            Specifies the list of resdiues to delete for the particular model.
+        """
+
+        # Get all atoms for residues to remove them
+        atoms_to_remove = []
+        for residue in self.structures[model].get_residues():
+            chain = residue.get_parent().id
+            if (chain, residue.id[1]) in residues_list:
+                for atom in residue:
+                    atoms_to_remove.append((chain, residue.id[1], atom.name))
+
+        if atoms_to_remove == []:
+            raise ValueError('No atoms were found for the specified residue!')
+
+        self.removeModelAtoms(model, atoms_to_remove)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
@@ -519,28 +548,48 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def removeTerminiByConfidenceScore(self, confidence_threshold=70):
+    def removeTerminiByConfidenceScore(self, confidence_threshold=70, verbose=True):
         """
         Remove terminal regions with low confidence scores from models.
         """
 
+        remove_models = set()
         ## Warning only single chain implemented
         for model in self.models_names:
 
             atoms = [a for a in self.structures[model].get_atoms()]
+            bfactors = [a.bfactor for a in atoms]
+
+            if np.average(bfactors) == 0:
+                if verbose:
+                    print('Warning: model %s has no atom with the selected confidence!' % model)
+                remove_models.add(model)
+                continue
+
             n_terminus = set()
+            something = False
             for a in atoms:
                 if a.bfactor < confidence_threshold:
                     n_terminus.add(a.get_parent().id[1])
                 else:
+                    something = True
                     break
+
             c_terminus = set()
 
             for a in reversed(atoms):
                 if a.bfactor < confidence_threshold:
                     c_terminus.add(a.get_parent().id[1])
                 else:
+                    something = True
                     break
+
+            if not something:
+                if verbose and model not in remove_models:
+                    print('Warning: model %s has no atom with the selected confidence!' % model)
+                remove_models.add(model)
+                continue
+
             n_terminus = sorted(list(n_terminus))
             c_terminus = sorted(list(c_terminus))
 
@@ -550,10 +599,12 @@ chain to use for each model with the chains option.' % model)
                     if r.id[1] in n_terminus or r.id[1] in c_terminus:
                         remove_this.append(r)
                 chain = c
+                # Remove residues
+                for r in remove_this:
+                    chain.detach_child(r.id)
 
-            # Remove residues
-            for r in remove_this:
-                chain.detach_child(r.id)
+        for model in remove_models:
+            self.removeModel(model)
 
         self.getModelsSequences()
         # self.calculateSecondaryStructure(_save_structure=True)
@@ -596,6 +647,80 @@ chain to use for each model with the chains option.' % model)
                                                   aligment_mode=aligment_mode)
 
             traj.save(output_folder+'/'+model+'.pdb')
+
+
+    def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder,
+                                    separator='-', overwrite=True, only_models=None,
+                                    only_ligands=None):
+        """
+        Position a set of ligands into specific protein coordinates.
+
+        Parameters
+        ==========
+        coordinate : tuple or dict
+            New desired coordinates of the ligand
+        ligand_folder : str
+            Path to the ligands folder to store ligand molecules
+        output_folder : str
+            Path to the output folder to store models
+        overwrite : bool
+            Overwrite if structure file already exists.
+        """
+
+        # Create output directory
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        if isinstance(only_ligands, str):
+            only_ligands = [only_ligands]
+
+        # Copy script file to output directory
+        _copyScriptFile(output_folder, 'positionLigandAtCoordinate.py')
+
+        for l in os.listdir(ligand_folder):
+            if l.endswith('.mae'):
+                ln = l.replace('.mae', '')
+            elif l.endswith('.pdb'):
+                ln = l.replace('.pdb', '')
+            else:
+                continue
+
+            if not isinstance(only_ligands, type(None)):
+                if ln not in only_ligands:
+                    continue
+
+            for model in self:
+
+                if not isinstance(only_models, type(None)):
+                    if model not in only_models:
+                        continue
+
+                self.docking_ligands.setdefault(model, [])
+                self.docking_ligands[model].append(ln)
+
+                if not os.path.exists(output_folder+'/'+model):
+                    os.mkdir(output_folder+'/'+model)
+
+                if os.path.exists(output_folder+'/'+model+'/'+model+separator+ln+separator+'0.pdb') and not overwrite:
+                    continue
+
+                _saveStructureToPDB(self.structures[model],
+                                                     output_folder+'/'+model+'/'+model+separator+ln+'.pdb')
+                command = 'run python3 '+output_folder+'/._positionLigandAtCoordinate.py '
+                command += output_folder+'/'+model+'/'+model+separator+ln+'.pdb '
+                command += ligand_folder+'/'+l+' '
+                if isinstance(coordinate, dict):
+                    command += '"'+','.join([str(x) for x in coordinate[model]])+'"'
+                elif isinstance(coordinate, tuple) and len(coordinate) == 3:
+                    command += '"'+','.join([str(x) for x in coordinate])+'"'
+                else:
+                    raise ValueError('coordinate needs to be a 3-element tuple of integers or dict.')
+                command += ' --separator "'+separator+'" '
+                command += ' --pele_poses\n'
+                os.system(command)
 
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
                       param_files=None, mpi_command='slurm'):
@@ -1370,9 +1495,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not os.path.exists(job_folder+'/output_models/'+model):
                 os.mkdir(job_folder+'/output_models/'+model)
 
-            # Generate input protein and ligand files
+            # Generate input protein files
             input_protein = job_folder+'/input_models/'+model+'.pdb'
-            if not os.path.exists(input_protein) or overwrite:
+            input_mae = input_protein.replace('.pdb', '.mae')
+            if not os.path.exists(input_mae) or overwrite:
                 command = 'run '+script_path+' '
                 command += input_protein+' '
                 command += job_folder+'/output_models/'+model+' '
@@ -1382,15 +1508,20 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Add site map command
             command = 'cd '+job_folder+'/output_models/'+model+'\n'
             command += '"${SCHRODINGER}/sitemap" '
+            command += '-j '+model+' '
             command += '-prot ../../input_models/'+model+'/'+model+'_protein.mae'+' '
             command += '-sitebox '+str(site_box)+' '
             command += '-resolution '+str(resolution)+' '
             command += '-reportsize '+str(reportsize)+' '
             command += '-keepvolpts yes '
             command += '-keeplogs yes '
-            command += '-siteasl \"res.num {'+target_residue+'}\" '
+
+            if isinstance(target_residue, dict):
+                command += '-siteasl \"res.num {'+str(target_residue[model])+'}\" '
+            else:
+                command += '-siteasl \"res.num {'+str(target_residue)+'}\" '
             command += '-HOST localhost:1 '
-            command += '-TMPLAUNCHDIR\n'
+            command += '-TMPLAUNCHDIR '
             command += '-WAIT\n'
             command += 'cd ../../..\n'
             jobs.append(command)
@@ -1640,16 +1771,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.system(command)
 
         # Copy file to avoid the faulty preparation...
-        # shutil.copyfile(output_folder+'/'+resname+'.pdb',
-                        # output_folder+'/'+resname+'_p.pdb')
+        shutil.copyfile(output_folder+'/'+resname+'.pdb',
+                        output_folder+'/'+resname+'_p.pdb')
 
     def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
-                             box_radius=10, steps=100, debug=False, iterations=3, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
+                             box_radius=10, steps=100, debug=False, iterations=5, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
-                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None):
+                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
+                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1679,6 +1811,32 @@ make sure of reading the target sequences with the function readTargetSequences(
             message = 'Spawning method %s not found.' % spawning
             message = 'Allowed options are: '+str(spawnings)
             raise ValueError(message)
+
+        if isinstance(membrane_residues, type(None)):
+            membrane_residues = {}
+
+        if isinstance(bias_to_point, type(None)):
+            bias_to_point = {}
+
+        # Check bias_to_point input
+        if isinstance(bias_to_point, (list, tuple)):
+            d = {}
+            for model in self:
+                d[model] = bias_to_point
+            bias_to_point = d
+
+        if not isinstance(bias_to_point, dict):
+            raise ValueError('bias_to_point should be a dictionary or a list.')
+
+        # Check COM distance bias inputs
+        if isinstance(com_bias1, type(None)):
+            com_bias1 = {}
+
+        if isinstance(com_bias2, type(None)):
+            com_bias2 = {}
+
+        if com_bias1 != {} and com_bias2 == {} or com_bias1 == {} and com_bias2 != {}:
+            raise ValueError('You must give both COM atom groups to apply a COM distance bias.')
 
         # Create PELE job folder
         if not os.path.exists(pele_folder):
@@ -1812,7 +1970,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 skip_covalent_residue = [r.resname for r in self.structures[protein].get_residues() if r.id[1] == index][0]
                                 covalent_command = 'cd output\n'
                                 covalent_command += 'python ._covalentLigandParameterization.py ligand/'+skip_covalent_residue+'.pdb '+skip_covalent_residue+' '+covalent_base_aa[skip_covalent_residue]+'\n'
+
+                                # Copy modify processed script
+                                _copyScriptFile(output_folder, 'modifyProcessedForCovalentPELE.py')
+                                cov_residues = ','.join([str(x) for x in self.covalent[protein]])
+                                covalent_command += 'python ._modifyProcessedForCovalentPELE.py '+cov_residues+' \n'
+                                covalent_command += 'mv DataLocal/Templates/OPLS2005/Protein/templates_generated/* DataLocal/Templates/OPLS2005/Protein/\n'
                                 covalent_command += 'cd ..\n'
+
+
 
                     # Write input yaml
                     with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml', 'w') as iyf:
@@ -1879,7 +2045,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(box_centers, type(None)) and peptide:
                             raise ValueError('You must give per-protein box_centers when docking peptides!')
                         if not isinstance(box_centers, type(None)):
-                            if not all(isinstance(x, float) for x in box_centers[model]):
+                            if not all(isinstance(x, float) for x in box_centers[model]) and \
+                               not all(isinstance(x, int) for x in box_centers[model]) and \
+                               not all(isinstance(x, np.float32) for x in box_centers[model]):
                                 # get coordinates from tuple
                                 for chain in self.structures[model[0]].get_chains():
                                     if chain.id == box_centers[model][0]:
@@ -1895,13 +2063,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             for coord in coordinates:
                                 #if not isinstance(coord, float):
                                 #    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
-                                box_center += '  - '+str(coord)+'\n'
+                                box_center += '  - '+str(float(coord))+'\n'
                             iyf.write("box_center: \n"+box_center)
 
                         # energy by residue is not implemented in PELE platform, therefore
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
-                        if debug or energy_by_residue or peptide  or nonbonded_energy != None:
+                        if debug or energy_by_residue or peptide  or nonbonded_energy != None or membrane_residues or bias_to_point or com_bias1:
                             iyf.write("debug: true\n")
 
                         if distances != None:
@@ -1947,6 +2115,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             with open(pele_folder+'/'+protein+separator+ligand+'/ligand_energy_groups.json', 'w') as jf:
                                 json.dump(ligand_energy_groups[ligand], jf)
 
+                    if protein in membrane_residues:
+                        _copyScriptFile(pele_folder, 'addMembraneConstraints.py')
+                        mem_res_script = '._addMembraneConstraints.py' #I have added the _
+
                     if nonbonded_energy != None:
                         _copyScriptFile(pele_folder, 'addAtomNonBondedEnergyToPELEconf.py')
                         nbe_script_name = '._addAtomNonBondedEnergyToPELEconf.py'
@@ -1954,6 +2126,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                             raise ValueError('nonbonded_energy, must be given as a dictionary')
                         with open(pele_folder+'/'+protein+separator+ligand+'/nonbonded_energy_atoms.json', 'w') as jf:
                             json.dump(nonbonded_energy[protein][ligand], jf)
+
+                    if protein in bias_to_point:
+                        _copyScriptFile(pele_folder, 'addBiasToPoint.py')
+                        btp_script = '._addBiasToPoint.py'
+
+                    if protein in com_bias1:
+                        _copyScriptFile(pele_folder, 'addComDistancesBias.py')
+                        cbs_script = '._addComDistancesBias.py'
 
                     if peptide:
                         _copyScriptFile(pele_folder, 'modifyPelePlatformForPeptide.py')
@@ -1977,8 +2157,35 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
                             elif tf.endswith('z'):
                                 command += "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"+tf+",g "+yaml_file+"\n"
+
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
+                        if protein in membrane_residues:
+                            command += "python ../"+mem_res_script+' '
+                            command += "output " # I think we should change this for a variable
+                            command += "--membrane_residues "
+                            command += ",".join([str(x) for x in membrane_residues[protein]])+'\n' #1,2,3,4,5
+                            continuation = True
+
+                        if protein in bias_to_point:
+                            command += "python ../"+btp_script+' '
+                            command += "output " # I think we should change this for a variable
+                            command += ",".join([str(x) for x in bias_to_point[protein]])+'\n'
+                            continuation = True
+
+                        if protein in com_bias1 and ligand in com_bias1[protein]:
+                            # Write both COM groups as json files
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/._com_group1.json', 'w') as jf:
+                                json.dump(com_bias1[protein][ligand], jf)
+
+                            with open(pele_folder+'/'+protein+'_'+ligand+'/._com_group2.json', 'w') as jf:
+                                json.dump(com_bias2[protein][ligand], jf)
+
+                            command += "python ../"+cbs_script+' '
+                            command += "output " # I think we should change this for a variable
+                            command += "._com_group1.json "
+                            command += "._com_group2.json\n"
+                            continuation = True
 
                     if covalent_setup:
                         command += covalent_command
@@ -1994,14 +2201,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         debug_line = True
                                         oyml.write('restart: true\n')
                                         oyml.write('adaptive_restart: true\n')
+                                        continue
                                     elif 'restart: true' in l:
                                         continue
                                     oyml.write(l)
                                 if not debug_line:
                                     oyml.write('restart: true\n')
                                     oyml.write('adaptive_restart: true\n')
+                        if covalent_setup:
+                            continuation = False
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
+
+                        if membrane_residues or bias_to_point or com_bias1:
+                            continuation = False
+                            debug = False
 
                     elif energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
@@ -2033,7 +2247,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if nonbonded_energy == None:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif extend_iterations and not continuation:
-                        raise ValueEror('extend_iterations must be used together with the continuation keyword')
+                        raise ValueError('extend_iterations must be used together with the continuation keyword')
 
                     if nonbonded_energy != None:
                         command += 'python ../'+nbe_script_name+' output --energy_type '+nonbonded_energy_type
@@ -3908,7 +4122,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         def check_atom_in_atoms(atom, atoms, atom_mapping):
-
             if atom_mapping != None:
                 atom_mapping = atom_mapping[model]
 
@@ -4080,7 +4293,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Read PDB file and get conect lines only
         """
-
         # Get atom indexes by tuple and objects
         atoms = self._getAtomIndexes(model, pdb_file)
         if only_hetatoms:
