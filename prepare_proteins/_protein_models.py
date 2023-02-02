@@ -2282,7 +2282,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpMDSimulations(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,water_traj=False,ion_chain=False):
+    def setUpMDSimulations(self ,md_folder, sim_time, frags=5, program='gromacs', temperature=298.15,
+                           command_name='gmx_mpi', ff='amber99sb-star-ildn', water_traj=False,
+                           ion_chain=False):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2294,11 +2296,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         md_folder : str
             Path to the job folder where the MD input files are located.
         sim_time : int
-            Number of simulation steps
+            Simulation time in nanoseconds.
         frags : int
             Number of fragments to divide the simulation.
         program : str
             Program to execute simulation.
+        temperature : float
+            Simulation temperature
         command : str
             Command to call program.
         ff : str
@@ -2312,9 +2316,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError('The program %s is not available for setting MD simulations.' % program)
 
         # Create MD job folders
-        if benchmark == True:
-            md_folder = md_folder + '_benchmark'
-
         if not os.path.exists(md_folder):
             os.mkdir(md_folder)
         if not os.path.exists(md_folder+'/scripts'):
@@ -2344,13 +2345,23 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
                 if line.strip().startswith('nsteps'):
-                    line = 'nsteps = '+ str(int(sim_time/frags)) + '\n'
+                    line = 'nsteps = '+ str(int(sim_time*250000/frags)) + '\n' # with an integrator of 0.004fs
+                if 'TEMPERATURE' in line:
+                    line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
                 #    if line.strip().startswith('compressed-x-grps'):
                 #        line = 'compressed_x_grps = '+'System'+ '\n'
 
                 sys.stdout.write(line)
 
+            for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
+                if 'TEMPERATURE' in line:
+                    print(line)
+                    line.replace('TEMPERATURE', str(temperature))
+
+            for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
+                if 'TEMPERATURE' in line:
+                    line.replace('TEMPERATURE', str(temperature))
 
             jobs = []
 
@@ -2488,7 +2499,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',benchmark=False,benchmark_steps=10,separator='_',ligand_chain='L'):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chain='L'):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2528,9 +2539,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError('The program %s is not available for setting MD simulations.' % program)
 
         # Create MD job folders
-        if benchmark == True:
-            md_folder = md_folder + '_benchmark'
-
         if not os.path.exists(md_folder):
             os.mkdir(md_folder)
         if not os.path.exists(md_folder+'/scripts'):

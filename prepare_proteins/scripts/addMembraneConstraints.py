@@ -8,7 +8,7 @@ from Bio.PDB.Polypeptide import three_to_one
 parser = argparse.ArgumentParser()
 parser.add_argument('pele_output', help='Path to the PELE output folder.')
 parser.add_argument('--membrane_residues', help='Comma-separated-list of membrane residue indexes.')
-parser.add_argument('--mem_spring_constant', default=10.0, help='Spring constant for membrane residues')
+parser.add_argument('--mem_spring_constant', default=1.0, help='Spring constant for membrane residues')
 parser.add_argument('--mem_edge_spring_constant', default=5.0, help='Spring constant for the membrane edge residues')
 parser.add_argument('--nomem_spring_constant', default=0.5, help='Spring constant for no-membrane residues')
 
