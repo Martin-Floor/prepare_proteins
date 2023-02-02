@@ -15,7 +15,7 @@ args=parser.parse_args()
 
 protein_file = args.protein_file
 ligand_file = args.ligand_file
-x,y,z = [int(x) for x in args.coordinate.split(',')]
+x,y,z = [float(x) for x in args.coordinate.split(',')]
 coordinate = np.array([x,y,z])
 separator = args.separator
 pele_poses = args.pele_poses
