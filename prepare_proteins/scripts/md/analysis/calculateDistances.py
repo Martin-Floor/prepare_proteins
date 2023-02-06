@@ -16,14 +16,14 @@ if args.carbonyl != '0':
 else:
     carbonyl = None
 
-t = md.load(path, top='/'.join(path.split('/')[:-2])+'/md/prot_md_1_no_water.gro')
+t = md.load(path+'/prot_md_cat_noPBC.xtc', top=path+'/prot_md_1_no_water.gro')
 #t = t[0:100] #Test#
 dist_dic = {}
 dist_dic['ser_his'] = []
 dist_dic['asp_his'] = []
 dist_dic['pep'] = []
 
-print('Calculating distances for '+path.split('/')[-3])
+print('Calculating distances for model '+path.split('/')[-2]+' replica '+path.split('/')[-1])
 
 for frame in t:
     top = frame.top
@@ -38,7 +38,9 @@ for frame in t:
     heavy_ser_atom = top.select('resSeq '+ser+' and name OG')
 
     if carbonyl != None:
-        pep_atom = top.select('resSeq '+str(int(carbonyl)+1)+' and name C')[1]
+        first_pep_res = top.atom(top.select('resname ACE')[1])
+        resnum = first_pep_res.residue.index
+        pep_atom = top.select('resid '+str(int(carbonyl)+resnum)+' and name C')[0]
 
     '''
     if his_name == 'NE2':
@@ -67,7 +69,7 @@ for frame in t:
         asp_atom1 = top.select('resSeq '+asp+' and name OD1')
         asp_atom2 = top.select('resSeq '+asp+' and name OD2')
 
-    elif asp_res_name == 'G':
+    elif asp_res_name == 'E':
         asp_atom1 = top.select('resSeq '+asp+' and name OE1')
         asp_atom2 = top.select('resSeq '+asp+' and name OE2')
 
@@ -93,6 +95,6 @@ for frame in t:
     else:
         dist_dic['pep'].append(0)
 
-with open(path.split('/')[-3]+'_dist.json', 'w') as f:
+with open(path+'/dist.json', 'w') as f:
     json.dump(dist_dic,f)
-    print('Saved distances for '+path.split('/')[-3])
+    print('Saved distances for model '+path.split('/')[-2]+' replica '+path.split('/')[-1])
