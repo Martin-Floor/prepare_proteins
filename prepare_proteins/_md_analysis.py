@@ -15,7 +15,7 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads=None,carbonyls=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',remove_water=True,peptide=False,ligand=False):
+    def __init__(self, path, triads=None, carbonyls=None, command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',remove_water=True,peptide=False,ligand=False):
 
         self.paths = {}
         self.distances = {}
