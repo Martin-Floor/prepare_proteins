@@ -2380,11 +2380,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpMDSimulations(self ,md_folder, sim_time, frags=5, program='gromacs', temperature=298.15,
                            command_name='gmx_mpi', ff='amber99sb-star-ildn', water_traj=False,
-<<<<<<< HEAD
                            ion_chain=False, replicas=1):
-=======
-                           ion_chain=False):
->>>>>>> df01af8b1d3ca4cfc97addff9afef19d38014fbc
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2605,11 +2601,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-<<<<<<< HEAD
     def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chain='L',replicas=1):
-=======
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chain='L'):
->>>>>>> df01af8b1d3ca4cfc97addff9afef19d38014fbc
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
