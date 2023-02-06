@@ -16,9 +16,10 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads=None,carbonyls=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',remove_water=True,peptide=False,ligand=False):
+    def __init__(self,path,triads=None,carbonyls=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,peptide=False,ligand=False):
 
-        self.paths = {}
+        self.trajectory_paths = {}
+        self.topology_paths = {}
         self.distances = {}
         self.angles = {}
         self.triads = triads
@@ -36,25 +37,31 @@ class md_analysis:
         #Remove boundary conditions from gromacs simulation trajectory file and get paths
 
         for model in self.models:
-            self.paths[model] = {}
+            self.trajectory_paths[model] = {}
+            self.topology_paths[model] = {}
             for replica in os.listdir(path+'/output_models/'+model):
                 traj_path = path+'/output_models/'+model+'/'+replica+'/'+step
 
-                if not os.path.exists(traj_path+'/'+traj_name) or len(os.listdir(traj_path))==0:
+                if not os.path.exists(traj_path) or len(os.listdir(traj_path))==0:
                     print('WARNING: model '+model+' has no trajectories')
 
                 else:
 
-                    self.paths[model][replica] = (traj_path+'/'+traj_name)
+                    self.trajectory_paths[model][replica] = (traj_path+'/'+traj_name)
+                    if remove_water:
+                        self.topology_paths[model][replica] =  (traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
+                    else:
+                        self.topology_paths[model][replica] =  (traj_path+'/'+topol_name)
+
                     for file in os.listdir(traj_path):
-                        if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro'):
+                        if not os.path.exists(traj_path+'/'+topol_name):
                             print('WARNING: No gro file')
                             continue
 
                         if file.endswith('.xtc') and not file.endswith('_noPBC.xtc') and not os.path.exists(traj_path+'/'+file.split(".")[0]+'_noPBC.xtc'):
 
                             if peptide:
-                                for line in open('/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro').readlines():
+                                for line in open(traj_path+'/'+topol_name).readlines():
                                     if 'ACE' in line:
                                         atom_num = int(line[16:21])-2
                                         break
@@ -75,7 +82,7 @@ class md_analysis:
                                         #line = ''
                                 line += '\n'
 
-                                os.system('echo q | '+command+' make_ndx -f '+'/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
+                                os.system('echo q | '+command+' make_ndx -f '+traj_path+'/'+topol_name+' -o '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
 
                                 with open('/'.join(traj_path.split('/')[:-1])+'/md/index.ndx','a') as f:
                                     f.write(line)
@@ -87,11 +94,11 @@ class md_analysis:
                             else:
                                 os.system('echo '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
 
-                    if not os.path.exists(traj_path+'/'+traj_name) and os.path.exists('/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro'):
+                    if not os.path.exists(traj_path+'/'+traj_name) and os.path.exists(traj_path+'/'+topol_name):
                         os.system(command+' trjcat -f '+traj_path+'/*_noPBC.xtc -o '+traj_path+'/'+traj_name+' -cat')
 
-                    if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1_no_water.gro') and os.path.exists('/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro') and remove_water == True:
-                        os.system('echo '+option+' | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1_no_water.gro')
+                    if not os.path.exists(traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1]) and os.path.exists(traj_path+'/'+topol_name) and remove_water == True:
+                        os.system('echo '+option+' | gmx editconf -ndef -f '+traj_path+'/'+topol_name+' -o '+traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
 
     def setupCalculateDistances(self,job_folder='MD_analysis_data',overwrite=False):
 
@@ -113,10 +120,10 @@ class md_analysis:
                 sof.write(l)
 
         jobs = []
-        for model in self.paths:
+        for model in self.trajectory_paths:
             if not os.path.exists(job_folder+'/'+model):
                 os.mkdir(job_folder+'/'+model)
-            for replica,path in self.paths[model].items():
+            for replica,path in self.trajectory_paths[model].items():
                 if not os.path.exists(job_folder+'/'+model+'/'+replica):
                     os.mkdir(job_folder+'/'+model+'/'+replica)
 
@@ -125,7 +132,7 @@ class md_analysis:
 
                 new_path = job_folder+'/'+model+'/'+replica
 
-                if not os.path.exists(job_folder+'/'+model+'_dist.json') or overwrite:
+                if not os.trajectory_paths.exists(job_folder+'/'+model+'_dist.json') or overwrite:
                     command = 'cd '+job_folder+'\n'
                     if self.carbonyls != None:
                         carbonyl_arg = self.carbonyls[model]
@@ -143,10 +150,10 @@ class md_analysis:
         if not os.path.exists(folder):
             os.mkdir(folder)
 
-        for model in self.paths:
+        for model in self.trajectory_paths:
             self.distances[model] = {}
-            for replica,path in self.paths[model].items():
-                if (os.path.exists(folder+'/'+model+'/'+replica+'/dist.json') and not overwrite):
+            for replica,path in self.trajectory_paths[model].items():
+                if (os.trajectory_paths.exists(folder+'/'+model+'/'+replica+'/dist.json') and not overwrite):
                     with open(folder+'/'+model+'/'+replica+'/dist.json','r') as f:
                         self.distances[model][replica] = json.load(f)
                     print('Reading distance for '+model)
@@ -154,7 +161,7 @@ class md_analysis:
 
                 ### WARNING: Option not implemented  with replicas ###
                 if calculate:
-                    if os.path.exists(path) and os.path.exists('/'.join(path.split('/')[:-2])+'/md/prot_md_1.gro'):
+                    if os.trajectory_paths.exists(path) and os.trajectory_paths.exists('/'.join(path.split('/')[:-2])+'/md/prot_md_1.gro'):
                         print('Calculating distance for '+model)
                         t = md.load(path, top='/'.join(path.split('/')[:-2])+'/md/prot_md_1.gro')
                         #t = t[0:100] #Test#
