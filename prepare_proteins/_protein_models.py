@@ -21,7 +21,6 @@ import matplotlib.pyplot as plt
 import mdtraj as md
 import fileinput
 
-
 import prepare_proteins
 
 class proteinModels:
@@ -1462,7 +1461,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpSiteMapForModels(self, job_folder, target_residue, site_box=10,
+    def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10,
                               resolution='fine', reportsize=100, overwrite=False):
         """
         Generates a SiteMap calculation for model poses (no ligand) near specified residues.
@@ -1494,9 +1493,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         jobs = []
         for model in self.models_names:
 
-            # Createa output folder for each model
-            if not os.path.exists(job_folder+'/output_models/'+model):
-                os.mkdir(job_folder+'/output_models/'+model)
+            # Create an output folder for each model
+            output_folder = job_folder+'/output_models/'+model
+            if not os.path.exists(output_folder):
+                os.mkdir(output_folder)
 
             # Generate input protein files
             input_protein = job_folder+'/input_models/'+model+'.pdb'
@@ -1504,30 +1504,37 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not os.path.exists(input_mae) or overwrite:
                 command = 'run '+script_path+' '
                 command += input_protein+' '
-                command += job_folder+'/output_models/'+model+' '
+                command += output_folder+' '
                 command += '--protein_only '
                 os.system(command)
 
-            # Add site map command
-            command = 'cd '+job_folder+'/output_models/'+model+'\n'
-            command += '"${SCHRODINGER}/sitemap" '
-            command += '-j '+model+' '
-            command += '-prot ../../input_models/'+model+'/'+model+'_protein.mae'+' '
-            command += '-sitebox '+str(site_box)+' '
-            command += '-resolution '+str(resolution)+' '
-            command += '-reportsize '+str(reportsize)+' '
-            command += '-keepvolpts yes '
-            command += '-keeplogs yes '
-
-            if isinstance(target_residue, dict):
-                command += '-siteasl \"res.num {'+str(target_residue[model])+'}\" '
+            if isinstance(target_residues, dict):
+                tr = target_residues[model]
+            elif isinstance(target_residues, (list, tuple)):
+                tr = target_residues
             else:
-                command += '-siteasl \"res.num {'+str(target_residue)+'}\" '
-            command += '-HOST localhost:1 '
-            command += '-TMPLAUNCHDIR '
-            command += '-WAIT\n'
-            command += 'cd ../../..\n'
-            jobs.append(command)
+                tr = [target_residues]
+
+            for r in tr:
+                if not os.path.exists(output_folder+'/'+r):
+                    os.mkdir(output_folder+'/'+r)
+
+                # Add site map command
+                command = 'cd '+job_folder+'/output_models/'+model+'/'+r+'\n'
+                command += '"${SCHRODINGER}/sitemap" '
+                command += '-j '+model+' '
+                command += '-prot ../'+model+'_protein.mae'+' '
+                command += '-sitebox '+str(site_box)+' '
+                command += '-resolution '+str(resolution)+' '
+                command += '-reportsize '+str(reportsize)+' '
+                command += '-keepvolpts yes '
+                command += '-keeplogs yes '
+                command += '-siteasl \"res.num {'+str(r)+'}\" '
+                command += '-HOST localhost:1 '
+                command += '-TMPLAUNCHDIR '
+                command += '-WAIT\n'
+                command += 'cd ../../../..\n'
+                jobs.append(command)
 
         return jobs
 
@@ -1601,6 +1608,92 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'cd ../../..\n'
                     jobs.append(command)
         return jobs
+
+    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0):
+        """
+        Extract score values from a site map calculation.
+
+         Parameters
+         ==========
+         sitemap_folder : str
+             Path to the site map calculation folder. See
+             setUpSiteMapForModels()
+        failed_value : None, float or int
+            The value to put in the columns of failed siteMap calculations.
+
+        Returns
+        =======
+        sitemap_data : pandas.DataFrame
+            Site map pocket information.
+        """
+
+        def parseVolumeInfo(eval_log):
+            """
+            Parse eval log file for site scores.
+
+            Parameters
+            ==========
+            eval_log : str
+                Eval log file from sitemap output
+
+            Returns
+            =======
+            pocket_data : dict
+                Scores for the given pocket
+            """
+            with open(eval_log) as lf:
+                c = False
+                for l in lf:
+                    if 'volume' in l:
+                        c = True
+                        labels = l.split()
+                        continue
+                    if c:
+                        values = [float(x) for x in l.split()]
+                        pocket_data = {x:y for x,y in zip(labels, values)}
+                        c = False
+            return pocket_data
+
+
+        sitemap_data = {}
+        sitemap_data['Model'] = []
+        sitemap_data['Target Residue'] = []
+        sitemap_data['Pocket'] = []
+
+        output_folder = sitemap_folder+'/output_models'
+        for m in os.listdir(output_folder):
+            for r in os.listdir(output_folder+'/'+m):
+                if os.path.isdir(output_folder+'/'+m+'/'+r):
+                    eval_log = False
+                    for f in os.listdir(output_folder+'/'+m+'/'+r):
+                        if f.endswith('_eval.log'):
+                            eval_log = True
+
+                            pocket = int(f.split('_')[-2])
+                            pocket_data = parseVolumeInfo(output_folder+'/'+m+'/'+r+'/'+f)
+
+                            sitemap_data['Model'].append(m)
+                            sitemap_data['Target Residue'].append(r)
+                            sitemap_data['Pocket'].append(pocket)
+
+                            for l in pocket_data:
+                                sitemap_data.setdefault(l, [])
+                                sitemap_data[l].append(pocket_data[l])
+
+                    # Add models without site map data
+                    if not eval_log:
+                        sitemap_data['Model'].append(m)
+                        sitemap_data['Target Residue'].append(r)
+                        sitemap_data['Pocket'].append(pocket)
+                        for l in ['SiteScore', 'size', 'Dscore', 'volume', 'exposure', 'enclosure',
+                                   'contact', 'phobic', 'philic', 'balance', 'don/acc']:
+                            sitemap_data.setdefault(l, [])
+                            sitemap_data[l].append(failed_value)
+
+        sitemap_data = pd.DataFrame(sitemap_data)
+        sitemap_data.set_index(['Model', 'Target Residue', 'Pocket'], inplace=True)
+
+        return sitemap_data
 
     def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
                                     only_ligands=None):
@@ -2287,7 +2380,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpMDSimulations(self ,md_folder, sim_time, frags=5, program='gromacs', temperature=298.15,
                            command_name='gmx_mpi', ff='amber99sb-star-ildn', water_traj=False,
-                           ion_chain=False):
+                           ion_chain=False, replicas=1):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2338,19 +2431,18 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Copy script files
         if program == 'gromacs':
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/mdp'):
-                if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp',no_py=False,hidden=False)
+                if not file.startswith("__") and not file.endswith(".py"):
+                    _copyScriptFile(md_folder+'/scripts/', file, subfolder='md/gromacs/mdp', no_py=False, hidden=False)
 
             for file in resource_listdir(Requirement.parse("prepare_proteins"), 'prepare_proteins/scripts/md/gromacs/ff/'+ff):
-                if not file.startswith("__"):
-                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff,no_py=False,hidden=False)
-
+                if not file.startswith("__") and not file.endswith(".py"):
+                    _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff, no_py=False, hidden=False)
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
                 if line.strip().startswith('nsteps'):
                     line = 'nsteps = '+ str(int(sim_time*250000/frags)) + '\n' # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
-                    line.replace('TEMPERATURE', str(temperature))
+                    line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
                 #    if line.strip().startswith('compressed-x-grps'):
                 #        line = 'compressed_x_grps = '+'System'+ '\n'
@@ -2359,12 +2451,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'TEMPERATURE' in line:
-                    print(line)
-                    line.replace('TEMPERATURE', str(temperature))
+                    line = line.replace('TEMPERATURE', str(temperature))
+
+                sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
                 if 'TEMPERATURE' in line:
-                    line.replace('TEMPERATURE', str(temperature))
+                    line = line.replace('TEMPERATURE', str(temperature))
+                sys.stdout.write(line)
 
             jobs = []
 
@@ -2507,7 +2601,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chain='L'):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chain='L',replicas=1):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -4487,7 +4581,7 @@ def _copyScriptFile(output_folder, script_name, no_py=False, subfolder=None, hid
 
     # Write control script to output folder
     if no_py == True:
-        script_name = script_name[:-3]
+        script_name = script_name.replace('.py', '')
 
     if hidden:
         output_path = output_folder+'/._'+script_name
