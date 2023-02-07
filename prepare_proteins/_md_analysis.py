@@ -16,7 +16,7 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads=None,carbonyls=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,peptide=False,ligand=False):
+    def __init__(self,path,triads=None,lig_atoms=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,peptide=False,ligand=False):
 
         self.trajectory_paths = {}
         self.topology_paths = {}
@@ -24,7 +24,7 @@ class md_analysis:
         self.angles = {}
         self.triads = triads
         self.models = os.listdir(path+'/output_models/')
-        self.carbonyls = carbonyls
+        self.lig_atoms = lig_atoms
 
         if remove_water == True:
             if peptide or ligand:
@@ -103,7 +103,7 @@ class md_analysis:
     def setupCalculateDistances(self,job_folder='MD_analysis_data',overwrite=False):
 
         if self.triads == None:
-            raise ValueEror('Triads were not given to the object')
+            raise ValueError('Triads were not given to the object')
 
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
@@ -123,23 +123,32 @@ class md_analysis:
         for model in self.trajectory_paths:
             if not os.path.exists(job_folder+'/'+model):
                 os.mkdir(job_folder+'/'+model)
-            for replica,path in self.trajectory_paths[model].items():
+            for replica in self.trajectory_paths[model]:
+                if not os.path.exists(self.trajectory_paths[model][replica]):
+                    print('WARNING: trajectory file for model '+model+' and replica '+replica+' does not exist.')
+                    continue
+                if not os.path.exists(self.topology_paths[model][replica]):
+                    print('WARNING: topology file for model '+model+' and replica '+replica+' does not exist.')
+                    continue
+
                 if not os.path.exists(job_folder+'/'+model+'/'+replica):
                     os.mkdir(job_folder+'/'+model+'/'+replica)
 
-                shutil.copyfile(path,job_folder+'/'+model+'/'+replica+'/'+path.split('/')[-1])
-                shutil.copyfile('/'.join(path.split('/')[:-2])+'/md/prot_md_1_no_water.gro',job_folder+'/'+model+'/'+replica+'/prot_md_1_no_water.gro')
+                shutil.copyfile(self.trajectory_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.trajectory_paths[model][replica].split('/')[-1])
+                shutil.copyfile(self.topology_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.topology_paths[model][replica].split('/')[-1])
 
                 new_path = job_folder+'/'+model+'/'+replica
 
-                if not os.trajectory_paths.exists(job_folder+'/'+model+'_dist.json') or overwrite:
+                if not os.path.exists(job_folder+'/'+model+'_dist.json') or overwrite:
                     command = 'cd '+job_folder+'\n'
-                    if self.carbonyls != None:
-                        carbonyl_arg = self.carbonyls[model]
-                    else:
-                        carbonyl_arg = '0'
-
-                    command += 'python ._'+script_name+' -p '+new_path+' --triad '+','.join(self.triads[model])+' --carbonyl '+carbonyl_arg+'\n'
+                    command += 'python ._'+script_name+' -p '+new_path +' '
+                    command += '--triad '+','.join(self.triads[model])+' '
+                    if self.lig_atoms != None:
+                        with open(new_path+'/lig_atoms.json','w') as f:
+                            print(self.lig_atoms[model])
+                            json.dump(self.lig_atoms[model],f)
+                        command += ' --lig_atoms lig_atoms.json '
+                    command += '\n'
                     command += 'cd ..\n'
                     jobs.append(command)
         return jobs
@@ -153,7 +162,7 @@ class md_analysis:
         for model in self.trajectory_paths:
             self.distances[model] = {}
             for replica,path in self.trajectory_paths[model].items():
-                if (os.trajectory_paths.exists(folder+'/'+model+'/'+replica+'/dist.json') and not overwrite):
+                if (os.path.exists(folder+'/'+model+'/'+replica+'/dist.json') and not overwrite):
                     with open(folder+'/'+model+'/'+replica+'/dist.json','r') as f:
                         self.distances[model][replica] = json.load(f)
                     print('Reading distance for '+model)
