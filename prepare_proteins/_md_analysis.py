@@ -40,11 +40,10 @@ class md_analysis:
             for replica in os.listdir(path+'/output_models/'+model):
                 traj_path = path+'/output_models/'+model+'/'+replica+'/'+step
 
-                if not os.path.exists(traj_path+'/'+traj_name) or len(os.listdir(traj_path))==0:
-                    print('WARNING: model '+model+' has no trajectories')
+                if not os.path.exists(traj_path) or len(os.listdir(traj_path))==0:
+                    print('WARNING: path '+traj_path+' has no trajectories')
 
                 else:
-
                     self.paths[model][replica] = (traj_path+'/'+traj_name)
                     for file in os.listdir(traj_path):
                         if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/md/prot_md_1.gro'):
