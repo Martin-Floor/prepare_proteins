@@ -2682,13 +2682,25 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
                 if line.strip().startswith('nsteps'):
-                    line = 'nsteps = '+ str(int(sim_time/frags)) + '\n'
+                    line = 'nsteps = '+ str(int(sim_time*250000/frags)) + '\n' # with an integrator of 0.004fs
+                if 'TEMPERATURE' in line:
+                    line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
                 #    if line.strip().startswith('compressed-x-grps'):
                 #        line = 'compressed_x_grps = '+'System'+ '\n'
 
                 sys.stdout.write(line)
 
+            for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
+                if 'TEMPERATURE' in line:
+                    line = line.replace('TEMPERATURE', str(temperature))
+
+                sys.stdout.write(line)
+
+            for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
+                if 'TEMPERATURE' in line:
+                    line = line.replace('TEMPERATURE', str(temperature))
+                sys.stdout.write(line)
 
             jobs = []
 
@@ -2779,7 +2791,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
 
                         command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
-                        command += 'grep -h ATOM prot.pdb ../../../input_models/'+model+'/ligand.pdb >| complex.pdb'+'\n'
+                        command += 'grep -h ATOM prot.pdb ../../../../input_models/'+model+'/ligand.pdb >| complex.pdb'+'\n'
                         command += command_name+' editconf -f complex.pdb -o complex.gro'+'\n'
                         command += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a #include "ligand.acpype\/ligand_GMX.itp"\\n#ifdef POSRES\\n#include "ligand.acpype\/posre_ligand.itp"\\n#endif\' topol.top'+'\n'
                         #\'/^#include "amber99sb-star-ildn.ff\/forcefield.itp"*/a \\n#include "'+ligand+'.acpype\/'+ligand+'_GMX.itp"\n#ifdef POSRES\n#include "'+ligand+'.acpype\/posre_'+ligand+'.itp"\n#endif\'
@@ -2793,7 +2805,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         command += command_name+' editconf -f complex.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
                         command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
-                        command += command_name+' grompp -f ../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
+                        command += command_name+' grompp -f ../../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
 
                         ####
                         selector = str(13+num_chains)
@@ -2814,7 +2826,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/em/prot_em.tpr"):
                         command += 'mkdir em'+'\n'
                         command += 'cd em'+'\n'
-                        command += command_name+' grompp -f ../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
+                        command += command_name+' grompp -f ../../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
                         command += command_name+' mdrun -v -deffnm prot_em'+'\n'
                         command += 'cd ..'+'\n'
 
@@ -2823,7 +2835,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/nvt/prot_nvt.tpr"):
                         command += 'mkdir nvt'+'\n'
                         command += 'cd nvt'+'\n'
-                        command += 'cp -r ../../../scripts/nvt.mdp .'+'\n'
+                        command += 'cp -r ../../../../scripts/nvt.mdp .'+'\n'
                         command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' nvt.mdp'+'\n'
 
                         command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp -fc 1000 1000 1000'+'\n'
@@ -2839,7 +2851,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'mkdir npt'+'\n'
                     command += 'cd npt'+'\n'
 
-                    command += 'cp -r ../../../scripts/npt.mdp .'+'\n'
+                    command += 'cp -r ../../../../scripts/npt.mdp .'+'\n'
                     command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' npt.mdp'+'\n'
 
                     for i in range(len(FClist)+1):
@@ -2861,7 +2873,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'mkdir md'+'\n'
                     command += 'cd md'+'\n'
 
-                    command += 'cp -r ../../../scripts/md.mdp .'+'\n'
+                    command += 'cp -r ../../../../scripts/md.mdp .'+'\n'
                     command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' md.mdp'+'\n'
 
                     for i in range(1,frags+1):

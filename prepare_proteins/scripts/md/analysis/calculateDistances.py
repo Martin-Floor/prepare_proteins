@@ -7,14 +7,16 @@ import numpy as np
 parser = argparse.ArgumentParser()
 parser.add_argument("-p", "--path")
 parser.add_argument("-t", "--triad")
-parser.add_argument("-c", "--carbonyl")
+parser.add_argument("-l", "--lig_atoms",default=None)
 args = parser.parse_args()
 path = '../'+args.path
 triad = args.triad.split(',')
-if args.carbonyl != '0':
-    carbonyl = int(args.carbonyl)
+if args.lig_atoms != None:
+    with open(path+'/'+args.lig_atoms,'r') as f:
+        lig_atoms = json.load(f)
 else:
-    carbonyl = None
+    lig_atoms = None
+
 
 t = md.load(path+'/prot_md_cat_noPBC.xtc', top=path+'/prot_md_1_no_water.gro')
 #t = t[0:100] #Test#
@@ -37,10 +39,15 @@ for frame in t:
     ser_atom = top.select('resSeq '+ser+' and name HG')
     heavy_ser_atom = top.select('resSeq '+ser+' and name OG')
 
-    if carbonyl != None:
-        first_pep_res = top.atom(top.select('resname ACE')[1])
-        resnum = first_pep_res.residue.index
-        pep_atom = top.select('resid '+str(int(carbonyl)+resnum)+' and name C')[0]
+    if lig_atoms != None:
+        sel_command = ''
+        for atom in lig_atoms:
+            sel_command += '(resname '+atom[0]+' and resid '+atom[1]+' and name '+atom[2]+') or '
+
+        #first_pep_res = top.atom(top.select('resname ACE')[1])
+        #resnum = first_pep_res.residue.index
+        #lig_atom_sel = top.select('resid '+str(int(carbonyl)+resnum)+' and name C')[0]
+        lig_atom_sel = top.select(sel_command[:-3])
 
     '''
     if his_name == 'NE2':
@@ -90,8 +97,13 @@ for frame in t:
     dist_dic['ser_his'].append(float(np.linalg.norm(frame.xyz[0][ser_atom] - frame.xyz[0][his_ser_atom])))
     dist_dic['asp_his'].append(asp_dist)
 
-    if carbonyl != None:
-        dist_dic['pep'].append(float(np.linalg.norm(frame.xyz[0][heavy_ser_atom] - frame.xyz[0][pep_atom])))
+    if lig_atoms != None:
+        lig_distances = []
+        for atom in lig_atom_sel:
+            lig_distances.append(float(np.linalg.norm(frame.xyz[0][heavy_ser_atom] - frame.xyz[0][atom])))
+        dist_dic['pep'].append(np.min(lig_distances))
+
+        #dist_dic['pep'].append(float(np.linalg.norm(frame.xyz[0][heavy_ser_atom] - frame.xyz[0][pep_atom])))
     else:
         dist_dic['pep'].append(0)
 
