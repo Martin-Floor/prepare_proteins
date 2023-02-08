@@ -4284,7 +4284,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line = 'CONECT'
                     for x in entry:
                         if not hydrogens:
-                            if 'H' not in x[2]:
+                            type_index = (x[2].find(next(filter(str.isalpha, x[2]))))
+                            if x[2][type_index] != 'H':
                                 x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
                                 line += '%5s' % atoms[x]
                         else:
