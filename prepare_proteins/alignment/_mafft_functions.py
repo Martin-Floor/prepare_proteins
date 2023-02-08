@@ -13,7 +13,7 @@ class mafft:
         Execute a multiple sequence alignment of the input sequences
     """
 
-    def multipleSequenceAlignment(sequences, output=None, anysymbol=False):
+    def multipleSequenceAlignment(sequences, output=None, anysymbol=False, stdout=True, stderr=True, quiet=False):
         """
         Use the mafft executable to perform a multiple sequence alignment.
 
@@ -25,7 +25,9 @@ class mafft:
         output : str
             File name to write the fasta formatted alignment output.
         anysymbol : bool
-            Use unusual symbols in the alignment
+            Use unusual symbols in the alignment.
+        quiet : bool
+            Do not display progress messages.
 
         Returns
         -------
@@ -33,24 +35,41 @@ class mafft:
             Multiple sequence alignment in Biopython format.
         """
 
+        # Generate random variable names
+        target_file = '.'+str(uuid.uuid4())+'.fasta.tmp'
+        output_file = '.'+str(uuid.uuid4())+'.out.tmp'
+
         # Write input file containing the sequences
-        writeFastaFile(sequences, 'sequences.fasta.tmp')
+        writeFastaFile(sequences, target_file)
+
+        # Manage stdout and stderr
+        if stdout:
+            stdout = None
+        else:
+            stdout = subprocess.DEVNULL
+
+        if stderr:
+            stderr = None
+        else:
+            stderr = subprocess.DEVNULL
 
         # Calculate alignment
         command = 'mafft --auto'
         if anysymbol:
             command += ' --anysymbol'
-        command += ' sequences.fasta.tmp > sequences.aligned.fasta.tmp'
-        os.system(command)
+        if quiet:
+            command += ' --quiet'
+        command += ' '+target_file+' > '+output_file
+        subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
 
         # Read aligned file
-        alignment = AlignIO.read("sequences.aligned.fasta.tmp", "fasta")
+        alignment = AlignIO.read(output_file, "fasta")
 
         # Remove temporary file
-        os.remove('sequences.fasta.tmp')
+        os.remove(target_file)
         if output != None:
-            shutil.copyfile('sequences.aligned.fasta.tmp', output)
-        os.remove('sequences.aligned.fasta.tmp')
+            shutil.copyfile(output_file, output)
+        os.remove(output_file)
 
         return alignment
 
