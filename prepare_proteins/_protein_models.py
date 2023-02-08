@@ -4096,7 +4096,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 keep_residues=kr,
                                 **keywords)
 
-            self._write_conect_lines(model, output_folder+'/'+model+'.pdb')
+            if 'remove_hydrogens' in keywords:
+                if keywords['remove_hydrogens'] == True:
+                    check_file = True
+                    hydrogens = False
+                else:
+                    check_file = False
+                    hydrogens = True
+            else:
+                check_file = False
+                hydrogens = True
+
+            self._write_conect_lines(model, output_folder+'/'+model+'.pdb',check_file=check_file,hydrogens=hydrogens)
 
             if convert_to_mae:
                 cwd = os.getcwd()
@@ -4226,7 +4237,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.sequence_differences
 
-    def _write_conect_lines(self, model, pdb_file, atom_mapping=None, check_file=False):
+    def _write_conect_lines(self, model, pdb_file, atom_mapping=None, check_file=False, hydrogens=True):
         """
         Write stored conect lines for a particular model into the given PDB file.
 
@@ -4272,8 +4283,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for entry in self.conects[model]:
                     line = 'CONECT'
                     for x in entry:
-                        x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
-                        line += '%5s' % atoms[x]
+                        if not hydrogens:
+                            if 'H' not in x[2]:
+                                x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
+                                line += '%5s' % atoms[x]
+                        else:
+                            x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
+                            line += '%5s' % atoms[x]
+
                     line += '\n'
                     tmp.write(line)
             tmp.write('END\n')
