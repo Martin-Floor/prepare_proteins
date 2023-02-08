@@ -63,7 +63,7 @@ class proteinModels:
         Get the paths for all PDBs in the input_folder path.
     """
 
-    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False):
+    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False, verbose=False):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -100,6 +100,10 @@ class proteinModels:
 
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
+
+            if verbose:
+                print('Reading model: %s' % model)
+
             self.models_names.append(model)
             self.readModelFromPDB(model, self.models_paths[model])
 
@@ -1877,7 +1881,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
-                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None):
+                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, rescoring=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -1902,6 +1906,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         spawnings = ['independent', 'inverselyProportional', 'epsilon', 'variableEpsilon',
                      'independentMetric', 'UCB', 'FAST', 'ProbabilityMSM', 'MetastabilityMSM',
                      'IndependentMSM']
+
+        methods = ['rescoring']
 
         if spawning != None and spawning not in spawnings:
             message = 'Spawning method %s not found.' % spawning
@@ -2111,6 +2117,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("equilibration: false\n")
                         if spawning != None:
                             iyf.write("spawning: '"+str(spawning)+"'\n")
+
+                        if rescoring:
+                            iyf.write("rescoring: true\n")
+
                         iyf.write("traj: trajectory.xtc\n")
                         iyf.write("working_folder: 'output'\n")
                         if usesrun:
@@ -4192,7 +4202,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             to_align = {}
             to_align['current'] = self.sequences[model]
             to_align['target'] = self.target_sequences[model]
-            msa = prepare_proteins.alignment.mafft.multipleSequenceAlignment(to_align)
+            msa = prepare_proteins.alignment.mafft.multipleSequenceAlignment(to_align, stderr=False, stdout=False)
 
             # Iterate the alignment to gather sequence differences
             p = 0

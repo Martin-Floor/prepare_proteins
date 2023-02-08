@@ -47,4 +47,4 @@ gen_seed			= -1		; generate a random seed
 annealing			= single single ; single sequence of points for each T-coupling group
 annealing_npoints		= 2 	 2 		; two points - start and end temperatures
 annealing_time 			= 0 100  0 100  ; time frame of heating - heat over period of 500 ps
-annealing_temp			= 10 300 10 300 ; start and end temperatures
+annealing_temp			= 10 TEMPERATURE 10 TEMPERATURE ; start and end temperatures
