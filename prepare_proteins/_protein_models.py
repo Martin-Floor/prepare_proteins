@@ -4581,7 +4581,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if d.endswith('.pdb'):
                 pdb_name = '.'.join(d.split('.')[:-1])
 
-                if only_models != None:
+                if only_models != []:
                     if pdb_name not in only_models:
                         continue
 
