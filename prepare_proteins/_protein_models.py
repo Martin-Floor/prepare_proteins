@@ -3435,7 +3435,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for metric in filter_values:
 
                     if metric not in ['Score', 'RMSD']:
-                        ligand_data = ligand_data[ligand_data['metric_'+metric] < filter_values[metric]]
+                        ligand_data = ligand_data[ligand_data[metric] < filter_values[metric]]
                     else:
                         ligand_data = ligand_data[ligand_data[metric] < filter_values[metric]]
 
@@ -4176,7 +4176,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 keep_residues=kr,
                                 **keywords)
 
-            self._write_conect_lines(model, output_folder+'/'+model+'.pdb')
+            if 'remove_hydrogens' in keywords:
+                if keywords['remove_hydrogens'] == True:
+                    check_file = True
+                    hydrogens = False
+                else:
+                    check_file = False
+                    hydrogens = True
+            else:
+                check_file = False
+                hydrogens = True
+
+            self._write_conect_lines(model, output_folder+'/'+model+'.pdb',check_file=check_file,hydrogens=hydrogens)
 
             if convert_to_mae:
                 cwd = os.getcwd()
@@ -4306,7 +4317,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.sequence_differences
 
-    def _write_conect_lines(self, model, pdb_file, atom_mapping=None, check_file=False):
+    def _write_conect_lines(self, model, pdb_file, atom_mapping=None, check_file=False, hydrogens=True):
         """
         Write stored conect lines for a particular model into the given PDB file.
 
@@ -4352,8 +4363,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for entry in self.conects[model]:
                     line = 'CONECT'
                     for x in entry:
-                        x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
-                        line += '%5s' % atoms[x]
+                        if not hydrogens:
+                            type_index = (x[2].find(next(filter(str.isalpha, x[2]))))
+                            if x[2][type_index] != 'H':
+                                x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
+                                line += '%5s' % atoms[x]
+                        else:
+                            x = check_atom_in_atoms(x, atoms, atom_mapping=atom_mapping)
+                            line += '%5s' % atoms[x]
+
                     line += '\n'
                     tmp.write(line)
             tmp.write('END\n')
@@ -4499,11 +4517,15 @@ make sure of reading the target sequences with the function readTargetSequences(
         with open(pdb_file) as pdbf:
             for l in pdbf:
                 if l.startswith('CONECT'):
+                    l = l.replace("CONECT", "")
+                    l = l.strip("\n")
+                    num = len(l) / 5
+                    new_l = [int(l[i * 5:(i * 5) + 5]) for i in range(int(num))]
                     if only_hetatoms:
-                        het_atoms = [True if atoms_objects[int(x)].get_parent().id[0] != ' ' else False for x in l.split()[1:]]
+                        het_atoms = [True if atoms_objects[int(x)].get_parent().id[0] != ' ' else False for x in new_l]
                         if True not in het_atoms:
                             continue
-                    conects.append([atoms[int(x)] for x in l.split()[1:]])
+                    conects.append([atoms[int(x)] for x in new_l])
         return conects
 
     def _getAtomIndexes(self, model, pdb_file, invert=False, check_file=False, return_objects=False):
@@ -4513,7 +4535,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         with open(pdb_file, 'r') as f:
             for l in f:
                 if l.startswith('ATOM') or l.startswith('HETATM'):
-                    index, name, chain, resid = (int(l[7:12]), l[12:17].strip(), l[21], int(l[22:27]))
+                    index, name, chain, resid = (int(l[6:11]), l[12:16].strip(), l[21], int(l[22:26]))
                     atom_indexes[(chain, resid, name)] = index
 
         if check_file:
