@@ -2388,7 +2388,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpMDSimulations(self ,md_folder, sim_time, frags=5, program='gromacs', temperature=298.15,
+    def setUpMDSimulations(self ,md_folder, sim_time,nvt_time=2,npt_time=0.2,frags=1, program='gromacs', temperature=298.15,
                            command_name='gmx_mpi', ff='amber99sb-star-ildn', water_traj=False,
                            ion_chain=False, replicas=1):
         """
@@ -2449,8 +2449,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff, no_py=False, hidden=False)
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
-                if line.strip().startswith('nsteps'):
-                    line = 'nsteps = '+ str(int(sim_time*250000/frags)) + '\n' # with an integrator of 0.004fs
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
@@ -2460,12 +2460,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 sys.stdout.write(line)
@@ -2507,9 +2511,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 gmx_codes.append(number)
 
                 his_pro = (str(gmx_codes)[1:-1].replace(',',''))
-
+                command = ''
                 for i in range(replicas):
-                    command = 'cd '+md_folder+'\n'
+                    command += 'cd '+md_folder+'\n'
                     command += "export GMXLIB=$(pwd)/FF" +'\n'
 
                     # Set up commands
@@ -2605,8 +2609,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         else:
                             if os.path.exists(md_folder+'/output_models/'+model+'/'+str(f)+'/md/prot_md_'+str(f)+'_prev.cpt'):
                                 command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+' -cpi prot_md_'+str(f)+'_prev.cpt'+'\n'
+                    command += 'cd ../../../../../\n'
 
-                    jobs.append(command)
+                jobs.append(command)
 
             return jobs
 
