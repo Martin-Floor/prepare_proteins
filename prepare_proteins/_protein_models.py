@@ -163,7 +163,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         # Check chain ID
         chain = [chain for chain in self.structures[model].get_chains() if chain_id == chain.id]
         if len(chain) != 1:
-            raise ValueError('Chain ID given was not found in the selected model.')
+            print('Chain ID %s was not found in the selected model.' % chain_id)
+            print('Creating a new chain with ID %s' % chain_id)
+            new_chain = PDB.Chain.Chain(chain_id)
+            for m in self.structures[model]:
+                m.add(new_chain)
+            chain = [chain for chain in self.structures[model].get_chains() if chain_id == chain.id]
 
         # Check coordinates correctness
         if coordinates.shape == ():
@@ -182,7 +187,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Create new residue
         if new_resid == None:
-            new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+            try:
+                new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+            except:
+                new_resid = 1
 
         rt_flag = ' ' # Define the residue type flag for complete the residue ID.
         if hetatom:
@@ -192,7 +200,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         residue = PDB.Residue.Residue((rt_flag, new_resid, ' '), resname, ' ')
 
         # Add new atoms to residue
-        serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
+        try:
+            serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
+        except:
+            serial_number = 1
         for i, atnm in enumerate(atom_names):
             if elements:
                 atom = PDB.Atom.Atom(atom_names[i], coordinates[i], 0, 1.0, ' ',
