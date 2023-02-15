@@ -4448,7 +4448,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             for l in pdbf:
                 if l.startswith('CONECT'):
                     l = l.replace("CONECT", "")
-                    l = l.strip("\n")
+                    l = l.strip("\n").rstrip(" ")
                     num = len(l) / 5
                     new_l = [int(l[i * 5:(i * 5) + 5]) for i in range(int(num))]
                     if only_hetatoms:
