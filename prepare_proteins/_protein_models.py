@@ -63,7 +63,7 @@ class proteinModels:
         Get the paths for all PDBs in the input_folder path.
     """
 
-    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False, verbose=False):
+    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False, verbose=False, only_models=None):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -82,8 +82,15 @@ class proteinModels:
             method.
         """
 
+        if only_models == None:
+            only_models = []
+        elif isinstance(only_models, str):
+            only_models = [only_models]
+        elif not isinstance(only_models, list):
+            raise ValueError('You must give models as a list or a single model as a string!')
+
         self.models_folder = models_folder
-        self.models_paths = self._getModelsPaths()
+        self.models_paths = self._getModelsPaths(only_models=only_models)
         self.models_names = [] # Store model names
         self.structures = {} # structures are stored here
         self.sequences = {} # sequences are stored here
@@ -156,7 +163,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         # Check chain ID
         chain = [chain for chain in self.structures[model].get_chains() if chain_id == chain.id]
         if len(chain) != 1:
-            raise ValueError('Chain ID given was not found in the selected model.')
+            print('Chain ID %s was not found in the selected model.' % chain_id)
+            print('Creating a new chain with ID %s' % chain_id)
+            new_chain = PDB.Chain.Chain(chain_id)
+            for m in self.structures[model]:
+                m.add(new_chain)
+            chain = [chain for chain in self.structures[model].get_chains() if chain_id == chain.id]
 
         # Check coordinates correctness
         if coordinates.shape == ():
@@ -175,7 +187,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Create new residue
         if new_resid == None:
-            new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+            try:
+                new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+            except:
+                new_resid = 1
 
         rt_flag = ' ' # Define the residue type flag for complete the residue ID.
         if hetatom:
@@ -185,7 +200,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         residue = PDB.Residue.Residue((rt_flag, new_resid, ' '), resname, ' ')
 
         # Add new atoms to residue
-        serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
+        try:
+            serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
+        except:
+            serial_number = 1
         for i, atnm in enumerate(atom_names):
             if elements:
                 atom = PDB.Atom.Atom(atom_names[i], coordinates[i], 0, 1.0, ' ',
@@ -609,9 +627,6 @@ chain to use for each model with the chains option.' % model)
         for model in remove_models:
             self.removeModel(model)
 
-        for model in remove_models:
-            self.removeModel(model)
-
         self.getModelsSequences()
         # self.calculateSecondaryStructure(_save_structure=True)
 
@@ -652,8 +667,10 @@ chain to use for each model with the chains option.' % model)
                                                   trajectory_chain_indexes=trajectory_chain_indexes,
                                                   aligment_mode=aligment_mode)
 
-            traj.save(output_folder+'/'+model+'.pdb')
+            # Get bfactors
+            bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
 
+            traj.save(output_folder+'/'+model+'.pdb', bfactors=bfactors)
 
     def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder,
                                     separator='-', overwrite=True, only_models=None,
@@ -1530,9 +1547,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-prot ../'+model+'_protein.mae'+' '
                 command += '-sitebox '+str(site_box)+' '
                 command += '-resolution '+str(resolution)+' '
-                command += '-reportsize '+str(reportsize)+' '
                 command += '-keepvolpts yes '
                 command += '-keeplogs yes '
+                command += '-reportsize '+str(reportsize)+' '
                 command += '-siteasl \"res.num {'+str(r)+'}\" '
                 command += '-HOST localhost:1 '
                 command += '-TMPLAUNCHDIR '
@@ -1613,7 +1630,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0):
+    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True):
         """
         Extract score values from a site map calculation.
 
@@ -1658,6 +1675,48 @@ make sure of reading the target sequences with the function readTargetSequences(
                         c = False
             return pocket_data
 
+        def checkIfCompleted(log_file):
+            """
+            Check log file for calculation completition.
+
+            Parameters
+            ==========
+            log_file : str
+                Path to the standard sitemap log file.
+
+            Returns
+            =======
+            completed : bool
+                Did the simulation end correctly?
+            """
+            with open(log_file) as lf:
+                for l in lf:
+                    if 'Site finding job' in l and 'started' not in l:
+                        if 'completed' in l:
+                            return True
+                        elif 'failed' in l:
+                            return False
+
+        def checkIfFound(log_file):
+            """
+            Check log file for found sites.
+
+            Parameters
+            ==========
+            log_file : str
+                Path to the standard sitemap log file.
+
+            Returns
+            =======
+            found : bool
+                Did the simulation end correctly?
+            """
+            found = True
+            with open(log_file) as lf:
+                for l in lf:
+                    if 'No sites found' in l:
+                        found = False
+            return found
 
         sitemap_data = {}
         sitemap_data['Model'] = []
@@ -1669,7 +1728,29 @@ make sure of reading the target sequences with the function readTargetSequences(
             for r in os.listdir(output_folder+'/'+m):
                 if os.path.isdir(output_folder+'/'+m+'/'+r):
                     eval_log = False
+                    log_file = output_folder+'/'+m+'/'+r+'/'+m+'.log'
+                    if os.path.exists(log_file):
+                        completed = checkIfCompleted(log_file)
+                    else:
+                        if verbose:
+                            message = 'Log file for model %s and residue %s was not found!\n' % (m, r)
+                            message += 'It seems the calculation has not run yet...'
+                            print(message)
+                        continue
+
+                    if not completed:
+                        if verbose:
+                            print('There was a problem with model %s and residue %s' % (m, r))
+                        continue
+                    else:
+                        found = checkIfFound(log_file)
+                        if not found:
+                            if verbose:
+                                print('No sites were found for model %s and residue %s' % (m, r))
+                            continue
+
                     for f in os.listdir(output_folder+'/'+m+'/'+r):
+
                         if f.endswith('_eval.log'):
                             eval_log = True
 
@@ -2388,7 +2469,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpMDSimulations(self ,md_folder, sim_time, frags=5, program='gromacs', temperature=298.15,
+    def setUpMDSimulations(self ,md_folder, sim_time,nvt_time=2,npt_time=0.2,frags=1, program='gromacs', temperature=298.15,
                            command_name='gmx_mpi', ff='amber99sb-star-ildn', water_traj=False,
                            ion_chain=False, replicas=1):
         """
@@ -2449,8 +2530,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     _copyScriptFile(md_folder+'/FF/'+ff+'.ff', file, subfolder='md/gromacs/ff/'+ff, no_py=False, hidden=False)
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
-                if line.strip().startswith('nsteps'):
-                    line = 'nsteps = '+ str(int(sim_time*250000/frags)) + '\n' # with an integrator of 0.004fs
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
@@ -2460,12 +2541,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 sys.stdout.write(line)
@@ -2507,9 +2592,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 gmx_codes.append(number)
 
                 his_pro = (str(gmx_codes)[1:-1].replace(',',''))
-
+                command = ''
                 for i in range(replicas):
-                    command = 'cd '+md_folder+'\n'
+                    command += 'cd '+md_folder+'\n'
                     command += "export GMXLIB=$(pwd)/FF" +'\n'
 
                     # Set up commands
@@ -2605,8 +2690,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         else:
                             if os.path.exists(md_folder+'/output_models/'+model+'/'+str(f)+'/md/prot_md_'+str(f)+'_prev.cpt'):
                                 command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+' -cpi prot_md_'+str(f)+'_prev.cpt'+'\n'
+                    command += 'cd ../../../../../\n'
 
-                    jobs.append(command)
+                jobs.append(command)
 
             return jobs
 
@@ -4495,7 +4581,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         atoms[index] = _atom
         return atoms
 
-    def _getModelsPaths(self):
+    def _getModelsPaths(self, only_models=None):
         """
         Get PDB models paths in the models_folder attribute
 
@@ -4505,10 +4591,16 @@ make sure of reading the target sequences with the function readTargetSequences(
         paths : dict
             Paths to all models
         """
+
         paths = {}
         for d in os.listdir(self.models_folder):
             if d.endswith('.pdb'):
                 pdb_name = '.'.join(d.split('.')[:-1])
+
+                if only_models != []:
+                    if pdb_name not in only_models:
+                        continue
+
                 paths[pdb_name] = self.models_folder+'/'+d
 
         return paths

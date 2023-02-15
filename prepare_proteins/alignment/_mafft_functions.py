@@ -1,6 +1,8 @@
 import os
+import subprocess
 from Bio import AlignIO
 import shutil
+import uuid
 from ._methods import *
 
 class mafft:

@@ -1,7 +1,7 @@
 define				= -DPOSRES	; position restrain the protein
 ; Run parameters
 integrator			= md		; leap-frog integrator
-nsteps				= 250000		; 200 ps
+nsteps				= NUMBER_OF_STEPS		; 200 ps
 dt				= 0.004		; 4 fs with virtual sites
 ; Output control
 nstxout				= 0		; don't write coordinates to .trr file

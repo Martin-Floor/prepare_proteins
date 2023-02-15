@@ -107,7 +107,7 @@ def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
         sequences['reference'] = getTopologySequence(reference.topology, rci)
 
         # Align sequences
-        alignment = mafft.multipleSequenceAlignment(sequences)
+        alignment = mafft.multipleSequenceAlignment(sequences, stdout=False, stderr=False)
 
         # Get coincident positions in the alignment
         positions = getCommonPositions(alignment[0].seq, alignment[1].seq,
