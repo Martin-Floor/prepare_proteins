@@ -2688,16 +2688,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'mkdir md'+'\n'
                     command += 'cd md'+'\n'
                     for f in range(1,frags+1):
-                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'.xtc'):
+                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(f)+'.gro'):
                             if f == 1:
                                 command += command_name+' grompp -f ../../../../scripts/md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(f)+'.tpr'+'\n'
                                 command += command_name+' mdrun -v -deffnm prot_md_' + str(f) + '\n'
                             else:
                                 command += command_name+' grompp -f ../../../../scripts/md.mdp -c prot_md_'+str(f-1)+'.gro -t prot_md_'+str(f-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(f)+'.tpr'+'\n'
                                 command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+'\n'
-                        else:
-                            if os.path.exists(md_folder+'/output_models/'+model+'/'+str(f)+'/md/prot_md_'+str(f)+'_prev.cpt'):
-                                command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+' -cpi prot_md_'+str(f)+'_prev.cpt'+'\n'
                     command += 'cd ../../../../../\n'
 
                 jobs.append(command)
