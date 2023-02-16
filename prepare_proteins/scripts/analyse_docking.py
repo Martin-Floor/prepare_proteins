@@ -67,7 +67,12 @@ for model in subjobs:
                         failed_dockings.append((model, ligand))
                         print('Docking for %s + %s failed' % (model, ligand))
 
-print('%s of %s models failed (%.2f)' % (failed_count, total, 100*failed_count/total))
+if total == 0:
+    print('There is no docking outputs in the  given folder!')
+    exit()
+else:
+    percentage = 100*failed_count/total
+    print('%s of %s models failed (%.2f)' % (failed_count, total, percentage))
 
 # Write failed dockings to file
 if return_failed:
