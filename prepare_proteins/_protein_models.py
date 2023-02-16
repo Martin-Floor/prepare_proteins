@@ -623,7 +623,7 @@ chain to use for each model with the chains option.' % model)
 
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
                                   trajectory_chain_indexes=None, reference_chain_indexes=None,
-                                  aligment_mode='aligned'):
+                                  aligment_mode='aligned', verbose=False):
         """
         Align all models to a reference PDB based on a sequence alignemnt.
 
@@ -651,6 +651,10 @@ chain to use for each model with the chains option.' % model)
 
         reference = md.load(reference)
         for model in self.models_names:
+
+            if verbose:
+                print('Saving model: %s' % model)
+
             traj = md.load(self.models_paths[model])
             MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
                                                   trajectory_chain_indexes=trajectory_chain_indexes,
@@ -658,6 +662,10 @@ chain to use for each model with the chains option.' % model)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
+
+            # Correct B-factors outside the -10 to 100 range accepted ny mdtraj
+            bfactors = np.where(bfactors>100.0, 99.99, bfactors)
+            bfactors = np.where(bfactors<-10.0, -9.99, bfactors)
 
             traj.save(output_folder+'/'+model+'.pdb', bfactors=bfactors)
 
@@ -1526,11 +1534,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 tr = [target_residues]
 
             for r in tr:
-                if not os.path.exists(output_folder+'/'+r):
-                    os.mkdir(output_folder+'/'+r)
+                if not os.path.exists(output_folder+'/'+str(r)):
+                    os.mkdir(output_folder+'/'+str(r))
 
                 # Add site map command
-                command = 'cd '+job_folder+'/output_models/'+model+'/'+r+'\n'
+                command = 'cd '+job_folder+'/output_models/'+model+'/'+str(r)+'\n'
                 command += '"${SCHRODINGER}/sitemap" '
                 command += '-j '+model+' '
                 command += '-prot ../'+model+'_protein.mae'+' '
