@@ -103,25 +103,26 @@ def msaIndexesFromSequencePositions(msa, sequence_id, sequence_positions):
         MSA indexes matching the target sequence positions (zero-based indexes)
     """
 
-    msa_indexes = []
-    p = 0
-
     # Check whether the given ID is presetnin the MSA.
-    msa_ids = [x.id for x in msa]
-    if sequence_id not in msa_ids:
+    if sequence_id not in [x.id for x in msa]:
         raise ValueError('Entry %s not found in MSA' % sequence_id)
 
     # Gather MSA index positions mathing the target sequence positions.
-    updated = False
-    for i in range(msa.get_alignment_length()):
-        for a in msa:
-            if a.id == sequence_id:
+    msa_indexes = []
+    p = 0
+    for a in msa:
+        if a.id == sequence_id:
+
+            # Check that all given positions are lower than the sequence length
+            for x in sequence_positions:
+                sl = len([x for x in a.seq if x != '-'])
+                if x > sl:
+                    raise ValueError('The given position %s is larger than the length %s of the target sequence in the MSA.' % (x, sl))
+
+            for i in range(msa.get_alignment_length()):
                 if a.seq[i] != '-':
                     p += 1
-                    updated = True
-                else:
-                    updated = False
-        if p in sequence_positions and updated:
-            msa_indexes.append(i)
+                    if p in sequence_positions:
+                        msa_indexes.append(i)
 
     return msa_indexes
