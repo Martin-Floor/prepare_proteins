@@ -276,6 +276,31 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         self.removeModelAtoms(model, atoms_to_remove)
 
+    def addOXTAtoms(self):
+        """
+        Add missing OXT atoms for terminal residues when missing
+        """
+
+        # Define internal coordinates for OXT
+        oxt_c_distance = 1.251
+        oxt_c_o_angle = 124.222
+        oxt_c_o_ca = 179.489
+
+        for model in self:
+            for chain in self.structures[model].get_chains():
+                residues = [r for r in chain if r.id[0] == ' ']
+                last_atoms = {a.name:a for a in residues[-1]}
+                if 'OXT' not in last_atoms:
+
+                    oxt_coord = _computeCartesianFromInternal(last_atoms['C'].coord,
+                                                             last_atoms['O'].coord,
+                                                             last_atoms['CA'].coord,
+                                                             1.251, 124.222, 179.489)
+                    serial_number = max([a.serial_number for a in residues[-1]])+1
+                    oxt = PDB.Atom.Atom('OXT', oxt_coord, 0, 1.0, ' ',
+                                             'OXT ', serial_number+1, 'O')
+                    residues[-1].add(oxt)
+
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
         """
@@ -4778,6 +4803,59 @@ def _copyScriptFile(output_folder, script_name, no_py=False, subfolder=None, hid
     with open(output_path, 'w') as sof:
         for l in script_file:
             sof.write(l)
+
+def _computeCartesianFromInternal(coord2 , coord3, coord4, distance, angle, torsion):
+    """
+    Compute the cartesian coordinates for the i atom based on internal coordinates
+    of other three atoms (j, k, l).
+
+    Parameters
+    ==========
+    coord1 : numpy.ndarray shape=(3,)
+        Coordinate of the j atom bound to the i atom
+    coord2 : numpy.ndarray shape=(3,)
+        Coordinate of the k atom bound to the j atom
+    coord3 : numpy.ndarray shape=(3,)
+        Coordinate of the l atom bound to the k atom
+    distance : float
+        Distance between the i and j atoms in angstroms
+    angle : float
+        Angle between the i, j, and k atoms in degrees
+    torsion : float
+        Torsion between the i, j, k, l atoms in degrees
+
+    Returns
+    =======
+    coord1 : float
+        Coordinate of the i atom
+
+    """
+
+    torsion = torsion * np.pi / 180.0 # Convert to radians
+    angle = angle * np.pi / 180.0 # Convert to radians
+
+    v1 = coord2 - coord3
+    v2 = coord2 - coord4
+
+    n =  np.cross(v1, v2)
+    nn = np.cross(v1, n)
+
+    n /=  np.linalg.norm(n)
+    nn /= np.linalg.norm(nn)
+
+    n *= -np.sin(torsion)
+    nn *= np.cos(torsion)
+
+    v3 =  n + nn
+    v3 /= np.linalg.norm(v3)
+    v3 *= distance * np.sin(angle)
+
+    v1 /= np.linalg.norm(v1)
+    v1 *= distance * np.cos(angle)
+
+    coord1 = coord2 + v3 - v1
+
+    return coord1
 
 def _get_atom_tuple(atom):
     return (atom.get_parent().get_parent().id,
