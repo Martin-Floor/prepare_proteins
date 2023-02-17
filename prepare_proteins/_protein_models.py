@@ -3741,6 +3741,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             number of calculations, so is off by default).
         """
 
+        if not os.path.exists(rosetta_folder):
+            raise ValueError('The Rosetta calculation folder: "%s" does not exists!' % rosetta_folder)
+
         # Write atom_pairs dictionary to json file
         if atom_pairs != None:
             with open(rosetta_folder+'/._atom_pairs.json', 'w') as jf:
@@ -3790,9 +3793,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             distances_csv = distances_folder+'/'+model+'.csv'
             if os.path.exists(distances_csv):
                 self.rosetta_distances[model] = pd.read_csv(distances_csv)
+                self.rosetta_distances[model].set_index(['Model', 'Pose'], inplace=True)
 
         self.rosetta_data['scores'] = pd.concat(self.rosetta_data['scores'])
-        self.rosetta_data['scores'].set_index('description', inplace=True)
+        self.rosetta_data['scores'].set_index(['Model', 'Pose'], inplace=True)
 
         # # Check if analysis files exists
         # if os.path.exists('._rosetta_data.csv') and not overwrite:

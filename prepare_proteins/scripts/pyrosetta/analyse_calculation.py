@@ -28,7 +28,7 @@ if query_residues != None:
 decompose_bb_hb_into_pair_energies = args.decompose_bb_hb_into_pair_energies
 
 # Initialise PyRosetta environment
-init()
+init('-mute all')
 
 # Get silent files
 silent_file = {}
@@ -74,7 +74,7 @@ def readPosesFromSilent(silent_file, params_dir=None):
     sfd.read_file(silent_file)
 
     #Iterate over tags of models, if tags is given as a list, then skip models not in tags
-    for tag in sfd.tags():
+    for tag in sorted(sfd.tags()):
 
         ss = sfd.get_structure(tag)
 
@@ -134,7 +134,7 @@ def getPoseCordinates(pose):
 
     return coordinates
 
-def readScoreFromSilent(score_file, indexing=True):
+def readScoreFromSilent(score_file, indexing=False):
     """
     Generates an iterator from the poses in the silent file
 
@@ -159,14 +159,30 @@ def readScoreFromSilent(score_file, indexing=True):
                     scores[score].append(float(line.split()[i]))
                 except:
                     scores[score].append(line.split()[i])
+
     scores.pop('SCORE:')
     for s in scores:
+        if s == 'description':
+            models = []
+            poses = []
+            for x in scores[s]:
+                model, pose = x.split('_')
+                models.append(model)
+                poses.append(int(pose))
+            continue
         scores[s] = np.array(scores[s])
+    scores.pop('description')
+    scores['Model'] = np.array(models)
+    scores['Pose'] = np.array(poses)
+
+    # Sort all values based on pose number
+    for s in scores:
+        scores[s] = [x for _,x in sorted(zip(scores['Pose'],scores[s]))]
 
     scores = pd.DataFrame(scores)
 
     if indexing:
-        scores = scores.set_index('description')
+        scores = scores.set_index(['Model', 'Pose'])
 
     return scores
 
@@ -302,12 +318,6 @@ def deltaEMutation(pose, mutant_position, mutant_aa, by_residue=False,
 
     return De
 
-
-# Check whether silent files will be read
-read_silent = False
-if atom_pairs != None or energy_by_residue or interacting_residues or protonation_states:
-    read_silent = True
-
 # atom_pairs_labels = []
 # scores_data = []
 
@@ -359,20 +369,15 @@ if not os.path.exists(distances_folder):
 
 for model in silent_file:
 
-    # Check wether csv files exist
-    files_exist = []
+    # Check whether csv files exist
+    file_exists = {}
 
     # Check score files
     score_file = scores_folder+'/'+model+'.csv'
     if not os.path.exists(score_file):
-        files_exist.append(False)
         # Create dictionary entries for scores
-        scores = {}
-        scores['description'] = []
-    else:
-        scores = pd.read_csv(score_file)
-        scores.set_index('description')
-        files_exist.append(True)
+        scores = readScoreFromSilent(silent_file[model])
+        scores.to_csv(score_file, index=False)
 
     if atom_pairs != None:
         # Check distance files
@@ -380,137 +385,126 @@ for model in silent_file:
         if not os.path.exists(distance_file):
             # Create dictionary entries for distances
             distances = {}
-            distances['description'] = []
-            files_exist.append(False)
+            distances['Model'] = []
+            distances['Pose'] = []
+            file_exists['distances'] = False
         else:
-            distances = pd.read_csv(distance_file)
-            distances.set_index('description')
-            files_exist.append(True)
+            file_exists['distances'] = True
 
     # Skip model processing if all files are found
-    if all(files_exist):
+    skip = [file_exists[x] for x in file_exists]
+    if all(skip):
         continue
 
-    # Get all scores from silent file
-    scores = readScoreFromSilent(silent_file[model])
+    for pose in readPosesFromSilent(silent_file[model], params_dir=params):
 
-    if read_silent:
+        tag = pose.pdb_info().name()
 
-        for pose in readPosesFromSilent(silent_file[model], params_dir=params):
+        # Calculate distances
+        if atom_pairs != None and not file_exists['distances']:
 
-            tag = pose.pdb_info().name()
+            # Add tags as model and pose to distances
+            distances['Model'].append(tag.split('_')[0])
+            distances['Pose'].append(int(tag.split('_')[1]))
 
-            # Calculate distances
-            if atom_pairs != None:
+            # Get pose coordinates
+            coordinates = getPoseCordinates(pose)
 
-                # Add tag to distances df
-                distances['description'].append(tag)
+            # Get atom pair distances
+            for pair in atom_pairs[model]:
+                label = 'distance_'
+                label += '_'.join([str(x) for x in pair[0]])+'-'
+                label += '_'.join([str(x) for x in pair[1]])
 
-                # Get pose coordinates
-                coordinates = getPoseCordinates(pose)
+                # Add label to dictionary
+                distances.setdefault(label, [])
 
-                # Get atom pair distances
-                for pair in atom_pairs[model]:
-                    label = 'distance_'
-                    label += '_'.join([str(x) for x in pair[0]])+'-'
-                    label += '_'.join([str(x) for x in pair[1]])
+                # Add atom pair distance
+                c1 = coordinates[pair[0][0]][pair[0][1]][pair[0][2]]
+                c2 = coordinates[pair[1][0]][pair[1][1]][pair[1][2]]
+                distances[label].append(np.linalg.norm(c1-c2))
 
-                    # Add label to dictionary
-                    distances[label] = []
+        # if energy_by_residue:
+        #     residue_energies = getResidueEnergies(pose, decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
+        #     # Add energy to data
+        #     for r in residue_energies['total_score']:
+        #         res_info = pose.pdb_info().pose2pdb(r)
+        #         res = res_info.split()[0]
+        #         chain = res_info.split()[1]
+        #
+        #         ebr_data['description'].append(tag)
+        #         ebr_data['chain'].append(chain)
+        #         ebr_data['residue'].append(res)
+        #         for st in residue_energies:
+        #             if st not in ebr_data:
+        #                 ebr_data[st] = []
+        #             ebr_data[st].append(residue_energies[st][r])
+        #
+        # if interacting_residues:
+        #     # Get neighbour residues for each residue
+        #     all_residues = set()
+        #     neighbours = {}
+        #     for r in range(1, pose.total_residue()+1):
+        #         if query_residues != None:
+        #             if r not in query_residues:
+        #                 continue
+        #         neighbours[r] = getResidueNeighbours(pose, r)
+        #         for n in neighbours[r]:
+        #             all_residues.add(n)
+        #
+        #     # Calculate mutational energies
+        #     dM = {}
+        #     for i,r in enumerate(all_residues):
+        #         dM[r] = deltaEMutation(pose, r, mutate_to, by_residue=True,
+        #                 decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
+        #
+        #     # Add energy entries
+        #     for r in range(1, pose.total_residue()+1):
+        #         if query_residues != None:
+        #             if r not in query_residues:
+        #                 continue
+        #
+        #         res_info = pose.pdb_info().pose2pdb(r)
+        #         res = res_info.split()[0]
+        #         chain = res_info.split()[1]
+        #
+        #         for n in neighbours[r]:
+        #             # Store only interacting residues
+        #             if dM[n]['total_score'][r] != 0:
+        #                 n_res_info = pose.pdb_info().pose2pdb(n)
+        #                 n_res = res_info.split()[0]
+        #                 n_chain = res_info.split()[1]
+        #                 neighbours_data['description'].append(tag)
+        #                 neighbours_data['chain'].append(chain)
+        #                 neighbours_data['residue'].append(res)
+        #                 neighbours_data['neighbour chain'].append(n_chain)
+        #                 neighbours_data['neighbour residue'].append(n_res)
+        #
+        #                 for st in dM[n]:
+        #                     neighbours_data[st].append(dM[n][st][r])
+        #
+        # # Only implemented for histidines (of course it will be easy todo it for other residues)
+        # if protonation_states:
+        #     for r in range(1, pose.total_residue()+1):
+        #         residue =  pose.residue(r)
+        #         resname = residue.name()
+        #         res_info = pose.pdb_info().pose2pdb(r)
+        #         res = res_info.split()[0]
+        #         chain = res_info.split()[1]
+        #
+        #         if resname.startswith('HIS'):
+        #             if resname == 'HIS_D':
+        #                 his_type = 'HID'
+        #             if resname == 'HIS':
+        #                 his_type = 'HIE'
+        #             protonation_data['description'].append(tag)
+        #             protonation_data['chain'].append(chain)
+        #             protonation_data['residue'].append(res)
+        #             protonation_data['residue state'].append(his_type)
 
-                    # Add atom pair distance
-                    c1 = coordinates[pair[0][0]][pair[0][1]][pair[0][2]]
-                    c2 = coordinates[pair[1][0]][pair[1][1]][pair[1][2]]
-                    distances[label].append(np.linalg.norm(c1-c2))
-
-            # if energy_by_residue:
-            #     residue_energies = getResidueEnergies(pose, decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
-            #     # Add energy to data
-            #     for r in residue_energies['total_score']:
-            #         res_info = pose.pdb_info().pose2pdb(r)
-            #         res = res_info.split()[0]
-            #         chain = res_info.split()[1]
-            #
-            #         ebr_data['description'].append(tag)
-            #         ebr_data['chain'].append(chain)
-            #         ebr_data['residue'].append(res)
-            #         for st in residue_energies:
-            #             if st not in ebr_data:
-            #                 ebr_data[st] = []
-            #             ebr_data[st].append(residue_energies[st][r])
-            #
-            # if interacting_residues:
-            #     # Get neighbour residues for each residue
-            #     all_residues = set()
-            #     neighbours = {}
-            #     for r in range(1, pose.total_residue()+1):
-            #         if query_residues != None:
-            #             if r not in query_residues:
-            #                 continue
-            #         neighbours[r] = getResidueNeighbours(pose, r)
-            #         for n in neighbours[r]:
-            #             all_residues.add(n)
-            #
-            #     # Calculate mutational energies
-            #     dM = {}
-            #     for i,r in enumerate(all_residues):
-            #         dM[r] = deltaEMutation(pose, r, mutate_to, by_residue=True,
-            #                 decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
-            #
-            #     # Add energy entries
-            #     for r in range(1, pose.total_residue()+1):
-            #         if query_residues != None:
-            #             if r not in query_residues:
-            #                 continue
-            #
-            #         res_info = pose.pdb_info().pose2pdb(r)
-            #         res = res_info.split()[0]
-            #         chain = res_info.split()[1]
-            #
-            #         for n in neighbours[r]:
-            #             # Store only interacting residues
-            #             if dM[n]['total_score'][r] != 0:
-            #                 n_res_info = pose.pdb_info().pose2pdb(n)
-            #                 n_res = res_info.split()[0]
-            #                 n_chain = res_info.split()[1]
-            #                 neighbours_data['description'].append(tag)
-            #                 neighbours_data['chain'].append(chain)
-            #                 neighbours_data['residue'].append(res)
-            #                 neighbours_data['neighbour chain'].append(n_chain)
-            #                 neighbours_data['neighbour residue'].append(n_res)
-            #
-            #                 for st in dM[n]:
-            #                     neighbours_data[st].append(dM[n][st][r])
-            #
-            # # Only implemented for histidines (of course it will be easy todo it for other residues)
-            # if protonation_states:
-            #     for r in range(1, pose.total_residue()+1):
-            #         residue =  pose.residue(r)
-            #         resname = residue.name()
-            #         res_info = pose.pdb_info().pose2pdb(r)
-            #         res = res_info.split()[0]
-            #         chain = res_info.split()[1]
-            #
-            #         if resname.startswith('HIS'):
-            #             if resname == 'HIS_D':
-            #                 his_type = 'HID'
-            #             if resname == 'HIS':
-            #                 his_type = 'HIE'
-            #             protonation_data['description'].append(tag)
-            #             protonation_data['chain'].append(chain)
-            #             protonation_data['residue'].append(res)
-            #             protonation_data['residue state'].append(his_type)
-
-    # If no atom pair is given just return the rosetta scores
-    else:
-        scores = readScoreFromSilent(silent_file[model], indexing=False)
-
-    scores.to_csv(score_file, index=False)
-
-    if atom_pairs != None:
+    if not file_exists['distances']:
         # Convert distances dictionary to DataFrame
         distances = pd.DataFrame(distances)
-        distances.set_index('description')
         distances.to_csv(distance_file, index=False)
 
 # # Write energy by residue data
