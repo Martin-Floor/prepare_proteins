@@ -3774,10 +3774,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
 
         # Compile dataframes into rosetta_data attributes
-        self.rosetta_data = {}
-        self.rosetta_data['scores'] = []
-
+        self.rosetta_data = []
         self.rosetta_distances = {}
+        self.rosetta_ebr = []
+        self.rosetta_neighbours = []
+        self.rosetta_protonation = []
 
         analysis_folder = rosetta_folder+'/.analysis'
         for model in self:
@@ -3786,7 +3787,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             scores_folder = analysis_folder+'/scores'
             scores_csv = scores_folder+'/'+model+'.csv'
             if os.path.exists(scores_csv):
-                self.rosetta_data['scores'].append(pd.read_csv(scores_csv))
+                self.rosetta_data.append(pd.read_csv(scores_csv))
 
             # Read distances
             distances_folder = analysis_folder+'/distances'
@@ -3795,82 +3796,44 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.rosetta_distances[model] = pd.read_csv(distances_csv)
                 self.rosetta_distances[model].set_index(['Model', 'Pose'], inplace=True)
 
-        self.rosetta_data['scores'] = pd.concat(self.rosetta_data['scores'])
-        self.rosetta_data['scores'].set_index(['Model', 'Pose'], inplace=True)
+            # Read energy-by-residue data
+            ebr_folder = analysis_folder+'/ebr'
+            erb_csv = ebr_folder+'/'+model+'.csv'
+            if os.path.exists(erb_csv):
+                self.rosetta_ebr.append(pd.read_csv(erb_csv))
 
-        # # Check if analysis files exists
-        # if os.path.exists('._rosetta_data.csv') and not overwrite:
-        #     self.rosetta_data = pd.read_csv('._rosetta_data.csv')
-        #     self.rosetta_data.set_index('description', inplace=True)
-        #     analyse = False
-        #     atom_pairs = None
-        #
-        # if energy_by_residue and not overwrite:
-        #     if os.path.exists('._rosetta_energy_residue_data.csv'):
-        #         self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
-        #         self.rosetta_ebr_data.set_index(['description', 'chain', 'residue'], inplace=True)
-        #     else:
-        #         analyse = True
-        #
-        # if interacting_residues and not overwrite:
-        #     if os.path.exists('._rosetta_interacting_residues_data.csv'):
-        #         self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
-        #         self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
-        #     else:
-        #         analyse = True
-        #
-        # if protonation_states and not overwrite:
-        #     if os.path.exists('._rosetta_protonation_data.csv'):
-        #         self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
-        #         self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
-        #     else:
-        #         analyse = True
-        #
-        # if analyse:
-        #     command = 'python ._analyse_calculation.py . '
-        #     if atom_pairs != None:
-        #         command += '--atom_pairs ._atom_pairs.json '
-        #     if energy_by_residue:
-        #         command += '--energy_by_residue '
-        #     if interacting_residues:
-        #         command += '--interacting_residues '
-        #         if query_residues != None:
-        #             command += '--query_residues '
-        #             command += ','.join([str(r) for r in query_residues])+' '
-        #     if protonation_states:
-        #         command += '--protonation_states '
-        #     if decompose_bb_hb_into_pair_energies:
-        #         command += '--decompose_bb_hb_into_pair_energies'
-        #
-        #     try:
-        #         os.system(command)
-        #     except:
-        #         os.chdir('..')
-        #         raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
-        #
-        #     # Read the CSV files into pandas
-        #
-        #     # Read the CSV file into pandas
-        #     self.rosetta_data = pd.read_csv('._rosetta_data.csv')
-        #     self.rosetta_data.set_index('description', inplace=True)
-        #
-        #     if energy_by_residue:
-        #         if not os.path.exists('._rosetta_energy_residue_data.csv'):
-        #             raise ValueError('Rosetta energy by reisdue analysis failed. Check the ouput of the analyse_calculation.py script.')
-        #         self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
-        #         self.rosetta_ebr_data.set_index(['description', 'chain', 'residue'], inplace=True)
-        #
-        #     if interacting_residues:
-        #         if not os.path.exists('._rosetta_energy_residue_data.csv'):
-        #             raise ValueError('Rosetta interacting reisdues analysis failed. Check the ouput of the analyse_calculation.py script.')
-        #         self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
-        #         self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
-        #
-        #     if protonation_states:
-        #         self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
-        #         self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
-        #
-        # os.chdir('..')
+            # Read interacting neighbours data
+            neighbours_folder = analysis_folder+'/neighbours'
+            neighbours_csv = neighbours_folder+'/'+model+'.csv'
+            if os.path.exists(neighbours_csv):
+                self.rosetta_neighbours.append(pd.read_csv(neighbours_csv))
+
+            # Read protonation data
+            protonation_folder = analysis_folder+'/protonation'
+            protonation_csv = protonation_folder+'/'+model+'.csv'
+            if os.path.exists(protonation_csv):
+                self.rosetta_protonation.append(pd.read_csv(protonation_csv))
+
+        self.rosetta_data = pd.concat(self.rosetta_data)
+        self.rosetta_data.set_index(['Model', 'Pose'], inplace=True)
+
+        if energy_by_residue and self.rosetta_ebr != []:
+            self.rosetta_ebr = pd.concat(self.rosetta_ebr)
+            self.rosetta_ebr.set_index(['Model', 'Pose', 'Chain', 'Residue'], inplace=True)
+        else:
+            self.rosetta_ebr = None
+
+        if interacting_residues and self.rosetta_neighbours != []:
+            self.rosetta_neighbours = pd.concat(self.rosetta_neighbours)
+            self.rosetta_neighbours.set_index(['Model', 'Pose', 'Chain', 'Residue'], inplace=True)
+        else:
+            self.rosetta_neighbours = None
+
+        if protonation_states and self.rosetta_protonation != []:
+            self.rosetta_protonation = pd.concat(self.rosetta_protonation)
+            self.rosetta_protonation.set_index(['Model', 'Pose', 'Chain', 'Residue'], inplace=True)
+        else:
+            self.rosetta_protonation = None
 
     def getRosettaModelDistances(self, model):
         """
