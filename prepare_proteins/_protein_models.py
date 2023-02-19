@@ -688,21 +688,28 @@ chain to use for each model with the chains option.' % model)
             aligning positions with exactly the same aminoacids after the sequence
             alignemnt or 'aligned' for structurally aligining sequences using all
             positions aligned in the sequence alignment.
+
+        Returns
+        =======
+        rmsd : tuple
+            A tuple containing the RMSD in Angstroms and the number of alpha-carbon
+            atoms over which it was calculated.
         """
 
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
 
         reference = md.load(reference)
+        rmsd = {}
         for model in self.models_names:
 
             if verbose:
                 print('Saving model: %s' % model)
 
             traj = md.load(self.models_paths[model])
-            MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
-                                                  trajectory_chain_indexes=trajectory_chain_indexes,
-                                                  aligment_mode=aligment_mode)
+            rmsd[model] = MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
+                                                         trajectory_chain_indexes=trajectory_chain_indexes,
+                                                         aligment_mode=aligment_mode)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
@@ -712,6 +719,8 @@ chain to use for each model with the chains option.' % model)
             bfactors = np.where(bfactors<-10.0, -9.99, bfactors)
 
             traj.save(output_folder+'/'+model+'.pdb', bfactors=bfactors)
+
+        return rmsd
 
     def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder,
                                     separator='-', overwrite=True, only_models=None,
