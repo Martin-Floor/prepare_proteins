@@ -163,7 +163,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         # Check chain ID
         chain = [chain for chain in self.structures[model].get_chains() if chain_id == chain.id]
         if len(chain) != 1:
-            raise ValueError('Chain ID given was not found in the selected model.')
+            print('Chain ID %s was not found in the selected model.' % chain_id)
+            print('Creating a new chain with ID %s' % chain_id)
+            new_chain = PDB.Chain.Chain(chain_id)
+            for m in self.structures[model]:
+                m.add(new_chain)
+            chain = [chain for chain in self.structures[model].get_chains() if chain_id == chain.id]
 
         # Check coordinates correctness
         if coordinates.shape == ():
@@ -182,7 +187,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Create new residue
         if new_resid == None:
-            new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+            try:
+                new_resid = max([r.id[1] for r in chain[0].get_residues()])+1
+            except:
+                new_resid = 1
 
         rt_flag = ' ' # Define the residue type flag for complete the residue ID.
         if hetatom:
@@ -192,7 +200,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         residue = PDB.Residue.Residue((rt_flag, new_resid, ' '), resname, ' ')
 
         # Add new atoms to residue
-        serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
+        try:
+            serial_number = max([a.serial_number for a in chain[0].get_atoms()])+1
+        except:
+            serial_number = 1
         for i, atnm in enumerate(atom_names):
             if elements:
                 atom = PDB.Atom.Atom(atom_names[i], coordinates[i], 0, 1.0, ' ',
@@ -264,6 +275,31 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             raise ValueError('No atoms were found for the specified residue!')
 
         self.removeModelAtoms(model, atoms_to_remove)
+
+    def addOXTAtoms(self):
+        """
+        Add missing OXT atoms for terminal residues when missing
+        """
+
+        # Define internal coordinates for OXT
+        oxt_c_distance = 1.251
+        oxt_c_o_angle = 124.222
+        oxt_c_o_ca = 179.489
+
+        for model in self:
+            for chain in self.structures[model].get_chains():
+                residues = [r for r in chain if r.id[0] == ' ']
+                last_atoms = {a.name:a for a in residues[-1]}
+                if 'OXT' not in last_atoms:
+
+                    oxt_coord = _computeCartesianFromInternal(last_atoms['C'].coord,
+                                                             last_atoms['O'].coord,
+                                                             last_atoms['CA'].coord,
+                                                             1.251, 124.222, 179.489)
+                    serial_number = max([a.serial_number for a in residues[-1]])+1
+                    oxt = PDB.Atom.Atom('OXT', oxt_coord, 0, 1.0, ' ',
+                                             'OXT ', serial_number+1, 'O')
+                    residues[-1].add(oxt)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
                          atom_mapping=None):
@@ -417,12 +453,20 @@ chain to use for each model with the chains option.' % model)
 
             # Count structure positions
             for entry in self.msa:
+
+                if entry.id not in self.models_names:
+                    continue
+
                 if entry.seq[i] != '-':
                     residue_positions[entry.id] += 1
 
             # Get residue positions matching the MSA indexes
             if i == msa_index:
                 for entry in self.msa:
+
+                    if entry.id not in self.models_names:
+                        continue
+
                     if entry.seq[i] == '-':
                         residue_positions[entry.id] = None
                     else:
@@ -623,7 +667,7 @@ chain to use for each model with the chains option.' % model)
 
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
                                   trajectory_chain_indexes=None, reference_chain_indexes=None,
-                                  aligment_mode='aligned'):
+                                  aligment_mode='aligned', verbose=False):
         """
         Align all models to a reference PDB based on a sequence alignemnt.
 
@@ -644,22 +688,39 @@ chain to use for each model with the chains option.' % model)
             aligning positions with exactly the same aminoacids after the sequence
             alignemnt or 'aligned' for structurally aligining sequences using all
             positions aligned in the sequence alignment.
+
+        Returns
+        =======
+        rmsd : tuple
+            A tuple containing the RMSD in Angstroms and the number of alpha-carbon
+            atoms over which it was calculated.
         """
 
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
 
         reference = md.load(reference)
+        rmsd = {}
         for model in self.models_names:
+
+            if verbose:
+                print('Saving model: %s' % model)
+
             traj = md.load(self.models_paths[model])
-            MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
-                                                  trajectory_chain_indexes=trajectory_chain_indexes,
-                                                  aligment_mode=aligment_mode)
+            rmsd[model] = MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
+                                                         trajectory_chain_indexes=trajectory_chain_indexes,
+                                                         aligment_mode=aligment_mode)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
 
+            # Correct B-factors outside the -10 to 100 range accepted ny mdtraj
+            bfactors = np.where(bfactors>100.0, 99.99, bfactors)
+            bfactors = np.where(bfactors<-10.0, -9.99, bfactors)
+
             traj.save(output_folder+'/'+model+'.pdb', bfactors=bfactors)
+
+        return rmsd
 
     def positionLigandsAtCoordinate(self, coordinate, ligand_folder, output_folder,
                                     separator='-', overwrite=True, only_models=None,
@@ -1526,11 +1587,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 tr = [target_residues]
 
             for r in tr:
-                if not os.path.exists(output_folder+'/'+r):
-                    os.mkdir(output_folder+'/'+r)
+                if not os.path.exists(output_folder+'/'+str(r)):
+                    os.mkdir(output_folder+'/'+str(r))
 
                 # Add site map command
-                command = 'cd '+job_folder+'/output_models/'+model+'/'+r+'\n'
+                command = 'cd '+job_folder+'/output_models/'+model+'/'+str(r)+'\n'
                 command += '"${SCHRODINGER}/sitemap" '
                 command += '-j '+model+' '
                 command += '-prot ../'+model+'_protein.mae'+' '
@@ -2680,16 +2741,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'mkdir md'+'\n'
                     command += 'cd md'+'\n'
                     for f in range(1,frags+1):
-                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'.xtc'):
+                        if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(f)+'.gro'):
                             if f == 1:
                                 command += command_name+' grompp -f ../../../../scripts/md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(f)+'.tpr'+'\n'
                                 command += command_name+' mdrun -v -deffnm prot_md_' + str(f) + '\n'
                             else:
                                 command += command_name+' grompp -f ../../../../scripts/md.mdp -c prot_md_'+str(f-1)+'.gro -t prot_md_'+str(f-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(f)+'.tpr'+'\n'
                                 command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+'\n'
-                        else:
-                            if os.path.exists(md_folder+'/output_models/'+model+'/'+str(f)+'/md/prot_md_'+str(f)+'_prev.cpt'):
-                                command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+' -cpi prot_md_'+str(f)+'_prev.cpt'+'\n'
                     command += 'cd ../../../../../\n'
 
                 jobs.append(command)
@@ -3703,6 +3761,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             number of calculations, so is off by default).
         """
 
+        if not os.path.exists(rosetta_folder):
+            raise ValueError('The Rosetta calculation folder: "%s" does not exists!' % rosetta_folder)
+
         # Write atom_pairs dictionary to json file
         if atom_pairs != None:
             with open(rosetta_folder+'/._atom_pairs.json', 'w') as jf:
@@ -3712,85 +3773,87 @@ make sure of reading the target sequences with the function readTargetSequences(
         _copyScriptFile(rosetta_folder, 'analyse_calculation.py', subfolder='pyrosetta')
 
         # Execute docking analysis
-        os.chdir(rosetta_folder)
+        command = 'python '+rosetta_folder+'/._analyse_calculation.py '+rosetta_folder+' '
+        if atom_pairs != None:
+            command += '--atom_pairs '+rosetta_folder+'/._atom_pairs.json '
+        if energy_by_residue:
+            command += '--energy_by_residue '
+        if interacting_residues:
+            command += '--interacting_residues '
+            if query_residues != None:
+                command += '--query_residues '
+                command += ','.join([str(r) for r in query_residues])+' '
+        if protonation_states:
+            command += '--protonation_states '
+        if decompose_bb_hb_into_pair_energies:
+            command += '--decompose_bb_hb_into_pair_energies'
+        try:
+            os.system(command)
+        except:
+            os.chdir('..')
+            raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
 
-        analyse = True
-        # Check if analysis files exists
-        if os.path.exists('._rosetta_data.csv') and not overwrite:
-            self.rosetta_data = pd.read_csv('._rosetta_data.csv')
-            self.rosetta_data.set_index('description', inplace=True)
-            analyse = False
-            atom_pairs = None
+        # Compile dataframes into rosetta_data attributes
+        self.rosetta_data = []
+        self.rosetta_distances = {}
+        self.rosetta_ebr = []
+        self.rosetta_neighbours = []
+        self.rosetta_protonation = []
 
-        if energy_by_residue and not overwrite:
-            if os.path.exists('._rosetta_energy_residue_data.csv'):
-                self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
-                self.rosetta_ebr_data.set_index(['description', 'chain', 'residue'], inplace=True)
-            else:
-                analyse = True
+        analysis_folder = rosetta_folder+'/.analysis'
+        for model in self:
 
-        if interacting_residues and not overwrite:
-            if os.path.exists('._rosetta_interacting_residues_data.csv'):
-                self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
-                self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
-            else:
-                analyse = True
+            # Read scores
+            scores_folder = analysis_folder+'/scores'
+            scores_csv = scores_folder+'/'+model+'.csv'
+            if os.path.exists(scores_csv):
+                self.rosetta_data.append(pd.read_csv(scores_csv))
 
-        if protonation_states and not overwrite:
-            if os.path.exists('._rosetta_protonation_data.csv'):
-                self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
-                self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
-            else:
-                analyse = True
+            # Read distances
+            distances_folder = analysis_folder+'/distances'
+            distances_csv = distances_folder+'/'+model+'.csv'
+            if os.path.exists(distances_csv):
+                self.rosetta_distances[model] = pd.read_csv(distances_csv)
+                self.rosetta_distances[model].set_index(['Model', 'Pose'], inplace=True)
 
-        if analyse:
-            command = 'python ._analyse_calculation.py . '
-            if atom_pairs != None:
-                command += '--atom_pairs ._atom_pairs.json '
-            if energy_by_residue:
-                command += '--energy_by_residue '
-            if interacting_residues:
-                command += '--interacting_residues '
-                if query_residues != None:
-                    command += '--query_residues '
-                    command += ','.join([str(r) for r in query_residues])+' '
-            if protonation_states:
-                command += '--protonation_states '
-            if decompose_bb_hb_into_pair_energies:
-                command += '--decompose_bb_hb_into_pair_energies'
+            # Read energy-by-residue data
+            ebr_folder = analysis_folder+'/ebr'
+            erb_csv = ebr_folder+'/'+model+'.csv'
+            if os.path.exists(erb_csv):
+                self.rosetta_ebr.append(pd.read_csv(erb_csv))
 
-            try:
-                os.system(command)
-            except:
-                os.chdir('..')
-                raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
+            # Read interacting neighbours data
+            neighbours_folder = analysis_folder+'/neighbours'
+            neighbours_csv = neighbours_folder+'/'+model+'.csv'
+            if os.path.exists(neighbours_csv):
+                self.rosetta_neighbours.append(pd.read_csv(neighbours_csv))
 
-            # Read the CSV file into pandas
-            if not os.path.exists('._rosetta_data.csv'):
-                os.chdir('..')
-                raise ValueError('Rosetta analysis failed. Check the ouput of the analyse_calculation.py script.')
+            # Read protonation data
+            protonation_folder = analysis_folder+'/protonation'
+            protonation_csv = protonation_folder+'/'+model+'.csv'
+            if os.path.exists(protonation_csv):
+                self.rosetta_protonation.append(pd.read_csv(protonation_csv))
 
-            # Read the CSV file into pandas
-            self.rosetta_data = pd.read_csv('._rosetta_data.csv')
-            self.rosetta_data.set_index('description', inplace=True)
+        self.rosetta_data = pd.concat(self.rosetta_data)
+        self.rosetta_data.set_index(['Model', 'Pose'], inplace=True)
 
-            if energy_by_residue:
-                if not os.path.exists('._rosetta_energy_residue_data.csv'):
-                    raise ValueError('Rosetta energy by reisdue analysis failed. Check the ouput of the analyse_calculation.py script.')
-                self.rosetta_ebr_data = pd.read_csv('._rosetta_energy_residue_data.csv')
-                self.rosetta_ebr_data.set_index(['description', 'chain', 'residue'], inplace=True)
+        if energy_by_residue and self.rosetta_ebr != []:
+            self.rosetta_ebr = pd.concat(self.rosetta_ebr)
+            self.rosetta_ebr.set_index(['Model', 'Pose', 'Chain', 'Residue'], inplace=True)
+        else:
+            self.rosetta_ebr = None
 
-            if interacting_residues:
-                if not os.path.exists('._rosetta_energy_residue_data.csv'):
-                    raise ValueError('Rosetta interacting reisdues analysis failed. Check the ouput of the analyse_calculation.py script.')
-                self.rosetta_interacting_residues = pd.read_csv('._rosetta_interacting_residues_data.csv')
-                self.rosetta_interacting_residues.set_index(['description', 'chain', 'residue', 'neighbour chain', 'neighbour residue'], inplace=True)
+        if interacting_residues and self.rosetta_neighbours != []:
+            self.rosetta_neighbours = pd.concat(self.rosetta_neighbours)
+            self.rosetta_neighbours.set_index(['Model', 'Pose', 'Chain', 'Residue'], inplace=True)
+        else:
+            self.rosetta_neighbours = None
 
-            if protonation_states:
-                self.rosetta_protonation_states = pd.read_csv('._rosetta_protonation_data.csv')
-                self.rosetta_protonation_states.set_index(['description', 'chain', 'residue'], inplace=True)
-
-        os.chdir('..')
+        if protonation_states and self.rosetta_protonation != []:
+            self.rosetta_protonation = pd.concat(self.rosetta_protonation)
+            self.rosetta_protonation.set_index(['Model', 'Pose', 'Chain', 'Residue'], inplace=True)
+        else:
+            self.rosetta_protonation = None
 
     def getRosettaModelDistances(self, model):
         """
@@ -4534,7 +4597,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             for l in pdbf:
                 if l.startswith('CONECT'):
                     l = l.replace("CONECT", "")
-                    l = l.strip("\n")
+                    l = l.strip("\n").rstrip(" ")
                     num = len(l) / 5
                     new_l = [int(l[i * 5:(i * 5) + 5]) for i in range(int(num))]
                     if only_hetatoms:
@@ -4727,6 +4790,59 @@ def _copyScriptFile(output_folder, script_name, no_py=False, subfolder=None, hid
     with open(output_path, 'w') as sof:
         for l in script_file:
             sof.write(l)
+
+def _computeCartesianFromInternal(coord2 , coord3, coord4, distance, angle, torsion):
+    """
+    Compute the cartesian coordinates for the i atom based on internal coordinates
+    of other three atoms (j, k, l).
+
+    Parameters
+    ==========
+    coord1 : numpy.ndarray shape=(3,)
+        Coordinate of the j atom bound to the i atom
+    coord2 : numpy.ndarray shape=(3,)
+        Coordinate of the k atom bound to the j atom
+    coord3 : numpy.ndarray shape=(3,)
+        Coordinate of the l atom bound to the k atom
+    distance : float
+        Distance between the i and j atoms in angstroms
+    angle : float
+        Angle between the i, j, and k atoms in degrees
+    torsion : float
+        Torsion between the i, j, k, l atoms in degrees
+
+    Returns
+    =======
+    coord1 : float
+        Coordinate of the i atom
+
+    """
+
+    torsion = torsion * np.pi / 180.0 # Convert to radians
+    angle = angle * np.pi / 180.0 # Convert to radians
+
+    v1 = coord2 - coord3
+    v2 = coord2 - coord4
+
+    n =  np.cross(v1, v2)
+    nn = np.cross(v1, n)
+
+    n /=  np.linalg.norm(n)
+    nn /= np.linalg.norm(nn)
+
+    n *= -np.sin(torsion)
+    nn *= np.cos(torsion)
+
+    v3 =  n + nn
+    v3 /= np.linalg.norm(v3)
+    v3 *= distance * np.sin(angle)
+
+    v1 /= np.linalg.norm(v1)
+    v1 *= distance * np.cos(angle)
+
+    coord1 = coord2 + v3 - v1
+
+    return coord1
 
 def _get_atom_tuple(atom):
     return (atom.get_parent().get_parent().id,

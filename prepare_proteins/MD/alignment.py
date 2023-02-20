@@ -1,4 +1,5 @@
 from prepare_proteins.alignment import mafft
+import mdtraj as md
 
 def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
                                        chain_indexes=None, trajectory_chain_indexes=None,
@@ -133,6 +134,10 @@ def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
     # Align trajectory
     trajectory.superpose(reference, frame=reference_frame, atom_indices=trajectory_atoms,
                          ref_atom_indices=reference_atoms)
+
+    rmsd = md.rmsd(trajectory, reference, atom_indices=trajectory_atoms, ref_atom_indices=reference_atoms)[0]*10.0
+
+    return rmsd, len(trajectory_atoms)
 
 def getCommonPositions(sequence1, sequence2, mode='exact'):
     """
