@@ -1944,7 +1944,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         shutil.copyfile(output_folder+'/'+resname+'.pdb',
                         output_folder+'/'+resname+'_p.pdb')
 
-    def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None, ligand_index=1,
+    def setUpPELECalculation(self, pele_folder, models_folder, input_yaml, box_centers=None, distances=None,constraints=None,ligand_index=1,
                              box_radius=10, steps=100, debug=False, iterations=5, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
@@ -2261,6 +2261,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     d2 = "- '"+d[1][0]+":"+str(d[1][1])+":"+d[1][2]+"'\n"
                                 iyf.write(d1)
                                 iyf.write(d2)
+
+                        if constraints != None:
+                            iyf.write("external_constraints:\n")
+                            for c in constraints[(protein,ligand)]:
+                                if len(c) == 2:
+                                    line = "- '"+str(c[0])+"-"+str(c[1])+"'\n"
+                                elif len(c) == 4:
+                                    line = "- '"+str(c[0])+"-"+str(c[1])+"-"+str(c[2])+"-"+str(c[3])+"'\n"
+                                else:
+                                    raise ValueError('Constraint for protein '+protein+' with ligand '+ligand+' are not defined correctly.')
+                                iyf.write(line)
 
                         if seed:
                             iyf.write('seed: '+str(seed)+'\n')
