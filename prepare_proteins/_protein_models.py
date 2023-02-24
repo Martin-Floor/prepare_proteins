@@ -926,7 +926,8 @@ chain to use for each model with the chains option.' % model)
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
-                                 executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None):
+                                 executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
+                                 skip_finished=True):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -956,6 +957,10 @@ chain to use for each model with the chains option.' % model)
         if parallelisation == 'srun' and cpus != None:
             raise ValueError('CPUs can only be set up when using mpirun parallelisation!')
 
+        if cst_optimization and cpus > 10:
+            print('WARNING: A large number of structures (%s) is not necessary when running constrained optimizations!' % nstruct)
+            print('Consider running 10 or less structures.')
+
         # Save all models
         self.saveModels(relax_folder+'/input_models', models=models)
 
@@ -976,6 +981,14 @@ has been carried out. Please run compareSequences() function before setting muta
 
             if not os.path.exists(relax_folder+'/output_models/'+model):
                 os.mkdir(relax_folder+'/output_models/'+model)
+
+            if skip_finished:
+                # Check if model has already been calculated and finished
+                score_file = relax_folder+'/output_models/'+model+'/'+model+'_relax.sc'
+                if os.path.exists(score_file):
+                    scores = _readRosettaScoreFile(score_file)
+                    if scores.shape[0] >= nstruct:
+                        continue
 
             # Create xml minimization protocol
             xml = rosettaScripts.xmlScript()
@@ -3892,7 +3905,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         distances = []
-        for d in self.rosetta_distances['AF-A0A014MGJ4']:
+        for d in self.rosetta_distances[model]:
             if d.startswith('distance_'):
                 distances.append(d)
 
@@ -3923,25 +3936,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         for name in metric_labels:
             if 'metric_'+name in self.rosetta_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
+
             else:
                 values = []
-                models = []
-                for model in self.rosetta_data.index:
-                    base_name = '_'.join(model.split('_')[:-1])
-                    if base_name not in models:
-                        models.append(base_name)
-
-                for model in list(models):
-                    mask = []
-                    for index in self.rosetta_data.index:
-                        if model in index:
-                            mask.append(True)
-                        else:
-                            mask.append(False)
-                    model_data = self.rosetta_data[mask]
-                    model_distances = metric_labels[name][model]
-
-                    values += model_data[model_distances].min(axis=1).tolist()
+                for model in self.rosetta_data.index.levels[0]:
+                    model_distances = self.rosetta_distances[model]
+                    md = model_distances[metric_labels[name][model]]
+                    values += md.min(axis=1).tolist()
 
                 self.rosetta_data['metric_'+name] = values
 
@@ -4858,3 +4859,55 @@ def _get_atom_tuple(atom):
     return (atom.get_parent().get_parent().id,
             atom.get_parent().id[1],
             atom.name)
+
+def _readRosettaScoreFile(score_file, indexing=False):
+    """
+    Generates an iterator from the poses in the silent file
+
+    Arguments:
+    ==========
+    silent_file : (str)
+        Path to the input silent file.
+
+    Returns:
+    ========
+        Generator object for the poses in the silen file.
+    """
+    with open(score_file) as sf:
+        lines = [x for x in sf.readlines() if x.startswith('SCORE:')]
+        score_terms = lines[0].split()
+        scores = {}
+        for line in lines[1:]:
+            for i, score in enumerate(score_terms):
+                if score not in scores:
+                    scores[score] = []
+                try:
+                    scores[score].append(float(line.split()[i]))
+                except:
+                    scores[score].append(line.split()[i])
+
+    scores.pop('SCORE:')
+    for s in scores:
+        if s == 'description':
+            models = []
+            poses = []
+            for x in scores[s]:
+                model, pose = '_'.join(x.split('_')[:-1]), x.split('_')[-1]
+                models.append(model)
+                poses.append(int(pose))
+            continue
+        scores[s] = np.array(scores[s])
+    scores.pop('description')
+    scores['Model'] = np.array(models)
+    scores['Pose'] = np.array(poses)
+
+    # Sort all values based on pose number
+    for s in scores:
+        scores[s] = [x for _,x in sorted(zip(scores['Pose'],scores[s]))]
+
+    scores = pd.DataFrame(scores)
+
+    if indexing:
+        scores = scores.set_index(['Model', 'Pose'])
+
+    return scores
