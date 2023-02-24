@@ -925,7 +925,8 @@ chain to use for each model with the chains option.' % model)
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
-                                 membrane=False, membrane_thickness=15, param_files=None):
+                                 membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
+                                 executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -947,6 +948,14 @@ chain to use for each model with the chains option.' % model)
         if not os.path.exists(relax_folder+'/output_models'):
             os.mkdir(relax_folder+'/output_models')
 
+        if parallelisation not in ['mpirun', 'srun']:
+            raise ValueError('Are you sure about your parallelisation type?')
+
+        if parallelisation == 'mpirun' and cpus == None:
+            raise ValueError('You must setup the number of cpus when using mpirun')
+        if parallelisation == 'srun' and cpus != None:
+            raise ValueError('CPUs can only be set up when using mpirun parallelisation!')
+
         # Save all models
         self.saveModels(relax_folder+'/input_models', models=models)
 
@@ -962,6 +971,7 @@ has been carried out. Please run compareSequences() function before setting muta
 
             # Skip models not in the given list
             if models != None:
+                if model not in models:
                     continue
 
             if not os.path.exists(relax_folder+'/output_models/'+model):
@@ -1074,7 +1084,13 @@ has been carried out. Please run compareSequences() function before setting muta
 
             # Create and append execution command
             command = 'cd '+relax_folder+'/output_models/'+model+'\n'
-            command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_relax.flags\n'
+            if parallelisation == 'mpirun':
+                if cpus == 1:
+                    command += executable+' @ '+'../../flags/'+model+'_relax.flags\n'
+                else:
+                    command += 'mpirun -np '+str(cpus)+' '+executable+' @ '+'../../flags/'+model+'_relax.flags\n'
+            else:
+                command += 'srun '+executable+' @ '+'../../flags/'+model+'_relax.flags\n'
             command += 'cd ../../..\n'
             jobs.append(command)
 
@@ -3707,7 +3723,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
-                                  protonation_states=False, decompose_bb_hb_into_pair_energies=False):
+                                  protonation_states=False, decompose_bb_hb_into_pair_energies=False,
+                                  cpus=None):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -3776,6 +3793,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '--protonation_states '
         if decompose_bb_hb_into_pair_energies:
             command += '--decompose_bb_hb_into_pair_energies'
+        if cpus != None:
+            command += '--cpus '+str(cpus)
+        command += '\n'
         try:
             os.system(command)
         except:
@@ -3860,20 +3880,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         """
 
-        mask = []
-        for pose in self.rosetta_data.index:
-            model_base_name = '_'.join(pose.split('_')[:-1])
-            if model == model_base_name:
-                mask.append(True)
-            else:
-                mask.append(False)
-        model_data = self.rosetta_data[mask]
-
         distances = []
-        for d in model_data:
+        for d in self.rosetta_distances['AF-A0A014MGJ4']:
             if d.startswith('distance_'):
-                if not model_data[d].dropna().empty:
-                    distances.append(d)
+                distances.append(d)
 
         return distances
 
