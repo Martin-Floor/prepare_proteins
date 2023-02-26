@@ -958,9 +958,9 @@ chain to use for each model with the chains option.' % model)
         if parallelisation == 'srun' and cpus != None:
             raise ValueError('CPUs can only be set up when using mpirun parallelisation!')
 
-        if cst_optimization and cpus > 10:
+        if cst_optimization and nstruct > 100:
             print('WARNING: A large number of structures (%s) is not necessary when running constrained optimizations!' % nstruct)
-            print('Consider running 10 or less structures.')
+            print('Consider running 100 or less structures.')
 
         # Save all models
         self.saveModels(relax_folder+'/input_models', models=models)
