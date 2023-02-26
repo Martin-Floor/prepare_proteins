@@ -63,7 +63,8 @@ class proteinModels:
         Get the paths for all PDBs in the input_folder path.
     """
 
-    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False, verbose=False, only_models=None):
+    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False,
+                 verbose=False, only_models=None):
         """
         Read PDB models as Bio.PDB structure objects.
 
