@@ -424,7 +424,7 @@ chain to use for each model with the chains option.' % model)
 
         return conserved
 
-    def getStructurePositionFromMSAindex(self, msa_index):
+    def getStructurePositionsFromMSAindexes(self, msa_indexes):
         """
         Get the individual model residue structure positions of a specific MSA index
 
@@ -1613,8 +1613,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 tr = target_residues[model]
             elif isinstance(target_residues, (list, tuple)):
                 tr = target_residues
-            else:
-                tr = [target_residues]
+
+            # If single integer is given make it a list
+            if isinstance(tr, int):
+                tr = [tr]
 
             for r in tr:
                 if not os.path.exists(output_folder+'/'+str(r)):
