@@ -424,57 +424,68 @@ chain to use for each model with the chains option.' % model)
 
         return conserved
 
-    def getStructurePositionsFromMSAindexes(self, msa_indexes):
+    def getStructurePositionsFromMSAindexes(self, msa_indexes, msa=None, models=None):
         """
-        Get the individual model residue structure positions of a specific MSA index
+        Get the individual model residue structure positions of a set of MSA indexes
 
         Paramters
         =========
-        msa_index : int
-            Zero-based MSA index
+        msa_indexes : list
+            Zero-based MSA indexes
 
         Returns
         =======
         residue_indexes : dict
-            Residue indexes for each protein at the MSA position
+            Residue indexes for each protein at the MSA positions
         """
 
-        residue_positions = {}
+        if models == None:
+            models = []
+        elif isinstance(models, str):
+            models = [models]
+
+        # If msa not given get the class msa attribute
+        if msa == None:
+            msa = self.msa
+
+        positions = {}
         residue_ids = {}
 
         # Gather dictionary between sequence position and residue PDB index
         for model in self.models_names:
-            residue_positions[model] = 0
+            if models != [] and model not in models:
+                continue
+
+            positions[model] = 0
             residue_ids[model] = {}
             for i,r in enumerate(self.structures[model].get_residues()):
                 residue_ids[model][i+1] = r.id[1]
 
         # Gather sequence indexes for the given MSA index
-        for i in range(self.msa.get_alignment_length()):
-
+        sequence_positions = {}
+        for i in range(msa.get_alignment_length()):
             # Count structure positions
-            for entry in self.msa:
+            for entry in msa:
 
                 if entry.id not in self.models_names:
                     continue
+                sequence_positions.setdefault(entry.id, [])
 
                 if entry.seq[i] != '-':
-                    residue_positions[entry.id] += 1
+                    positions[entry.id] += 1
 
             # Get residue positions matching the MSA indexes
-            if i == msa_index:
-                for entry in self.msa:
-
+            if i in msa_indexes:
+                for entry in msa:
                     if entry.id not in self.models_names:
                         continue
 
                     if entry.seq[i] == '-':
-                        residue_positions[entry.id] = None
+                        sequence_positions[entry.id].append(None)
                     else:
-                        residue_positions[entry.id] = residue_ids[entry.id][residue_positions[entry.id]]
-                break
+                        sequence_positions[entry.id].append(residue_ids[entry.id][positions[entry.id]])
 
-        return residue_positions
+        return sequence_positions
 
     def calculateSecondaryStructure(self, _save_structure=False):
         """
@@ -1562,8 +1573,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10,
-                              resolution='fine', reportsize=100, overwrite=False):
+    def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10, enclosure=0.5,
+                             maxvdw=1.1, resolution='fine', reportsize=100, overwrite=False,
+                             maxdist=8.0, sidechain=True):
         """
         Generates a SiteMap calculation for model poses (no ligand) near specified residues.
 
@@ -1601,7 +1613,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Generate input protein files
             input_protein = job_folder+'/input_models/'+model+'.pdb'
-            input_mae = input_protein.replace('.pdb', '.mae')
+
+            input_mae = job_folder+'/output_models/'+model+'/'+model+'_protein.mae'
             if not os.path.exists(input_mae) or overwrite:
                 command = 'run '+script_path+' '
                 command += input_protein+' '
@@ -1631,8 +1644,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-resolution '+str(resolution)+' '
                 command += '-keepvolpts yes '
                 command += '-keeplogs yes '
+                command += '-maxdist '+str(maxdist)+' '
+                command += '-enclosure '+str(enclosure)+' '
+                command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
-                command += '-siteasl \"res.num {'+str(r)+'}\" '
+                command += '-siteasl \"res.num {'+str(r)+'}'
+                if sidechain:
+                    command += ' and not (atom.pt ca,c,n,h,o)'
+                command += '\" '
                 command += '-HOST localhost:1 '
                 command += '-TMPLAUNCHDIR '
                 command += '-WAIT\n'
