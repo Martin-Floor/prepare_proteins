@@ -3540,8 +3540,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
             else:
                 values = []
-                for model in self.docking_distances:
-                    for ligand in self.docking_distances[model]:
+                for model in self.docking_data.index.levels[0]:
+                    model_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
+                    for ligand in model_series.index.levels[1]:
                         distances = catalytic_labels[name][model][ligand]
                         values += self.docking_distances[model][ligand][distances].min(axis=1).tolist()
                 self.docking_data['metric_'+name] = values
