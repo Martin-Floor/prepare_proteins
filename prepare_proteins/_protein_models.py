@@ -100,6 +100,7 @@ class proteinModels:
         self.multi_chain = False
         self.ss = {} # secondary structure strings are stored here
         self.docking_data = None # secondary structure strings are stored here
+        self.docking_distances = {}
         self.docking_ligands = {}
         self.rosetta_data = None # Rosetta data is stored here
         self.sequence_differences = {} # Store missing/changed sequence information
@@ -1425,21 +1426,27 @@ make sure of reading the target sequences with the function readTargetSequences(
         jobs = []
         for model in self.models_names:
 
-            # Get coordinates of center residue
-            chainid = center_atoms[model][0]
-            resid = center_atoms[model][1]
-            atom_name = center_atoms[model][2]
+            if all([isinstance(x, (float, int)) for x in center_atoms[model]]):
+                x = float(center_atoms[model][0])
+                y = float(center_atoms[model][1])
+                z = float(center_atoms[model][2])
 
-            x = None
-            for c in self.structures[model].get_chains():
-                if c.id == chainid:
-                    for r in c.get_residues():
-                        if r.id[1] == resid:
-                            for a in r.get_atoms():
-                                if a.name == atom_name:
-                                    x = a.coord[0]
-                                    y = a.coord[1]
-                                    z = a.coord[2]
+            else:
+                # Get coordinates of center residue
+                chainid = center_atoms[model][0]
+                resid = center_atoms[model][1]
+                atom_name = center_atoms[model][2]
+
+                x = None
+                for c in self.structures[model].get_chains():
+                    if c.id == chainid:
+                        for r in c.get_residues():
+                            if r.id[1] == resid:
+                                for a in r.get_atoms():
+                                    if a.name == atom_name:
+                                        x = a.coord[0]
+                                        y = a.coord[1]
+                                        z = a.coord[2]
 
             # Check if any atom center was found.
             if x == None:
@@ -1644,9 +1651,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-resolution '+str(resolution)+' '
                 command += '-keepvolpts yes '
                 command += '-keeplogs yes '
-                command += '-maxdist '+str(maxdist)+' '
-                command += '-enclosure '+str(enclosure)+' '
-                command += '-maxvdw '+str(maxvdw)+' '
+                # command += '-maxdist '+str(maxdist)+' '
+                # command += '-enclosure '+str(enclosure)+' '
+                # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
                 command += '-siteasl \"res.num {'+str(r)+'}'
                 if sidechain:
@@ -2261,8 +2268,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 covalent_command += 'python ._modifyProcessedForCovalentPELE.py '+cov_residues+' \n'
                                 covalent_command += 'mv DataLocal/Templates/OPLS2005/Protein/templates_generated/* DataLocal/Templates/OPLS2005/Protein/\n'
                                 covalent_command += 'cd ..\n'
-
-
 
                     # Write input yaml
                     with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml', 'w') as iyf:
@@ -3134,7 +3139,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
-                       skip_chains=False, return_failed=False, ignore_hydrogens=False):
+                       skip_chains=False, return_failed=False, ignore_hydrogens=False,
+                       separator='-', overwrite=True):
         """
         Analyse a Glide Docking simulation. The function allows to calculate ligand
         distances with the options protein_atoms or protein_pairs. With the first option
@@ -3167,64 +3173,78 @@ make sure of reading the target sequences with the function readTargetSequences(
             Return failed dockings as a list?
         ignore_hydrogens : bool
             With this option ligand hydrogens will be ignored for the closest distance (i.e., protein_atoms) calculation.
+        separator : str
+            Symbol to use for separating protein from ligand names. Should not be found in any model or ligand name.
+        overwrite : bool
+            Rerun analysis.
         """
+
+        # Create analysis folder
+        if not os.path.exists(docking_folder+'/.analysis'):
+            os.mkdir(docking_folder+'/.analysis')
+
+        # Create analysis folder
+        if not os.path.exists(docking_folder+'/.analysis/atom_pairs'):
+            os.mkdir(docking_folder+'/.analysis/atom_pairs')
+
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
-        _copyScriptFile(docking_folder, 'analyse_docking.py')
-        script_path = docking_folder+'/._analyse_docking.py'
+        _copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
+        script_path = docking_folder+'/.analysis/._analyse_docking.py'
 
         # Write protein_atoms dictionary to json file
         if protein_atoms != None:
-            with open(docking_folder+'/._protein_atoms.json', 'w') as jf:
+            with open(docking_folder+'/.analysis/._protein_atoms.json', 'w') as jf:
                 json.dump(protein_atoms, jf)
 
         # Write atom_pairs dictionary to json file
         if atom_pairs != None:
-            with open(docking_folder+'/._atom_pairs.json', 'w') as jf:
+            with open(docking_folder+'/.analysis/._atom_pairs.json', 'w') as jf:
                 json.dump(atom_pairs, jf)
 
         # Execute docking analysis
         os.chdir(docking_folder)
 
-        command = 'run ._analyse_docking.py'
+        command = 'run .analysis/._analyse_docking.py'
         if atom_pairs != None:
-            command += ' --atom_pairs ._atom_pairs.json'
+            command += ' --atom_pairs .analysis/._atom_pairs.json'
         elif protein_atoms != None:
-            command += ' --protein_atoms ._protein_atoms.json'
+            command += ' --protein_atoms .analysis/._protein_atoms.json'
         if skip_chains:
             command += ' --skip_chains'
         if return_failed:
             command += ' --return_failed'
         if ignore_hydrogens:
             command += ' --ignore_hydrogens'
+        command += ' --separator '+separator
+        if overwrite:
+            command += ' --overwrite '
         os.system(command)
 
         # Read the CSV file into pandas
-        if not os.path.exists('._docking_data.csv'):
+        if not os.path.exists('.analysis/docking_data.csv'):
             os.chdir('..')
             raise ValueError('Docking analysis failed. Check the ouput of the analyse_docking.py script.')
 
-        self.docking_data = pd.read_csv('._docking_data.csv')
+        self.docking_data = pd.read_csv('.analysis/docking_data.csv')
         # Create multiindex dataframe
         self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
-        # Create dictionary with proteins and ligands
-        for protein in self.docking_data.index.levels[0]:
-            protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
-            self.docking_ligands[protein] = []
-            ligands = [*set(protein_series.index.get_level_values('Ligand'))]
-            for ligand in ligands:
-                self.docking_ligands[protein].append(ligand)
+        for f in os.listdir('.analysis/atom_pairs'):
+            model = f.split(separator)[0]
+            ligand = f.split(separator)[1].split('.')[0]
 
-        # Remove tmp files
-        os.remove('._analyse_docking.py')
-        os.remove('._docking_data.csv')
-        if os.path.exists('._protein_atoms.json'):
-            os.remove('._protein_atoms.json')
+            # # Read the CSV file into pandas
+            self.docking_distances.setdefault(model, {})
+            self.docking_distances[model][ligand] = pd.read_csv('.analysis/atom_pairs/'+f)
+            self.docking_distances[model][ligand].set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
+
+            self.docking_ligands.setdefault(model, [])
+            if ligand not in self.docking_ligands[model]:
+                self.docking_ligands[model].append(ligand)
 
         if return_failed:
-            with open('._failed_dockings.json') as jifd:
+            with open('.analysis/._failed_dockings.json') as jifd:
                 failed_dockings = json.load(jifd)
-            os.remove('._failed_dockings.json')
             os.chdir('..')
             return failed_dockings
 
@@ -3275,14 +3295,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Get the distances related to a protein and ligand docking.
         """
-        protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
-        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-        if not ligand_series.empty:
-            distances = []
-            for d in ligand_series:
-                if d not in ['Score', 'RMSD', 'Catalytic distance']:
-                    if not ligand_series[d].dropna().empty:
-                        distances.append(d)
+        distances = []
+        for d in self.docking_distances[protein][ligand]:
+            distances.append(d)
+
+        if distances != []:
             return distances
         else:
             return None
@@ -3496,7 +3513,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.protonation_states
 
-    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None,overwrite=False):
+    def combineDockingDistancesIntoMetrics(self, catalytic_labels, overwrite=False):
         """
         Combine different equivalent distances into specific named metrics. The function
         takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
@@ -3522,15 +3539,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             if 'metric_'+name in self.docking_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
             else:
-                changed = True
                 values = []
-                for protein in self.docking_data.index.levels[0]:
-                    protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
-                    for ligand in self.docking_data.index.levels[1]:
-                        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-                        if not ligand_series.empty:
-                            distances = catalytic_labels[name][protein][ligand]
-                            values += ligand_series[distances].min(axis=1).tolist()
+                for model in self.docking_distances:
+                    for ligand in self.docking_distances[model]:
+                        distances = catalytic_labels[name][model][ligand]
+                        values += self.docking_distances[model][ligand][distances].min(axis=1).tolist()
                 self.docking_data['metric_'+name] = values
 
     def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
@@ -3581,7 +3594,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         selected_indexes = []
 
         for t in np.arange(min_threshold, max_threshold+(step_size/10), step_size):
-            filter_values = {m:t for m in metrics}
+            filter_values = {(m if  m.startswith('metric_') else 'metric_'+m):t for m in metrics}
             best_poses = self.getBestDockingPoses(filter_values, n_models=1)
             mask = []
             if not isinstance(ligands, type(None)):
