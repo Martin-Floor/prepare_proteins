@@ -8,11 +8,14 @@ import json
 
 # ## Define input variables
 parser = argparse.ArgumentParser()
-parser.add_argument('--protein_atoms', default=None, help='Dictionary json file including protein_atoms for distance calculations.')
+parser.add_argument('--protein_atoms', default=None, help='Dictionary json file including protein_atoms for closest distance calculations.')
 parser.add_argument('--atom_pairs', default=None, help='Dictionary json file including protein_atoms for distance calculations.')
 parser.add_argument('--skip_chains', default=False, action='store_true', help='Skip chain comparison and select only by residue ID and atom name.')
 parser.add_argument('--return_failed', default=False, action='store_true', help='Output a file containing failed docking models.')
 parser.add_argument('--ignore_hydrogens', default=False, action='store_true', help='Ignore hydrogens for closes distance calculation.')
+parser.add_argument('--separator', default='-', help='Separator to use in naming model+ligand files.')
+parser.add_argument('--overwrite', default=False, action='store_true', help='Reanalyse docking simulations?')
+
 args=parser.parse_args()
 
 protein_atoms = args.protein_atoms
@@ -20,6 +23,8 @@ atom_pairs = args.atom_pairs
 skip_chains = args.skip_chains
 return_failed = args.return_failed
 ignore_hydrogens = args.ignore_hydrogens
+separator = args.separator
+overwrite = args.overwrite
 
 def RMSD(ref_coord, curr_coord):
     sq_distances = np.linalg.norm(ref_coord - curr_coord, axis=1)**2
@@ -39,16 +44,32 @@ if atom_pairs != None:
 subjobs = {}
 mae_output = {}
 for model in os.listdir('output_models'):
+
+    # Check separator in model name
+    if separator in model:
+        raise ValueError('The separator %s was found in model name %s. Please use a different one!' % (separator, model))
+
     if os.path.isdir('output_models/'+model):
+
         subjobs[model] = {}
         mae_output[model] = {}
         for f in os.listdir('output_models/'+model):
+
             if 'subjobs.log' in f:
                 ligand = f.replace(model+'_','').replace('_subjobs.log','')
                 subjobs[model][ligand] = 'output_models/'+model+'/'+f
+
             elif f.endswith('.maegz'):
                 ligand = f.replace(model+'_','').replace('_pv.maegz','')
-                mae_output[model][ligand] = 'output_models/'+model+'/'+f
+
+                # Check separator in ligand name
+                if separator in ligand:
+                    raise ValueError('The separator %s was found in ligand name %s. Please use a different one!' % (separator, ligand))
+
+                # Check that the CSV distance files exists
+                csv_name = model+separator+ligand+'.csv'
+                if not os.path.exists('.analysis/atom_pairs/'+csv_name) or overwrite:
+                    mae_output[model][ligand] = 'output_models/'+model+'/'+f
 
 # Get failed models
 failed_count = 0
@@ -76,28 +97,30 @@ else:
 
 # Write failed dockings to file
 if return_failed:
-    with open('._failed_dockings.json', 'w') as fdjof:
+    with open('.analysis/._failed_dockings.json', 'w') as fdjof:
         json.dump(failed_dockings, fdjof)
 
 data = {}
 data["Protein"] = []
 data["Ligand"] = []
-data["Score"] = []
 data["Pose"] = []
+data["Score"] = []
 data['RMSD'] = []
-
 if protein_atoms != None:
     data["Closest distance"] = []
     data["Closest atom"] = []
-
-if atom_pairs != None:
-    atom_pairs_labels = set()
 
 index_count = 0
 # Calculate and add scores
 for model in sorted(mae_output):
     if mae_output[model] != {}:
         for ligand in sorted(mae_output[model]):
+
+            distance_data = {}
+            distance_data["Protein"] = []
+            distance_data["Ligand"] = []
+            distance_data["Pose"] = []
+
             pose_count = 0
             for st in structure.StructureReader(mae_output[model][ligand]):
                 if 'r_i_glide_gscore' in st.property:
@@ -110,6 +133,10 @@ for model in sorted(mae_output):
                     data["Protein"].append(model)
                     data["Ligand"].append(ligand)
                     data["Pose"].append(pose_count)
+
+                    distance_data["Protein"].append(model)
+                    distance_data["Ligand"].append(ligand)
+                    distance_data["Pose"].append(pose_count)
 
                     # Get Glide score
                     score = st.property['r_i_glide_gscore']
@@ -148,23 +175,12 @@ for model in sorted(mae_output):
                                         d = np.linalg.norm(p_coordinates[i]-c_coordinates[j])
                                         label = '_'.join([str(x) for x in pair[0]])+'-'+pair[1]
 
-                                        # Add label to dictionary if not in it
-                                        if label not in data:
-                                            data[label] = []
-                                            atom_pairs_labels.add(label)
-
-                                        # Fill with None until match the index count
-                                        delta = index_count-len(data[label])
-                                        for x in range(delta-1):
-                                            data[label].append(None)
-
                                         # Append distance
-                                        data[label].append(d)
+                                        distance_data.setdefault(label, [])
+                                        distance_data[label].append(d)
+                                        assert len(distance_data[label]) == len(distance_data['Pose'])
 
-                                        # Assert same length for label data
-                                        # assert len(data[label]) == len(data['Pose'])
-
-                            elif isinstance(pair[1], tuple) or isinstance(pair[1], list):
+                            elif isinstance(pair[1], (list,tuple)):
                                 ligand_chain_id = pair[1][0]
                                 ligand_residue_index = pair[1][1]
                                 ligand_atom_name = pair[1][2]
@@ -179,18 +195,11 @@ for model in sorted(mae_output):
                                         label = '_'.join([str(x) for x in pair[0]])+'-'+'_'.join([str(x) for x in pair[1]])
 
                                         # Add label to dictionary if not in it
-                                        if label not in data:
-                                            data[label] = []
-                                            atom_pairs_labels.add(label)
-
-                                        # Fill with None until match the index count
-                                        delta = len(data["Pose"])-len(data[label])
-                                        for x in range(delta-1):
-                                            data[label].append(None)
-                                        data[label].append(d)
+                                        distance_data.setdefault(label, [])
+                                        distance_data[label].append(d)
 
                                         # Assert same length for label data
-                                        assert len(data[label]) == len(data['Pose'])
+                                        assert len(distance_data[label]) == len(distance_data['Pose'])
 
                     #Get closest ligand distance to protein atoms
                     if protein_atoms != None:
@@ -236,6 +245,7 @@ for model in sorted(mae_output):
                         protein = st
                         # Get protein atom coordinates
                         p_coordinates = []
+                        p_found = []
                         for pair in atom_pairs[model][ligand]:
                             if skip_chains:
                                 residue_id = pair[0][0]
@@ -245,6 +255,7 @@ for model in sorted(mae_output):
                                         for atom in residue.atom:
                                             if atom.pdbname.strip() == atom_name:
                                                 p_coordinates.append(atom.xyz)
+                                                p_found.append(atom)
                             else:
                                 chain_id = pair[0][0]
                                 residue_id = pair[0][1]
@@ -256,18 +267,27 @@ for model in sorted(mae_output):
                                                 for atom in residue.atom:
                                                     if atom.pdbname.strip() == atom_name:
                                                         p_coordinates.append(atom.xyz)
+                                                        p_found.append([atom.chain, atom.getResidue().resnum, atom.pdbname.strip()])
+
+                        # Check if some protein atoms was not found
+                        not_found = []
+                        if len(p_found) != len(atom_pairs[model][ligand]):
+                            for p in atom_pairs[model][ligand]:
+                                if p[0] not in p_found:
+                                    not_found.append(p[0])
+                            raise ValueError('The following atoms were not found: %s' % not_found)
 
                         if p_coordinates == []:
                             raise ValueError('Error. Protein atoms were not found in model %s!' % model)
                         p_coordinates = np.array(p_coordinates)
 
-# Add missing values in distance label entries
-if atom_pairs != None:
-    for label in atom_pairs_labels:
-        delta = len(data['Pose'])-len(data[label])
-        for x in range(delta):
-            data[label].append(None)
+            distance_data = pd.DataFrame(distance_data)
+            # Create multiindex dataframe
+            csv_name = model+separator+ligand+'.csv'
+            distance_data.to_csv('.analysis/atom_pairs/'+csv_name, index=False)
 
-data = pd.DataFrame(data)
-# Create multiindex dataframe
-data.to_csv('._docking_data.csv', index=False)
+csv_name = 'docking_data.csv'
+if not os.path.exists('.analysis/'+csv_name) or overwrite:
+    data = pd.DataFrame(data)
+    # Create multiindex dataframe
+    data.to_csv('.analysis/'+csv_name, index=False)

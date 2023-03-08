@@ -63,7 +63,8 @@ class proteinModels:
         Get the paths for all PDBs in the input_folder path.
     """
 
-    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False, verbose=False, only_models=None):
+    def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False,
+                 verbose=False, only_models=None):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -99,6 +100,7 @@ class proteinModels:
         self.multi_chain = False
         self.ss = {} # secondary structure strings are stored here
         self.docking_data = None # secondary structure strings are stored here
+        self.docking_distances = {}
         self.docking_ligands = {}
         self.rosetta_data = None # Rosetta data is stored here
         self.sequence_differences = {} # Store missing/changed sequence information
@@ -423,57 +425,68 @@ chain to use for each model with the chains option.' % model)
 
         return conserved
 
-    def getStructurePositionFromMSAindex(self, msa_index):
+    def getStructurePositionsFromMSAindexes(self, msa_indexes, msa=None, models=None):
         """
-        Get the individual model residue structure positions of a specific MSA index
+        Get the individual model residue structure positions of a set of MSA indexes
 
         Paramters
         =========
-        msa_index : int
-            Zero-based MSA index
+        msa_indexes : list
+            Zero-based MSA indexes
 
         Returns
         =======
         residue_indexes : dict
-            Residue indexes for each protein at the MSA position
+            Residue indexes for each protein at the MSA positions
         """
 
-        residue_positions = {}
+        if models == None:
+            models = []
+        elif isinstance(models, str):
+            models = [models]
+
+        # If msa not given get the class msa attribute
+        if msa == None:
+            msa = self.msa
+
+        positions = {}
         residue_ids = {}
 
         # Gather dictionary between sequence position and residue PDB index
         for model in self.models_names:
-            residue_positions[model] = 0
+            if models != [] and model not in models:
+                continue
+
+            positions[model] = 0
             residue_ids[model] = {}
             for i,r in enumerate(self.structures[model].get_residues()):
                 residue_ids[model][i+1] = r.id[1]
 
         # Gather sequence indexes for the given MSA index
-        for i in range(self.msa.get_alignment_length()):
-
+        sequence_positions = {}
+        for i in range(msa.get_alignment_length()):
             # Count structure positions
-            for entry in self.msa:
+            for entry in msa:
 
                 if entry.id not in self.models_names:
                     continue
+                sequence_positions.setdefault(entry.id, [])
 
                 if entry.seq[i] != '-':
-                    residue_positions[entry.id] += 1
+                    positions[entry.id] += 1
 
             # Get residue positions matching the MSA indexes
-            if i == msa_index:
-                for entry in self.msa:
-
+            if i in msa_indexes:
+                for entry in msa:
                     if entry.id not in self.models_names:
                         continue
 
                     if entry.seq[i] == '-':
-                        residue_positions[entry.id] = None
+                        sequence_positions[entry.id].append(None)
                     else:
-                        residue_positions[entry.id] = residue_ids[entry.id][residue_positions[entry.id]]
-                break
+                        sequence_positions[entry.id].append(residue_ids[entry.id][positions[entry.id]])
 
-        return residue_positions
+        return sequence_positions
 
     def calculateSecondaryStructure(self, _save_structure=False):
         """
@@ -925,7 +938,9 @@ chain to use for each model with the chains option.' % model)
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
-                                 membrane=False, membrane_thickness=15, param_files=None):
+                                 membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
+                                 executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
+                                 skip_finished=True):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -947,6 +962,18 @@ chain to use for each model with the chains option.' % model)
         if not os.path.exists(relax_folder+'/output_models'):
             os.mkdir(relax_folder+'/output_models')
 
+        if parallelisation not in ['mpirun', 'srun']:
+            raise ValueError('Are you sure about your parallelisation type?')
+
+        if parallelisation == 'mpirun' and cpus == None:
+            raise ValueError('You must setup the number of cpus when using mpirun')
+        if parallelisation == 'srun' and cpus != None:
+            raise ValueError('CPUs can only be set up when using mpirun parallelisation!')
+
+        if cst_optimization and nstruct > 100:
+            print('WARNING: A large number of structures (%s) is not necessary when running constrained optimizations!' % nstruct)
+            print('Consider running 100 or less structures.')
+
         # Save all models
         self.saveModels(relax_folder+'/input_models', models=models)
 
@@ -962,10 +989,19 @@ has been carried out. Please run compareSequences() function before setting muta
 
             # Skip models not in the given list
             if models != None:
+                if model not in models:
                     continue
 
             if not os.path.exists(relax_folder+'/output_models/'+model):
                 os.mkdir(relax_folder+'/output_models/'+model)
+
+            if skip_finished:
+                # Check if model has already been calculated and finished
+                score_file = relax_folder+'/output_models/'+model+'/'+model+'_relax.sc'
+                if os.path.exists(score_file):
+                    scores = _readRosettaScoreFile(score_file)
+                    if scores.shape[0] >= nstruct:
+                        continue
 
             # Create xml minimization protocol
             xml = rosettaScripts.xmlScript()
@@ -1074,7 +1110,13 @@ has been carried out. Please run compareSequences() function before setting muta
 
             # Create and append execution command
             command = 'cd '+relax_folder+'/output_models/'+model+'\n'
-            command += 'srun rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_relax.flags\n'
+            if parallelisation == 'mpirun':
+                if cpus == 1:
+                    command += executable+' @ '+'../../flags/'+model+'_relax.flags\n'
+                else:
+                    command += 'mpirun -np '+str(cpus)+' '+executable+' @ '+'../../flags/'+model+'_relax.flags\n'
+            else:
+                command += 'srun '+executable+' @ '+'../../flags/'+model+'_relax.flags\n'
             command += 'cd ../../..\n'
             jobs.append(command)
 
@@ -1384,21 +1426,27 @@ make sure of reading the target sequences with the function readTargetSequences(
         jobs = []
         for model in self.models_names:
 
-            # Get coordinates of center residue
-            chainid = center_atoms[model][0]
-            resid = center_atoms[model][1]
-            atom_name = center_atoms[model][2]
+            if all([isinstance(x, (float, int)) for x in center_atoms[model]]):
+                x = float(center_atoms[model][0])
+                y = float(center_atoms[model][1])
+                z = float(center_atoms[model][2])
 
-            x = None
-            for c in self.structures[model].get_chains():
-                if c.id == chainid:
-                    for r in c.get_residues():
-                        if r.id[1] == resid:
-                            for a in r.get_atoms():
-                                if a.name == atom_name:
-                                    x = a.coord[0]
-                                    y = a.coord[1]
-                                    z = a.coord[2]
+            else:
+                # Get coordinates of center residue
+                chainid = center_atoms[model][0]
+                resid = center_atoms[model][1]
+                atom_name = center_atoms[model][2]
+
+                x = None
+                for c in self.structures[model].get_chains():
+                    if c.id == chainid:
+                        for r in c.get_residues():
+                            if r.id[1] == resid:
+                                for a in r.get_atoms():
+                                    if a.name == atom_name:
+                                        x = a.coord[0]
+                                        y = a.coord[1]
+                                        z = a.coord[2]
 
             # Check if any atom center was found.
             if x == None:
@@ -1532,8 +1580,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10,
-                              resolution='fine', reportsize=100, overwrite=False):
+    def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10, enclosure=0.5,
+                             maxvdw=1.1, resolution='fine', reportsize=100, overwrite=False,
+                             maxdist=8.0, sidechain=True):
         """
         Generates a SiteMap calculation for model poses (no ligand) near specified residues.
 
@@ -1571,7 +1620,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Generate input protein files
             input_protein = job_folder+'/input_models/'+model+'.pdb'
-            input_mae = input_protein.replace('.pdb', '.mae')
+
+            input_mae = job_folder+'/output_models/'+model+'/'+model+'_protein.mae'
             if not os.path.exists(input_mae) or overwrite:
                 command = 'run '+script_path+' '
                 command += input_protein+' '
@@ -1583,8 +1633,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 tr = target_residues[model]
             elif isinstance(target_residues, (list, tuple)):
                 tr = target_residues
-            else:
-                tr = [target_residues]
+
+            # If single integer is given make it a list
+            if isinstance(tr, int):
+                tr = [tr]
 
             for r in tr:
                 if not os.path.exists(output_folder+'/'+str(r)):
@@ -1599,8 +1651,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-resolution '+str(resolution)+' '
                 command += '-keepvolpts yes '
                 command += '-keeplogs yes '
+                # command += '-maxdist '+str(maxdist)+' '
+                # command += '-enclosure '+str(enclosure)+' '
+                # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
-                command += '-siteasl \"res.num {'+str(r)+'}\" '
+                command += '-siteasl \"res.num {'+str(r)+'}'
+                if sidechain:
+                    command += ' and not (atom.pt ca,c,n,h,o)'
+                command += '\" '
                 command += '-HOST localhost:1 '
                 command += '-TMPLAUNCHDIR '
                 command += '-WAIT\n'
@@ -2216,8 +2274,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 covalent_command += 'python ._modifyProcessedForCovalentPELE.py '+cov_residues+' \n'
                                 covalent_command += 'mv DataLocal/Templates/OPLS2005/Protein/templates_generated/* DataLocal/Templates/OPLS2005/Protein/\n'
                                 covalent_command += 'cd ..\n'
-
-
 
                     # Write input yaml
                     with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml', 'w') as iyf:
@@ -3089,7 +3145,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
-                       skip_chains=False, return_failed=False, ignore_hydrogens=False):
+                       skip_chains=False, return_failed=False, ignore_hydrogens=False,
+                       separator='-', overwrite=True):
         """
         Analyse a Glide Docking simulation. The function allows to calculate ligand
         distances with the options protein_atoms or protein_pairs. With the first option
@@ -3122,64 +3179,78 @@ make sure of reading the target sequences with the function readTargetSequences(
             Return failed dockings as a list?
         ignore_hydrogens : bool
             With this option ligand hydrogens will be ignored for the closest distance (i.e., protein_atoms) calculation.
+        separator : str
+            Symbol to use for separating protein from ligand names. Should not be found in any model or ligand name.
+        overwrite : bool
+            Rerun analysis.
         """
+
+        # Create analysis folder
+        if not os.path.exists(docking_folder+'/.analysis'):
+            os.mkdir(docking_folder+'/.analysis')
+
+        # Create analysis folder
+        if not os.path.exists(docking_folder+'/.analysis/atom_pairs'):
+            os.mkdir(docking_folder+'/.analysis/atom_pairs')
+
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
-        _copyScriptFile(docking_folder, 'analyse_docking.py')
-        script_path = docking_folder+'/._analyse_docking.py'
+        _copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
+        script_path = docking_folder+'/.analysis/._analyse_docking.py'
 
         # Write protein_atoms dictionary to json file
         if protein_atoms != None:
-            with open(docking_folder+'/._protein_atoms.json', 'w') as jf:
+            with open(docking_folder+'/.analysis/._protein_atoms.json', 'w') as jf:
                 json.dump(protein_atoms, jf)
 
         # Write atom_pairs dictionary to json file
         if atom_pairs != None:
-            with open(docking_folder+'/._atom_pairs.json', 'w') as jf:
+            with open(docking_folder+'/.analysis/._atom_pairs.json', 'w') as jf:
                 json.dump(atom_pairs, jf)
 
         # Execute docking analysis
         os.chdir(docking_folder)
 
-        command = 'run ._analyse_docking.py'
+        command = 'run .analysis/._analyse_docking.py'
         if atom_pairs != None:
-            command += ' --atom_pairs ._atom_pairs.json'
+            command += ' --atom_pairs .analysis/._atom_pairs.json'
         elif protein_atoms != None:
-            command += ' --protein_atoms ._protein_atoms.json'
+            command += ' --protein_atoms .analysis/._protein_atoms.json'
         if skip_chains:
             command += ' --skip_chains'
         if return_failed:
             command += ' --return_failed'
         if ignore_hydrogens:
             command += ' --ignore_hydrogens'
+        command += ' --separator '+separator
+        if overwrite:
+            command += ' --overwrite '
         os.system(command)
 
         # Read the CSV file into pandas
-        if not os.path.exists('._docking_data.csv'):
+        if not os.path.exists('.analysis/docking_data.csv'):
             os.chdir('..')
             raise ValueError('Docking analysis failed. Check the ouput of the analyse_docking.py script.')
 
-        self.docking_data = pd.read_csv('._docking_data.csv')
+        self.docking_data = pd.read_csv('.analysis/docking_data.csv')
         # Create multiindex dataframe
         self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
-        # Create dictionary with proteins and ligands
-        for protein in self.docking_data.index.levels[0]:
-            protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
-            self.docking_ligands[protein] = []
-            ligands = [*set(protein_series.index.get_level_values('Ligand'))]
-            for ligand in ligands:
-                self.docking_ligands[protein].append(ligand)
+        for f in os.listdir('.analysis/atom_pairs'):
+            model = f.split(separator)[0]
+            ligand = f.split(separator)[1].split('.')[0]
 
-        # Remove tmp files
-        os.remove('._analyse_docking.py')
-        os.remove('._docking_data.csv')
-        if os.path.exists('._protein_atoms.json'):
-            os.remove('._protein_atoms.json')
+            # # Read the CSV file into pandas
+            self.docking_distances.setdefault(model, {})
+            self.docking_distances[model][ligand] = pd.read_csv('.analysis/atom_pairs/'+f)
+            self.docking_distances[model][ligand].set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
+
+            self.docking_ligands.setdefault(model, [])
+            if ligand not in self.docking_ligands[model]:
+                self.docking_ligands[model].append(ligand)
 
         if return_failed:
-            with open('._failed_dockings.json') as jifd:
+            with open('.analysis/._failed_dockings.json') as jifd:
                 failed_dockings = json.load(jifd)
-            os.remove('._failed_dockings.json')
             os.chdir('..')
             return failed_dockings
 
@@ -3230,14 +3301,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Get the distances related to a protein and ligand docking.
         """
-        protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
-        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-        if not ligand_series.empty:
-            distances = []
-            for d in ligand_series:
-                if d not in ['Score', 'RMSD', 'Catalytic distance']:
-                    if not ligand_series[d].dropna().empty:
-                        distances.append(d)
+        distances = []
+        for d in self.docking_distances[protein][ligand]:
+            distances.append(d)
+
+        if distances != []:
             return distances
         else:
             return None
@@ -3451,7 +3519,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return self.protonation_states
 
-    def combineDockingDistancesIntoMetrics(self, catalytic_labels, exclude=None,overwrite=False):
+    def combineDockingDistancesIntoMetrics(self, catalytic_labels, overwrite=False):
         """
         Combine different equivalent distances into specific named metrics. The function
         takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
@@ -3477,15 +3545,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             if 'metric_'+name in self.docking_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
             else:
-                changed = True
                 values = []
-                for protein in self.docking_data.index.levels[0]:
-                    protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == protein]
-                    for ligand in self.docking_data.index.levels[1]:
-                        ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
-                        if not ligand_series.empty:
-                            distances = catalytic_labels[name][protein][ligand]
-                            values += ligand_series[distances].min(axis=1).tolist()
+                for model in self.docking_data.index.levels[0]:
+                    model_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
+                    for ligand in model_series.index.levels[1]:
+                        distances = catalytic_labels[name][model][ligand]
+                        values += self.docking_distances[model][ligand][distances].min(axis=1).tolist()
                 self.docking_data['metric_'+name] = values
 
     def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
@@ -3536,7 +3601,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         selected_indexes = []
 
         for t in np.arange(min_threshold, max_threshold+(step_size/10), step_size):
-            filter_values = {m:t for m in metrics}
+            filter_values = {(m if  m.startswith('metric_') else 'metric_'+m):t for m in metrics}
             best_poses = self.getBestDockingPoses(filter_values, n_models=1)
             mask = []
             if not isinstance(ligands, type(None)):
@@ -3724,7 +3789,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
-                                  protonation_states=False, decompose_bb_hb_into_pair_energies=False):
+                                  protonation_states=False, decompose_bb_hb_into_pair_energies=False,
+                                  cpus=None):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -3793,6 +3859,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '--protonation_states '
         if decompose_bb_hb_into_pair_energies:
             command += '--decompose_bb_hb_into_pair_energies'
+        if cpus != None:
+            command += '--cpus '+str(cpus)
+        command += '\n'
         try:
             os.system(command)
         except:
@@ -3877,20 +3946,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         """
 
-        mask = []
-        for pose in self.rosetta_data.index:
-            model_base_name = '_'.join(pose.split('_')[:-1])
-            if model == model_base_name:
-                mask.append(True)
-            else:
-                mask.append(False)
-        model_data = self.rosetta_data[mask]
-
         distances = []
-        for d in model_data:
+        for d in self.rosetta_distances[model]:
             if d.startswith('distance_'):
-                if not model_data[d].dropna().empty:
-                    distances.append(d)
+                distances.append(d)
 
         return distances
 
@@ -3919,25 +3978,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         for name in metric_labels:
             if 'metric_'+name in self.rosetta_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
+
             else:
                 values = []
-                models = []
-                for model in self.rosetta_data.index:
-                    base_name = '_'.join(model.split('_')[:-1])
-                    if base_name not in models:
-                        models.append(base_name)
-
-                for model in list(models):
-                    mask = []
-                    for index in self.rosetta_data.index:
-                        if model in index:
-                            mask.append(True)
-                        else:
-                            mask.append(False)
-                    model_data = self.rosetta_data[mask]
-                    model_distances = metric_labels[name][model]
-
-                    values += model_data[model_distances].min(axis=1).tolist()
+                for model in self.rosetta_data.index.levels[0]:
+                    model_distances = self.rosetta_distances[model]
+                    md = model_distances[metric_labels[name][model]]
+                    values += md.min(axis=1).tolist()
 
                 self.rosetta_data['metric_'+name] = values
 
@@ -4854,3 +4901,55 @@ def _get_atom_tuple(atom):
     return (atom.get_parent().get_parent().id,
             atom.get_parent().id[1],
             atom.name)
+
+def _readRosettaScoreFile(score_file, indexing=False):
+    """
+    Generates an iterator from the poses in the silent file
+
+    Arguments:
+    ==========
+    silent_file : (str)
+        Path to the input silent file.
+
+    Returns:
+    ========
+        Generator object for the poses in the silen file.
+    """
+    with open(score_file) as sf:
+        lines = [x for x in sf.readlines() if x.startswith('SCORE:')]
+        score_terms = lines[0].split()
+        scores = {}
+        for line in lines[1:]:
+            for i, score in enumerate(score_terms):
+                if score not in scores:
+                    scores[score] = []
+                try:
+                    scores[score].append(float(line.split()[i]))
+                except:
+                    scores[score].append(line.split()[i])
+
+    scores.pop('SCORE:')
+    for s in scores:
+        if s == 'description':
+            models = []
+            poses = []
+            for x in scores[s]:
+                model, pose = '_'.join(x.split('_')[:-1]), x.split('_')[-1]
+                models.append(model)
+                poses.append(int(pose))
+            continue
+        scores[s] = np.array(scores[s])
+    scores.pop('description')
+    scores['Model'] = np.array(models)
+    scores['Pose'] = np.array(poses)
+
+    # Sort all values based on pose number
+    for s in scores:
+        scores[s] = [x for _,x in sorted(zip(scores['Pose'],scores[s]))]
+
+    scores = pd.DataFrame(scores)
+
+    if indexing:
+        scores = scores.set_index(['Model', 'Pose'])
+
+    return scores
