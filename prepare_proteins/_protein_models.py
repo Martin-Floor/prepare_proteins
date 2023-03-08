@@ -2017,6 +2017,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
 
+        Constraints must be given for positional constraints as:
+        {(model1_name,ligand_name):[(springConstant,(chain_id, residue_id, atom_name)), ...], (model1_name,ligand_name):...}
+        And for distance constraints as:
+        {(model1_name,ligand_name):[(springConstant,distance,(chain1_id, residue1_id, atom_name1),(chain2_id, residue2_id, atom_name2)) ...], (model1_name,ligand_name):...}
+
+
         Parameters
         ==========
         pele_folder : str
@@ -2327,9 +2333,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("external_constraints:\n")
                             for c in constraints[(protein,ligand)]:
                                 if len(c) == 2:
-                                    line = "- '"+str(c[0])+"-"+str(c[1])+"'\n"
+                                    line = "- '"+str(c[0])+"-"+str(c[1][0])+':'+str(c[1][1])+':'str(c[1][2])+"'\n" # cst_force and atom_index for positional cst
                                 elif len(c) == 4:
-                                    line = "- '"+str(c[0])+"-"+str(c[1])+"-"+str(c[2])+"-"+str(c[3])+"'\n"
+                                    line = "- '"+str(c[0])+"-"+str(c[1])+"-"+str(c[2][0])+':'+str(c[2][1])+':'str(c[2][2])+"-"+str(c[3][0])+':'+str(c[3][1])+':'str(c[3][2])+"'\n" # cst_force, distance, atom_index1, atom_index2 for distance cst
                                 else:
                                     raise ValueError('Constraint for protein '+protein+' with ligand '+ligand+' are not defined correctly.')
                                 iyf.write(line)
@@ -4597,7 +4603,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             for l in pdbf:
                 if l.startswith('CONECT'):
                     l = l.replace("CONECT", "")
-                    l = l.strip("\n").rstrip(" ")
+                    l = l.strip("\n").rstrip()
                     num = len(l) / 5
                     new_l = [int(l[i * 5:(i * 5) + 5]) for i in range(int(num))]
                     if only_hetatoms:
