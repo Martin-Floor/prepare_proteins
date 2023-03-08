@@ -2389,9 +2389,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("external_constraints:\n")
                             for c in constraints[(protein,ligand)]:
                                 if len(c) == 2:
-                                    line = "- '"+str(c[0])+"-"+str(c[1][0])+':'+str(c[1][1])+':'str(c[1][2])+"'\n" # cst_force and atom_index for positional cst
+                                    line = "- '"+str(c[0])+"-"+str(c[1][0])+':'+str(c[1][1])+':'+str(c[1][2])+"'\n" # cst_force and atom_index for positional cst
                                 elif len(c) == 4:
-                                    line = "- '"+str(c[0])+"-"+str(c[1])+"-"+str(c[2][0])+':'+str(c[2][1])+':'str(c[2][2])+"-"+str(c[3][0])+':'+str(c[3][1])+':'str(c[3][2])+"'\n" # cst_force, distance, atom_index1, atom_index2 for distance cst
+                                    line = "- '"+str(c[0])+"-"+str(c[1])+"-"+str(c[2][0])+':'+str(c[2][1])+':'+str(c[2][2])+"-"+str(c[3][0])+':'+str(c[3][1])+':'+str(c[3][2])+"'\n" # cst_force, distance, atom_index1, atom_index2 for distance cst
                                 else:
                                     raise ValueError('Constraint for protein '+protein+' with ligand '+ligand+' are not defined correctly.')
                                 iyf.write(line)
