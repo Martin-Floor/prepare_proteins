@@ -2717,7 +2717,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 his_pro = (str(gmx_codes)[1:-1].replace(',',''))
                 command = ''
                 for i in range(replicas):
-                    command += 'cd '+md_folder+'\n'
+                    command = 'cd '+md_folder+'\n'
                     command += "export GMXLIB=$(pwd)/FF" +'\n'
 
                     # Set up commands
@@ -2812,7 +2812,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += command_name+' mdrun -v -deffnm prot_md_'+str(f)+'\n'
                     command += 'cd ../../../../../\n'
 
-                jobs.append(command)
+                    jobs.append(command)
 
             return jobs
 
