@@ -214,7 +214,7 @@ def readScoreFromSilent(score_file, indexing=False):
             models = []
             poses = []
             for x in scores[s]:
-                model, pose = x.split('_')
+                model, pose = '_'.join(x.split('_')[:-1]), x.split('_')[-1]
                 models.append(model)
                 poses.append(int(pose))
             continue
