@@ -3546,11 +3546,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
             else:
                 values = []
-                for model in self.docking_data.index.levels[0]:
+                for model in self.docking_distances:
                     model_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
-                    for ligand in model_series.index.levels[1]:
+                    for ligand in self.docking_distances[model]:
+
+                        ligand_series = model_series[model_series.index.get_level_values('Ligand') == ligand]
                         distances = catalytic_labels[name][model][ligand]
-                        values += self.docking_distances[model][ligand][distances].min(axis=1).tolist()
+                        distance_values = self.docking_distances[model][ligand][distances].min(axis=1).tolist()
+                        assert ligand_series.shape[0] == len(distance_values)
+                        values += distance_values
                 self.docking_data['metric_'+name] = values
 
     def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
