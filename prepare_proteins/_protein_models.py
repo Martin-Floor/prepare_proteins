@@ -3577,9 +3577,19 @@ make sure of reading the target sequences with the function readTargetSequences(
         best_poses = pd.DataFrame()
         bp = []
         failed = []
-        for model in self.docking_ligands:
+        for model in self.docking_data.index.levels[0]:
+
+            # Check whether model is found in docking distances
+            if model not in self.docking_distances:
+                continue
+
             protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
-            for ligand in self.docking_ligands[model]:
+            for ligand in self.docking_data.index.levels[1]:
+
+                # Check whether ligand is found in model's docking distances
+                if ligand not in self.docking_distances[model]:
+                    continue
+
                 ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
                 for metric in filter_values:
 
