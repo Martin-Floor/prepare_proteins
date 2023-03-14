@@ -3557,7 +3557,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     for ligand in self.docking_data.index.levels[1]:
 
                         # Check whether ligand is found in model's docking distances
-                        if model not in self.docking_distances[model]:
+                        if ligand not in self.docking_distances[model]:
                             continue
 
                         ligand_series = model_series[model_series.index.get_level_values('Ligand') == ligand]
