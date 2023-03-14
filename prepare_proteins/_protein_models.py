@@ -396,9 +396,9 @@ chain to use for each model with the chains option.' % model)
                 else:
                     sequences[model] = self.sequences[model]
 
-            self.msa = alignment.mafft.multipleSequenceAlignment(sequences)
+            self.msa = alignment.mafft.multipleSequenceAlignment(sequences, stderr=False)
         else:
-            self.msa = alignment.mafft.multipleSequenceAlignment(self.sequences)
+            self.msa = alignment.mafft.multipleSequenceAlignment(self.sequences, stderr=False)
 
         return self.msa
 
