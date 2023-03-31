@@ -680,7 +680,7 @@ chain to use for each model with the chains option.' % model)
 
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
                                   trajectory_chain_indexes=None, reference_chain_indexes=None,
-                                  aligment_mode='aligned', verbose=False):
+                                  aligment_mode='aligned', verbose=False, reference_residues=None):
         """
         Align all models to a reference PDB based on a sequence alignemnt.
 
@@ -722,7 +722,7 @@ chain to use for each model with the chains option.' % model)
             traj = md.load(self.models_paths[model])
             rmsd[model] = MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
                                                          trajectory_chain_indexes=trajectory_chain_indexes,
-                                                         aligment_mode=aligment_mode)
+                                                         aligment_mode=aligment_mode, reference_residues=reference_residues)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
@@ -1159,20 +1159,21 @@ has been carried out. Please run compareSequences() function before setting muta
                 flags.write('-s model.pdb\n')
                 flags.write('-out:path:pdb .\n')
 
-            flag_file = job_folder+'/flags/mp_transform_'+model+'.flags'
-            with open(flag_file, 'w') as flags:
-                flags.write('-s ../../input_models/'+model+'.pdb\n')
-                flags.write('-mp:transform:optimize_embedding true\n')
-                flags.write('-mp:setup:spanfiles '+model+'.span\n')
-                flags.write('-out:no_nstruct_label\n')
+            # flag_file = job_folder+'/flags/mp_transform_'+model+'.flags'
+            # with open(flag_file, 'w') as flags:
+            #     flags.write('-s ../../input_models/'+model+'.pdb\n')
+            #     flags.write('-mp:transform:optimize_embedding true\n')
+            #     flags.write('-mp:setup:spanfiles '+model+'.span\n')
+            #     flags.write('-out:no_nstruct_label\n')
 
             command = 'cd '+job_folder+'/output_models/'+model+'\n'
             command += 'cp ../../input_models/'+model+'.pdb model.pdb\n'
             command += 'mp_span_from_pdb.linuxgccrelease @ ../../flags/mp_span_from_pdb_'+model+'.flags\n'
-            command += 'rm model.pdb \n'
+            # command += 'rm model.pdb \n'
+            command += 'mv model.pdb '+model+'.pdb\n'
             command += 'mv model.span '+model+'.span\n'
-            command += 'mp_transform.linuxgccrelease @ ../../flags/mp_transform_'+model+'.flags\n'
-            command += 'python ../../._embeddingToMembrane.py'+' '+model+'.pdb\n'
+            # command += 'mp_transform.linuxgccrelease @ ../../flags/mp_transform_'+model+'.flags\n'
+            # command += 'python ../../._embeddingToMembrane.py'+' '+model+'.pdb\n'
             command += 'cd ../../..\n'
             jobs.append(command)
 
