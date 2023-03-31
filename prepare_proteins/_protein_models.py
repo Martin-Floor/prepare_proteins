@@ -2522,6 +2522,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if covalent_setup:
                             continuation = False
 
+                        if extend_iterations:
+                            _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
+                            extend_script_name = '._extendAdaptiveIteartions.py'
+                            command += 'python ../'+extend_script_name+' output\n'
+
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
                         if membrane_residues or bias_to_point or com_bias1:
