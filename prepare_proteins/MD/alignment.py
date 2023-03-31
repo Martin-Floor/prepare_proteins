@@ -3,7 +3,8 @@ import mdtraj as md
 
 def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
                                        chain_indexes=None, trajectory_chain_indexes=None,
-                                       reference_chain_indexes=None, aligment_mode='exact'):
+                                       reference_chain_indexes=None, aligment_mode='exact',
+                                       reference_residues=None):
     """
     Align two trajectories based on a sequence alignment of specific chains. The
     chains are specified using their indexes. When the trajectories have corresponding
@@ -139,7 +140,7 @@ def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
 
     return rmsd, len(trajectory_atoms)
 
-def getCommonPositions(sequence1, sequence2, mode='exact'):
+def getCommonPositions(sequence1, sequence2, mode='exact', sequence1_residues=None):
     """
     Get the common positions of two aligned sequences. Two modes are possible:
     mode = 'exact', in which positions returned are equal in sequence.
@@ -177,6 +178,12 @@ def getCommonPositions(sequence1, sequence2, mode='exact'):
     s2p = 0
     # Iterate through the aligned positions
     for i in range(len(sequence1)):
+
+        # Skip residues not found in given list
+        if sequence1_residues != None:
+            if s1p+1 not in sequence1_residues:
+                continue
+
         # Compare sequences according to selected mode
         if sequence1[i] != '-' and sequence2[i] != '-':
             if mode == 'exact':
