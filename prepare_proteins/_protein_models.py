@@ -3810,7 +3810,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
                                   protonation_states=False, decompose_bb_hb_into_pair_energies=False,
-                                  cpus=None):
+                                  binding_energy=False, cpus=None):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -3851,6 +3851,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         decompose_bb_hb_into_pair_energies : bool
             Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
             number of calculations, so is off by default).
+        binding_energy : str
+            Comma-separated list of chains for which calculate the binding energy.
         """
 
         if not os.path.exists(rosetta_folder):
@@ -3866,6 +3868,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         command = 'python '+rosetta_folder+'/._analyse_calculation.py '+rosetta_folder+' '
+
+        if binding_energy:
+            command += '--binding_energy '+binding_energy+' '
         if atom_pairs != None:
             command += '--atom_pairs '+rosetta_folder+'/._atom_pairs.json '
         if energy_by_residue:
@@ -3894,6 +3899,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.rosetta_ebr = []
         self.rosetta_neighbours = []
         self.rosetta_protonation = []
+        binding_energy_df = []
 
         analysis_folder = rosetta_folder+'/.analysis'
         for model in self:
@@ -3903,6 +3909,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             scores_csv = scores_folder+'/'+model+'.csv'
             if os.path.exists(scores_csv):
                 self.rosetta_data.append(pd.read_csv(scores_csv))
+
+            # Read binding energies
+            be_folder = analysis_folder+'/binding_energy'
+            be_csv = be_folder+'/'+model+'.csv'
+            if os.path.exists(be_csv):
+                binding_energy_df.append(pd.read_csv(be_csv))
 
             # Read distances
             distances_folder = analysis_folder+'/distances'
@@ -3931,6 +3943,22 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         self.rosetta_data = pd.concat(self.rosetta_data)
         self.rosetta_data.set_index(['Model', 'Pose'], inplace=True)
+
+        if binding_energy:
+            binding_energy_df = pd.concat(binding_energy_df)
+            binding_energy_df.set_index(['Model', 'Pose'], inplace=True)
+
+            # Add interface scores to rosetta_data
+            for score in binding_energy_df:
+                index_value_map = {}
+                for i,v in binding_energy_df.iterrows():
+                    index_value_map[i] = v[score]
+
+                values = []
+                for i in self.rosetta_data.index:
+                    values.append(index_value_map[i])
+
+                self.rosetta_data[score] = values
 
         if energy_by_residue and self.rosetta_ebr != []:
             self.rosetta_ebr = pd.concat(self.rosetta_ebr)
@@ -4954,6 +4982,8 @@ def _readRosettaScoreFile(score_file, indexing=False):
             models = []
             poses = []
             for x in scores[s]:
+                if x == 'description':
+                    continue
                 model, pose = '_'.join(x.split('_')[:-1]), x.split('_')[-1]
                 models.append(model)
                 poses.append(int(pose))

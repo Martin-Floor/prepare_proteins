@@ -14,6 +14,7 @@ parser.add_argument('--energy_by_residue', action='store_true', default=False, h
 parser.add_argument('--interacting_residues', action='store_true', default=False, help='Calculate interacting neighbour residues')
 parser.add_argument('--protonation_states', action='store_true', default=False, help='Get the protonation states of a group of tritable residues.')
 parser.add_argument('--cpus', default=None, help='Number of CPUs for parallelization')
+parser.add_argument('--binding_energy', default=None, help='Calculate binding energy for the given chains.')
 parser.add_argument('--query_residues',
                     help='Comma separated (no spaces) list of residues. Works together with --interacting_residues or --protonation_states')
 parser.add_argument('--decompose_bb_hb_into_pair_energies', action='store_true', default=False,
@@ -26,6 +27,8 @@ atom_pairs = args.atom_pairs
 energy_by_residue = args.energy_by_residue
 interacting_residues = args.interacting_residues
 protonation_states = args.protonation_states
+binding_energy = args.binding_energy
+
 cpus = args.cpus
 if cpus != None:
     cpus = int(cpus)
@@ -33,6 +36,10 @@ query_residues = args.query_residues
 if query_residues != None:
     query_residues = [int(r) for r in query_residues.split(',')]
 decompose_bb_hb_into_pair_energies = args.decompose_bb_hb_into_pair_energies
+
+if binding_energy != None:
+    binding_energy_chains = binding_energy.split(',')
+    binding_energy = True
 
 # Initialise PyRosetta environment
 init('-mute all')
@@ -366,6 +373,117 @@ def deltaEMutation(pose, mutant_position, mutant_aa, by_residue=False,
 
     return De
 
+def calculateInterfaceScore(pose, target_chain):
+    """
+    Calculate interaface score for a specified jump.
+
+    Paramters
+    =========
+    pose : rosetta.
+
+    """
+
+    sfxn = get_fa_scorefxn()
+
+    interface_pose = pose.clone()
+
+    rosetta.core.scoring.constraints.remove_constraints_of_type(interface_pose, 'AtomPair')
+
+    jump_id = rosetta.core.pose.get_jump_id_from_chain(target_chain, interface_pose)
+    chain_id = rosetta.core.pose.get_chain_id_from_chain(target_chain, interface_pose)
+    chain_residues = rosetta.core.pose.get_chain_residues(interface_pose,chain_id)
+    chain_residues_id = [x.seqpos() for x in list(chain_residues)]
+    protein_residues_id = [r for r in range(1,interface_pose.total_residue()) if r not in  chain_residues_id]
+
+    chains_coor = getCoordinates(interface_pose,chain_residues_id)
+    protein_coor = getCoordinates(interface_pose, protein_residues_id)
+
+    chain_centroid = np.average(chains_coor, axis=0)
+    protein_centroid = np.average(protein_coor, axis=0)
+    vector =  chain_centroid - protein_centroid
+    vector = vector/np.linalg.norm(vector)
+    vector = rosetta.numeric.xyzVector_double_t(vector[0], vector[1], vector[2])
+
+    Ei = sfxn(interface_pose)
+
+    chain_mover = rosetta.protocols.rigid.RigidBodyTransMover()
+    chain_mover.trans_axis(vector)
+    chain_mover.step_size(1000)
+    chain_mover.rb_jump(jump_id)
+    chain_mover.apply(interface_pose)
+
+    Ef = sfxn(interface_pose)
+
+    return Ei-Ef
+
+def getCoordinates(pose, residues=None, bb_only=False, sc_only=False):
+    """
+    Get all the pose atoms coordinates. An optional list of residues can be given
+    to limit coordinates to only include the atoms of these residues.
+
+    Parameters
+    ==========
+    pose : pyrosetta.rosetta.core.pose.Pose
+        Pose from which to get the atomic coordinates.
+    residues : list
+        An optional list of residues to only get their coordinates.
+    bb_only : bool
+        Get only backbone atom coordinates from the pose.
+    sc_only : bool
+        Get only sidechain atom coordinates from the pose.
+
+    Returns
+    =======
+    coordinates : numpy.ndarray
+        The pose's coordinates.
+    """
+
+    if bb_only and sc_only:
+        raise ValueError('bb_only and sc_only cannot be given simultaneously!')
+
+    coordinates = []
+    for r in range(1, pose.total_residue()+1):
+        # Check if a list of residue indexes is given.
+        if residues != None:
+            if r not in residues:
+                continue
+
+        # Get residue coordinates
+        residue = pose.residue(r)
+        bb_indexes = residue.all_bb_atoms()
+        for a in range(1, residue.natoms()+1):
+
+            # Skip non backbone atoms
+            if bb_only:
+                if a not in bb_indexes:
+                    continue
+
+            # Skip backbone atoms
+            if sc_only:
+                if a in bb_indexes:
+                    continue
+
+            # Get coordinates
+            xyz = residue.xyz(a)
+            xyz = np.array([xyz[0], xyz[1], xyz[2]])
+            coordinates.append(xyz)
+
+    coordinates = np.array(coordinates)
+
+    return coordinates
+
+def _calculateBE(arguments):
+
+    tag, chain, silent_file, params = arguments
+    pose = getPoseFromTag(tag, silent_file, params_dir=params)
+
+    be = {}
+    be['Model'], be['Pose'] = '_'.join(tag.split('_')[:-1]), tag.split('_')[-1]
+    interface_score = calculateInterfaceScore(pose, chain)
+    be['interface_score_'+chain] = interface_score
+
+    return be
+
 def _calculateDistances(arguments):
     """
     Calculate distances for a single pose
@@ -376,8 +494,7 @@ def _calculateDistances(arguments):
 
     # Add tags as model and pose to distances
     distances = {}
-    distances['Model'] = tag.split('_')[0]
-    distances['Pose'] = int(tag.split('_')[1])
+    distances['Model'], distances['Pose'] = '_'.join(tag.split('_')[:-1]), tag.split('_')[-1]
 
     # Get pose coordinates
     coordinates = getPoseCordinates(pose)
@@ -421,8 +538,7 @@ def _calculateEnergyByResidue(arguments):
         res = res_info.split()[0]
         chain = res_info.split()[1]
 
-        ebr['Model'].append(tag.split('_')[0])
-        ebr['Pose'].append(int(tag.split('_')[1]))
+        ebr['Model'], ebr['Pose'] = '_'.join(tag.split('_')[:-1]), tag.split('_')[-1]
         ebr['Chain'].append(chain)
         ebr['Residue'].append(res)
         for st in residue_energies:
@@ -472,8 +588,8 @@ def _calculateInteractingResidues(arguments):
                 n_res_info = pose.pdb_info().pose2pdb(n)
                 n_res = res_info.split()[0]
                 n_chain = res_info.split()[1]
-                neighbours_data['Model'].append(tag.split('_')[0])
-                neighbours_data['Pose'].append(int(tag.split('_')[1]))
+                neighbours_data['Model'],  = '_'.join(tag.split('_')[:-1])
+                neighbours_data['Pose'] = tag.split('_')[-1]
                 neighbours_data['Chain'].append(chain)
                 neighbours_data['Residue'].append(res)
                 neighbours_data['Neighbour chain'].append(n_chain)
@@ -513,8 +629,8 @@ def _calculateProtonationStates(arguments):
             if resname == 'HIS':
                 his_type = 'HIE'
 
-            protonation_data['Model'].append(tag.split('_')[0])
-            protonation_data['Pose'].append(int(tag.split('_')[1]))
+            protonation_data['Model'],  = '_'.join(tag.split('_')[:-1])
+            protonation_data['Pose'] = tag.split('_')[-1]
             protonation_data['Chain'].append(chain)
             protonation_data['Residue'].append(res)
             protonation_data['Residue state'].append(his_type)
@@ -529,6 +645,12 @@ if not os.path.exists(rosetta_folder+'/.analysis'):
 scores_folder = rosetta_folder+'/.analysis/scores'
 if not os.path.exists(scores_folder):
     os.mkdir(scores_folder)
+
+# Create subfolder to binding energies
+if binding_energy:
+    binding_energy_folder = rosetta_folder+'/.analysis/binding_energy'
+    if not os.path.exists(binding_energy_folder):
+        os.mkdir(binding_energy_folder)
 
 # Create subfolder to store distances
 if atom_pairs != None:
@@ -565,6 +687,19 @@ for model in silent_file:
         # Create dictionary entries for scores
         scores = readScoreFromSilent(silent_file[model])
         scores.to_csv(score_file, index=False)
+
+    if binding_energy:
+        binding_energy_file = binding_energy_folder+'/'+model+'.csv'
+        if not os.path.exists(binding_energy_file):
+            be = {}
+            be['Model'] = []
+            be['Pose'] = []
+            for chain in binding_energy_chains:
+                be['interface_score_'+chain] = []
+
+            file_exists['be'] = False
+        else:
+            file_exists['be'] = True
 
     if atom_pairs != None:
         # Check distance files
@@ -636,6 +771,7 @@ for model in silent_file:
     if all(skip):
         continue
 
+    be_jobs = []
     distance_jobs = []
     ebr_jobs = []
     neighbours_jobs = []
@@ -643,6 +779,11 @@ for model in silent_file:
 
     # for pose in readPosesFromSilent(silent_file[model], params_dir=params):
     for tag in getTagsFromSilent(silent_file[model], params_dir=params):
+
+        if binding_energy and not file_exists['be']:
+            for chain in binding_energy_chains:
+                be_jobs.append([tag, chain, silent_file[model], params])
+
         # Calculate distances
         if atom_pairs != None and not file_exists['distances']:
             distance_jobs.append([tag, atom_pairs[model], silent_file[model], params])
@@ -659,6 +800,16 @@ for model in silent_file:
     if cpus == None:
         cpus = cpu_count()
     pool = Pool(cpus)
+
+    if len(be_jobs) > 0:
+        be_results = pool.map(_calculateBE, be_jobs)
+
+        for ber in be_results:
+            for k in ber:
+                be[k].append(ber[k])
+
+        be = pd.DataFrame(be)
+        be.to_csv(binding_energy_file, index=False)
 
     if len(distance_jobs) > 0:
         distance_results = pool.map(_calculateDistances, distance_jobs)
