@@ -1388,7 +1388,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
-                         outerbox=(30,30,30), useflexmae=True, peptide=False, mae_input=True):
+                         outerbox=(30,30,30), useflexmae=True, peptide=False,
+                         mae_input=True, cst_positions=None):
         """
         Setup grid calculation for each model.
 
@@ -1397,6 +1398,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         grid_folder : str
             Path to grid calculation folder
         center_atoms : tuple
+            Atoms to center the grid box.
+        cst_positions : dict
+            atom and radius for cst position for each model:
+            cst_positions = {
+            model : ((chain_id, residue_index, atom_name), radius), ...
+            }
         """
 
         # Create grid job folders
@@ -1449,16 +1456,49 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         y = a.coord[1]
                                         z = a.coord[2]
 
+            if cst_positions != None:
+
+                cst_x = {}
+                cst_y = {}
+                cst_z = {}
+
+                # Convert to a list of only one position cst is given
+                if isinstance(cst_positions[model], tuple):
+                    cst_positions[model] = [cst_positions[model]]
+
+                for i,position in enumerate(cst_positions[model]):
+
+                    # Get coordinates of center residue
+                    chainid = position[0]
+                    resid = position[1]
+                    atom_name = position[2]
+
+                    x = None
+                    for c in self.structures[model].get_chains():
+                        if c.id == chainid:
+                            for r in c.get_residues():
+                                if r.id[1] == resid:
+                                    for a in r.get_atoms():
+                                        if a.name == atom_name:
+                                            cst_x[i+1] = a.coord[0]
+                                            cst_y[i+1] = a.coord[1]
+                                            cst_z[i+1] = a.coord[2]
+
             # Check if any atom center was found.
             if x == None:
                 raise ValueError('Given atom center not found for model %s' % model)
 
             # Write grid input file
             with open(grid_folder+'/grid_inputs/'+model+'.in', 'w') as gif:
-                gif.write('GRID_CENTER %.14f, %.14f, %.14f\n' % (x,y,z))
+                gif.write('GRID_CENTER %.14f, %.14f, %.14f\n' % (x,y,z, ))
                 gif.write('GRIDFILE '+model+'.zip\n')
                 gif.write('INNERBOX %s, %s, %s\n' % innerbox)
                 gif.write('OUTERBOX %s, %s, %s\n' % outerbox)
+
+                if cst_positions != None:
+                    for i,position in enumerate(cst_positions[model]):
+                        gif.write('POSIT_CONSTRAINTS "position'+str(i+1)+' %.14f %.14f %.14f %.14f",\n' % (cst_x[i+1], cst_y[i+1], cst_z[i+1], position[-1]))
+
                 if mae_input:
                     gif.write('RECEP_FILE %s\n' % ('../input_models/'+model+'.mae'))
                 else:
@@ -1492,7 +1532,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
                           poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                          energy_by_residue=False, use_new_version=False,):
+                          energy_by_residue=False, use_new_version=False):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
