@@ -87,7 +87,7 @@ class proteinModels:
             only_models = []
         elif isinstance(only_models, str):
             only_models = [only_models]
-        elif not isinstance(only_models, list):
+        elif not isinstance(only_models, (list, tuple, set)):
             raise ValueError('You must give models as a list or a single model as a string!')
 
         self.models_folder = models_folder
@@ -809,7 +809,7 @@ chain to use for each model with the chains option.' % model)
                 os.system(command)
 
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
-                      param_files=None, mpi_command='slurm'):
+                      param_files=None, mpi_command='slurm', cpus=None):
         """
         Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
         with each protein as the first key and the name of the particular mutant as the second key.
@@ -831,8 +831,11 @@ chain to use for each model with the chains option.' % model)
         """
 
         mpi_commands = ['slurm', 'openmpi', None]
-        if mpi_command not in ['slurm', 'openmpi', None]:
+        if mpi_command not in mpi_commands:
             raise ValueError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
+
+        if mpi_command == 'openmpi' and not isinstance(cpus, int):
+            raise ValueError('')
 
         # Create mutation job folder
         if not os.path.exists(job_folder):
@@ -928,9 +931,13 @@ chain to use for each model with the chains option.' % model)
                 # Create and append execution command
                 if mpi_command == None:
                     mpi_command = ''
+                elif mpi_command == 'openmpi':
+                    mpi_command = 'mpirun -np '+str(cpus)' '
+                else:
+                    mpi_command = mpi_command+' '
 
                 command = 'cd '+job_folder+'/output_models/'+model+'\n'
-                command += mpi_command+' rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
+                command += mpi_command+'rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
                 command += 'cd ../../..\n'
                 jobs.append(command)
 
