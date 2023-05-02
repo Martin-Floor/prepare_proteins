@@ -932,7 +932,7 @@ chain to use for each model with the chains option.' % model)
                 if mpi_command == None:
                     mpi_command = ''
                 elif mpi_command == 'openmpi':
-                    mpi_command = 'mpirun -np '+str(cpus)' '
+                    mpi_command = 'mpirun -np '+str(cpus)+' '
                 else:
                     mpi_command = mpi_command+' '
 
