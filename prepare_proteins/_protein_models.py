@@ -1395,8 +1395,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
-                         outerbox=(30,30,30), useflexmae=True, peptide=False,
-                         mae_input=True, cst_positions=None):
+                     outerbox=(30,30,30), useflexmae=True, peptide=False,
+                     mae_input=True, cst_positions=None):
         """
         Setup grid calculation for each model.
 
@@ -1476,11 +1476,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for i,position in enumerate(cst_positions[model]):
 
                     # Get coordinates of center residue
-                    chainid = position[0]
-                    resid = position[1]
-                    atom_name = position[2]
+                    chainid = position[0][0]
+                    resid = position[0][1]
+                    atom_name = position[0][2]
 
-                    x = None
                     for c in self.structures[model].get_chains():
                         if c.id == chainid:
                             for r in c.get_residues():
@@ -1494,6 +1493,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Check if any atom center was found.
             if x == None:
                 raise ValueError('Given atom center not found for model %s' % model)
+
+            # Check if any atom center was found.
+            if cst_positions and cst_x == {}:
+                raise ValueError('Given atom constraint not found for model %s' % model)
 
             # Write grid input file
             with open(grid_folder+'/grid_inputs/'+model+'.in', 'w') as gif:
@@ -1538,8 +1541,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
-                          poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                          energy_by_residue=False, use_new_version=False):
+                      poses_per_lig=100, precision='SP', use_ligand_charges=False,
+                      energy_by_residue=False, use_new_version=False, cst_fragments=None):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
@@ -1554,6 +1557,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         residues : dict
             Dictionary with the residues for each model near which to position the
             ligand as the starting pose.
+        cst_fragments: dict
+            Dictionary with a tuple composed by 3 elements: first, the fragment of the ligand
+            to which you want to make the bias (in SMARTS pattern nomenclature), the number of feature,
+            if you only have 1 constraint on the grid and in the ligand, it will be 1, and True/False
+            depending on if you want to include that constraint inside the grid constraint (True) or
+            exclude it (False).
+            {'model': {'ligand': ('[fragment]', feature, True) ...
+            }
         """
 
         # Create docking job folders
@@ -1602,6 +1613,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                     dif.write('PRECISION %s\n' % precision)
                     if energy_by_residue:
                         dif.write('WRITE_RES_INTERACTION true\n')
+                    # Constraints
+                    if cst_fragments != None:
+
+                        if isinstance(cst_fragments[grid][substrate], tuple):
+                            cst_fragments[grid][substrate] = [cst_fragments[grid][substrate]]
+
+                        for i,fragment in enumerate(cst_fragments[grid][substrate]):
+                            dif.write('[CONSTRAINT_GROUP:1]\n')
+                            dif.write('\tUSE_CONS position1:'+str(i+1)+',\n')
+                            dif.write('\tNREQUIRED_CONS ALL\n')
+                            dif.write('[FEATURE:'+str(i+1)+']\n')
+                            dif.write('\tPATTERN1 "'+fragment[0]+' '+str(fragment[1]))
+                            if fragment[2]:
+                                dif.write(' include')
+                            dif.write('"\n')
 
                 # Create commands
                 command = 'cd '+docking_folder+'/output_models/'+grid+'\n'
@@ -1624,369 +1650,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-TMPLAUNCHDIR '
                 command += '-WAIT\n'
                 command += 'cd ../../..\n'
-                jobs.append(command)
-
-        return jobs
-
-    def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10, enclosure=0.5,
-                             maxvdw=1.1, resolution='fine', reportsize=100, overwrite=False,
-                             maxdist=8.0, sidechain=True):
-        """
-        Generates a SiteMap calculation for model poses (no ligand) near specified residues.
-
-        Parameters
-        ==========
-        job_folder : str
-            Path to the calculation folder
-        """
-
-        # Create site map job folders
-        if not os.path.exists(job_folder):
-            os.mkdir(job_folder)
-
-        if not os.path.exists(job_folder+'/input_models'):
-            os.mkdir(job_folder+'/input_models')
-
-        if not os.path.exists(job_folder+'/output_models'):
-            os.mkdir(job_folder+'/output_models')
-
-        # Copy script to generate protein and ligand mae inputs, separately.
-        _copyScriptFile(job_folder, 'prepareForSiteMap.py')
-        script_path = job_folder+'/._prepareForSiteMap.py'
-
-        # Save all input models
-        self.saveModels(job_folder+'/input_models')
-
-        # Create input files
-        jobs = []
-        for model in self.models_names:
-
-            # Create an output folder for each model
-            output_folder = job_folder+'/output_models/'+model
-            if not os.path.exists(output_folder):
-                os.mkdir(output_folder)
-
-            # Generate input protein files
-            input_protein = job_folder+'/input_models/'+model+'.pdb'
-
-            input_mae = job_folder+'/output_models/'+model+'/'+model+'_protein.mae'
-            if not os.path.exists(input_mae) or overwrite:
-                command = 'run '+script_path+' '
-                command += input_protein+' '
-                command += output_folder+' '
-                command += '--protein_only '
-                os.system(command)
-
-            if isinstance(target_residues, dict):
-                tr = target_residues[model]
-            elif isinstance(target_residues, (list, tuple)):
-                tr = target_residues
-
-            # If single integer is given make it a list
-            if isinstance(tr, int):
-                tr = [tr]
-
-            for r in tr:
-                if not os.path.exists(output_folder+'/'+str(r)):
-                    os.mkdir(output_folder+'/'+str(r))
-
-                # Add site map command
-                command = 'cd '+job_folder+'/output_models/'+model+'/'+str(r)+'\n'
-                command += '"${SCHRODINGER}/sitemap" '
-                command += '-j '+model+' '
-                command += '-prot ../'+model+'_protein.mae'+' '
-                command += '-sitebox '+str(site_box)+' '
-                command += '-resolution '+str(resolution)+' '
-                command += '-keepvolpts yes '
-                command += '-keeplogs yes '
-                # command += '-maxdist '+str(maxdist)+' '
-                # command += '-enclosure '+str(enclosure)+' '
-                # command += '-maxvdw '+str(maxvdw)+' '
-                command += '-reportsize '+str(reportsize)+' '
-                command += '-siteasl \"res.num {'+str(r)+'}'
-                if sidechain:
-                    command += ' and not (atom.pt ca,c,n,h,o)'
-                command += '\" '
-                command += '-HOST localhost:1 '
-                command += '-TMPLAUNCHDIR '
-                command += '-WAIT\n'
-                command += 'cd ../../../..\n'
-                jobs.append(command)
-
-        return jobs
-
-    def setUpSiteMapForLigands(self, job_folder, poses_folder, site_box=10, resolution='fine', overwrite=False):
-        """
-        Generates a SiteMap calculation for Docking poses outputed by the extractDockingPoses()
-        function.
-
-        Parameters
-        ==========
-        job_folder : str
-            Path to the calculation folder
-        poses_folder : str
-            Path to docking poses folder.
-        """
-
-        # Create site map job folders
-        if not os.path.exists(job_folder):
-            os.mkdir(job_folder)
-
-        if not os.path.exists(job_folder+'/input_models'):
-            os.mkdir(job_folder+'/input_models')
-
-        if not os.path.exists(job_folder+'/output_models'):
-            os.mkdir(job_folder+'/output_models')
-
-        # Copy script to generate protein and ligand mae inputs, separately.
-        _copyScriptFile(job_folder, 'prepareForSiteMap.py')
-        script_path = job_folder+'/._prepareForSiteMap.py'
-
-        # Create input files
-        jobs = []
-        for model in os.listdir(poses_folder):
-            if not os.path.isdir(poses_folder+'/'+model):
-                continue
-            if not os.path.exists(job_folder+'/input_models/'+model):
-                os.mkdir(job_folder+'/input_models/'+model)
-            if not os.path.exists(job_folder+'/output_models/'+model):
-                os.mkdir(job_folder+'/output_models/'+model)
-
-            for pose in os.listdir(poses_folder+'/'+model):
-                if pose.endswith('.pdb'):
-                    pose_name = pose.replace('.pdb','')
-
-                    # Generate input protein and ligand files
-                    input_ligand = job_folder+'/input_models/'+model+'/'+pose_name+'_ligand.mae'
-                    input_protein = job_folder+'/input_models/'+model+'/'+pose_name+'_protein.mae'
-                    if not os.path.exists(input_ligand) or not os.path.exists(input_protein) or overwrite:
-                        command = 'run '+script_path+' '
-                        command += poses_folder+'/'+model+'/'+pose+' '
-                        command += job_folder+'/input_models/'+model
-                        os.system(command)
-
-                    # Write Site Map input file
-                    with open(job_folder+'/output_models/'+model+'/'+pose_name+'.in', 'w') as smi:
-                        smi.write('PROTEIN ../../input_models/'+model+'/'+pose_name+'_protein.mae\n')
-                        smi.write('LIGMAE ../../input_models/'+model+'/'+pose_name+'_ligand.mae\n')
-                        smi.write('SITEBOX '+str(site_box)+'\n')
-                        smi.write('RESOLUTION '+resolution+'\n')
-                        smi.write('REPORTSIZE 100\n')
-                        smi.write('KEEPVOLPTS yes\n')
-                        smi.write('KEEPLOGS yes\n')
-
-                    # Add site map command
-                    command = 'cd '+job_folder+'/output_models/'+model+'\n'
-                    command += '"${SCHRODINGER}/sitemap" '
-                    command += pose_name+'.in'+' '
-                    command += '-HOST localhost:1 '
-                    command += '-TMPLAUNCHDIR '
-                    command += '-WAIT\n'
-                    command += 'cd ../../..\n'
-                    jobs.append(command)
-        return jobs
-
-    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True):
-        """
-        Extract score values from a site map calculation.
-
-         Parameters
-         ==========
-         sitemap_folder : str
-             Path to the site map calculation folder. See
-             setUpSiteMapForModels()
-        failed_value : None, float or int
-            The value to put in the columns of failed siteMap calculations.
-
-        Returns
-        =======
-        sitemap_data : pandas.DataFrame
-            Site map pocket information.
-        """
-
-        def parseVolumeInfo(eval_log):
-            """
-            Parse eval log file for site scores.
-
-            Parameters
-            ==========
-            eval_log : str
-                Eval log file from sitemap output
-
-            Returns
-            =======
-            pocket_data : dict
-                Scores for the given pocket
-            """
-            with open(eval_log) as lf:
-                c = False
-                for l in lf:
-                    if 'volume' in l:
-                        c = True
-                        labels = l.split()
-                        continue
-                    if c:
-                        values = [float(x) for x in l.split()]
-                        pocket_data = {x:y for x,y in zip(labels, values)}
-                        c = False
-            return pocket_data
-
-        def checkIfCompleted(log_file):
-            """
-            Check log file for calculation completition.
-
-            Parameters
-            ==========
-            log_file : str
-                Path to the standard sitemap log file.
-
-            Returns
-            =======
-            completed : bool
-                Did the simulation end correctly?
-            """
-            with open(log_file) as lf:
-                for l in lf:
-                    if 'Site finding job' in l and 'started' not in l:
-                        if 'completed' in l:
-                            return True
-                        elif 'failed' in l:
-                            return False
-
-        def checkIfFound(log_file):
-            """
-            Check log file for found sites.
-
-            Parameters
-            ==========
-            log_file : str
-                Path to the standard sitemap log file.
-
-            Returns
-            =======
-            found : bool
-                Did the simulation end correctly?
-            """
-            found = True
-            with open(log_file) as lf:
-                for l in lf:
-                    if 'No sites found' in l:
-                        found = False
-            return found
-
-        sitemap_data = {}
-        sitemap_data['Model'] = []
-        sitemap_data['Target Residue'] = []
-        sitemap_data['Pocket'] = []
-
-        output_folder = sitemap_folder+'/output_models'
-        for m in os.listdir(output_folder):
-            for r in os.listdir(output_folder+'/'+m):
-                if os.path.isdir(output_folder+'/'+m+'/'+r):
-                    eval_log = False
-                    log_file = output_folder+'/'+m+'/'+r+'/'+m+'.log'
-                    if os.path.exists(log_file):
-                        completed = checkIfCompleted(log_file)
-                    else:
-                        if verbose:
-                            message = 'Log file for model %s and residue %s was not found!\n' % (m, r)
-                            message += 'It seems the calculation has not run yet...'
-                            print(message)
-                        continue
-
-                    if not completed:
-                        if verbose:
-                            print('There was a problem with model %s and residue %s' % (m, r))
-                        continue
-                    else:
-                        found = checkIfFound(log_file)
-                        if not found:
-                            if verbose:
-                                print('No sites were found for model %s and residue %s' % (m, r))
-                            continue
-
-                    for f in os.listdir(output_folder+'/'+m+'/'+r):
-
-                        if f.endswith('_eval.log'):
-                            eval_log = True
-
-                            pocket = int(f.split('_')[-2])
-                            pocket_data = parseVolumeInfo(output_folder+'/'+m+'/'+r+'/'+f)
-
-                            sitemap_data['Model'].append(m)
-                            sitemap_data['Target Residue'].append(r)
-                            sitemap_data['Pocket'].append(pocket)
-
-                            for l in pocket_data:
-                                sitemap_data.setdefault(l, [])
-                                sitemap_data[l].append(pocket_data[l])
-
-                    # Add models without site map data
-                    if not eval_log:
-                        sitemap_data['Model'].append(m)
-                        sitemap_data['Target Residue'].append(r)
-                        sitemap_data['Pocket'].append(pocket)
-                        for l in ['SiteScore', 'size', 'Dscore', 'volume', 'exposure', 'enclosure',
-                                   'contact', 'phobic', 'philic', 'balance', 'don/acc']:
-                            sitemap_data.setdefault(l, [])
-                            sitemap_data[l].append(failed_value)
-
-        sitemap_data = pd.DataFrame(sitemap_data)
-        sitemap_data.set_index(['Model', 'Target Residue', 'Pocket'], inplace=True)
-
-        return sitemap_data
-
-    def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
-                                    only_ligands=None):
-        """
-        Run PELE platform for ligand parameterization
-
-        Parameters
-        ==========
-        job_folder : str
-            Path to the job input folder
-        ligands_folder : str
-            Path to the folder containing the ligand molecules in PDB format.
-        """
-
-        charge_methods = ['gasteiger', 'am1bcc', 'OPLS']
-        if charge_method == None:
-            charge_method = 'OPLS'
-
-        if charge_method not in charge_methods:
-            raise ValueError('The charge method should be one of: '+str(charge_methods))
-
-        # Create PELE job folder
-        if not os.path.exists(job_folder):
-            os.mkdir(job_folder)
-
-        # Copy script to generate protein and ligand mae inputs, separately.
-        _copyScriptFile(job_folder, 'peleffy_ligand.py')
-
-        jobs = []
-        for ligand in os.listdir(ligands_folder):
-
-            extension = ligand.split('.')[-1]
-
-            if extension == 'pdb':
-                ligand_name = ligand.replace('.'+extension, '')
-
-                # Only process ligands given in only_ligands list
-                if only_ligands != None:
-                    if ligand_name not in only_ligands:
-                        continue
-
-                # structure = _readPDB(ligand_name, ligands_folder+'/'+ligand)
-                if not os.path.exists(job_folder+'/'+ligand_name):
-                    os.mkdir(job_folder+'/'+ligand_name)
-
-                # _saveStructureToPDB(structure, job_folder+'/'+pdb_name+'/'+pdb_name+extension)
-                shutil.copyfile(ligands_folder+'/'+ligand, job_folder+'/'+ligand_name+'/'+ligand_name+'.'+extension)
-
-                # Create command
-                command = 'cd '+job_folder+'/'+ligand_name+'\n'
-                command += 'python  ../._peleffy_ligand.py '+ligand_name+'.'+extension+'\n'
-                command += 'cd ../..\n'
                 jobs.append(command)
 
         return jobs
