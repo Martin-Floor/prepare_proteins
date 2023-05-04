@@ -338,8 +338,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if covalent_check:
             self._checkCovalentLigands(model, pdb_file, atom_mapping=atom_mapping)
 
-        # Update conect lines
-        self.conects[model] = self._readPDBConectLines(pdb_file, model)
+            # Update conect lines
+            self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
         self.models_paths[model] = pdb_file
 
