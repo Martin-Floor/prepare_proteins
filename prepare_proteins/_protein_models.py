@@ -947,7 +947,7 @@ chain to use for each model with the chains option.' % model)
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
-                                 skip_finished=True):
+                                 skip_finished=True, null=False):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1075,10 +1075,12 @@ has been carried out. Please run compareSequences() function before setting muta
             # Create fastrelax mover
             relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
             xml.addMover(relax)
-            protocol.append(relax)
 
-            # Set protocol
-            xml.setProtocol(protocol)
+            if not null:
+                protocol.append(relax)
+
+                # Set protocol
+                xml.setProtocol(protocol)
 
             # Add scorefunction output
             xml.addOutputScorefunction(sfxn)
@@ -3520,7 +3522,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
                                   protonation_states=False, decompose_bb_hb_into_pair_energies=False,
-                                  binding_energy=False, cpus=None):
+                                  binding_energy=False, cpus=None, return_jobs=False):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -3583,6 +3585,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '--binding_energy '+binding_energy+' '
         if atom_pairs != None:
             command += '--atom_pairs '+rosetta_folder+'/._atom_pairs.json '
+        if return_jobs:
+            command += '--models MODEL '
         if energy_by_residue:
             command += '--energy_by_residue '
         if interacting_residues:
@@ -3597,11 +3601,23 @@ make sure of reading the target sequences with the function readTargetSequences(
         if cpus != None:
             command += '--cpus '+str(cpus)
         command += '\n'
-        try:
-            os.system(command)
-        except:
-            os.chdir('..')
-            raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
+
+        # Compile individual models for each job
+        if return_jobs:
+            commands = []
+            for m in self:
+                commands.append(command.replace('MODEL', m))
+
+            print('Returning jobs for running the analysis in parallel.')
+            print('After jobs have finished, rerun this function removing return_jobs=True!')
+            return commands
+
+        else:
+            try:
+                os.system(command)
+            except:
+                os.chdir('..')
+                raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
 
         # Compile dataframes into rosetta_data attributes
         self.rosetta_data = []
@@ -3651,10 +3667,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             if os.path.exists(protonation_csv):
                 self.rosetta_protonation.append(pd.read_csv(protonation_csv))
 
+        if self.rosetta_data == []:
+            raise ValueError('No rosetta output was found in %s' % rosetta_folder)
+
         self.rosetta_data = pd.concat(self.rosetta_data)
         self.rosetta_data.set_index(['Model', 'Pose'], inplace=True)
 
         if binding_energy:
+
             binding_energy_df = pd.concat(binding_energy_df)
             binding_energy_df.set_index(['Model', 'Pose'], inplace=True)
 
@@ -3845,6 +3865,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if os.path.isdir(mutants_folder+'/output_models/'+d):
                 for f in os.listdir(mutants_folder+'/output_models/'+d):
                     if f.endswith('.out'):
+
                         model = d
                         mutant = f.replace(model+'_', '').replace('.out', '')
                         scores = readSilentScores(mutants_folder+'/output_models/'+d+'/'+f)
@@ -3870,6 +3891,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         self.readModelFromPDB(mutant, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(mutant)
+
 
         self.getModelsSequences()
         print('Added the following mutants from folder %s:' % mutants_folder)
@@ -3902,6 +3924,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         if os.path.exists(optimization_folder+'/params'):
             params = optimization_folder+'/params'
 
+        pi = 1
         for d in os.listdir(optimization_folder+'/output_models'):
             if os.path.isdir(optimization_folder+'/output_models/'+d):
                 for f in os.listdir(optimization_folder+'/output_models/'+d):
@@ -3921,11 +3944,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += ' -extra_res_path '+params+' '
                         command += ' -tags '+best_model_tag
                         os.system(command)
+                        if pi == 1:
+                            print(1, self.models_paths)
+                            pi += 1
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
+                        if pi == 2:
+                            print(2, self.models_paths)
+                            pi += 1
+
         self.getModelsSequences()
+
         missing_models = set(self.models_names) - set(models)
         if missing_models != set():
             print('Missing models in relaxation folder:')

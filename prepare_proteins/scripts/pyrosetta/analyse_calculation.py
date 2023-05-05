@@ -20,6 +20,7 @@ parser.add_argument('--query_residues',
                     help='Comma separated (no spaces) list of residues. Works together with --interacting_residues or --protonation_states')
 parser.add_argument('--decompose_bb_hb_into_pair_energies', action='store_true', default=False,
                     help='Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the number of calculations, so is off by default).')
+parser.add_argument('--verbose', action='store_true', default=False)
 
 # Store variables
 args=parser.parse_args()
@@ -29,6 +30,7 @@ energy_by_residue = args.energy_by_residue
 interacting_residues = args.interacting_residues
 protonation_states = args.protonation_states
 binding_energy = args.binding_energy
+verbose = args.verbose
 
 cpus = args.cpus
 if cpus != None:
