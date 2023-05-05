@@ -1,11 +1,13 @@
 from . import alignment
 import os
+import shutil
 
 class sequenceModels:
 
     def __init__(self, models_fasta):
 
         self.sequences = alignment.readFastaFile(models_fasta, replace_slash=True)
+        self.sequences_names = list(self.sequences.keys())
 
     def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
                        remove_extras=True):
@@ -54,3 +56,46 @@ class sequenceModels:
             jobs.append(command)
 
         return jobs
+
+    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder):
+        """
+        Copy models from an AlphaFold calculation to an specfied output folder.
+
+        Parameters
+        ==========
+        af_folder : str
+            Path to the Alpha fold folder calculation
+        output_folder : str
+            Path to the output folder where to store the models
+        """
+
+        # Get paths to models in alphafold folder
+        models_paths = {}
+        for d in os.listdir(af_folder+'output_models'):
+            mdir = af_folder+'output_models/'+d
+            for f in os.listdir(mdir):
+                if f.startswith('relaxed_model_1_ptm'):
+                    models_paths[d] = mdir+'/'+f
+
+        # Create output folder
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        for m in self:
+            if m in models_paths:
+                shutil.copyfile(models_paths[m], output_folder+'/'+m+'.pdb')
+            else:
+                print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
+
+    def __iter__(self):
+        #returning __iter__ object
+        self._iter_n = -1
+        self._stop_inter = len(self.sequences_names)
+        return self
+
+    def __next__(self):
+        self._iter_n += 1
+        if self._iter_n < self._stop_inter:
+            return self.sequences_names[self._iter_n]
+        else:
+            raise StopIteration
