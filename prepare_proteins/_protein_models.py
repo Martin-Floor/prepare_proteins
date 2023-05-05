@@ -460,24 +460,40 @@ chain to use for each model with the chains option.' % model)
             positions[model] = 0
             residue_ids[model] = {}
             for i,r in enumerate(self.structures[model].get_residues()):
+                if r.resname in ['HIE', 'HID', 'HIP']:
+                    resname = 'HIS'
+                elif r.resname == 'CYX':
+                    resname = 'CYS'
+                elif r.resname == 'ASH':
+                    resname = 'ASP'
+                elif r.resname == 'GLH':
+                    resname = 'GLU'
+                else:
+                    resname = r.resname
+
+                # Skip not protein residues
+                try:
+                    PDB.Polypeptide.three_to_one(resname)
+                except:
+                    continue
+
                 residue_ids[model][i+1] = r.id[1]
 
         # Gather sequence indexes for the given MSA index
         sequence_positions = {}
         for i in range(msa.get_alignment_length()):
-            # Count structure positions
+
+            # Get residue positions matching the MSA indexes
             for entry in msa:
 
-                if entry.id not in self.models_names:
-                    continue
                 sequence_positions.setdefault(entry.id, [])
 
                 if entry.seq[i] != '-':
                     positions[entry.id] += 1
 
-            # Get residue positions matching the MSA indexes
-            if i in msa_indexes:
-                for entry in msa:
+                if i in msa_indexes:
+
+                    # Check that ID is loaded in library as a model
                     if entry.id not in self.models_names:
                         continue
 
@@ -3020,6 +3036,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         Get the distances related to a protein and ligand docking.
         """
         distances = []
+
+        if prortein not in self.docking_distances:
+            return None
+
+        if ligand not in self.docking_distances[protein]:
+            return None
+
         for d in self.docking_distances[protein][ligand]:
             distances.append(d)
 
@@ -3948,12 +3971,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             print(1, self.models_paths)
                             pi += 1
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
-                        os.remove(best_model_tag+'.pdb')
-                        models.append(model)
-
                         if pi == 2:
                             print(2, self.models_paths)
                             pi += 1
+                        os.remove(best_model_tag+'.pdb')
+                        models.append(model)
+
+
 
         self.getModelsSequences()
 
