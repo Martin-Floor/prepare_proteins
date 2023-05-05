@@ -1810,7 +1810,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True):
+    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
         """
         Extract score values from a site map calculation.
          Parameters
@@ -1820,6 +1820,9 @@ make sure of reading the target sequences with the function readTargetSequences(
              setUpSiteMapForModels()
         failed_value : None, float or int
             The value to put in the columns of failed siteMap calculations.
+        output_models : str
+            Folder to combine models with sitemap points
+
         Returns
         =======
         sitemap_data : pandas.DataFrame
@@ -1893,7 +1896,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         sitemap_data['Target Residue'] = []
         sitemap_data['Pocket'] = []
 
+        input_folder = sitemap_folder+'/input_models'
         output_folder = sitemap_folder+'/output_models'
+
+        if output_models:
+            if not os.path.exists(output_models):
+                os.mkdir(output_models)
+
         for m in os.listdir(output_folder):
             for r in os.listdir(output_folder+'/'+m):
                 if os.path.isdir(output_folder+'/'+m+'/'+r):
@@ -1928,6 +1937,24 @@ make sure of reading the target sequences with the function readTargetSequences(
                     for l in pocket_data:
                         sitemap_data.setdefault(l, [])
                         sitemap_data[l].append(pocket_data[l])
+
+                    if output_models:
+                        print('Storing Volume Points models at %s' % output_models)
+                        input_file = input_folder+'/'+m+'.pdb'
+                        volpoint_file = output_folder+'/'+m+'/'+r+'/'+m+'_site_1_volpts.pdb'
+                        if os.path.exists(volpoint_file):
+
+                            istruct = _readPDB(m+'_input', input_file)
+                            imodel = [x for x in istruct.get_models()][0]
+                            vstruct = _readPDB(m+'_volpts', volpoint_file)
+                            vpt_chain = PDB.Chain.Chain('V')
+                            for r in vstruct.get_residues():
+                                vpt_chain.add(r)
+                            imodel.add(vpt_chain)
+
+                            _saveStructureToPDB(istruct, output_models+'/'+m+'_vpts.pdb')
+                        else:
+                            print('Volume points PDB not found for model %s and residue %s' % (m, r))
 
         sitemap_data = pd.DataFrame(sitemap_data)
         sitemap_data.set_index(['Model', 'Target Residue', 'Pocket'], inplace=True)
