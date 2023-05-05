@@ -10,6 +10,7 @@ from multiprocessing import Pool, cpu_count
 parser = argparse.ArgumentParser()
 parser.add_argument('rosetta_folder', help='Path to json file containing the atom pairs to calculate distances.')
 parser.add_argument('--atom_pairs', help='Path to json file containing the atom pairs to calculate distances.')
+parser.add_argument('--models', help='Comma separated (no spaces) list of models to process')
 parser.add_argument('--energy_by_residue', action='store_true', default=False, help='Get energy by residue information?')
 parser.add_argument('--interacting_residues', action='store_true', default=False, help='Calculate interacting neighbour residues')
 parser.add_argument('--protonation_states', action='store_true', default=False, help='Get the protonation states of a group of tritable residues.')
@@ -20,7 +21,7 @@ parser.add_argument('--query_residues',
 parser.add_argument('--decompose_bb_hb_into_pair_energies', action='store_true', default=False,
                     help='Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the number of calculations, so is off by default).')
 
-
+# Store variables
 args=parser.parse_args()
 rosetta_folder = args.rosetta_folder
 atom_pairs = args.atom_pairs
@@ -32,6 +33,11 @@ binding_energy = args.binding_energy
 cpus = args.cpus
 if cpus != None:
     cpus = int(cpus)
+
+models = args.models
+if models != None:
+    models = [m for m in models.split(',')]
+
 query_residues = args.query_residues
 if query_residues != None:
     query_residues = [int(r) for r in query_residues.split(',')]
@@ -47,9 +53,23 @@ init('-mute all')
 # Get silent files
 silent_file = {}
 for model in os.listdir(rosetta_folder+'/output_models'):
+
+    if models != None:
+        if model not in models:
+            continue
+
     for f in os.listdir(rosetta_folder+'/output_models/'+model):
         if f.endswith('.out'):
             silent_file[model] = rosetta_folder+'/output_models/'+model+'/'+f
+
+if silent_file == {}:
+    message = 'No silent files were found in rosetta calculation folder %s!' % rosetta_folder
+    if models != []:
+        message += '\nGiven models:\n'
+        for m in models:
+            message += '\t'+m+'\n'
+    raise ValueError(message)
+
 
 # Check if params were given
 params = None
