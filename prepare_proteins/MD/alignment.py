@@ -3,7 +3,7 @@ import mdtraj as md
 
 def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
                                        chain_indexes=None, trajectory_chain_indexes=None,
-                                       reference_chain_indexes=None, aligment_mode='exact',
+                                       reference_chain_indexes=None, aligment_mode='aligned',
                                        reference_residues=None):
     """
     Align two trajectories based on a sequence alignment of specific chains. The
