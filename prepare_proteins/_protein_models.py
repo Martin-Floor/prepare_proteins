@@ -64,7 +64,7 @@ class proteinModels:
     """
 
     def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False,
-                 verbose=False, only_models=None):
+                 verbose=False, only_models=None, exclude_models=None):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -85,13 +85,25 @@ class proteinModels:
 
         if only_models == None:
             only_models = []
+
         elif isinstance(only_models, str):
             only_models = [only_models]
+
         elif not isinstance(only_models, (list, tuple, set)):
             raise ValueError('You must give models as a list or a single model as a string!')
 
+        if exclude_models == None:
+            exclude_models = []
+
+        elif isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+
+        elif not isinstance(exclude_models, (list, tuple, set)):
+            raise ValueError('You must give excluded models as a list or a single model as a string!')
+
         self.models_folder = models_folder
-        self.models_paths = self._getModelsPaths(only_models=only_models)
+        self.models_paths = self._getModelsPaths(only_models=only_models,
+                                                 exclude_models=exclude_models)
         self.models_names = [] # Store model names
         self.structures = {} # structures are stored here
         self.sequences = {} # sequences are stored here
@@ -114,7 +126,7 @@ class proteinModels:
                 print('Reading model: %s' % model)
 
             self.models_names.append(model)
-            self.readModelFromPDB(model, self.models_paths[model])
+            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True)
 
         if get_sequences:
             # Get sequence information based on stored structure objects
@@ -304,7 +316,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     residues[-1].add(oxt)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
-                         atom_mapping=None):
+                         atom_mapping=None, add_to_path=False):
         """
         Adds a model from a PDB file.
 
@@ -341,7 +353,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             # Update conect lines
             self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
-        self.models_paths[model] = pdb_file
+        if add_to_path:
+            self.models_paths[model] = pdb_file
 
         return self.structures[model]
 
@@ -726,8 +739,8 @@ chain to use for each model with the chains option.' % model)
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
 
             # Correct B-factors outside the -10 to 100 range accepted ny mdtraj
-            bfactors = np.where(bfactors>100.0, 99.99, bfactors)
-            bfactors = np.where(bfactors<-10.0, -9.99, bfactors)
+            bfactors = np.where(bfactors>=100.0, 99.99, bfactors)
+            bfactors = np.where(bfactors<=-10.0, -9.99, bfactors)
 
             traj.save(output_folder+'/'+model+'.pdb', bfactors=bfactors)
 
@@ -1533,7 +1546,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '-HOST localhost '
             command += '-TMPLAUNCHDIR '
             command += '-WAIT\n'
-
             command += 'cd ../..\n'
 
             jobs.append(command)
@@ -4290,7 +4302,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         if os.path.exists(optimization_folder+'/params'):
             params = optimization_folder+'/params'
 
-        pi = 1
         for d in os.listdir(optimization_folder+'/output_models'):
             if os.path.isdir(optimization_folder+'/output_models/'+d):
                 for f in os.listdir(optimization_folder+'/output_models/'+d):
@@ -4310,13 +4321,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += ' -extra_res_path '+params+' '
                         command += ' -tags '+best_model_tag
                         os.system(command)
-                        if pi == 1:
-                            print(1, self.models_paths)
-                            pi += 1
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
-                        if pi == 2:
-                            print(2, self.models_paths)
-                            pi += 1
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
@@ -4869,7 +4874,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         atoms[index] = _atom
         return atoms
 
-    def _getModelsPaths(self, only_models=None):
+    def _getModelsPaths(self, only_models=None, exclude_models=None):
         """
         Get PDB models paths in the models_folder attribute
 
@@ -4887,6 +4892,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if only_models != []:
                     if pdb_name not in only_models:
+                        continue
+
+                if exclude_models != []:
+                    if pdb_name in exclude_models:
                         continue
 
                 paths[pdb_name] = self.models_folder+'/'+d
