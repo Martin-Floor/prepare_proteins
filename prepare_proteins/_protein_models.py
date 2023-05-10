@@ -119,6 +119,9 @@ class proteinModels:
         self.conects = {} # Store the conection inforamtion for each model
         self.covalent = {} # Store covalent residues
 
+        self.distance_data = {}
+        self.models_data = {}
+
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
 
@@ -3406,7 +3409,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             return None
 
-    def calculateModelsDistances(self, atom_pairs):
+    def calculateModelsDistances(self, atom_pairs, verbose=False):
         """
         Calculate models distances for a set of atom pairs.
 
@@ -3420,34 +3423,32 @@ make sure of reading the target sequences with the function readTargetSequences(
             Atom pairs to calculate for each model
         """
 
-        self.distance_data = {}
-        self.distance_data['model'] = []
-
         ### Add all label entries to dictionary
         for model in self.structures:
+            self.distance_data[model] = {}
+            self.distance_data[model]['model'] = []
+
             for d in atom_pairs[model]:
                 # Generate label for distance
                 label = 'distance_'
                 label += '_'.join([str(x) for x in d[0]])+'-'
                 label += '_'.join([str(x) for x in d[1]])
-                if label not in self.distance_data:
-                    self.distance_data[label] = []
+                self.distance_data[model].setdefault(label, [])
 
         for model in self.structures:
 
+            if verbose:
+                print('Calculating distances for model %s' % model)
 
-            self.distance_data['model'].append(model)
+            self.distance_data[model]['model'].append(model)
 
             # Get atoms in atom_pairs as dictionary
             atoms = {}
             for d in atom_pairs[model]:
                 for t in d:
-                    if t[0] not in atoms:
-                        atoms[t[0]] = {}
-                    if t[1] not in atoms[t[0]]:
-                        atoms[t[0]][t[1]] = []
-                    if t[2] not in atoms[t[0]][t[1]]:
-                        atoms[t[0]][t[1]].append(t[2])
+                    atoms.setdefault(t[0], {})
+                    atoms[t[0]].setdefault(t[1], [])
+                    atoms[t[0]][t[1]].append(t[2])
 
             # Get atom coordinates for each atom in atom_pairs
             coordinates = {}
@@ -3472,26 +3473,23 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Calculate distance
                 atom1 = d[0]
                 atom2 = d[1]
+
+                if atom1[2] not in coordinates[atom1[0]][atom1[1]]:
+                    raise ValueError('Atom name %s was not found in residue %s of chain %s' % (atom1[2], atom1[1], atom1[0]))
+                if atom2[2] not in coordinates[atom2[0]][atom2[1]]:
+                    raise ValueError('Atom name %s was not found in residue %s of chain %s' % (atom2[2], atom2[1], atom2[0]))
+
                 coord1 = coordinates[atom1[0]][atom1[1]][atom1[2]]
                 coord2 = coordinates[atom2[0]][atom2[1]][atom2[2]]
                 value = np.linalg.norm(coord1-coord2)
 
                 # Add data to dataframe
-                self.distance_data[label].append(value)
+                self.distance_data[model][label].append(value)
 
-            # Check length of each label
-            for label in self.distance_data:
-                if label not in ['model']:
-                    delta = len(self.distance_data['model'])-len(self.distance_data[label])
-                    for x in range(delta):
-                        self.distance_data[label].append(None)
-
-        self.distance_data = pd.DataFrame(self.distance_data)
-        self.distance_data.set_index('model', inplace=True)
+            self.distance_data[model] = pd.DataFrame(self.distance_data[model])
+            self.distance_data[model].set_index('model', inplace=True)
 
         return self.distance_data
-
-
 
     def getModelDistances(self, model):
         """
@@ -3505,7 +3503,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             model name
         """
 
-        model_data = self.distance_data[self.distance_data.index == model]
+        model_data = self.distance_data[model]
         distances = []
         for d in model_data:
             if 'distance_' in d:
@@ -3534,28 +3532,29 @@ make sure of reading the target sequences with the function readTargetSequences(
             Dictionary defining which distances will be combined under a common name.
             (for details see above).
         """
+
+        if self.models_data == {}:
+            self.models_data['model'] = [m for m in self]
+
         for name in metric_distances:
-            if 'metric_'+name in self.distance_data.keys() and not overwrite:
+
+            if 'metric_'+name in self.models_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
             else:
                 values = []
                 models = []
 
-                for model in self.models_names:
-                    mask = []
-                    for index in self.distance_data.index:
-                        if model == index:
-                            mask.append(True)
-                        else:
-                            mask.append(False)
-
-                    model_data = self.distance_data[mask]
+                for model in self:
+                    model_data = self.distance_data[model]
                     model_distances = metric_distances[name][model]
                     values += model_data[model_distances].min(axis=1).tolist()
 
-                self.distance_data['metric_'+name] = values
+                self.models_data['metric_'+name] = values
 
-        return self.distance_data
+        self.models_data = pd.DataFrame(self.models_data)
+        self.models_data.set_index('model', inplace=True)
+
+        return self.models_data
 
     def getModelsProtonationStates(self, residues=None):
         """
