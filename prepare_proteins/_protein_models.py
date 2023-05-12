@@ -1671,13 +1671,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10, enclosure=0.5,
                              maxvdw=1.1, resolution='fine', reportsize=100, overwrite=False,
-                             maxdist=8.0, sidechain=True):
+                             maxdist=8.0, sidechain=True, only_models=None):
         """
         Generates a SiteMap calculation for model poses (no ligand) near specified residues.
         Parameters
         ==========
         job_folder : str
             Path to the calculation folder
+        target_residues : list
+            List of atoms (chain_id, index) for which to calculate sitemap pockets
         """
 
         # Create site map job folders
@@ -1694,12 +1696,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         _copyScriptFile(job_folder, 'prepareForSiteMap.py')
         script_path = job_folder+'/._prepareForSiteMap.py'
 
-        # Save all input models
+        #Save all input models
         self.saveModels(job_folder+'/input_models')
 
         # Create input files
         jobs = []
         for model in self.models_names:
+
+            # Skip models not in only_models list
+            if only_models != None:
+                if model not in only_models:
+                    continue
 
             # Create an output folder for each model
             output_folder = job_folder+'/output_models/'+model
@@ -1717,21 +1724,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '--protein_only '
                 os.system(command)
 
-            if isinstance(target_residues, dict):
-                tr = target_residues[model]
-            elif isinstance(target_residues, (list, tuple)):
-                tr = target_residues
+            if not isinstance(target_residues, dict):
+                raise ValueError('Problem: target_residues must be a dictionary!')
 
-            # If single integer is given make it a list
-            if isinstance(tr, int):
-                tr = [tr]
+            elif isinstance(target_residues[model], tuple):
+                target_residues[model] = [target_residues[model]]
 
-            for r in tr:
-                if not os.path.exists(output_folder+'/'+str(r)):
-                    os.mkdir(output_folder+'/'+str(r))
+            for r in target_residues[model]:
+
+                label = ''.join([str(x) for x in r])
+
+                # Create folder
+                if not os.path.exists(output_folder+'/'+label):
+                    os.mkdir(output_folder+'/'+label)
 
                 # Add site map command
-                command = 'cd '+job_folder+'/output_models/'+model+'/'+str(r)+'\n'
+                command = 'cd '+job_folder+'/output_models/'+model+'/'+label+'\n'
                 command += '"${SCHRODINGER}/sitemap" '
                 command += '-j '+model+' '
                 command += '-prot ../'+model+'_protein.mae'+' '
@@ -1743,7 +1751,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # command += '-enclosure '+str(enclosure)+' '
                 # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
-                command += '-siteasl \"res.num {'+str(r)+'}'
+                command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
                 if sidechain:
                     command += ' and not (atom.pt ca,c,n,h,o)'
                 command += '\" '
@@ -1844,7 +1852,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             Site map pocket information.
         """
 
-        def parseVolumeInfo(eval_log):
+        def parseVolumeInfo(log_file):
             """
             Parse eval log file for site scores.
             Parameters
@@ -1856,7 +1864,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             pocket_data : dict
                 Scores for the given pocket
             """
-            with open(eval_log) as lf:
+            with open(log_file) as lf:
                 c = False
                 for l in lf:
                     if l.startswith('SiteScore'):
@@ -1902,7 +1910,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             found = True
             with open(log_file) as lf:
                 for l in lf:
-                    if 'No sites found' in l:
+                    if 'No sites found' in l or 'no sites were found' in l:
                         found = False
             return found
 
