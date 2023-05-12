@@ -2917,7 +2917,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chain='L',replicas=1):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,temperature=298.15,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chains=['L'],replicas=1):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2946,7 +2946,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         class chainSelect(PDB.Select):
             def accept_chain(self,chain):
-                if chain.get_id() == ligand_chain:
+                if chain.get_id() in ligand_chains:
                     return False
                 else:
                     return True
@@ -2987,8 +2987,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
-                if line.strip().startswith('nsteps'):
-                    line = 'nsteps = '+ str(int(sim_time*250000/frags)) + '\n' # with an integrator of 0.004fs
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
@@ -2998,12 +2998,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 sys.stdout.write(line)
@@ -3012,12 +3016,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for model in self.models_names:
                 protein = model.split(separator)[0]
-                ligand_name = model.split(separator)[1].replace('.pdb','')
+                #ligand_name = model.split(separator)[1].replace('.pdb','')
 
 
                 # Create additional folders
                 if not os.path.exists(md_folder+'/input_models/'+model):
                     os.mkdir(md_folder+'/input_models/'+model)
+
+                if not os.path.exists(md_folder+'/output_models/'+model):
+                    os.mkdir(md_folder+'/output_models/'+model)
 
                 for i in range(replicas):
                     if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)):
@@ -3028,11 +3035,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 gmx_codes = []
 
+                ligand_res = {}
+
                 for mdl in structure:
                     for chain in mdl:
                         for residue in chain:
-                            if chain.get_id() == ligand_chain:
-                                ligand_res = residue.resname
+                            if chain.get_id() in ligand_chains:
+                                ligand_res[chain.get_id()] = residue.resname
                             HD1 = False
                             HE2 = False
                             if residue.resname == 'HIS':
@@ -3064,24 +3073,77 @@ make sure of reading the target sequences with the function readTargetSequences(
                 io.set_structure(structure)
                 io.save(md_folder+'/input_models/'+model+'/protein.pdb',chainSelect())
 
+                ligand_coords = {}
                 for chain in pdb_chains:
-                    if chain.get_id() == ligand_chain:
-                        ligand_coords = [a.coord for a in chain.get_atoms()]
+                    if chain.get_id() in ligand_chains:
+                        ligand_coords[chain.get_id()] = [a.coord for a in chain.get_atoms()]
                         io.set_structure(chain)
-                        io.save(md_folder+'/input_models/'+model+'/ligand.pdb')
+                        io.save(md_folder+'/input_models/'+model+'/'+ligand_res[chain.get_id()]+'.pdb')
 
-                if ligand_name not in os.listdir(md_folder+'/ligand_params'):
-                    os.mkdir(md_folder+'/ligand_params/'+ligand_name)
-                    shutil.copyfile(md_folder+'/input_models/'+model+'/ligand.pdb', md_folder+'/ligand_params/'+ligand_name+'/ligand.pdb')
-                    os.chdir(md_folder+'/ligand_params/'+ligand_name)
-                    os.system('acpype -i ligand.pdb')
-                    os.chdir('../../..')
+                for lig_chain,ligand_name in ligand_res.items():
+                    if ligand_name not in os.listdir(md_folder+'/ligand_params'):
+                        os.mkdir(md_folder+'/ligand_params/'+ligand_name)
+                        shutil.copyfile(md_folder+'/input_models/'+model+'/'+ligand_name+'.pdb', md_folder+'/ligand_params/'+ligand_name+'/'+ligand_name+'.pdb')
+                        os.chdir(md_folder+'/ligand_params/'+ligand_name)
+                        os.system('acpype -i '+ligand_name+'.pdb')
 
-                ligand_structure = parser.get_structure('ligand',md_folder+'/ligand_params/'+ligand_name+'/ligand.acpype/ligand_NEW.pdb')
-                for i,atom in enumerate(ligand_structure.get_atoms()):
-                    atom.coord = ligand_coords[i]
-                io.set_structure(ligand_structure)
-                io.save(md_folder+'/input_models/'+model+'/ligand.pdb')
+                        f = open(ligand_name+'.acpype/'+ligand_name+'_GMX.itp')
+                        lines = f.readlines()
+                        atomtypes_lines = []
+                        new_lines = []
+                        atomtypes = False
+                        atoms = False
+                        for i,l in enumerate(lines):
+                            if atomtypes:
+                                if l.startswith('[ moleculetype ]'):
+                                    new_lines.append(l)
+                                    atomtypes = False
+                                else:
+                                    #print(l[:-1])
+                                    spl = l.split()
+                                    if spl != []:
+                                        spl[0] = ligand_name+spl[0]
+                                        spl[1] = ligand_name+spl[1]
+                                        atomtypes_lines.append(' '.join(spl))
+                            elif atoms:
+                                if l.startswith('[ bonds ]'):
+                                    new_lines.append(l)
+                                    atoms = False
+                                else:
+                                    spl = l.split()
+                                    if spl != []:
+                                        spl[1] = ligand_name+spl[1]
+                                        new_lines.append(' '.join(spl)+'\n')
+                            else:
+                                new_lines.append(l)
+
+                            if l.startswith(';name'):
+                                if lines[i-1].startswith('[ atomtypes ]'):
+                                    atomtypes = True
+
+                            elif l.startswith(';'):
+                                if lines[i-1].startswith('[ atoms ]'):
+                                    atoms = True
+
+
+                        with open('../atomtypes.itp','a') as f:
+                            f.write('[ atomtypes ]\n')
+                            for line in atomtypes_lines:
+                                f.write(line+'\n')
+
+                        with open(ligand_name+'.acpype/'+ligand_name+'_GMX.itp','w') as f:
+                            for line in new_lines:
+                                if not line.startswith('[ atomtypes ]'):
+                                    f.write(line)
+
+                        os.chdir('../../..')
+                        #####
+
+                    ligand_structure = parser.get_structure('ligand',md_folder+'/ligand_params/'+ligand_name+'/'+ligand_name+'.acpype/'+ligand_name+'_NEW.pdb')
+                    for i,atom in enumerate(ligand_structure.get_atoms()):
+                        atom.coord = ligand_coords[lig_chain][i]
+                    io.set_structure(ligand_structure)
+                    io.save(md_folder+'/input_models/'+model+'/'+ligand_name+'.pdb')
 
                 for i in range(replicas):
 
@@ -3093,21 +3155,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                         ### changes ###
                         #command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/model.pdb'+'\n'
                         command += 'cp input_models/'+model+'/protein.pdb output_models/'+model+'/'+str(i)+'/topol/protein.pdb'+'\n'
-                        command += 'cp -r ligand_params/'+ligand_name+'/ligand.acpype output_models/'+model+'/'+str(i)+'/topol/'+'\n'
+                        command += 'cp ligand_params/atomtypes.itp output_models/'+model+'/'+str(i)+'/topol/atomtypes.itp'+'\n'
+                        for ligand_name in ligand_res.values():
+                            command += 'cp -r ligand_params/'+ligand_name+'/'+ligand_name+'.acpype output_models/'+model+'/'+str(i)+'/topol/'+'\n'
                         command += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
-
+                        lig_files = ''
+                        for ligand_name in ligand_res.values():
+                            lig_files += ' ../../../../input_models/'+model+'/'+ligand_name+'.pdb '
                         command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
-                        command += 'grep -h ATOM prot.pdb ../../../../input_models/'+model+'/ligand.pdb >| complex.pdb'+'\n'
+                        command += 'grep -h ATOM prot.pdb '+lig_files+' >| complex.pdb'+'\n'
                         command += command_name+' editconf -f complex.pdb -o complex.gro'+'\n'
-                        command += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a #include "ligand.acpype\/ligand_GMX.itp"\\n#ifdef POSRES\\n#include "ligand.acpype\/posre_ligand.itp"\\n#endif\' topol.top'+'\n'
-                        #\'/^#include "amber99sb-star-ildn.ff\/forcefield.itp"*/a \\n#include "'+ligand+'.acpype\/'+ligand+'_GMX.itp"\n#ifdef POSRES\n#include "'+ligand+'.acpype\/posre_'+ligand+'.itp"\n#endif\'
+                        line = ''
+                        line +=  '#include "atomtypes.itp"\\n'
+                        for ligand_name in ligand_res.values():
+                            line += '#include "'+ligand_name+'.acpype\/'+ligand_name+'_GMX.itp"\\n'
+                        line += '#ifdef POSRES\\n'
+                        for ligand_name in ligand_res.values():
+                            line += '#include "'+ligand_name+'.acpype\/posre_'+ligand_name+'.itp"\\n'
+                        line += '#endif\''
 
-                        command += 'sed -i -e \'$a'+'ligand'.ljust(20)+'1'+'\' topol.top'+'\n'
+                        command += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a '+line+' topol.top'+'\n'
+                        #\'/^#include "amber99sb-star-ildn.ff\/forcefield.itp"*/a \\n#include "'+ligand+'.acpype\/'+ligand+'_GMX.itp"\n#ifdef POSRES\n#include "'+ligand+'.acpype\/posre_'+ligand+'.itp"\n#endif\'
+                        for ligand_name in ligand_res.values():
+                            command += 'sed -i -e \'$a'+ligand_name.ljust(20)+'1'+'\' topol.top'+'\n'
                         #command += 'echo q | gmx make_ndx -f '+ligand+'.acpype/'+ligand+'_GMX.gro -o ligand_index.ndx'
                         #command += 'echo q | gmx make_ndx -f complex.pdb -o index.ndx'
 
                         #print(command)
-                        #asda
 
                         command += command_name+' editconf -f complex.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
                         command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
@@ -3118,10 +3192,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         ####
 
                         command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+                        for ligand_name in ligand_res.values():
+                            command += 'echo -e "0 & ! a H*\\nq"| '+command_name+' make_ndx -f  '+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -o '+ligand_name+'_index.ndx'+'\n'
 
-
-                        command += 'echo -e "0 & ! a H*\\nq"| '+command_name+' make_ndx -f  ligand.acpype/ligand_GMX.gro -o ligand_index.ndx'+'\n'
-                        command += 'echo -e "1|13\\nq"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n'
+                        lig_selectors = '1|'
+                        for i in range(len(ligand_res.values())):
+                            lig_selectors += str(13+i)+'|'
+                        command += 'echo -e "'+lig_selectors[:-1]+'\\nq"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n'
 
 
                         command += 'cd ..'+'\n'
@@ -3142,9 +3219,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'mkdir nvt'+'\n'
                         command += 'cd nvt'+'\n'
                         command += 'cp -r ../../../../scripts/nvt.mdp .'+'\n'
-                        command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' nvt.mdp'+'\n'
-
-                        command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp -fc 1000 1000 1000'+'\n'
+                        command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+'_'.join(ligand_res.values())+' Water_and_ions\' nvt.mdp'+'\n'
+                        for ligand_name in ligand_res.values():
+                            command += 'echo 3 | '+command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/posre_'+ligand_name+'.itp -fc 1000 1000 1000'+'\n'
                         command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
 
                         command += command_name+' grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx'+'\n'
@@ -3158,7 +3235,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'cd npt'+'\n'
 
                     command += 'cp -r ../../../../scripts/npt.mdp .'+'\n'
-                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' npt.mdp'+'\n'
+                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+'_'.join(ligand_res.values())+' Water_and_ions\' npt.mdp'+'\n'
 
                     for i in range(len(FClist)+1):
                         if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/npt/prot_npt_'+str(i+1)+'.tpr'):
@@ -3166,7 +3243,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += command_name+' grompp -f npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro -n ../topol/index.ndx'+'\n'
                                 command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
                             else:
-                                command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                for ligand_name in ligand_res.values():
+                                    command += 'echo 3 | '+command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/'+ligand_name+'_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
                                 command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx'+'\n'
 
                                 command += command_name+' grompp -f npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro -n ../topol/index.ndx'+'\n'
@@ -3180,7 +3258,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'cd md'+'\n'
 
                     command += 'cp -r ../../../../scripts/md.mdp .'+'\n'
-                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' md.mdp'+'\n'
+                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+'_'.join(ligand_res.values())+' Water_and_ions\' md.mdp'+'\n'
 
                     for i in range(1,frags+1):
                         if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'.xtc'):
