@@ -454,6 +454,9 @@ chain to use for each model with the chains option.' % model)
             Residue indexes for each protein at the MSA positions
         """
 
+        if isinstance(msa_indexes, int):
+            msa_indexes = [msa_indexes]
+
         if models == None:
             models = []
         elif isinstance(models, str):
