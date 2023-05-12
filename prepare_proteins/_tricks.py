@@ -13,7 +13,7 @@ class tricks:
     useful.
     """
 
-    def getProteinLigandInputFiles(pele_folder, protein, ligand, separator='-'):
+    def getProteinLigandInputFiles(self, pele_folder, protein, ligand, separator='-'):
         """
         Returns the paths of the input PDB files of a PELE simulation folder
         for a specific protein and ligand.
@@ -40,7 +40,7 @@ class tricks:
 
         return pdb_files
 
-    def changeResidueAtomNames(input_pdb, residue, atom_names):
+    def changeResidueAtomNames(self, input_pdb, residue, atom_names):
         """
         Change the atom names of a specific residue in a pdb file.
 
@@ -81,7 +81,7 @@ class tricks:
             if not found[atom]:
                 print('Given atom %s was not found in residue %s' % (atom, residue))
 
-    def displaceLigandAtomNames(input_pdb, atom, alignment='right', verbose=False):
+    def displaceLigandAtomNames(self, input_pdb, atom, alignment='right', verbose=False):
         """
         Displace the name of the ligand atom name in the PDB.
 
@@ -113,7 +113,7 @@ class tricks:
                     tmp.write(l)
         shutil.move(input_pdb + '.tmp', input_pdb)
 
-    def displaceResidueAtomNames(input_pdb, atom, alignment='right'):
+    def displaceResidueAtomNames(self, input_pdb, atom, alignment='right'):
         """
         Displace the name of the atom name of a specific residue in the PDB.
 
@@ -250,6 +250,7 @@ class tricks:
             for node2 in dist_pdb[node1]:
                 # matrix_pdb_an[node1[0]][node1].add(f"{dist_pdb[node1][node2]}{node2[0]}")
                 matrix_pdb_an[node1[0]][node1].append(f"{dist_pdb[node1][node2]}{node2[0]}")
+            sorted(matrix_pdb_an[node1[0]][node1])
 
         return matrix_pdb_an
 
@@ -285,15 +286,15 @@ class tricks:
 
         # For connections signatures
         equi = []
-        dist_ros = list(df_rosetta.loc[(df_rosetta['AnSource'] == ros_an)]['Dist']) +\
+        dist_ros = list(df_rosetta.loc[(df_rosetta['AnSource'] == ros_an)]['Dist']) + \
                    list(df_rosetta.loc[(df_rosetta['AnTarget'] == ros_an)]['Dist'])
         for an in pel_ans:
-            dist_pele = list(df_pele.loc[(df_pele['AnSource'] == an)]['Dist']) +\
+            dist_pele = list(df_pele.loc[(df_pele['AnSource'] == an)]['Dist']) + \
                         list(df_pele.loc[(df_pele['AnTarget'] == an)]['Dist'])
             if ros_an_bounds_elem == pele_an_bounds_elem[an] and dist_pele == dist_ros:
                 equi.append(an)
 
-        return equi[0]
+        return equi[0] if len(equi) == 1 else pel_ans
 
     def mapPeleToRosettaParams(self, paramsRosetta, paramsPele, chain):
         """
@@ -314,8 +315,8 @@ class tricks:
             Dictionary with the mapped atom names
 
         """
-        df_pele = self._getBondPele(paramsPele, chain)
-        df_rosetta = self._getBondRosetta(paramsRosetta)
+        df_pele = self._getBondPele(paramsPele, chain).sort_index()
+        df_rosetta = self._getBondRosetta(paramsRosetta).sort_index()
         matrix_pele = self._getBondTopology(df_pele)
         matrix_rosetta = self._getBondTopology(df_rosetta)
 
@@ -338,11 +339,18 @@ class tricks:
         # Correct the atoms that have symmetry
         # Dict[rosetta_an] = pele_an
         prev_pel_an = ''
+        not_mapped = {}
         count = 0
         for ros_an in equival.keys():
             # If atoms have more than one equivalent
             if len(equival[ros_an]) > 1:
                 pel_an = self._mapSymmetrycal(ros_an, equival[ros_an], df_pele, df_rosetta)
+                if isinstance(pel_an, list):
+                    not_mapped[ros_an] = equival[ros_an].copy()
+                    shallow_copy = dict(equival)
+                    del shallow_copy[ros_an]
+                    equival = shallow_copy
+                    continue
                 # If the previous atom name equivalent is the same choose one, because is not important
                 if pel_an == prev_pel_an:
                     count += 1
@@ -353,21 +361,21 @@ class tricks:
                 count = 0
                 equival[ros_an] = equival[ros_an][0]
 
-        notMapped = []
-        for rosetta_elem in matrix_rosetta:
-            for rosetta_an in matrix_rosetta[rosetta_elem]:
-                if rosetta_an not in equival.keys():
-                    notMapped.append(rosetta_an)
-
-        if not len(notMapped) == 0:
-            print("The following atoms are not mapped:")
-            print(notMapped)
+        if not len(not_mapped) == 0:
+            msg = "The following atoms are not mapped, should be revised manualy:\n"
+            msg += f"{not_mapped}\n"
+            msg += "Will try to assign names by name similarity\n"
+            print(msg)
+            for ros_an in not_mapped.keys():
+                if ros_an in not_mapped[ros_an]:
+                    not_mapped[ros_an] = ros_an
+            equival = {**equival, **not_mapped}
         else:
             print("All atoms are mapped")
 
         return equival
 
-    def _readPELECharges(self, pele_params):
+    def _readPELECharges(self, pele_params, ligand):
         """
         Read the PELE charges from the pele params file
 
@@ -389,7 +397,7 @@ class tricks:
             nb = False
             count = 1
             for l in pele:
-                if l.startswith('HEM'):
+                if l.startswith(ligand):
                     total_an = int(l.split()[1])
                 if l.split()[0] == '1':
                     an = True
@@ -405,7 +413,6 @@ class tricks:
                 if nb:
                     atom_name = atom_names[int(l.split()[0])].replace('_', '')
                     charges[atom_name] = float(l.split()[3])
-
             tc = 0
             for atom in charges:
                 tc += charges[atom]
@@ -468,7 +475,8 @@ class tricks:
                         l = ' '.join(l) + '\n'
                     tmp.write(l)
             shutil.move(params_file + '.tmp', params_file)
-    def getPELEChargesIntoParams(self, rosetta_params, pele_params, ligand=None):
+
+    def getPELEChargesIntoParams(self, rosetta_params, pele_params, mapping, ligand=None):
         """
         Get the pele charges to the rosetta params file
         Parameters
@@ -481,8 +489,11 @@ class tricks:
             Dictionary with the mapping of the atoms
 
         """
+        if ligand == None:
+            ligand = os.path.basename(rosetta_params).rstrip(".params")
+
         # Get PELE charges
-        pele_charges = self._readPELECharges(pele_params)
+        pele_charges = self._readPELECharges(pele_params, ligand)
         rosetta_charges = self._readRosettaCharges(rosetta_params)
 
         pele_atoms = set(pele_charges.keys())
@@ -490,9 +501,6 @@ class tricks:
 
         unassigned_pele_atoms = pele_atoms - pele_atoms.intersection(rosetta_atoms)
         unassigned_rosetta_atoms = rosetta_atoms - rosetta_atoms.intersection(pele_atoms)
-
-        if ligand == None:
-            ligand = os.path.basename(rosetta_params).rstrip(".params")
 
         mapping = self.mapPeleToRosettaParams(rosetta_params, pele_params, ligand)
 
@@ -516,3 +524,4 @@ class tricks:
                 new_charges[a] = pele_charges[a]
 
         self._updateParamsCharges(rosetta_params, new_charges)
+        print("Copied the charges from pele to rosetta")
