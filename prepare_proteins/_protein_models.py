@@ -319,7 +319,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     residues[-1].add(oxt)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
-                         atom_mapping=None, add_to_path=False):
+                         atom_mapping=None, add_to_path=False, conect_update=True):
         """
         Adds a model from a PDB file.
 
@@ -353,7 +353,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if covalent_check:
             self._checkCovalentLigands(model, pdb_file, atom_mapping=atom_mapping)
 
-            # Update conect lines
+        # Update conect lines
+        if conect_update:
             self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
         if add_to_path:
@@ -3622,7 +3623,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             (for details see above).
         """
 
-        if self.models_data == {}:
+        if isinstance(self.models_data, dict) and self.models_data == {}:
             self.models_data['model'] = [m for m in self]
 
         for name in metric_distances:
@@ -3943,7 +3944,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
                                        return_failed=False, covalent_check=True,
-                                       atom_mapping=None):
+                                       atom_mapping=None, conect_update=False):
         """
         Read structures from a Schrodinger calculation.
 
@@ -3971,7 +3972,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         model = f.replace('.pdb', '')
                         models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f,
-                                              covalent_check=covalent_check, atom_mapping=atom_mapping)
+                                              covalent_check=covalent_check, atom_mapping=atom_mapping,
+                                              conect_update=conect_update)
 
         self.getModelsSequences()
 
@@ -4197,7 +4199,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return distances
 
-    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False):
+    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False, rosetta_data=None):
         """
         Combine different equivalent distances contained in the self.distance_data
         attribute into specific named metrics. The function takes as input a
@@ -4219,18 +4221,21 @@ make sure of reading the target sequences with the function readTargetSequences(
             (for details see above).
         """
 
+        if rosetta_data == None:
+            rosetta_data = self.rosetta_data
+
         for name in metric_labels:
-            if 'metric_'+name in self.rosetta_data.keys() and not overwrite:
+            if 'metric_'+name in rosetta_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
 
             else:
                 values = []
-                for model in self.rosetta_data.index.levels[0]:
+                for model in rosetta_data.index.levels[0]:
                     model_distances = self.rosetta_distances[model]
                     md = model_distances[metric_labels[name][model]]
                     values += md.min(axis=1).tolist()
 
-                self.rosetta_data['metric_'+name] = values
+                rosetta_data['metric_'+name] = values
 
     def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
         """
