@@ -4199,7 +4199,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return distances
 
-    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False, rosetta_data=None):
+    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False, rosetta_data=None,
+                                          rosetta_distances=None):
         """
         Combine different equivalent distances contained in the self.distance_data
         attribute into specific named metrics. The function takes as input a
@@ -4223,6 +4224,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if isinstance(rosetta_data, type(None)):
             rosetta_data = self.rosetta_data
+        if isinstance(rosetta_distances, type(None)):
+            rosetta_distances = self.rosetta_distances
 
         for name in metric_labels:
             if 'metric_'+name in rosetta_data.keys() and not overwrite:
@@ -4231,7 +4234,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 values = []
                 for model in rosetta_data.index.levels[0]:
-                    model_distances = self.rosetta_distances[model]
+                    model_distances = rosetta_distances[model]
                     md = model_distances[metric_labels[name][model]]
                     values += md.min(axis=1).tolist()
 
