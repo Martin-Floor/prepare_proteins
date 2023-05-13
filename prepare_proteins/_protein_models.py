@@ -4221,7 +4221,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             (for details see above).
         """
 
-        if rosetta_data == None:
+        if isinstance(rosetta_data, type(None)):
             rosetta_data = self.rosetta_data
 
         for name in metric_labels:
