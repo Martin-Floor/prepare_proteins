@@ -4224,6 +4224,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if isinstance(rosetta_data, type(None)):
             rosetta_data = self.rosetta_data
+
         if isinstance(rosetta_distances, type(None)):
             rosetta_distances = self.rosetta_distances
 
@@ -4388,6 +4389,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             Is this a relax run?
         min_value : bool
             Grab the minimum score value. Set false to grab the maximum scored value.
+        tags : dict
+            The tag of a specific pose to be loaded for the given model. Each model
+            must have a single tag in the tags dictionary. If a model is not found
+            in the tags dictionary, normal processing will follow to select
+            the loaded pose.
+        wat_to_hoh : bool
+            Change water names from WAT to HOH when loading.
+        return_missing : bool
+            Return missing models from the optimization_folder.
         """
 
         executable = 'extract_pdbs.linuxgccrelease'
@@ -4403,6 +4413,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for f in os.listdir(optimization_folder+'/output_models/'+d):
                     if f.endswith('_relax.out'):
                         model = d
+
+                        # skip models not loaded into the library
+                        if model not in self.models_names:
+                            continue
+
                         scores = readSilentScores(optimization_folder+'/output_models/'+d+'/'+f)
                         if tags != None and model in tags:
                             print('Reading model %s from the given tag %s' % (model, tags[model]))
