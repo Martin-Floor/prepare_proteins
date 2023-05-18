@@ -878,6 +878,16 @@ chain to use for each model with the chains option.' % model)
         sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
                                                                weights_file=score_fxn_name)
 
+        # Create and append execution command
+        if mpi_command == None:
+            mpi_command = ''
+        elif mpi_command == 'slurm':
+            mpi_command = 'srun '
+        elif mpi_command == 'openmpi':
+            mpi_command = 'mpirun -np '+str(cpus)+' '
+        else:
+            mpi_command = mpi_command+' '
+
         for model in self.models_names:
 
             # Skip models not in given mutants
@@ -945,14 +955,6 @@ chain to use for each model with the chains option.' % model)
                     flags.addOption('in:file:extra_res_path', '../../params')
 
                 flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
-
-                # Create and append execution command
-                if mpi_command == None:
-                    mpi_command = ''
-                elif mpi_command == 'openmpi':
-                    mpi_command = 'mpirun -np '+str(cpus)+' '
-                else:
-                    mpi_command = mpi_command+' '
 
                 command = 'cd '+job_folder+'/output_models/'+model+'\n'
                 command += mpi_command+'rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
@@ -1987,6 +1989,66 @@ make sure of reading the target sequences with the function readTargetSequences(
         sitemap_data.set_index(['Model', 'Target Residue', 'Pocket'], inplace=True)
 
         return sitemap_data
+
+    def definePocketResiduesWithSiteMap(self, volpts_models, distance_to_points=2.5, only_models=None,
+                                    output_file=None, overwrite=False):
+        """
+        Calculates the active site residues based on the volume points from a sitemap
+        calcualtion. The models should be written with the option output_models from
+        the analiseSiteMapCalculation() function.
+
+        Parameters
+        ==========
+        volpts_models : str
+            Path to the folder where models containing the sitemap volume points residues.
+        only_models : (str, list)
+            Specific models to be processed, if None all the models loaded in this class
+            will be used
+        distance_to_points : float
+            The distance to consider a residue in contact with the volume point atoms.
+        output_file : str
+            Path the json output file to store the residue data
+        overwrite : bool
+            Overwrite json file if found? (essentially, calculate all again)
+        """
+
+        if output_file == None:
+            output_file = 'residues_'+volpts_models.split('/')[0]+'.json'
+
+        print(output_file)
+
+        if not os.path.exists(output_file) or overwrite:
+
+            residues = {}
+            for model in self:
+
+                # Skip models not in only_models list
+                if only_models != None:
+                    if model not in only_models:
+                        continue
+
+                # Check if the volume points model file exists
+                volpts_file = volpts_models+'/'+model+'_vpts.pdb'
+                if not os.path.exists(volpts_file):
+                    print('Model %s not found in the volume points folder %s!' % (model, volpts_models))
+
+                traj = md.load(volpts_file)
+                protein = traj.topology.select('protein and not resname vpt')
+                vpts = traj.topology.select('resname vpt')
+                n = md.compute_neighbors(traj, distance_to_points/10, vpts, haystack_indices=protein)
+                residues[model] = list(set([traj.topology.atom(i).residue.resSeq for i in n[0] if traj.topology.atom(i).is_sidechain]))
+
+            with open(output_file, 'w') as jf:
+                json.dump(residues, jf)
+
+        else:
+            with open(output_file) as jf:
+                residues = json.load(jf)
+
+        for model in residues:
+            residues[model] = np.array(list(residues[model]))
+
+        return residues
 
     def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
                                     only_ligands=None):
