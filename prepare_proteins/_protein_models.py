@@ -128,7 +128,7 @@ class proteinModels:
             if verbose:
                 print('Reading model: %s' % model)
 
-            self.models_names.append(model)
+            # self.models_names.append(model)
             self.readModelFromPDB(model, self.models_paths[model], add_to_path=True)
 
         if get_sequences:
@@ -338,6 +338,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         structure : Bio.PDB.Structure
             Structure object.
         """
+
+        if model not in self.models_names:
+            self.models_names.append(model)
+
         self.structures[model] = _readPDB(model, pdb_file)
 
         if wat_to_hoh:
@@ -827,6 +831,7 @@ chain to use for each model with the chains option.' % model)
                 os.system(command)
 
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
+                      executable='rosetta_scripts.mpi.linuxgccrelease',
                       param_files=None, mpi_command='slurm', cpus=None):
         """
         Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
@@ -957,7 +962,7 @@ chain to use for each model with the chains option.' % model)
                 flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
 
                 command = 'cd '+job_folder+'/output_models/'+model+'\n'
-                command += mpi_command+'rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
+                command += mpi_command+executable+' @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
                 command += 'cd ../../..\n'
                 jobs.append(command)
 
@@ -1991,7 +1996,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return sitemap_data
 
     def definePocketResiduesWithSiteMap(self, volpts_models, distance_to_points=2.5, only_models=None,
-                                    output_file=None, overwrite=False):
+                                        output_file=None, overwrite=False):
         """
         Calculates the active site residues based on the volume points from a sitemap
         calcualtion. The models should be written with the option output_models from
@@ -2013,9 +2018,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         if output_file == None:
-            output_file = 'residues_'+volpts_models.split('/')[0]+'.json'
-
-        print(output_file)
+            raise ValueError('An ouput file name must be given')
+        if not output_file.endswith('.json'):
+            output_file = output_file+'.json'
 
         if not os.path.exists(output_file) or overwrite:
 
@@ -4374,7 +4379,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return filtered_data
 
     def loadMutantsAsNewModels(self, mutants_folder, filter_score_term='score', tags=None,
-                               min_value=True, wat_to_hoh=True, keep_model_name=True):
+                               min_value=True, wat_to_hoh=True, keep_model_name=True, only_mutants=None):
         """
         Load the best energy models from a set of silent files inside a createMutants()
         calculation folder. The models are added to the list of models and do not replace
@@ -4393,6 +4398,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         executable = 'extract_pdbs.linuxgccrelease'
         models = []
 
+        if only_mutants == None:
+            only_mutants = []
+
+        if isinstance(only_mutants, str):
+            only_mutants = [only_mutants]
+
         # Check if params were given
         params = None
         if os.path.exists(mutants_folder+'/params'):
@@ -4405,6 +4416,12 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         model = d
                         mutant = f.replace(model+'_', '').replace('.out', '')
+
+                        # Read only given mutants
+                        if only_mutants != []:
+                            if mutant not in only_mutants and model+'_'+mutant not in only_mutants:
+                                continue
+
                         scores = readSilentScores(mutants_folder+'/output_models/'+d+'/'+f)
                         if tags != None and mutant in tags:
                             print('Reading mutant model %s from the given tag %s' % (mutant, tags[mutant]))
@@ -4424,7 +4441,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if keep_model_name:
                             mutant = model+'_'+mutant
 
-                        self.models_names.append(mutant)
+                        # self.models_names.append(mutant)
                         self.readModelFromPDB(mutant, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(mutant)
