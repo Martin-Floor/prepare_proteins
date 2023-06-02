@@ -531,6 +531,21 @@ def _calculateDistances(arguments):
         distances.setdefault(label, [])
 
         # Add atom pair distance
+        if pair[0][0] not in coordinates:
+            raise ValueError('Chain %s not found in pose %s' % (pair[0][0], tag))
+        elif pair[0][1] not in coordinates[pair[0][0]]:
+            raise ValueError('Residue %s not found in chain %s and pose %s' % (pair[0][1], pair[0][0], tag))
+        elif pair[0][2] not in coordinates[pair[0][0]][pair[0][1]]:
+            raise ValueError('Atom %s not found in residue %s of chain %s in pose %s' % (pair[0][2], pair[0][1], pair[0][0], tag))
+
+        if pair[1][0] not in coordinates:
+            raise ValueError('Chain %s not found in pose %s' % (pair[1][0], tag))
+        elif pair[1][1] not in coordinates[pair[1][0]]:
+            raise ValueError('Residue %s not found in chain %s and pose %s' % (pair[1][1], pair[1][0], tag))
+        elif pair[1][2] not in coordinates[pair[1][0]][pair[1][1]]:
+            raise ValueError('Atom %s not found in residue %s of chain %s in pose %s' % (pair[1][2], pair[1][1], pair[1][0], tag))
+
+        # Add atom pair distance
         c1 = coordinates[pair[0][0]][pair[0][1]][pair[0][2]]
         c2 = coordinates[pair[1][0]][pair[1][1]][pair[1][2]]
         distances[label] = np.linalg.norm(c1-c2)
