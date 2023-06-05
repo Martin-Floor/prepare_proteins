@@ -637,7 +637,7 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def removeTerminiByConfidenceScore(self, confidence_threshold=70, verbose=True):
+    def removeTerminiByConfidenceScore(self, confidence_threshold=70, verbose=True, keep_up_to=5):
         """
         Remove terminal regions with low confidence scores from models.
         """
@@ -681,6 +681,11 @@ chain to use for each model with the chains option.' % model)
 
             n_terminus = sorted(list(n_terminus))
             c_terminus = sorted(list(c_terminus))
+
+            if len(n_terminus) <= keep_up_to:
+                n_terminus = []
+            if len(c_terminus) <= keep_up_to:
+                c_terminus = []
 
             remove_this = []
             for c in self.structures[model].get_chains():
