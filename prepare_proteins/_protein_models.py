@@ -637,9 +637,14 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def removeTerminiByConfidenceScore(self, confidence_threshold=70, verbose=True, keep_up_to=5):
+    def removeTerminiByConfidenceScore(self, confidence_threshold=70.0, keep_up_to=5, verbose=True):
         """
         Remove terminal regions with low confidence scores from models.
+
+        confidence_threshold : float
+            AlphaFold confidence threshold to consider residues as having a low score.
+        keep_up_to : int
+            If any terminal region is no larger than this value it will be kept.
         """
 
         remove_models = set()
