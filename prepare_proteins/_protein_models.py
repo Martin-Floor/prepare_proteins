@@ -967,6 +967,154 @@ chain to use for each model with the chains option.' % model)
                 jobs.append(command)
 
         return jobs
+    
+    def createDisulfureBond(self, job_folder, cys_dic, nstruct=100, relax_cycles=0, cst_optimization=True,
+                      executable='rosetta_scripts.mpi.linuxgccrelease',
+                      param_files=None, mpi_command='slurm', cpus=None, remove_existing=False,repack=True,
+                      scorefxn="ref2015"):
+        """
+        Create Disulfure bonds from protein models. Cysteine residues must be given as a nested dictionary
+        with each protein as the first key and the name of the particular mutant as the second key.
+        The value of each inner dictionary is a list containing only one element string with the cisteine pairs with : separator.
+        It is recommended to use absolute pose positions.
+
+        The mover is ForceDisulfides
+
+        Parameters
+        ==========
+        job_folder : str
+            Folder path where to place the mutation job.
+        cys_dic : dict
+            Dictionary specify the cysteine bonds to generate. # It is better to use the pose numbering to avoid
+            problems with the chains. !!!!! IMPORTANT !!!!!! Adjust first the positions in a previous function
+            as in the case of mutate residue.
+
+        relax_cycles : int
+            Apply this number of relax cycles (default:0, i.e., no relax).
+        nstruct : int
+            Number of structures to generate when relaxing mutant
+        param_files : list
+            Params file to use when reading model with Rosetta.
+        """
+
+        # Check both residues are cysteine
+
+        mpi_commands = ['slurm', 'openmpi', None]
+        if mpi_command not in mpi_commands:
+            raise ValueError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
+
+        if mpi_command == 'openmpi' and not isinstance(cpus, int):
+            raise ValueError('')
+
+        # Create mutation job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+        if not os.path.exists(job_folder+'/flags'):
+            os.mkdir(job_folder+'/flags')
+        if not os.path.exists(job_folder+'/xml'):
+            os.mkdir(job_folder+'/xml')
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Save considered models
+        considered_models = list(cys_dic.keys())
+        self.saveModels(job_folder+'/input_models', models=considered_models)
+
+        jobs = []
+
+        # Create all-atom score function
+        score_fxn_name = 'ref2015'
+        sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
+                                                               weights_file=score_fxn_name)
+
+        # Create and append execution command
+        if mpi_command == None:
+            mpi_command = ''
+        elif mpi_command == 'slurm':
+            mpi_command = 'srun '
+        elif mpi_command == 'openmpi':
+            mpi_command = 'mpirun -np '+str(cpus)+' '
+        else:
+            mpi_command = mpi_command+' '
+
+        for model in self.models_names:
+
+            # Skip models not in given cys_dic
+            if model not in considered_models:
+                continue
+
+            if not os.path.exists(job_folder+'/output_models/'+model):
+                os.mkdir(job_folder+'/output_models/'+model)
+
+            # Iterate each mutant
+            for mutant in cys_dic[model]:
+
+                # Create xml mutation (and minimization) protocol
+                xml = rosettaScripts.xmlScript()
+                protocol = []
+
+                # Add score function
+                xml.addScorefunction(sfxn)
+
+                for m in cys_dic[model][mutant]:
+                    disulfide = rosettaScripts.movers.ForceDisulfides(name='disulfide_'+str(m[0]),
+                                                          disulfides=m[0],
+                                                          remove_existing=remove_existing,
+                                                          repack=repack,
+                                                          scorefxn=scorefxn)
+                    xml.addMover(disulfide)
+                    protocol.append(disulfide)
+
+                if relax_cycles:
+                    # Create fastrelax mover
+                    relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
+                    xml.addMover(relax)
+                    protocol.append(relax)
+                else:
+                    # Turn off more than one structure when relax is not performed
+                    nstruct = 1
+
+                # Set protocol
+                xml.setProtocol(protocol)
+
+                # Add scorefunction output
+                xml.addOutputScorefunction(sfxn)
+
+                # Write XMl protocol file
+                xml.write_xml(job_folder+'/xml/'+model+'_'+mutant+'.xml')
+
+                # Create options for minimization protocol
+                flags = rosettaScripts.flags('../../xml/'+model+'_'+mutant+'.xml',
+                                             nstruct=nstruct, s='../../input_models/'+model+'.pdb',
+                                             output_silent_file=model+'_'+mutant+'.out')
+
+                # Add relaxation with constraints options and write flags file
+                if cst_optimization and relax_cycles:
+                    flags.add_relax_cst_options()
+                else:
+                    flags.add_relax_options()
+
+                # Add path to params files
+                if param_files != None:
+                    if not os.path.exists(job_folder+'/params'):
+                        os.mkdir(job_folder+'/params')
+                    if isinstance(param_files, str):
+                        param_files = [param_files]
+                    for param in param_files:
+                        param_name = param.split('/')[-1]
+                        shutil.copyfile(param, job_folder+'/params/'+param_name)
+                    flags.addOption('in:file:extra_res_path', '../../params')
+
+                flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
+
+                command = 'cd '+job_folder+'/output_models/'+model+'\n'
+                command += mpi_command+executable+' @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
+                command += 'cd ../../..\n'
+                jobs.append(command)
+
+        return jobs
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
