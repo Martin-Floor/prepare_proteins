@@ -3401,8 +3401,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro') and remove_water == True:
                     os.system('echo 1 | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro')
 
-
-
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
                        skip_chains=False, return_failed=False, ignore_hydrogens=False,
                        separator='-', overwrite=True):
@@ -3453,7 +3451,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(docking_folder+'/.analysis/atom_pairs')
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
-        _copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
+        prepare_proteins._copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
         script_path = docking_folder+'/.analysis/._analyse_docking.py'
 
         # Write protein_atoms dictionary to json file
@@ -3466,14 +3464,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(docking_folder+'/.analysis/._atom_pairs.json', 'w') as jf:
                 json.dump(atom_pairs, jf)
 
-        # Execute docking analysis
-        os.chdir(docking_folder)
-
-        command = 'run .analysis/._analyse_docking.py'
+        command = 'run '+docking_folder+'/.analysis/._analyse_docking.py '+docking_folder
         if atom_pairs != None:
-            command += ' --atom_pairs .analysis/._atom_pairs.json'
+            command += ' --atom_pairs '+docking_folder+'/.analysis/._atom_pairs.json'
         elif protein_atoms != None:
-            command += ' --protein_atoms .analysis/._protein_atoms.json'
+            command += ' --protein_atoms '+docking_folder+'/.analysis/._protein_atoms.json'
         if skip_chains:
             command += ' --skip_chains'
         if return_failed:
@@ -3486,21 +3481,20 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.system(command)
 
         # Read the CSV file into pandas
-        if not os.path.exists('.analysis/docking_data.csv'):
-            os.chdir('..')
+        if not os.path.exists(docking_folder+'/.analysis/docking_data.csv'):
             raise ValueError('Docking analysis failed. Check the ouput of the analyse_docking.py script.')
 
-        self.docking_data = pd.read_csv('.analysis/docking_data.csv')
+        self.docking_data = pd.read_csv(docking_folder+'/.analysis/docking_data.csv')
         # Create multiindex dataframe
         self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
-        for f in os.listdir('.analysis/atom_pairs'):
+        for f in os.listdir(docking_folder+'/.analysis/atom_pairs'):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split('.')[0]
 
             # # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
-            self.docking_distances[model][ligand] = pd.read_csv('.analysis/atom_pairs/'+f)
+            self.docking_distances[model][ligand] = pd.read_csv(docking_folder+'/.analysis/atom_pairs/'+f)
             self.docking_distances[model][ligand].set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
             self.docking_ligands.setdefault(model, [])
@@ -3508,12 +3502,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.docking_ligands[model].append(ligand)
 
         if return_failed:
-            with open('.analysis/._failed_dockings.json') as jifd:
+            with open(docking_folder+'/.analysis/._failed_dockings.json') as jifd:
                 failed_dockings = json.load(jifd)
-            os.chdir('..')
             return failed_dockings
-
-        os.chdir('..')
 
     def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
         """
