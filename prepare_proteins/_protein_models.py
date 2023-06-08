@@ -2998,7 +2998,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,temperature=298.15,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chains=['L'],replicas=1):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
+                                     temperature=298.15,frags=5,program='gromacs',
+                                     command_name='gmx_mpi',ff='amber99sb-star-ildn',
+                                     separator='_',ligand_chains=['L'],replicas=1,
+                                     charge=None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -3036,6 +3040,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if program not in available_programs:
             raise ValueError('The program %s is not available for setting MD simulations.' % program)
+
+        if charge == None:
+            charge = {}
 
         # Create MD job folders
         if not os.path.exists(md_folder):
@@ -3140,6 +3147,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     number = 2
                                 gmx_codes.append(number)
 
+                if ligand_res == {}:
+                    raise ValueError('Ligand was not found at chains %s' % str(ligand_chains))
+
                 his_pro = (str(gmx_codes)[1:-1].replace(',',''))
 
                # Get ligand parameters
@@ -3166,7 +3176,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                         os.mkdir(md_folder+'/ligand_params/'+ligand_name)
                         shutil.copyfile(md_folder+'/input_models/'+model+'/'+ligand_name+'.pdb', md_folder+'/ligand_params/'+ligand_name+'/'+ligand_name+'.pdb')
                         os.chdir(md_folder+'/ligand_params/'+ligand_name)
-                        os.system('acpype -i '+ligand_name+'.pdb')
+
+                        # Call acpype
+                        print('Parameterizing ligand %s' % ligand_name)
+                        command = 'acpype -i '+ligand_name+'.pdb'
+                        if ligand_name in charge:
+                            command += ' -n '+str(charge[ligand_name])
+                        print(command)
+                        print(os.getcwd())
+                        os.system(command)
 
                         f = open(ligand_name+'.acpype/'+ligand_name+'_GMX.itp')
                         lines = f.readlines()
@@ -3356,7 +3374,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
 
             return jobs
-
 
     def getTrajectoryPaths(self,path,step='md',traj_name='prot_md_cat_noPBC.xtc'):
         """
