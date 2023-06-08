@@ -4,9 +4,6 @@ import os
 import networkx as nx
 import pandas as pd
 
-import prepare_proteins
-
-
 class tricks:
     """
     Collection of useful functions to fix PDB formats that, ideally, should not be
