@@ -3,6 +3,7 @@ import json
 import numpy as np
 import io
 import shutil
+import pandas as pd
 
 import mdtraj as md
 
@@ -16,14 +17,14 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads=None,lig_atoms=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,peptide=False,ligand=False):
+    def __init__(self,path,triads=None,lig_atoms=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,peptide=False,ligand=False,remove_traj_files=False):
 
         self.trajectory_paths = {}
         self.topology_paths = {}
         self.distances = {}
         self.angles = {}
         self.triads = triads
-        self.models = os.listdir(path+'/output_models/')
+        self.models = [folder for folder in os.listdir(path+'/output_models/') if os.path.isdir(path+'/output_models/'+folder)]
         self.lig_atoms = lig_atoms
 
         if remove_water == True:
@@ -96,9 +97,15 @@ class md_analysis:
 
                     if not os.path.exists(traj_path+'/'+traj_name) and os.path.exists(traj_path+'/'+topol_name):
                         os.system(command+' trjcat -f '+traj_path+'/*_noPBC.xtc -o '+traj_path+'/'+traj_name+' -cat')
+                        if remove_traj_files:
+                            os.system('rm '+traj_path+'/prot_md_?.xtc')
+                            os.system('rm '+traj_path+'/prot_md_?_noPBC.xtc')
 
                     if not os.path.exists(traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1]) and os.path.exists(traj_path+'/'+topol_name) and remove_water == True:
-                        os.system('echo '+option+' | gmx editconf -ndef -f '+traj_path+'/'+topol_name+' -o '+traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
+                        os.system('echo '+option+' | '+command+' editconf -ndef -f '+traj_path+'/'+topol_name+' -o '+traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
+
+
+
 
     def setupCalculateDistances(self,job_folder='MD_analysis_data',overwrite=False):
 
@@ -133,13 +140,14 @@ class md_analysis:
 
                 if not os.path.exists(job_folder+'/'+model+'/'+replica):
                     os.mkdir(job_folder+'/'+model+'/'+replica)
-
-                shutil.copyfile(self.trajectory_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.trajectory_paths[model][replica].split('/')[-1])
-                shutil.copyfile(self.topology_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.topology_paths[model][replica].split('/')[-1])
+                if not os.path.exists(job_folder+'/'+model+'/'+replica+'/'+self.trajectory_paths[model][replica].split('/')[-1]):
+                    shutil.copyfile(self.trajectory_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.trajectory_paths[model][replica].split('/')[-1])
+                if not os.path.exists(job_folder+'/'+model+'/'+replica+'/'+self.topology_paths[model][replica].split('/')[-1]):
+                    shutil.copyfile(self.topology_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.topology_paths[model][replica].split('/')[-1])
 
                 new_path = job_folder+'/'+model+'/'+replica
 
-                if not os.path.exists(job_folder+'/'+model+'_dist.json') or overwrite:
+                if not os.path.exists(new_path+'/dist.json') or overwrite:
                     command = 'cd '+job_folder+'\n'
                     command += 'python ._'+script_name+' -p '+new_path +' '
                     command += '--triad '+','.join(self.triads[model])+' '
@@ -265,13 +273,13 @@ class md_analysis:
         def options1(model):
             if self.distances[model] != {}:
                 for replica in self.distances[model]:
-                    y1 = self.distances[model][replica]['ser_his']
+                    y1 = np.array(self.distances[model][replica]['ser_his'])*10
                     x1 = [x*0.1 for x in range(len(y1))]
 
-                    y2 = self.distances[model][replica]['asp_his']
+                    y2 = np.array(self.distances[model][replica]['asp_his'])*10
                     x2 = [x*0.1 for x in range(len(y2))]
 
-                    y3 = self.distances[model][replica]['pep']
+                    y3 = np.array(self.distances[model][replica]['pep'])*10
                     x3 = [x*0.1 for x in range(len(y3))]
 
                     plt.plot(x1,y1)
@@ -279,12 +287,12 @@ class md_analysis:
                     plt.plot(x3,y3)
                     plt.axhline(y=threshold, color='r', linestyle='-')
                     if lim:
-                        plt.ylim(0.1,1)
+                        plt.ylim(1,10)
 
                     plt.title(replica)
                     plt.xlabel("time (ns)")
-                    plt.ylabel("distance")
-                    plt.legend(['ser-his','his-asp','pep'])
+                    plt.ylabel("distance (Å)")
+                    plt.legend(['ser-his','his-acd','ser-pep'])
                     plt.show()
             else:
                 print('No distance data for model '+model)
@@ -293,12 +301,37 @@ class md_analysis:
 
 
     def get_distance_prob(self,threshold=0.45):
-        dist_prob = {}
+        data = {}
         for protein in self.distances:
-            if self.distances[protein]['ser_his'] != [] and self.distances[protein]['asp_his'] != []:
-                dist_prob[protein] = {}
-                dist_prob[protein]['ser_his'] = [x < threshold for x in self.distances[protein]['ser_his']].count(True)/len(self.distances[protein]['ser_his'])
-                dist_prob[protein]['asp_his'] = [x < threshold for x in self.distances[protein]['asp_his']].count(True)/len(self.distances[protein]['asp_his'])
-                dist_prob[protein]['both'] = [(x < threshold and y < threshold) for x,y in zip(self.distances[protein]['ser_his'], self.distances[protein]['asp_his'])].count(True)/len(self.distances[protein]['ser_his'])
+            for replica in self.distances[protein]:
 
-        return(dist_prob)
+                n_frames = len(self.distances[protein][replica]['ser_his'])
+                ser_mask = [x < threshold for x in self.distances[protein][replica]['ser_his']]
+                asp_mask = [x < threshold for x in self.distances[protein][replica]['asp_his']]
+                pep_mask = [x < threshold for x in self.distances[protein][replica]['pep']]
+                ct_mask = [(x and y) for x,y in zip(ser_mask,asp_mask)]
+                all_mask = [(x and y and z) for x,y,z in zip(ser_mask,asp_mask,pep_mask)]
+
+                data[(protein,replica)] = [np.mean(self.distances[protein][replica]['ser_his']),
+                                            np.std(self.distances[protein][replica]['ser_his']),
+                                            np.mean(self.distances[protein][replica]['asp_his']),
+                                            np.std(self.distances[protein][replica]['asp_his']),
+                                            np.mean(self.distances[protein][replica]['pep']),
+                                            np.std(self.distances[protein][replica]['pep']),
+                                            ser_mask.count(True)/n_frames,
+                                            asp_mask.count(True)/n_frames,
+                                            pep_mask.count(True)/n_frames,
+                                            ct_mask.count(True)/n_frames,
+                                            all_mask.count(True)/n_frames]
+
+                column_names = ['ser_his_mean','ser_his_std',
+                                'acd_his_mean','acd_his_std',
+                                'ser_pep_mean','ser_pep_std',
+                                'ser_his_per','acd_his_per',
+                                'ser_pep_per','ct_per','all_per']
+
+        df = pd.DataFrame(data).transpose()
+
+        df.columns = column_names
+
+        return(df)

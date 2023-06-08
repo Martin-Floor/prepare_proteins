@@ -64,7 +64,7 @@ class proteinModels:
     """
 
     def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False,
-                 verbose=False, only_models=None):
+                 verbose=False, only_models=None, exclude_models=None):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -85,13 +85,25 @@ class proteinModels:
 
         if only_models == None:
             only_models = []
+
         elif isinstance(only_models, str):
             only_models = [only_models]
-        elif not isinstance(only_models, list):
+
+        elif not isinstance(only_models, (list, tuple, set)):
             raise ValueError('You must give models as a list or a single model as a string!')
 
+        if exclude_models == None:
+            exclude_models = []
+
+        elif isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+
+        elif not isinstance(exclude_models, (list, tuple, set)):
+            raise ValueError('You must give excluded models as a list or a single model as a string!')
+
         self.models_folder = models_folder
-        self.models_paths = self._getModelsPaths(only_models=only_models)
+        self.models_paths = self._getModelsPaths(only_models=only_models,
+                                                 exclude_models=exclude_models)
         self.models_names = [] # Store model names
         self.structures = {} # structures are stored here
         self.sequences = {} # sequences are stored here
@@ -107,14 +119,17 @@ class proteinModels:
         self.conects = {} # Store the conection inforamtion for each model
         self.covalent = {} # Store covalent residues
 
+        self.distance_data = {}
+        self.models_data = {}
+
         # Read PDB structures into Biopython
         for model in sorted(self.models_paths):
 
             if verbose:
                 print('Reading model: %s' % model)
 
-            self.models_names.append(model)
-            self.readModelFromPDB(model, self.models_paths[model])
+            # self.models_names.append(model)
+            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True)
 
         if get_sequences:
             # Get sequence information based on stored structure objects
@@ -304,7 +319,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     residues[-1].add(oxt)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
-                         atom_mapping=None):
+                         atom_mapping=None, add_to_path=False, conect_update=True):
         """
         Adds a model from a PDB file.
 
@@ -323,6 +338,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         structure : Bio.PDB.Structure
             Structure object.
         """
+
+        if model not in self.models_names:
+            self.models_names.append(model)
+
         self.structures[model] = _readPDB(model, pdb_file)
 
         if wat_to_hoh:
@@ -339,9 +358,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             self._checkCovalentLigands(model, pdb_file, atom_mapping=atom_mapping)
 
         # Update conect lines
-        self.conects[model] = self._readPDBConectLines(pdb_file, model)
+        if conect_update:
+            self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
-        self.models_paths[model] = pdb_file
+        if add_to_path:
+            self.models_paths[model] = pdb_file
 
         return self.structures[model]
 
@@ -428,17 +449,18 @@ chain to use for each model with the chains option.' % model)
     def getStructurePositionsFromMSAindexes(self, msa_indexes, msa=None, models=None):
         """
         Get the individual model residue structure positions of a set of MSA indexes
-
         Paramters
         =========
         msa_indexes : list
             Zero-based MSA indexes
-
         Returns
         =======
         residue_indexes : dict
             Residue indexes for each protein at the MSA positions
         """
+
+        if isinstance(msa_indexes, int):
+            msa_indexes = [msa_indexes]
 
         if models == None:
             models = []
@@ -615,9 +637,14 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def removeTerminiByConfidenceScore(self, confidence_threshold=70, verbose=True):
+    def removeTerminiByConfidenceScore(self, confidence_threshold=70.0, keep_up_to=5, verbose=True):
         """
         Remove terminal regions with low confidence scores from models.
+
+        confidence_threshold : float
+            AlphaFold confidence threshold to consider residues as having a low score.
+        keep_up_to : int
+            If any terminal region is no larger than this value it will be kept.
         """
 
         remove_models = set()
@@ -660,6 +687,11 @@ chain to use for each model with the chains option.' % model)
             n_terminus = sorted(list(n_terminus))
             c_terminus = sorted(list(c_terminus))
 
+            if len(n_terminus) <= keep_up_to:
+                n_terminus = []
+            if len(c_terminus) <= keep_up_to:
+                c_terminus = []
+
             remove_this = []
             for c in self.structures[model].get_chains():
                 for r in c.get_residues():
@@ -680,7 +712,7 @@ chain to use for each model with the chains option.' % model)
 
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
                                   trajectory_chain_indexes=None, reference_chain_indexes=None,
-                                  aligment_mode='aligned', verbose=False):
+                                  aligment_mode='aligned', verbose=False, reference_residues=None):
         """
         Align all models to a reference PDB based on a sequence alignemnt.
 
@@ -722,14 +754,14 @@ chain to use for each model with the chains option.' % model)
             traj = md.load(self.models_paths[model])
             rmsd[model] = MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
                                                          trajectory_chain_indexes=trajectory_chain_indexes,
-                                                         aligment_mode=aligment_mode)
+                                                         aligment_mode=aligment_mode, reference_residues=reference_residues)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
 
             # Correct B-factors outside the -10 to 100 range accepted ny mdtraj
-            bfactors = np.where(bfactors>100.0, 99.99, bfactors)
-            bfactors = np.where(bfactors<-10.0, -9.99, bfactors)
+            bfactors = np.where(bfactors>=100.0, 99.99, bfactors)
+            bfactors = np.where(bfactors<=-10.0, -9.99, bfactors)
 
             traj.save(output_folder+'/'+model+'.pdb', bfactors=bfactors)
 
@@ -809,7 +841,8 @@ chain to use for each model with the chains option.' % model)
                 os.system(command)
 
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
-                      param_files=None, mpi_command='slurm'):
+                      executable='rosetta_scripts.mpi.linuxgccrelease',
+                      param_files=None, mpi_command='slurm', cpus=None):
         """
         Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
         with each protein as the first key and the name of the particular mutant as the second key.
@@ -831,8 +864,11 @@ chain to use for each model with the chains option.' % model)
         """
 
         mpi_commands = ['slurm', 'openmpi', None]
-        if mpi_command not in ['slurm', 'openmpi', None]:
+        if mpi_command not in mpi_commands:
             raise ValueError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
+
+        if mpi_command == 'openmpi' and not isinstance(cpus, int):
+            raise ValueError('')
 
         # Create mutation job folder
         if not os.path.exists(job_folder):
@@ -856,6 +892,16 @@ chain to use for each model with the chains option.' % model)
         score_fxn_name = 'ref2015'
         sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
                                                                weights_file=score_fxn_name)
+
+        # Create and append execution command
+        if mpi_command == None:
+            mpi_command = ''
+        elif mpi_command == 'slurm':
+            mpi_command = 'srun '
+        elif mpi_command == 'openmpi':
+            mpi_command = 'mpirun -np '+str(cpus)+' '
+        else:
+            mpi_command = mpi_command+' '
 
         for model in self.models_names:
 
@@ -925,12 +971,8 @@ chain to use for each model with the chains option.' % model)
 
                 flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
 
-                # Create and append execution command
-                if mpi_command == None:
-                    mpi_command = ''
-
                 command = 'cd '+job_folder+'/output_models/'+model+'\n'
-                command += mpi_command+' rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
+                command += mpi_command+executable+' @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
                 command += 'cd ../../..\n'
                 jobs.append(command)
 
@@ -940,7 +982,7 @@ chain to use for each model with the chains option.' % model)
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
-                                 skip_finished=True):
+                                 skip_finished=True, null=False):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1068,10 +1110,12 @@ has been carried out. Please run compareSequences() function before setting muta
             # Create fastrelax mover
             relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
             xml.addMover(relax)
-            protocol.append(relax)
 
-            # Set protocol
-            xml.setProtocol(protocol)
+            if not null:
+                protocol.append(relax)
+
+                # Set protocol
+                xml.setProtocol(protocol)
 
             # Add scorefunction output
             xml.addOutputScorefunction(sfxn)
@@ -1159,20 +1203,21 @@ has been carried out. Please run compareSequences() function before setting muta
                 flags.write('-s model.pdb\n')
                 flags.write('-out:path:pdb .\n')
 
-            flag_file = job_folder+'/flags/mp_transform_'+model+'.flags'
-            with open(flag_file, 'w') as flags:
-                flags.write('-s ../../input_models/'+model+'.pdb\n')
-                flags.write('-mp:transform:optimize_embedding true\n')
-                flags.write('-mp:setup:spanfiles '+model+'.span\n')
-                flags.write('-out:no_nstruct_label\n')
+            # flag_file = job_folder+'/flags/mp_transform_'+model+'.flags'
+            # with open(flag_file, 'w') as flags:
+            #     flags.write('-s ../../input_models/'+model+'.pdb\n')
+            #     flags.write('-mp:transform:optimize_embedding true\n')
+            #     flags.write('-mp:setup:spanfiles '+model+'.span\n')
+            #     flags.write('-out:no_nstruct_label\n')
 
             command = 'cd '+job_folder+'/output_models/'+model+'\n'
             command += 'cp ../../input_models/'+model+'.pdb model.pdb\n'
             command += 'mp_span_from_pdb.linuxgccrelease @ ../../flags/mp_span_from_pdb_'+model+'.flags\n'
-            command += 'rm model.pdb \n'
+            # command += 'rm model.pdb \n'
+            command += 'mv model.pdb '+model+'.pdb\n'
             command += 'mv model.span '+model+'.span\n'
-            command += 'mp_transform.linuxgccrelease @ ../../flags/mp_transform_'+model+'.flags\n'
-            command += 'python ../../._embeddingToMembrane.py'+' '+model+'.pdb\n'
+            # command += 'mp_transform.linuxgccrelease @ ../../flags/mp_transform_'+model+'.flags\n'
+            # command += 'python ../../._embeddingToMembrane.py'+' '+model+'.pdb\n'
             command += 'cd ../../..\n'
             jobs.append(command)
 
@@ -1387,7 +1432,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
-                         outerbox=(30,30,30), useflexmae=True, peptide=False, mae_input=True):
+                     outerbox=(30,30,30), useflexmae=True, peptide=False,
+                     mae_input=True, cst_positions=None):
         """
         Setup grid calculation for each model.
 
@@ -1396,6 +1442,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         grid_folder : str
             Path to grid calculation folder
         center_atoms : tuple
+            Atoms to center the grid box.
+        cst_positions : dict
+            atom and radius for cst position for each model:
+            cst_positions = {
+            model : ((chain_id, residue_index, atom_name), radius), ...
+            }
         """
 
         # Create grid job folders
@@ -1448,16 +1500,52 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         y = a.coord[1]
                                         z = a.coord[2]
 
+            if cst_positions != None:
+
+                cst_x = {}
+                cst_y = {}
+                cst_z = {}
+
+                # Convert to a list of only one position cst is given
+                if isinstance(cst_positions[model], tuple):
+                    cst_positions[model] = [cst_positions[model]]
+
+                for i,position in enumerate(cst_positions[model]):
+
+                    # Get coordinates of center residue
+                    chainid = position[0][0]
+                    resid = position[0][1]
+                    atom_name = position[0][2]
+
+                    for c in self.structures[model].get_chains():
+                        if c.id == chainid:
+                            for r in c.get_residues():
+                                if r.id[1] == resid:
+                                    for a in r.get_atoms():
+                                        if a.name == atom_name:
+                                            cst_x[i+1] = a.coord[0]
+                                            cst_y[i+1] = a.coord[1]
+                                            cst_z[i+1] = a.coord[2]
+
             # Check if any atom center was found.
             if x == None:
                 raise ValueError('Given atom center not found for model %s' % model)
 
+            # Check if any atom center was found.
+            if cst_positions and cst_x == {}:
+                raise ValueError('Given atom constraint not found for model %s' % model)
+
             # Write grid input file
             with open(grid_folder+'/grid_inputs/'+model+'.in', 'w') as gif:
-                gif.write('GRID_CENTER %.14f, %.14f, %.14f\n' % (x,y,z))
+                gif.write('GRID_CENTER %.14f, %.14f, %.14f\n' % (x,y,z, ))
                 gif.write('GRIDFILE '+model+'.zip\n')
                 gif.write('INNERBOX %s, %s, %s\n' % innerbox)
                 gif.write('OUTERBOX %s, %s, %s\n' % outerbox)
+
+                if cst_positions != None:
+                    for i,position in enumerate(cst_positions[model]):
+                        gif.write('POSIT_CONSTRAINTS "position'+str(i+1)+' %.14f %.14f %.14f %.14f",\n' % (cst_x[i+1], cst_y[i+1], cst_z[i+1], position[-1]))
+
                 if mae_input:
                     gif.write('RECEP_FILE %s\n' % ('../input_models/'+model+'.mae'))
                 else:
@@ -1482,7 +1570,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '-HOST localhost '
             command += '-TMPLAUNCHDIR '
             command += '-WAIT\n'
-
             command += 'cd ../..\n'
 
             jobs.append(command)
@@ -1490,8 +1577,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
-                          poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                          energy_by_residue=False, use_new_version=False,):
+                      poses_per_lig=100, precision='SP', use_ligand_charges=False,
+                      energy_by_residue=False, use_new_version=False, cst_fragments=None):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
@@ -1506,6 +1593,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         residues : dict
             Dictionary with the residues for each model near which to position the
             ligand as the starting pose.
+        cst_fragments: dict
+            Dictionary with a tuple composed by 3 elements: first, the fragment of the ligand
+            to which you want to make the bias (in SMARTS pattern nomenclature), the number of feature,
+            if you only have 1 constraint on the grid and in the ligand, it will be 1, and True/False
+            depending on if you want to include that constraint inside the grid constraint (True) or
+            exclude it (False).
+            {'model': {'ligand': ('[fragment]', feature, True) ...
+            }
         """
 
         # Create docking job folders
@@ -1554,6 +1649,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                     dif.write('PRECISION %s\n' % precision)
                     if energy_by_residue:
                         dif.write('WRITE_RES_INTERACTION true\n')
+                    # Constraints
+                    if cst_fragments != None:
+
+                        if isinstance(cst_fragments[grid][substrate], tuple):
+                            cst_fragments[grid][substrate] = [cst_fragments[grid][substrate]]
+
+                        for i,fragment in enumerate(cst_fragments[grid][substrate]):
+                            dif.write('[CONSTRAINT_GROUP:1]\n')
+                            dif.write('\tUSE_CONS position1:'+str(i+1)+',\n')
+                            dif.write('\tNREQUIRED_CONS ALL\n')
+                            dif.write('[FEATURE:'+str(i+1)+']\n')
+                            dif.write('\tPATTERN1 "'+fragment[0]+' '+str(fragment[1]))
+                            if fragment[2]:
+                                dif.write(' include')
+                            dif.write('"\n')
 
                 # Create commands
                 command = 'cd '+docking_folder+'/output_models/'+grid+'\n'
@@ -1582,14 +1692,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10, enclosure=0.5,
                              maxvdw=1.1, resolution='fine', reportsize=100, overwrite=False,
-                             maxdist=8.0, sidechain=True):
+                             maxdist=8.0, sidechain=True, only_models=None):
         """
         Generates a SiteMap calculation for model poses (no ligand) near specified residues.
-
         Parameters
         ==========
         job_folder : str
             Path to the calculation folder
+        target_residues : list
+            List of atoms (chain_id, index) for which to calculate sitemap pockets
         """
 
         # Create site map job folders
@@ -1606,12 +1717,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         _copyScriptFile(job_folder, 'prepareForSiteMap.py')
         script_path = job_folder+'/._prepareForSiteMap.py'
 
-        # Save all input models
+        #Save all input models
         self.saveModels(job_folder+'/input_models')
 
         # Create input files
         jobs = []
         for model in self.models_names:
+
+            # Skip models not in only_models list
+            if only_models != None:
+                if model not in only_models:
+                    continue
 
             # Create an output folder for each model
             output_folder = job_folder+'/output_models/'+model
@@ -1629,21 +1745,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '--protein_only '
                 os.system(command)
 
-            if isinstance(target_residues, dict):
-                tr = target_residues[model]
-            elif isinstance(target_residues, (list, tuple)):
-                tr = target_residues
+            if not isinstance(target_residues, dict):
+                raise ValueError('Problem: target_residues must be a dictionary!')
 
-            # If single integer is given make it a list
-            if isinstance(tr, int):
-                tr = [tr]
+            elif isinstance(target_residues[model], tuple):
+                target_residues[model] = [target_residues[model]]
 
-            for r in tr:
-                if not os.path.exists(output_folder+'/'+str(r)):
-                    os.mkdir(output_folder+'/'+str(r))
+            for r in target_residues[model]:
+
+                label = ''.join([str(x) for x in r])
+
+                # Create folder
+                if not os.path.exists(output_folder+'/'+label):
+                    os.mkdir(output_folder+'/'+label)
 
                 # Add site map command
-                command = 'cd '+job_folder+'/output_models/'+model+'/'+str(r)+'\n'
+                command = 'cd '+job_folder+'/output_models/'+model+'/'+label+'\n'
                 command += '"${SCHRODINGER}/sitemap" '
                 command += '-j '+model+' '
                 command += '-prot ../'+model+'_protein.mae'+' '
@@ -1655,7 +1772,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # command += '-enclosure '+str(enclosure)+' '
                 # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
-                command += '-siteasl \"res.num {'+str(r)+'}'
+                command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
                 if sidechain:
                     command += ' and not (atom.pt ca,c,n,h,o)'
                 command += '\" '
@@ -1671,7 +1788,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Generates a SiteMap calculation for Docking poses outputed by the extractDockingPoses()
         function.
-
         Parameters
         ==========
         job_folder : str
@@ -1738,10 +1854,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True):
+    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
         """
         Extract score values from a site map calculation.
-
          Parameters
          ==========
          sitemap_folder : str
@@ -1749,6 +1864,8 @@ make sure of reading the target sequences with the function readTargetSequences(
              setUpSiteMapForModels()
         failed_value : None, float or int
             The value to put in the columns of failed siteMap calculations.
+        output_models : str
+            Folder to combine models with sitemap points
 
         Returns
         =======
@@ -1756,24 +1873,22 @@ make sure of reading the target sequences with the function readTargetSequences(
             Site map pocket information.
         """
 
-        def parseVolumeInfo(eval_log):
+        def parseVolumeInfo(log_file):
             """
             Parse eval log file for site scores.
-
             Parameters
             ==========
             eval_log : str
                 Eval log file from sitemap output
-
             Returns
             =======
             pocket_data : dict
                 Scores for the given pocket
             """
-            with open(eval_log) as lf:
+            with open(log_file) as lf:
                 c = False
                 for l in lf:
-                    if 'volume' in l:
+                    if l.startswith('SiteScore'):
                         c = True
                         labels = l.split()
                         continue
@@ -1786,12 +1901,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         def checkIfCompleted(log_file):
             """
             Check log file for calculation completition.
-
             Parameters
             ==========
             log_file : str
                 Path to the standard sitemap log file.
-
             Returns
             =======
             completed : bool
@@ -1799,21 +1912,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             """
             with open(log_file) as lf:
                 for l in lf:
-                    if 'Site finding job' in l and 'started' not in l:
-                        if 'completed' in l:
-                            return True
-                        elif 'failed' in l:
-                            return False
+                    if 'SiteMap successfully completed' in l:
+                        return True
+            return False
 
         def checkIfFound(log_file):
             """
             Check log file for found sites.
-
             Parameters
             ==========
             log_file : str
                 Path to the standard sitemap log file.
-
             Returns
             =======
             found : bool
@@ -1822,7 +1931,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             found = True
             with open(log_file) as lf:
                 for l in lf:
-                    if 'No sites found' in l:
+                    if 'No sites found' in l or 'no sites were found' in l:
                         found = False
             return found
 
@@ -1831,11 +1940,16 @@ make sure of reading the target sequences with the function readTargetSequences(
         sitemap_data['Target Residue'] = []
         sitemap_data['Pocket'] = []
 
+        input_folder = sitemap_folder+'/input_models'
         output_folder = sitemap_folder+'/output_models'
+
+        if output_models:
+            if not os.path.exists(output_models):
+                os.mkdir(output_models)
+
         for m in os.listdir(output_folder):
             for r in os.listdir(output_folder+'/'+m):
                 if os.path.isdir(output_folder+'/'+m+'/'+r):
-                    eval_log = False
                     log_file = output_folder+'/'+m+'/'+r+'/'+m+'.log'
                     if os.path.exists(log_file):
                         completed = checkIfCompleted(log_file)
@@ -1857,42 +1971,104 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 print('No sites were found for model %s and residue %s' % (m, r))
                             continue
 
-                    for f in os.listdir(output_folder+'/'+m+'/'+r):
+                    pocket = int(r)
+                    pocket_data = parseVolumeInfo(log_file)
 
-                        if f.endswith('_eval.log'):
-                            eval_log = True
+                    sitemap_data['Model'].append(m)
+                    sitemap_data['Target Residue'].append(r)
+                    sitemap_data['Pocket'].append(pocket)
 
-                            pocket = int(f.split('_')[-2])
-                            pocket_data = parseVolumeInfo(output_folder+'/'+m+'/'+r+'/'+f)
+                    for l in pocket_data:
+                        sitemap_data.setdefault(l, [])
+                        sitemap_data[l].append(pocket_data[l])
 
-                            sitemap_data['Model'].append(m)
-                            sitemap_data['Target Residue'].append(r)
-                            sitemap_data['Pocket'].append(pocket)
+                    if output_models:
+                        print('Storing Volume Points models at %s' % output_models)
+                        input_file = input_folder+'/'+m+'.pdb'
+                        volpoint_file = output_folder+'/'+m+'/'+r+'/'+m+'_site_1_volpts.pdb'
+                        if os.path.exists(volpoint_file):
 
-                            for l in pocket_data:
-                                sitemap_data.setdefault(l, [])
-                                sitemap_data[l].append(pocket_data[l])
+                            istruct = _readPDB(m+'_input', input_file)
+                            imodel = [x for x in istruct.get_models()][0]
+                            vstruct = _readPDB(m+'_volpts', volpoint_file)
+                            vpt_chain = PDB.Chain.Chain('V')
+                            for r in vstruct.get_residues():
+                                vpt_chain.add(r)
+                            imodel.add(vpt_chain)
 
-                    # Add models without site map data
-                    if not eval_log:
-                        sitemap_data['Model'].append(m)
-                        sitemap_data['Target Residue'].append(r)
-                        sitemap_data['Pocket'].append(pocket)
-                        for l in ['SiteScore', 'size', 'Dscore', 'volume', 'exposure', 'enclosure',
-                                   'contact', 'phobic', 'philic', 'balance', 'don/acc']:
-                            sitemap_data.setdefault(l, [])
-                            sitemap_data[l].append(failed_value)
+                            _saveStructureToPDB(istruct, output_models+'/'+m+'_vpts.pdb')
+                        else:
+                            print('Volume points PDB not found for model %s and residue %s' % (m, r))
 
         sitemap_data = pd.DataFrame(sitemap_data)
         sitemap_data.set_index(['Model', 'Target Residue', 'Pocket'], inplace=True)
 
         return sitemap_data
 
+    def definePocketResiduesWithSiteMap(self, volpts_models, distance_to_points=2.5, only_models=None,
+                                        output_file=None, overwrite=False):
+        """
+        Calculates the active site residues based on the volume points from a sitemap
+        calcualtion. The models should be written with the option output_models from
+        the analiseSiteMapCalculation() function.
+
+        Parameters
+        ==========
+        volpts_models : str
+            Path to the folder where models containing the sitemap volume points residues.
+        only_models : (str, list)
+            Specific models to be processed, if None all the models loaded in this class
+            will be used
+        distance_to_points : float
+            The distance to consider a residue in contact with the volume point atoms.
+        output_file : str
+            Path the json output file to store the residue data
+        overwrite : bool
+            Overwrite json file if found? (essentially, calculate all again)
+        """
+
+        if output_file == None:
+            raise ValueError('An ouput file name must be given')
+        if not output_file.endswith('.json'):
+            output_file = output_file+'.json'
+
+        if not os.path.exists(output_file) or overwrite:
+
+            residues = {}
+            for model in self:
+
+                # Skip models not in only_models list
+                if only_models != None:
+                    if model not in only_models:
+                        continue
+
+                # Check if the volume points model file exists
+                volpts_file = volpts_models+'/'+model+'_vpts.pdb'
+                if not os.path.exists(volpts_file):
+                    print('Model %s not found in the volume points folder %s!' % (model, volpts_models))
+
+                traj = md.load(volpts_file)
+                protein = traj.topology.select('protein and not resname vpt')
+                vpts = traj.topology.select('resname vpt')
+                n = md.compute_neighbors(traj, distance_to_points/10, vpts, haystack_indices=protein)
+                residues[model] = list(set([traj.topology.atom(i).residue.resSeq for i in n[0] if traj.topology.atom(i).is_sidechain]))
+
+            with open(output_file, 'w') as jf:
+                json.dump(residues, jf)
+
+        else:
+            with open(output_file) as jf:
+                residues = json.load(jf)
+
+        for model in residues:
+            residues[model] = np.array(list(residues[model]))
+
+        return residues
+
     def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
                                     only_ligands=None):
         """
         Run PELE platform for ligand parameterization
-
         Parameters
         ==========
         job_folder : str
@@ -2521,6 +2697,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if covalent_setup:
                             continuation = False
 
+                        if extend_iterations:
+                            _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
+                            extend_script_name = '._extendAdaptiveIteartions.py'
+                            command += 'python ../'+extend_script_name+' output\n'
+
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
                         if membrane_residues or bias_to_point or com_bias1:
@@ -2817,7 +2998,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chain='L',replicas=1):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
+                                     temperature=298.15,frags=5,program='gromacs',
+                                     command_name='gmx_mpi',ff='amber99sb-star-ildn',
+                                     separator='_',ligand_chains=['L'],replicas=1,
+                                     charge=None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2846,7 +3031,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         class chainSelect(PDB.Select):
             def accept_chain(self,chain):
-                if chain.get_id() == ligand_chain:
+                if chain.get_id() in ligand_chains:
                     return False
                 else:
                     return True
@@ -2855,6 +3040,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if program not in available_programs:
             raise ValueError('The program %s is not available for setting MD simulations.' % program)
+
+        if charge == None:
+            charge = {}
 
         # Create MD job folders
         if not os.path.exists(md_folder):
@@ -2887,8 +3075,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
-                if line.strip().startswith('nsteps'):
-                    line = 'nsteps = '+ str(int(sim_time*250000/frags)) + '\n' # with an integrator of 0.004fs
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
@@ -2898,12 +3086,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
                 sys.stdout.write(line)
 
             for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
+                if 'NUMBER_OF_STEPS' in line:
+                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 sys.stdout.write(line)
@@ -2912,12 +3104,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for model in self.models_names:
                 protein = model.split(separator)[0]
-                ligand_name = model.split(separator)[1].replace('.pdb','')
+                #ligand_name = model.split(separator)[1].replace('.pdb','')
 
 
                 # Create additional folders
                 if not os.path.exists(md_folder+'/input_models/'+model):
                     os.mkdir(md_folder+'/input_models/'+model)
+
+                if not os.path.exists(md_folder+'/output_models/'+model):
+                    os.mkdir(md_folder+'/output_models/'+model)
 
                 for i in range(replicas):
                     if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)):
@@ -2928,11 +3123,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 gmx_codes = []
 
+                ligand_res = {}
+
                 for mdl in structure:
                     for chain in mdl:
                         for residue in chain:
-                            if chain.get_id() == ligand_chain:
-                                ligand_res = residue.resname
+                            if chain.get_id() in ligand_chains:
+                                ligand_res[chain.get_id()] = residue.resname
                             HD1 = False
                             HE2 = False
                             if residue.resname == 'HIS':
@@ -2950,6 +3147,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     number = 2
                                 gmx_codes.append(number)
 
+                if ligand_res == {}:
+                    raise ValueError('Ligand was not found at chains %s' % str(ligand_chains))
+
                 his_pro = (str(gmx_codes)[1:-1].replace(',',''))
 
                # Get ligand parameters
@@ -2964,24 +3164,85 @@ make sure of reading the target sequences with the function readTargetSequences(
                 io.set_structure(structure)
                 io.save(md_folder+'/input_models/'+model+'/protein.pdb',chainSelect())
 
+                ligand_coords = {}
                 for chain in pdb_chains:
-                    if chain.get_id() == ligand_chain:
-                        ligand_coords = [a.coord for a in chain.get_atoms()]
+                    if chain.get_id() in ligand_chains:
+                        ligand_coords[chain.get_id()] = [a.coord for a in chain.get_atoms()]
                         io.set_structure(chain)
-                        io.save(md_folder+'/input_models/'+model+'/ligand.pdb')
+                        io.save(md_folder+'/input_models/'+model+'/'+ligand_res[chain.get_id()]+'.pdb')
 
-                if ligand_name not in os.listdir(md_folder+'/ligand_params'):
-                    os.mkdir(md_folder+'/ligand_params/'+ligand_name)
-                    shutil.copyfile(md_folder+'/input_models/'+model+'/ligand.pdb', md_folder+'/ligand_params/'+ligand_name+'/ligand.pdb')
-                    os.chdir(md_folder+'/ligand_params/'+ligand_name)
-                    os.system('acpype -i ligand.pdb')
-                    os.chdir('../../..')
+                for lig_chain,ligand_name in ligand_res.items():
+                    if ligand_name not in os.listdir(md_folder+'/ligand_params'):
+                        os.mkdir(md_folder+'/ligand_params/'+ligand_name)
+                        shutil.copyfile(md_folder+'/input_models/'+model+'/'+ligand_name+'.pdb', md_folder+'/ligand_params/'+ligand_name+'/'+ligand_name+'.pdb')
+                        os.chdir(md_folder+'/ligand_params/'+ligand_name)
 
-                ligand_structure = parser.get_structure('ligand',md_folder+'/ligand_params/'+ligand_name+'/ligand.acpype/ligand_NEW.pdb')
-                for i,atom in enumerate(ligand_structure.get_atoms()):
-                    atom.coord = ligand_coords[i]
-                io.set_structure(ligand_structure)
-                io.save(md_folder+'/input_models/'+model+'/ligand.pdb')
+                        # Call acpype
+                        print('Parameterizing ligand %s' % ligand_name)
+                        command = 'acpype -i '+ligand_name+'.pdb'
+                        if ligand_name in charge:
+                            command += ' -n '+str(charge[ligand_name])
+                        print(command)
+                        print(os.getcwd())
+                        os.system(command)
+
+                        f = open(ligand_name+'.acpype/'+ligand_name+'_GMX.itp')
+                        lines = f.readlines()
+                        atomtypes_lines = []
+                        new_lines = []
+                        atomtypes = False
+                        atoms = False
+                        for i,l in enumerate(lines):
+                            if atomtypes:
+                                if l.startswith('[ moleculetype ]'):
+                                    new_lines.append(l)
+                                    atomtypes = False
+                                else:
+                                    #print(l[:-1])
+                                    spl = l.split()
+                                    if spl != []:
+                                        spl[0] = ligand_name+spl[0]
+                                        spl[1] = ligand_name+spl[1]
+                                        atomtypes_lines.append(' '.join(spl))
+                            elif atoms:
+                                if l.startswith('[ bonds ]'):
+                                    new_lines.append(l)
+                                    atoms = False
+                                else:
+                                    spl = l.split()
+                                    if spl != []:
+                                        spl[1] = ligand_name+spl[1]
+                                        new_lines.append(' '.join(spl)+'\n')
+                            else:
+                                new_lines.append(l)
+
+                            if l.startswith(';name'):
+                                if lines[i-1].startswith('[ atomtypes ]'):
+                                    atomtypes = True
+
+                            elif l.startswith(';'):
+                                if lines[i-1].startswith('[ atoms ]'):
+                                    atoms = True
+
+
+                        with open('../atomtypes.itp','a') as f:
+                            f.write('[ atomtypes ]\n')
+                            for line in atomtypes_lines:
+                                f.write(line+'\n')
+
+                        with open(ligand_name+'.acpype/'+ligand_name+'_GMX.itp','w') as f:
+                            for line in new_lines:
+                                if not line.startswith('[ atomtypes ]'):
+                                    f.write(line)
+
+                        os.chdir('../../..')
+                        #####
+
+                    ligand_structure = parser.get_structure('ligand',md_folder+'/ligand_params/'+ligand_name+'/'+ligand_name+'.acpype/'+ligand_name+'_NEW.pdb')
+                    for i,atom in enumerate(ligand_structure.get_atoms()):
+                        atom.coord = ligand_coords[lig_chain][i]
+                    io.set_structure(ligand_structure)
+                    io.save(md_folder+'/input_models/'+model+'/'+ligand_name+'.pdb')
 
                 for i in range(replicas):
 
@@ -2993,21 +3254,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                         ### changes ###
                         #command += 'cp input_models/'+model+'.pdb output_models/'+model+'/topol/model.pdb'+'\n'
                         command += 'cp input_models/'+model+'/protein.pdb output_models/'+model+'/'+str(i)+'/topol/protein.pdb'+'\n'
-                        command += 'cp -r ligand_params/'+ligand_name+'/ligand.acpype output_models/'+model+'/'+str(i)+'/topol/'+'\n'
+                        command += 'cp ligand_params/atomtypes.itp output_models/'+model+'/'+str(i)+'/topol/atomtypes.itp'+'\n'
+                        for ligand_name in ligand_res.values():
+                            command += 'cp -r ligand_params/'+ligand_name+'/'+ligand_name+'.acpype output_models/'+model+'/'+str(i)+'/topol/'+'\n'
                         command += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
-
+                        lig_files = ''
+                        for ligand_name in ligand_res.values():
+                            lig_files += ' ../../../../input_models/'+model+'/'+ligand_name+'.pdb '
                         command += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
-                        command += 'grep -h ATOM prot.pdb ../../../../input_models/'+model+'/ligand.pdb >| complex.pdb'+'\n'
+                        command += 'grep -h ATOM prot.pdb '+lig_files+' >| complex.pdb'+'\n'
                         command += command_name+' editconf -f complex.pdb -o complex.gro'+'\n'
-                        command += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a #include "ligand.acpype\/ligand_GMX.itp"\\n#ifdef POSRES\\n#include "ligand.acpype\/posre_ligand.itp"\\n#endif\' topol.top'+'\n'
-                        #\'/^#include "amber99sb-star-ildn.ff\/forcefield.itp"*/a \\n#include "'+ligand+'.acpype\/'+ligand+'_GMX.itp"\n#ifdef POSRES\n#include "'+ligand+'.acpype\/posre_'+ligand+'.itp"\n#endif\'
+                        line = ''
+                        line +=  '#include "atomtypes.itp"\\n'
+                        for ligand_name in ligand_res.values():
+                            line += '#include "'+ligand_name+'.acpype\/'+ligand_name+'_GMX.itp"\\n'
+                        line += '#ifdef POSRES\\n'
+                        for ligand_name in ligand_res.values():
+                            line += '#include "'+ligand_name+'.acpype\/posre_'+ligand_name+'.itp"\\n'
+                        line += '#endif\''
 
-                        command += 'sed -i -e \'$a'+'ligand'.ljust(20)+'1'+'\' topol.top'+'\n'
+                        command += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a '+line+' topol.top'+'\n'
+                        #\'/^#include "amber99sb-star-ildn.ff\/forcefield.itp"*/a \\n#include "'+ligand+'.acpype\/'+ligand+'_GMX.itp"\n#ifdef POSRES\n#include "'+ligand+'.acpype\/posre_'+ligand+'.itp"\n#endif\'
+                        for ligand_name in ligand_res.values():
+                            command += 'sed -i -e \'$a'+ligand_name.ljust(20)+'1'+'\' topol.top'+'\n'
                         #command += 'echo q | gmx make_ndx -f '+ligand+'.acpype/'+ligand+'_GMX.gro -o ligand_index.ndx'
                         #command += 'echo q | gmx make_ndx -f complex.pdb -o index.ndx'
 
                         #print(command)
-                        #asda
 
                         command += command_name+' editconf -f complex.gro -o prot_box.gro -c -d 1.0 -bt octahedron'+'\n'
                         command += command_name+' solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top'+'\n'
@@ -3018,10 +3291,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         ####
 
                         command += 'echo '+selector+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1'+'\n'
+                        for ligand_name in ligand_res.values():
+                            command += 'echo -e "0 & ! a H*\\nq"| '+command_name+' make_ndx -f  '+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -o '+ligand_name+'_index.ndx'+'\n'
 
-
-                        command += 'echo -e "0 & ! a H*\\nq"| '+command_name+' make_ndx -f  ligand.acpype/ligand_GMX.gro -o ligand_index.ndx'+'\n'
-                        command += 'echo -e "1|13\\nq"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n'
+                        lig_selectors = '1|'
+                        for i in range(len(ligand_res.values())):
+                            lig_selectors += str(13+i)+'|'
+                        command += 'echo -e "'+lig_selectors[:-1]+'\\nq"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n'
 
 
                         command += 'cd ..'+'\n'
@@ -3042,9 +3318,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'mkdir nvt'+'\n'
                         command += 'cd nvt'+'\n'
                         command += 'cp -r ../../../../scripts/nvt.mdp .'+'\n'
-                        command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' nvt.mdp'+'\n'
-
-                        command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp -fc 1000 1000 1000'+'\n'
+                        command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+'_'.join(ligand_res.values())+' Water_and_ions\' nvt.mdp'+'\n'
+                        for ligand_name in ligand_res.values():
+                            command += 'echo 3 | '+command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/posre_'+ligand_name+'.itp -fc 1000 1000 1000'+'\n'
                         command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx'+'\n'
 
                         command += command_name+' grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx'+'\n'
@@ -3058,7 +3334,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'cd npt'+'\n'
 
                     command += 'cp -r ../../../../scripts/npt.mdp .'+'\n'
-                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' npt.mdp'+'\n'
+                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+'_'.join(ligand_res.values())+' Water_and_ions\' npt.mdp'+'\n'
 
                     for i in range(len(FClist)+1):
                         if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/npt/prot_npt_'+str(i+1)+'.tpr'):
@@ -3066,7 +3342,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += command_name+' grompp -f npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro -n ../topol/index.ndx'+'\n'
                                 command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
                             else:
-                                command += 'echo 3 | '+command_name+' genrestr -f ../topol/ligand.acpype/ligand_GMX.gro -n ../topol/ligand_index.ndx -o ../topol/ligand.acpype/posre_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                for ligand_name in ligand_res.values():
+                                    command += 'echo 3 | '+command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/'+ligand_name+'_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
                                 command += 'echo 1 | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx'+'\n'
 
                                 command += command_name+' grompp -f npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro -n ../topol/index.ndx'+'\n'
@@ -3080,7 +3357,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += 'cd md'+'\n'
 
                     command += 'cp -r ../../../../scripts/md.mdp .'+'\n'
-                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+ligand_res+' Water_and_ions\' md.mdp'+'\n'
+                    command += 'sed -i  \'/tc-grps/c\\tc-grps = Protein_'+'_'.join(ligand_res.values())+' Water_and_ions\' md.mdp'+'\n'
 
                     for i in range(1,frags+1):
                         if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'.xtc'):
@@ -3097,7 +3374,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
 
             return jobs
-
 
     def getTrajectoryPaths(self,path,step='md',traj_name='prot_md_cat_noPBC.xtc'):
         """
@@ -3141,8 +3417,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro') and remove_water == True:
                     os.system('echo 1 | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro')
-
-
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
                        skip_chains=False, return_failed=False, ignore_hydrogens=False,
@@ -3194,7 +3468,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(docking_folder+'/.analysis/atom_pairs')
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
-        _copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
+        prepare_proteins._copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
         script_path = docking_folder+'/.analysis/._analyse_docking.py'
 
         # Write protein_atoms dictionary to json file
@@ -3207,14 +3481,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(docking_folder+'/.analysis/._atom_pairs.json', 'w') as jf:
                 json.dump(atom_pairs, jf)
 
-        # Execute docking analysis
-        os.chdir(docking_folder)
-
-        command = 'run .analysis/._analyse_docking.py'
+        command = 'run '+docking_folder+'/.analysis/._analyse_docking.py '+docking_folder
         if atom_pairs != None:
-            command += ' --atom_pairs .analysis/._atom_pairs.json'
+            command += ' --atom_pairs '+docking_folder+'/.analysis/._atom_pairs.json'
         elif protein_atoms != None:
-            command += ' --protein_atoms .analysis/._protein_atoms.json'
+            command += ' --protein_atoms '+docking_folder+'/.analysis/._protein_atoms.json'
         if skip_chains:
             command += ' --skip_chains'
         if return_failed:
@@ -3227,21 +3498,20 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.system(command)
 
         # Read the CSV file into pandas
-        if not os.path.exists('.analysis/docking_data.csv'):
-            os.chdir('..')
+        if not os.path.exists(docking_folder+'/.analysis/docking_data.csv'):
             raise ValueError('Docking analysis failed. Check the ouput of the analyse_docking.py script.')
 
-        self.docking_data = pd.read_csv('.analysis/docking_data.csv')
+        self.docking_data = pd.read_csv(docking_folder+'/.analysis/docking_data.csv')
         # Create multiindex dataframe
         self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
-        for f in os.listdir('.analysis/atom_pairs'):
+        for f in os.listdir(docking_folder+'/.analysis/atom_pairs'):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split('.')[0]
 
             # # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
-            self.docking_distances[model][ligand] = pd.read_csv('.analysis/atom_pairs/'+f)
+            self.docking_distances[model][ligand] = pd.read_csv(docking_folder+'/.analysis/atom_pairs/'+f)
             self.docking_distances[model][ligand].set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
             self.docking_ligands.setdefault(model, [])
@@ -3249,12 +3519,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.docking_ligands[model].append(ligand)
 
         if return_failed:
-            with open('.analysis/._failed_dockings.json') as jifd:
+            with open(docking_folder+'/.analysis/._failed_dockings.json') as jifd:
                 failed_dockings = json.load(jifd)
-            os.chdir('..')
             return failed_dockings
-
-        os.chdir('..')
 
     def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
         """
@@ -3297,12 +3564,19 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.system('run ._MAEtoPDB.py')
         os.chdir(cwd)
 
-    def getDockingDistances(self, protein, ligand):
+    def getDockingDistances(self, model, ligand):
         """
-        Get the distances related to a protein and ligand docking.
+        Get the distances related to a model and ligand docking.
         """
         distances = []
-        for d in self.docking_distances[protein][ligand]:
+
+        if model not in self.docking_distances:
+            return None
+
+        if ligand not in self.docking_distances[model]:
+            return None
+
+        for d in self.docking_distances[model][ligand]:
             distances.append(d)
 
         if distances != []:
@@ -3310,7 +3584,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             return None
 
-    def calculateModelsDistances(self, atom_pairs):
+    def calculateModelsDistances(self, atom_pairs, verbose=False):
         """
         Calculate models distances for a set of atom pairs.
 
@@ -3324,34 +3598,32 @@ make sure of reading the target sequences with the function readTargetSequences(
             Atom pairs to calculate for each model
         """
 
-        self.distance_data = {}
-        self.distance_data['model'] = []
-
         ### Add all label entries to dictionary
         for model in self.structures:
+            self.distance_data[model] = {}
+            self.distance_data[model]['model'] = []
+
             for d in atom_pairs[model]:
                 # Generate label for distance
                 label = 'distance_'
                 label += '_'.join([str(x) for x in d[0]])+'-'
                 label += '_'.join([str(x) for x in d[1]])
-                if label not in self.distance_data:
-                    self.distance_data[label] = []
+                self.distance_data[model].setdefault(label, [])
 
         for model in self.structures:
 
+            if verbose:
+                print('Calculating distances for model %s' % model)
 
-            self.distance_data['model'].append(model)
+            self.distance_data[model]['model'].append(model)
 
             # Get atoms in atom_pairs as dictionary
             atoms = {}
             for d in atom_pairs[model]:
                 for t in d:
-                    if t[0] not in atoms:
-                        atoms[t[0]] = {}
-                    if t[1] not in atoms[t[0]]:
-                        atoms[t[0]][t[1]] = []
-                    if t[2] not in atoms[t[0]][t[1]]:
-                        atoms[t[0]][t[1]].append(t[2])
+                    atoms.setdefault(t[0], {})
+                    atoms[t[0]].setdefault(t[1], [])
+                    atoms[t[0]][t[1]].append(t[2])
 
             # Get atom coordinates for each atom in atom_pairs
             coordinates = {}
@@ -3376,26 +3648,23 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Calculate distance
                 atom1 = d[0]
                 atom2 = d[1]
+
+                if atom1[2] not in coordinates[atom1[0]][atom1[1]]:
+                    raise ValueError('Atom name %s was not found in residue %s of chain %s' % (atom1[2], atom1[1], atom1[0]))
+                if atom2[2] not in coordinates[atom2[0]][atom2[1]]:
+                    raise ValueError('Atom name %s was not found in residue %s of chain %s' % (atom2[2], atom2[1], atom2[0]))
+
                 coord1 = coordinates[atom1[0]][atom1[1]][atom1[2]]
                 coord2 = coordinates[atom2[0]][atom2[1]][atom2[2]]
                 value = np.linalg.norm(coord1-coord2)
 
                 # Add data to dataframe
-                self.distance_data[label].append(value)
+                self.distance_data[model][label].append(value)
 
-            # Check length of each label
-            for label in self.distance_data:
-                if label not in ['model']:
-                    delta = len(self.distance_data['model'])-len(self.distance_data[label])
-                    for x in range(delta):
-                        self.distance_data[label].append(None)
-
-        self.distance_data = pd.DataFrame(self.distance_data)
-        self.distance_data.set_index('model', inplace=True)
+            self.distance_data[model] = pd.DataFrame(self.distance_data[model])
+            self.distance_data[model].set_index('model', inplace=True)
 
         return self.distance_data
-
-
 
     def getModelDistances(self, model):
         """
@@ -3409,7 +3678,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             model name
         """
 
-        model_data = self.distance_data[self.distance_data.index == model]
+        model_data = self.distance_data[model]
         distances = []
         for d in model_data:
             if 'distance_' in d:
@@ -3438,28 +3707,29 @@ make sure of reading the target sequences with the function readTargetSequences(
             Dictionary defining which distances will be combined under a common name.
             (for details see above).
         """
+
+        if isinstance(self.models_data, dict) and self.models_data == {}:
+            self.models_data['model'] = [m for m in self]
+
         for name in metric_distances:
-            if 'metric_'+name in self.distance_data.keys() and not overwrite:
+
+            if 'metric_'+name in self.models_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
             else:
                 values = []
                 models = []
 
-                for model in self.models_names:
-                    mask = []
-                    for index in self.distance_data.index:
-                        if model == index:
-                            mask.append(True)
-                        else:
-                            mask.append(False)
-
-                    model_data = self.distance_data[mask]
+                for model in self:
+                    model_data = self.distance_data[model]
                     model_distances = metric_distances[name][model]
                     values += model_data[model_distances].min(axis=1).tolist()
 
-                self.distance_data['metric_'+name] = values
+                self.models_data['metric_'+name] = values
 
-        return self.distance_data
+        self.models_data = pd.DataFrame(self.models_data)
+        self.models_data.set_index('model', inplace=True)
+
+        return self.models_data
 
     def getModelsProtonationStates(self, residues=None):
         """
@@ -3759,7 +4029,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
                                        return_failed=False, covalent_check=True,
-                                       atom_mapping=None):
+                                       atom_mapping=None, conect_update=False):
         """
         Read structures from a Schrodinger calculation.
 
@@ -3787,7 +4057,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         model = f.replace('.pdb', '')
                         models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f,
-                                              covalent_check=covalent_check, atom_mapping=atom_mapping)
+                                              covalent_check=covalent_check, atom_mapping=atom_mapping,
+                                              conect_update=conect_update)
 
         self.getModelsSequences()
 
@@ -3804,7 +4075,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
                                   protonation_states=False, decompose_bb_hb_into_pair_energies=False,
-                                  cpus=None):
+                                  binding_energy=False, cpus=None, return_jobs=False):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -3845,6 +4116,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         decompose_bb_hb_into_pair_energies : bool
             Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
             number of calculations, so is off by default).
+        binding_energy : str
+            Comma-separated list of chains for which calculate the binding energy.
         """
 
         if not os.path.exists(rosetta_folder):
@@ -3860,8 +4133,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Execute docking analysis
         command = 'python '+rosetta_folder+'/._analyse_calculation.py '+rosetta_folder+' '
+
+        if binding_energy:
+            command += '--binding_energy '+binding_energy+' '
         if atom_pairs != None:
             command += '--atom_pairs '+rosetta_folder+'/._atom_pairs.json '
+        if return_jobs:
+            command += '--models MODEL '
         if energy_by_residue:
             command += '--energy_by_residue '
         if interacting_residues:
@@ -3876,11 +4154,23 @@ make sure of reading the target sequences with the function readTargetSequences(
         if cpus != None:
             command += '--cpus '+str(cpus)
         command += '\n'
-        try:
-            os.system(command)
-        except:
-            os.chdir('..')
-            raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
+
+        # Compile individual models for each job
+        if return_jobs:
+            commands = []
+            for m in self:
+                commands.append(command.replace('MODEL', m))
+
+            print('Returning jobs for running the analysis in parallel.')
+            print('After jobs have finished, rerun this function removing return_jobs=True!')
+            return commands
+
+        else:
+            try:
+                os.system(command)
+            except:
+                os.chdir('..')
+                raise ValueError('Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script.')
 
         # Compile dataframes into rosetta_data attributes
         self.rosetta_data = []
@@ -3888,6 +4178,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.rosetta_ebr = []
         self.rosetta_neighbours = []
         self.rosetta_protonation = []
+        binding_energy_df = []
 
         analysis_folder = rosetta_folder+'/.analysis'
         for model in self:
@@ -3897,6 +4188,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             scores_csv = scores_folder+'/'+model+'.csv'
             if os.path.exists(scores_csv):
                 self.rosetta_data.append(pd.read_csv(scores_csv))
+
+            # Read binding energies
+            be_folder = analysis_folder+'/binding_energy'
+            be_csv = be_folder+'/'+model+'.csv'
+            if os.path.exists(be_csv):
+                binding_energy_df.append(pd.read_csv(be_csv))
 
             # Read distances
             distances_folder = analysis_folder+'/distances'
@@ -3923,8 +4220,28 @@ make sure of reading the target sequences with the function readTargetSequences(
             if os.path.exists(protonation_csv):
                 self.rosetta_protonation.append(pd.read_csv(protonation_csv))
 
+        if self.rosetta_data == []:
+            raise ValueError('No rosetta output was found in %s' % rosetta_folder)
+
         self.rosetta_data = pd.concat(self.rosetta_data)
         self.rosetta_data.set_index(['Model', 'Pose'], inplace=True)
+
+        if binding_energy:
+
+            binding_energy_df = pd.concat(binding_energy_df)
+            binding_energy_df.set_index(['Model', 'Pose'], inplace=True)
+
+            # Add interface scores to rosetta_data
+            for score in binding_energy_df:
+                index_value_map = {}
+                for i,v in binding_energy_df.iterrows():
+                    index_value_map[i] = v[score]
+
+                values = []
+                for i in self.rosetta_data.index:
+                    values.append(index_value_map[i])
+
+                self.rosetta_data[score] = values
 
         if energy_by_residue and self.rosetta_ebr != []:
             self.rosetta_ebr = pd.concat(self.rosetta_ebr)
@@ -3967,7 +4284,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return distances
 
-    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False):
+    def combineRosettaDistancesIntoMetric(self, metric_labels, overwrite=False, rosetta_data=None,
+                                          rosetta_distances=None):
         """
         Combine different equivalent distances contained in the self.distance_data
         attribute into specific named metrics. The function takes as input a
@@ -3989,18 +4307,24 @@ make sure of reading the target sequences with the function readTargetSequences(
             (for details see above).
         """
 
+        if isinstance(rosetta_data, type(None)):
+            rosetta_data = self.rosetta_data
+
+        if isinstance(rosetta_distances, type(None)):
+            rosetta_distances = self.rosetta_distances
+
         for name in metric_labels:
-            if 'metric_'+name in self.rosetta_data.keys() and not overwrite:
+            if 'metric_'+name in rosetta_data.keys() and not overwrite:
                 print('Combined metric %s already added. Give overwrite=True to recombine' % name)
 
             else:
                 values = []
-                for model in self.rosetta_data.index.levels[0]:
-                    model_distances = self.rosetta_distances[model]
+                for model in rosetta_data.index.levels[0]:
+                    model_distances = rosetta_distances[model]
                     md = model_distances[metric_labels[name][model]]
                     values += md.min(axis=1).tolist()
 
-                self.rosetta_data['metric_'+name] = values
+                rosetta_data['metric_'+name] = values
 
     def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
         """
@@ -4073,7 +4397,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return filtered_data
 
     def loadMutantsAsNewModels(self, mutants_folder, filter_score_term='score', tags=None,
-                               min_value=True, wat_to_hoh=True, keep_model_name=True):
+                               min_value=True, wat_to_hoh=True, keep_model_name=True, only_mutants=None):
         """
         Load the best energy models from a set of silent files inside a createMutants()
         calculation folder. The models are added to the list of models and do not replace
@@ -4092,6 +4416,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         executable = 'extract_pdbs.linuxgccrelease'
         models = []
 
+        if only_mutants == None:
+            only_mutants = []
+
+        if isinstance(only_mutants, str):
+            only_mutants = [only_mutants]
+
         # Check if params were given
         params = None
         if os.path.exists(mutants_folder+'/params'):
@@ -4101,8 +4431,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             if os.path.isdir(mutants_folder+'/output_models/'+d):
                 for f in os.listdir(mutants_folder+'/output_models/'+d):
                     if f.endswith('.out'):
+
                         model = d
                         mutant = f.replace(model+'_', '').replace('.out', '')
+
+                        # Read only given mutants
+                        if only_mutants != []:
+                            if mutant not in only_mutants and model+'_'+mutant not in only_mutants:
+                                continue
+
                         scores = readSilentScores(mutants_folder+'/output_models/'+d+'/'+f)
                         if tags != None and mutant in tags:
                             print('Reading mutant model %s from the given tag %s' % (mutant, tags[mutant]))
@@ -4122,10 +4459,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if keep_model_name:
                             mutant = model+'_'+mutant
 
-                        self.models_names.append(mutant)
+                        # self.models_names.append(mutant)
                         self.readModelFromPDB(mutant, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(mutant)
+
 
         self.getModelsSequences()
         print('Added the following mutants from folder %s:' % mutants_folder)
@@ -4148,6 +4486,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             Is this a relax run?
         min_value : bool
             Grab the minimum score value. Set false to grab the maximum scored value.
+        tags : dict
+            The tag of a specific pose to be loaded for the given model. Each model
+            must have a single tag in the tags dictionary. If a model is not found
+            in the tags dictionary, normal processing will follow to select
+            the loaded pose.
+        wat_to_hoh : bool
+            Change water names from WAT to HOH when loading.
+        return_missing : bool
+            Return missing models from the optimization_folder.
         """
 
         executable = 'extract_pdbs.linuxgccrelease'
@@ -4163,6 +4510,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for f in os.listdir(optimization_folder+'/output_models/'+d):
                     if f.endswith('_relax.out'):
                         model = d
+
+                        # skip models not loaded into the library
+                        if model not in self.models_names:
+                            continue
+
                         scores = readSilentScores(optimization_folder+'/output_models/'+d+'/'+f)
                         if tags != None and model in tags:
                             print('Reading model %s from the given tag %s' % (model, tags[model]))
@@ -4181,7 +4533,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
+
+
         self.getModelsSequences()
+
         missing_models = set(self.models_names) - set(models)
         if missing_models != set():
             print('Missing models in relaxation folder:')
@@ -4541,9 +4896,25 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         sequence = ''
         for r in chain:
-            if r.id[0] == ' ': # Non heteroatom filter
+
+            filter = False
+            if r.resname in ['HIE', 'HID', 'HIP']:
+                resname = 'HIS'
+            elif r.resname == 'CYX':
+                resname = 'CYS'
+            elif r.resname == 'ASH':
+                resname = 'ASP'
+            elif r.resname == 'GLH':
+                resname = 'GLU'
+            else:
+                # Leave out HETATMs
+                if r.id[0] != ' ':
+                    filter = True
+                resname = r.resname
+
+            if not filter: # Non heteroatom filter
                 try:
-                    sequence += PDB.Polypeptide.three_to_one(r.resname)
+                    sequence += PDB.Polypeptide.three_to_one(resname)
                 except:
                     sequence += 'X'
 
@@ -4711,7 +5082,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         atoms[index] = _atom
         return atoms
 
-    def _getModelsPaths(self, only_models=None):
+    def _getModelsPaths(self, only_models=None, exclude_models=None):
         """
         Get PDB models paths in the models_folder attribute
 
@@ -4729,6 +5100,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if only_models != []:
                     if pdb_name not in only_models:
+                        continue
+
+                if exclude_models != []:
+                    if pdb_name in exclude_models:
                         continue
 
                 paths[pdb_name] = self.models_folder+'/'+d
@@ -4948,6 +5323,8 @@ def _readRosettaScoreFile(score_file, indexing=False):
             models = []
             poses = []
             for x in scores[s]:
+                if x == 'description':
+                    continue
                 model, pose = '_'.join(x.split('_')[:-1]), x.split('_')[-1]
                 models.append(model)
                 poses.append(int(pose))

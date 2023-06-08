@@ -111,8 +111,6 @@ def setUpSiteMapCalculation(job_folder, prepwizard_folder, target_residue, site_
     if not os.path.exists(job_folder+'/output_models'):
         os.mkdir(job_folder+'/output_models')
 
-    # Copy control file to grid folder
-    prepare_proteins._copySchrodingerControlFile(job_folder)
     # Copy script to generate protein and ligand mae inputs, separately.
     prepare_proteins._copyScriptFile(job_folder, 'prepareForSiteMap.py')
     script_path = job_folder+'/._prepareForSiteMap.py'
@@ -148,13 +146,9 @@ def setUpSiteMapCalculation(job_folder, prepwizard_folder, target_residue, site_
                 command += '-keeplogs yes '
                 command += '-siteasl \"res.num {'+target_residue+'}\" '
                 command += '-HOST localhost:1 '
-                command += '-TMPLAUNCHDIR\n'
+                command += '-TMPLAUNCHDIR '
+                command += '-WAIT\n'
 
-                # Add control script command
-                command += 'python3 ../../._schrodinger_control.py '
-                command += name+'_protein.log ' # Check
-                command += '--job_type sitemap\n'
-                command += 'cd ../../..\n'
                 jobs.append(command)
 
     return jobs

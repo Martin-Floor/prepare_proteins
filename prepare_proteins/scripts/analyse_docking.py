@@ -8,6 +8,7 @@ import json
 
 # ## Define input variables
 parser = argparse.ArgumentParser()
+parser.add_argument('docking_folder', default=None, help='Path to the docking folder')
 parser.add_argument('--protein_atoms', default=None, help='Dictionary json file including protein_atoms for closest distance calculations.')
 parser.add_argument('--atom_pairs', default=None, help='Dictionary json file including protein_atoms for distance calculations.')
 parser.add_argument('--skip_chains', default=False, action='store_true', help='Skip chain comparison and select only by residue ID and atom name.')
@@ -18,6 +19,7 @@ parser.add_argument('--overwrite', default=False, action='store_true', help='Rea
 
 args=parser.parse_args()
 
+docking_folder = args.docking_folder
 protein_atoms = args.protein_atoms
 atom_pairs = args.atom_pairs
 skip_chains = args.skip_chains
@@ -43,21 +45,21 @@ if atom_pairs != None:
 # Get path to outputfiles
 subjobs = {}
 mae_output = {}
-for model in os.listdir('output_models'):
+for model in os.listdir(docking_folder+'/output_models'):
 
     # Check separator in model name
     if separator in model:
         raise ValueError('The separator %s was found in model name %s. Please use a different one!' % (separator, model))
 
-    if os.path.isdir('output_models/'+model):
+    if os.path.isdir(docking_folder+'/output_models/'+model):
 
         subjobs[model] = {}
         mae_output[model] = {}
-        for f in os.listdir('output_models/'+model):
+        for f in os.listdir(docking_folder+'/output_models/'+model):
 
             if 'subjobs.log' in f:
                 ligand = f.replace(model+'_','').replace('_subjobs.log','')
-                subjobs[model][ligand] = 'output_models/'+model+'/'+f
+                subjobs[model][ligand] = docking_folder+'/output_models/'+model+'/'+f
 
             elif f.endswith('.maegz'):
                 ligand = f.replace(model+'_','').replace('_pv.maegz','')
@@ -68,8 +70,8 @@ for model in os.listdir('output_models'):
 
                 # Check that the CSV distance files exists
                 csv_name = model+separator+ligand+'.csv'
-                if not os.path.exists('.analysis/atom_pairs/'+csv_name) or overwrite:
-                    mae_output[model][ligand] = 'output_models/'+model+'/'+f
+                if not os.path.exists(docking_folder+'/.analysis/atom_pairs/'+csv_name) or overwrite:
+                    mae_output[model][ligand] = docking_folder+'/output_models/'+model+'/'+f
 
 # Get failed models
 failed_count = 0
@@ -97,7 +99,7 @@ else:
 
 # Write failed dockings to file
 if return_failed:
-    with open('.analysis/._failed_dockings.json', 'w') as fdjof:
+    with open(docking_folder+'/.analysis/._failed_dockings.json', 'w') as fdjof:
         json.dump(failed_dockings, fdjof)
 
 data = {}
@@ -284,10 +286,10 @@ for model in sorted(mae_output):
             distance_data = pd.DataFrame(distance_data)
             # Create multiindex dataframe
             csv_name = model+separator+ligand+'.csv'
-            distance_data.to_csv('.analysis/atom_pairs/'+csv_name, index=False)
+            distance_data.to_csv(docking_folder+'/.analysis/atom_pairs/'+csv_name, index=False)
 
 csv_name = 'docking_data.csv'
-if not os.path.exists('.analysis/'+csv_name) or overwrite:
+if not os.path.exists(docking_folder+'/.analysis/'+csv_name) or overwrite:
     data = pd.DataFrame(data)
     # Create multiindex dataframe
-    data.to_csv('.analysis/'+csv_name, index=False)
+    data.to_csv(docking_folder+'/.analysis/'+csv_name, index=False)
