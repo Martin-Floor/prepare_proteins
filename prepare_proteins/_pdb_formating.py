@@ -186,16 +186,17 @@ class pdb_formating:
         if paramsRosetta.endswith('.params'):
             df_rosetta = self._getBondRosetta(paramsRosetta).sort_index()
         elif paramsRosetta.endswith('.pdb'):
-            df_rosetta = self._getBondPdb(paramsRosetta).sort_index()
+            df_rosetta = self._getBondPDB(paramsRosetta).sort_index()
         else:
             raise ValueError('The file extension is not valid. It should be .params or .pdb')
         
-        if paramsPele.endswith('z'):
-            df_pele = self._getBondPele(paramsPele, chain).sort_index()
-        elif paramsPele.endswith('.pdb'):
-            df_pele = self._getBondPdb(paramsPele).sort_index()
+        if paramsPele.endswith('.pdb'):
+            df_pele = self._getBondPDB(paramsPele).sort_index()
+        #if paramsPele.endswith('z'):
+        #    df_pele = self._getBondPele(paramsPele, chain).sort_index()
         else:
-            raise ValueError('The file extension is not valid. It should be .params or .pdb')
+            #raise ValueError('The file extension is not valid. It should be .params or .pdb')
+            df_pele = self._getBondPele(paramsPele, chain).sort_index()
 
         matrix_pele = self._getBondTopology(df_pele)
         matrix_rosetta = self._getBondTopology(df_rosetta)
