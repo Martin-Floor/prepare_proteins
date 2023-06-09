@@ -190,7 +190,7 @@ class pdb_formating:
         else:
             raise ValueError('The file extension is not valid. It should be .params or .pdb')
         
-        if paramsPele.endswith('.params'):
+        if paramsPele.endswith('z'):
             df_pele = self._getBondPele(paramsPele, chain).sort_index()
         elif paramsPele.endswith('.pdb'):
             df_pele = self._getBondPdb(paramsPele).sort_index()
