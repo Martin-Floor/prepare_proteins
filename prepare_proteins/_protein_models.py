@@ -2846,7 +2846,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*125000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -3087,7 +3087,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*125000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -4325,6 +4325,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     values += md.min(axis=1).tolist()
 
                 rosetta_data['metric_'+name] = values
+
+    
 
     def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
         """
