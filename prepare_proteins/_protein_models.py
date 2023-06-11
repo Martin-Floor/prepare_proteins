@@ -4326,7 +4326,47 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 rosetta_data['metric_'+name] = values
 
-    
+    def getBestRosettaModels(self, filter_values, n_models=1, return_failed=False):
+        """
+        Get best rosetta models based on their best "total_score" and a set of metrics
+        with specified thresholds. The filter thresholds must be provided with a dictionary
+        using the metric names as keys and the thresholds as the values.
+
+        Parameters
+        ==========
+        n_models : int
+            The number of models to select for each protein + ligand docking.
+        filter_values : dict
+            Thresholds for the filter.
+        return_failed : bool
+            Whether to return a list of the dockings without any models fulfilling
+            the selection criteria. It is returned as a tuple (index 0) alongside
+            the filtered data frame (index 1).
+        """
+
+        best_poses = pd.DataFrame()
+        bp = []
+        failed = []
+        for model in self.rosetta_data.index.levels[0]:
+            model_data = self.rosetta_data[self.rosetta_data.index.get_level_values('Model') == model]
+            for metric in filter_values:
+                if not metric.startswith('metric_'):
+                    metric_label = 'metric_'+metric
+                else:
+                    metric_label = metric
+                model_data = model_data[model_data[metric_label] < filter_values[metric]]
+                if model_data.empty:
+                    if model not in failed:
+                        failed.append(model)
+                    continue
+                if model_data.shape[0] < n_models:
+                    print('WARNING: less than %s models passed the filter %s + %s' % (n_models, model, ligand))
+                for i in model_data['score'].nsmallest(n_models).index:
+                    bp.append(i)
+
+        if return_failed:
+            return failed, self.rosetta_data[self.rosetta_data.index.isin(bp)]
+        return self.rosetta_data[self.rosetta_data.index.isin(bp)]
 
     def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
         """
