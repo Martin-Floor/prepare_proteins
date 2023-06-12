@@ -3837,7 +3837,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         values += distance_values
                 self.docking_data['metric_'+name] = values
 
-    def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
+    def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False,
+                            exclude_models=None, exclude_ligands=None, exclude_pairs=None):
         """
         Get best models based on the best SCORE and a set of metrics with specified thresholds.
         The filter thresholds must be provided with a dictionary using the metric names as keys
@@ -3853,13 +3854,40 @@ make sure of reading the target sequences with the function readTargetSequences(
             Whether to return a list of the dockings without any models fulfilling
             the selection criteria. It is returned as a tuple (index 0) alongside
             the filtered data frame (index 1).
+        exclude_models : list
+            List of models to be excluded from the selection.
+        exclude_ligands : list
+            List of ligands to be excluded from the selection.
+        exclude_pairs : list
+            List of pair tuples (model, ligand) to be excluded from the selection.
+
         """
+
+        if exclude_models == None:
+            exclude_models = []
+        if exclude_ligands == None:
+            exclude_ligands = []
+        if exclude_pairs == None:
+            exclude_pairs = []
+
         best_poses = pd.DataFrame()
         bp = []
         failed = []
         for model in self.docking_ligands:
+
+            if model in exclude_models:
+                continue
+
             protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
+
             for ligand in self.docking_ligands[model]:
+
+                if ligand in exclude_ligands:
+                    continue
+
+                if (model, ligand) in exclude_pairs:
+                    continue
+
                 ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
                 for metric in filter_values:
 
@@ -3880,7 +3908,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             return failed, self.docking_data[self.docking_data.index.isin(bp)]
         return self.docking_data[self.docking_data.index.isin(bp)]
 
-    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5, max_threshold=5.0, step_size=0.1):
+    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5,
+                                       max_threshold=5.0, step_size=0.1):
         extracted = []
         selected_indexes = []
 
@@ -4326,7 +4355,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 rosetta_data['metric_'+name] = values
 
-    def getBestRosettaModels(self, filter_values, n_models=1, return_failed=False):
+    def getBestRosettaModels(self, filter_values, n_models=1, return_failed=False, exclude_models=None):
         """
         Get best rosetta models based on their best "total_score" and a set of metrics
         with specified thresholds. The filter thresholds must be provided with a dictionary
@@ -4342,12 +4371,21 @@ make sure of reading the target sequences with the function readTargetSequences(
             Whether to return a list of the dockings without any models fulfilling
             the selection criteria. It is returned as a tuple (index 0) alongside
             the filtered data frame (index 1).
+        exclude_models : list
+            List of models to be excluded from the best poses selection.
         """
+
+        if exclude_models == None:
+            exclude_models = []
 
         best_poses = pd.DataFrame()
         bp = []
         failed = []
         for model in self.rosetta_data.index.levels[0]:
+
+            if model in exclude_models:
+                continue
+
             model_data = self.rosetta_data[self.rosetta_data.index.get_level_values('Model') == model]
             for metric in filter_values:
                 if not metric.startswith('metric_'):
@@ -4367,6 +4405,48 @@ make sure of reading the target sequences with the function readTargetSequences(
         if return_failed:
             return failed, self.rosetta_data[self.rosetta_data.index.isin(bp)]
         return self.rosetta_data[self.rosetta_data.index.isin(bp)]
+
+    def getBestRosettaModelsIteratively(self, metrics, min_threshold=3.5, max_threshold=5.0, step_size=0.1):
+        """
+        Extract the best rosetta poses by iterating the metrics thresholds from low values to high values.
+        At each iteration the poses are filtered by the current metric threshold and the lowest scoring poses
+        are selected. Further iterations at higher metric thresholds are applied to those model that do not
+        had poses passing all the metric filters. A current limitation of the method is that at each iteration
+        it uses the same theshold value for all the metrics.
+
+        Parameters
+        ==========
+        metrics : list
+            A list of the metrics to be used as filters
+        min_threshold : float
+            The lowest threshold to apply for filtering poses by the metric values.
+        """
+
+        extracted = []
+        selected_indexes = []
+
+        # Iterate the threshold values to be employed as filters
+        for t in np.arange(min_threshold, max_threshold+(step_size/10), step_size):
+
+            # Get models already selected
+            excluded_models = [m for m in extracted]
+
+            # Append metric_ prefic if needed
+            filter_values = {(m if  m.startswith('metric_') else 'metric_'+m):t for m in metrics}
+
+            # Filter poses at the current threshold
+            best_poses = self.getBestRosettaModels(filter_values, n_models=1, exclude_models=excluded_models)
+
+            # Save selected indexes not saved in previous iterations
+            for row in best_poses.index:
+                if row[0] not in extracted:
+                    selected_indexes.append(row)
+                if row[0] not in extracted:
+                    extracted.append(row[0])
+
+        best_poses = self.rosetta_data[self.rosetta_data.index.isin(selected_indexes)]
+
+        return best_poses
 
     def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
         """
