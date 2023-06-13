@@ -71,8 +71,8 @@ class sequenceModels:
 
         # Get paths to models in alphafold folder
         models_paths = {}
-        for d in os.listdir(af_folder+'output_models'):
-            mdir = af_folder+'output_models/'+d
+        for d in os.listdir(af_folder+'/output_models'):
+            mdir = af_folder+'/output_models/'+d
             for f in os.listdir(mdir):
                 if f.startswith('relaxed_model_1_ptm'):
                     models_paths[d] = mdir+'/'+f

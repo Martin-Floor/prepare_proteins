@@ -128,7 +128,7 @@ class proteinModels:
             if verbose:
                 print('Reading model: %s' % model)
 
-            self.models_names.append(model)
+            # self.models_names.append(model)
             self.readModelFromPDB(model, self.models_paths[model], add_to_path=True)
 
         if get_sequences:
@@ -338,6 +338,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         structure : Bio.PDB.Structure
             Structure object.
         """
+
+        if model not in self.models_names:
+            self.models_names.append(model)
+
         self.structures[model] = _readPDB(model, pdb_file)
 
         if wat_to_hoh:
@@ -633,9 +637,14 @@ chain to use for each model with the chains option.' % model)
         self.getModelsSequences()
         self.calculateSecondaryStructure(_save_structure=True)
 
-    def removeTerminiByConfidenceScore(self, confidence_threshold=70, verbose=True):
+    def removeTerminiByConfidenceScore(self, confidence_threshold=70.0, keep_up_to=5, verbose=True):
         """
         Remove terminal regions with low confidence scores from models.
+
+        confidence_threshold : float
+            AlphaFold confidence threshold to consider residues as having a low score.
+        keep_up_to : int
+            If any terminal region is no larger than this value it will be kept.
         """
 
         remove_models = set()
@@ -677,6 +686,11 @@ chain to use for each model with the chains option.' % model)
 
             n_terminus = sorted(list(n_terminus))
             c_terminus = sorted(list(c_terminus))
+
+            if len(n_terminus) <= keep_up_to:
+                n_terminus = []
+            if len(c_terminus) <= keep_up_to:
+                c_terminus = []
 
             remove_this = []
             for c in self.structures[model].get_chains():
@@ -827,6 +841,7 @@ chain to use for each model with the chains option.' % model)
                 os.system(command)
 
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
+                      executable='rosetta_scripts.mpi.linuxgccrelease',
                       param_files=None, mpi_command='slurm', cpus=None):
         """
         Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
@@ -957,7 +972,7 @@ chain to use for each model with the chains option.' % model)
                 flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
 
                 command = 'cd '+job_folder+'/output_models/'+model+'\n'
-                command += mpi_command+'rosetta_scripts.mpi.linuxgccrelease @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
+                command += mpi_command+executable+' @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
                 command += 'cd ../../..\n'
                 jobs.append(command)
 
@@ -1991,7 +2006,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return sitemap_data
 
     def definePocketResiduesWithSiteMap(self, volpts_models, distance_to_points=2.5, only_models=None,
-                                    output_file=None, overwrite=False):
+                                        output_file=None, overwrite=False):
         """
         Calculates the active site residues based on the volume points from a sitemap
         calcualtion. The models should be written with the option output_models from
@@ -2013,9 +2028,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         if output_file == None:
-            output_file = 'residues_'+volpts_models.split('/')[0]+'.json'
-
-        print(output_file)
+            raise ValueError('An ouput file name must be given')
+        if not output_file.endswith('.json'):
+            output_file = output_file+'.json'
 
         if not os.path.exists(output_file) or overwrite:
 
@@ -2832,7 +2847,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*125000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -2984,7 +2999,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             return jobs
 
 
-    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,temperature=298.15,frags=5,program='gromacs',command_name='gmx_mpi',ff='amber99sb-star-ildn',separator='_',ligand_chains=['L'],replicas=1):
+    def setUpMDSimulationsWithLigand(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
+                                     temperature=298.15,frags=5,program='gromacs',
+                                     command_name='gmx_mpi',ff='amber99sb-star-ildn',
+                                     separator='_',ligand_chains=['L'],replicas=1,
+                                     charge=None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -3022,6 +3041,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if program not in available_programs:
             raise ValueError('The program %s is not available for setting MD simulations.' % program)
+
+        if charge == None:
+            charge = {}
 
         # Create MD job folders
         if not os.path.exists(md_folder):
@@ -3066,7 +3088,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*250000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*125000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -3126,6 +3148,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     number = 2
                                 gmx_codes.append(number)
 
+                if ligand_res == {}:
+                    raise ValueError('Ligand was not found at chains %s' % str(ligand_chains))
+
                 his_pro = (str(gmx_codes)[1:-1].replace(',',''))
 
                # Get ligand parameters
@@ -3152,7 +3177,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                         os.mkdir(md_folder+'/ligand_params/'+ligand_name)
                         shutil.copyfile(md_folder+'/input_models/'+model+'/'+ligand_name+'.pdb', md_folder+'/ligand_params/'+ligand_name+'/'+ligand_name+'.pdb')
                         os.chdir(md_folder+'/ligand_params/'+ligand_name)
-                        os.system('acpype -i '+ligand_name+'.pdb')
+
+                        # Call acpype
+                        print('Parameterizing ligand %s' % ligand_name)
+                        command = 'acpype -i '+ligand_name+'.pdb'
+                        if ligand_name in charge:
+                            command += ' -n '+str(charge[ligand_name])
+                        print(command)
+                        print(os.getcwd())
+                        os.system(command)
 
                         f = open(ligand_name+'.acpype/'+ligand_name+'_GMX.itp')
                         lines = f.readlines()
@@ -3343,7 +3376,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             return jobs
 
-
     def getTrajectoryPaths(self,path,step='md',traj_name='prot_md_cat_noPBC.xtc'):
         """
         """
@@ -3386,8 +3418,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro') and remove_water == True:
                     os.system('echo 1 | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro')
-
-
 
     def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
                        skip_chains=False, return_failed=False, ignore_hydrogens=False,
@@ -3439,7 +3469,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(docking_folder+'/.analysis/atom_pairs')
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
-        _copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
+        prepare_proteins._copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
         script_path = docking_folder+'/.analysis/._analyse_docking.py'
 
         # Write protein_atoms dictionary to json file
@@ -3452,14 +3482,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(docking_folder+'/.analysis/._atom_pairs.json', 'w') as jf:
                 json.dump(atom_pairs, jf)
 
-        # Execute docking analysis
-        os.chdir(docking_folder)
-
-        command = 'run .analysis/._analyse_docking.py'
+        command = 'run '+docking_folder+'/.analysis/._analyse_docking.py '+docking_folder
         if atom_pairs != None:
-            command += ' --atom_pairs .analysis/._atom_pairs.json'
+            command += ' --atom_pairs '+docking_folder+'/.analysis/._atom_pairs.json'
         elif protein_atoms != None:
-            command += ' --protein_atoms .analysis/._protein_atoms.json'
+            command += ' --protein_atoms '+docking_folder+'/.analysis/._protein_atoms.json'
         if skip_chains:
             command += ' --skip_chains'
         if return_failed:
@@ -3472,21 +3499,20 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.system(command)
 
         # Read the CSV file into pandas
-        if not os.path.exists('.analysis/docking_data.csv'):
-            os.chdir('..')
+        if not os.path.exists(docking_folder+'/.analysis/docking_data.csv'):
             raise ValueError('Docking analysis failed. Check the ouput of the analyse_docking.py script.')
 
-        self.docking_data = pd.read_csv('.analysis/docking_data.csv')
+        self.docking_data = pd.read_csv(docking_folder+'/.analysis/docking_data.csv')
         # Create multiindex dataframe
         self.docking_data.set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
-        for f in os.listdir('.analysis/atom_pairs'):
+        for f in os.listdir(docking_folder+'/.analysis/atom_pairs'):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split('.')[0]
 
             # # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
-            self.docking_distances[model][ligand] = pd.read_csv('.analysis/atom_pairs/'+f)
+            self.docking_distances[model][ligand] = pd.read_csv(docking_folder+'/.analysis/atom_pairs/'+f)
             self.docking_distances[model][ligand].set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
             self.docking_ligands.setdefault(model, [])
@@ -3494,12 +3520,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.docking_ligands[model].append(ligand)
 
         if return_failed:
-            with open('.analysis/._failed_dockings.json') as jifd:
+            with open(docking_folder+'/.analysis/._failed_dockings.json') as jifd:
                 failed_dockings = json.load(jifd)
-            os.chdir('..')
             return failed_dockings
-
-        os.chdir('..')
 
     def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
         """
@@ -3815,7 +3838,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         values += distance_values
                 self.docking_data['metric_'+name] = values
 
-    def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False):
+    def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False,
+                            exclude_models=None, exclude_ligands=None, exclude_pairs=None):
         """
         Get best models based on the best SCORE and a set of metrics with specified thresholds.
         The filter thresholds must be provided with a dictionary using the metric names as keys
@@ -3831,13 +3855,40 @@ make sure of reading the target sequences with the function readTargetSequences(
             Whether to return a list of the dockings without any models fulfilling
             the selection criteria. It is returned as a tuple (index 0) alongside
             the filtered data frame (index 1).
+        exclude_models : list
+            List of models to be excluded from the selection.
+        exclude_ligands : list
+            List of ligands to be excluded from the selection.
+        exclude_pairs : list
+            List of pair tuples (model, ligand) to be excluded from the selection.
+
         """
+
+        if exclude_models == None:
+            exclude_models = []
+        if exclude_ligands == None:
+            exclude_ligands = []
+        if exclude_pairs == None:
+            exclude_pairs = []
+
         best_poses = pd.DataFrame()
         bp = []
         failed = []
         for model in self.docking_ligands:
+
+            if model in exclude_models:
+                continue
+
             protein_series = self.docking_data[self.docking_data.index.get_level_values('Protein') == model]
+
             for ligand in self.docking_ligands[model]:
+
+                if ligand in exclude_ligands:
+                    continue
+
+                if (model, ligand) in exclude_pairs:
+                    continue
+
                 ligand_data = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
                 for metric in filter_values:
 
@@ -3858,7 +3909,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             return failed, self.docking_data[self.docking_data.index.isin(bp)]
         return self.docking_data[self.docking_data.index.isin(bp)]
 
-    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5, max_threshold=5.0, step_size=0.1):
+    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5,
+                                       max_threshold=5.0, step_size=0.1):
         extracted = []
         selected_indexes = []
 
@@ -4304,6 +4356,99 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 rosetta_data['metric_'+name] = values
 
+    def getBestRosettaModels(self, filter_values, n_models=1, return_failed=False, exclude_models=None):
+        """
+        Get best rosetta models based on their best "total_score" and a set of metrics
+        with specified thresholds. The filter thresholds must be provided with a dictionary
+        using the metric names as keys and the thresholds as the values.
+
+        Parameters
+        ==========
+        n_models : int
+            The number of models to select for each protein + ligand docking.
+        filter_values : dict
+            Thresholds for the filter.
+        return_failed : bool
+            Whether to return a list of the dockings without any models fulfilling
+            the selection criteria. It is returned as a tuple (index 0) alongside
+            the filtered data frame (index 1).
+        exclude_models : list
+            List of models to be excluded from the best poses selection.
+        """
+
+        if exclude_models == None:
+            exclude_models = []
+
+        best_poses = pd.DataFrame()
+        bp = []
+        failed = []
+        for model in self.rosetta_data.index.levels[0]:
+
+            if model in exclude_models:
+                continue
+
+            model_data = self.rosetta_data[self.rosetta_data.index.get_level_values('Model') == model]
+            for metric in filter_values:
+                if not metric.startswith('metric_'):
+                    metric_label = 'metric_'+metric
+                else:
+                    metric_label = metric
+                model_data = model_data[model_data[metric_label] < filter_values[metric]]
+                if model_data.empty:
+                    if model not in failed:
+                        failed.append(model)
+                    continue
+                if model_data.shape[0] < n_models:
+                    print('WARNING: less than %s models passed the filter %s + %s' % (n_models, model, ligand))
+                for i in model_data['score'].nsmallest(n_models).index:
+                    bp.append(i)
+
+        if return_failed:
+            return failed, self.rosetta_data[self.rosetta_data.index.isin(bp)]
+        return self.rosetta_data[self.rosetta_data.index.isin(bp)]
+
+    def getBestRosettaModelsIteratively(self, metrics, min_threshold=3.5, max_threshold=5.0, step_size=0.1):
+        """
+        Extract the best rosetta poses by iterating the metrics thresholds from low values to high values.
+        At each iteration the poses are filtered by the current metric threshold and the lowest scoring poses
+        are selected. Further iterations at higher metric thresholds are applied to those model that do not
+        had poses passing all the metric filters. A current limitation of the method is that at each iteration
+        it uses the same theshold value for all the metrics.
+
+        Parameters
+        ==========
+        metrics : list
+            A list of the metrics to be used as filters
+        min_threshold : float
+            The lowest threshold to apply for filtering poses by the metric values.
+        """
+
+        extracted = []
+        selected_indexes = []
+
+        # Iterate the threshold values to be employed as filters
+        for t in np.arange(min_threshold, max_threshold+(step_size/10), step_size):
+
+            # Get models already selected
+            excluded_models = [m for m in extracted]
+
+            # Append metric_ prefic if needed
+            filter_values = {(m if  m.startswith('metric_') else 'metric_'+m):t for m in metrics}
+
+            # Filter poses at the current threshold
+            best_poses = self.getBestRosettaModels(filter_values, n_models=1, exclude_models=excluded_models)
+
+            # Save selected indexes not saved in previous iterations
+            for row in best_poses.index:
+                if row[0] not in extracted:
+                    selected_indexes.append(row)
+                if row[0] not in extracted:
+                    extracted.append(row[0])
+
+        best_poses = self.rosetta_data[self.rosetta_data.index.isin(selected_indexes)]
+
+        return best_poses
+
     def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
         """
         Filter the rosetta_data attribute based on the fufillment of protonation state conditions. Protonations states
@@ -4375,7 +4520,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return filtered_data
 
     def loadMutantsAsNewModels(self, mutants_folder, filter_score_term='score', tags=None,
-                               min_value=True, wat_to_hoh=True, keep_model_name=True):
+                               min_value=True, wat_to_hoh=True, keep_model_name=True, only_mutants=None):
         """
         Load the best energy models from a set of silent files inside a createMutants()
         calculation folder. The models are added to the list of models and do not replace
@@ -4394,6 +4539,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         executable = 'extract_pdbs.linuxgccrelease'
         models = []
 
+        if only_mutants == None:
+            only_mutants = []
+
+        if isinstance(only_mutants, str):
+            only_mutants = [only_mutants]
+
         # Check if params were given
         params = None
         if os.path.exists(mutants_folder+'/params'):
@@ -4406,6 +4557,12 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         model = d
                         mutant = f.replace(model+'_', '').replace('.out', '')
+
+                        # Read only given mutants
+                        if only_mutants != []:
+                            if mutant not in only_mutants and model+'_'+mutant not in only_mutants:
+                                continue
+
                         scores = readSilentScores(mutants_folder+'/output_models/'+d+'/'+f)
                         if tags != None and mutant in tags:
                             print('Reading mutant model %s from the given tag %s' % (mutant, tags[mutant]))
@@ -4425,7 +4582,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if keep_model_name:
                             mutant = model+'_'+mutant
 
-                        self.models_names.append(mutant)
+                        # self.models_names.append(mutant)
                         self.readModelFromPDB(mutant, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(mutant)

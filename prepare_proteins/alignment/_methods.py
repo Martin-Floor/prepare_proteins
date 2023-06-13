@@ -24,7 +24,6 @@ def readFastaFile(fasta_file, replace_slash=False):
         else:
             sequences[record.id] = str(record.seq)
 
-
     return sequences
 
 def writeFastaFile(sequences, output_file):

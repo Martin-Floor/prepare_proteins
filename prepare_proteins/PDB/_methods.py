@@ -105,3 +105,28 @@ def renumberResidues(structure, by_chain=False):
     structure_copy.add(model)
 
     return structure_copy
+
+def chainsAsStructure(chains):
+    """
+    This method creates a new Structure object containing only the given chains.
+
+    Parameters
+    ----------
+    chains : list or Bio.PDB.Chain
+        Chain or chains to be added to the new structure object.
+
+    Returns
+    -------
+    structure : Bio.PDB.Structure
+    """
+
+    if not isinstance(chains, list):
+        chains = [chains]
+
+    structure = PDB.Structure.Structure(0)
+    model = PDB.Model.Model(0)
+    for chain in chains:
+        model.add(chain)
+    structure.add(model)
+
+    return structure
