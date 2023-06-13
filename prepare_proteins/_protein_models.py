@@ -2773,9 +2773,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpMDSimulations(self ,md_folder, sim_time,nvt_time=2,npt_time=0.2,frags=1, program='gromacs', temperature=298.15,
-                           command_name='gmx_mpi', ff='amber99sb-star-ildn', water_traj=False,
-                           ion_chain=False, replicas=1):
+    def setUpMDSimulations(self ,md_folder, sim_time,nvt_time=2,npt_time=0.2,frags=1, program='gromacs',
+                           temperature=298.15, only_models=None, command_name='gmx_mpi', ff='amber99sb-star-ildn',
+                           water_traj=False, ion_chain=False, replicas=1):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -2794,6 +2794,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Program to execute simulation.
         temperature : float
             Simulation temperature
+        only_models : (string, list)
+            Only set up simulations for these models
         command : str
             Command to call program.
         ff : str
@@ -2805,6 +2807,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if program not in available_programs:
             raise ValueError('The program %s is not available for setting MD simulations.' % program)
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
 
         # Create MD job folders
         if not os.path.exists(md_folder):
@@ -2862,6 +2867,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             jobs = []
 
             for model in self.models_names:
+
+                if only_models != None:
+                    if model not in only_models:
+                        continue
+
                 # Create additional folders
                 if not os.path.exists(md_folder+'/output_models/'+model):
                     os.mkdir(md_folder+'/output_models/'+model)
@@ -3076,7 +3086,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*100000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
