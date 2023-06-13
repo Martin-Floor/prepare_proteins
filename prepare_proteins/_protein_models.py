@@ -2231,7 +2231,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
-                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, rescoring=False):
+                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -2646,16 +2646,17 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         if protein in com_bias1 and ligand in com_bias1[protein]:
                             # Write both COM groups as json files
-                            with open(pele_folder+'/'+protein+'_'+ligand+'/._com_group1.json', 'w') as jf:
+                            with open(pele_folder+'/'+protein+separator+ligand+'/._com_group1.json', 'w') as jf:
                                 json.dump(com_bias1[protein][ligand], jf)
 
-                            with open(pele_folder+'/'+protein+'_'+ligand+'/._com_group2.json', 'w') as jf:
+                            with open(pele_folder+'/'+protein+separator+ligand+'/._com_group2.json', 'w') as jf:
                                 json.dump(com_bias2[protein][ligand], jf)
 
                             command += "python ../"+cbs_script+' '
                             command += "output " # I think we should change this for a variable
                             command += "._com_group1.json "
-                            command += "._com_group2.json\n"
+                            command += "._com_group2.json "
+                            command += "--epsilon "+str(epsilon)+"\n"
                             continuation = True
 
                     if covalent_setup:
