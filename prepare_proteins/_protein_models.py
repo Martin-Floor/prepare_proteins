@@ -2246,7 +2246,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                              spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
-                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False):
+                             membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
+                             ligand_equilibration_cst=True):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -2544,7 +2545,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # energy by residue is not implemented in PELE platform, therefore
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
-                        if debug or energy_by_residue or peptide  or nonbonded_energy != None or membrane_residues or bias_to_point or com_bias1:
+                        if any([debug, energy_by_residue, peptide, nonbonded_energy != None,
+                               membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]):
                             iyf.write("debug: true\n")
 
                         if distances != None:
@@ -2625,6 +2627,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                         _copyScriptFile(pele_folder, 'modifyPelePlatformForPeptide.py')
                         peptide_script_name = '._modifyPelePlatformForPeptide.py'
 
+                    if ligand_equilibration_cst:
+                        _copyScriptFile(pele_folder, 'addLigandConstraintsToPELEconf.py')
+                        equilibration_script_name = '._addLigandConstraintsToPELEconf.py'
+                        _copyScriptFile(pele_folder, 'changeAdaptiveIterations.py')
+                        adaptive_script_name = '._changeAdaptiveIterations.py'
+
                     # Create command
                     command = 'cd '+pele_folder+'/'+protein+separator+ligand+'\n'
 
@@ -2672,6 +2680,56 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += "._com_group1.json "
                             command += "._com_group2.json "
                             command += "--epsilon "+str(epsilon)+"\n"
+                            continuation = True
+
+                        if ligand_equilibration_cst:
+
+                            # Copy input_yaml for equilibration
+                            of = open(pele_folder+'/'+protein+separator+ligand+'/input_equilibration.yaml', 'w')
+                            has_restart = False
+                            has_adaptive_restart = False
+                            with open(pele_folder+'/'+protein+separator+ligand+'/input.yaml') as iy:
+                                for l in iy:
+                                    if 'restart:' in l:
+                                        has_restart = True
+                                    if 'adaptive_restart:' in l:
+                                        has_adaptive_restart = True
+                                    if l.startswith('iterations:'):
+                                        l = 'iterations: 0\n'
+                                    if l.startswith('steps:'):
+                                        l = 'steps: 0\n'
+                                    of.write(l)
+                                if not has_restart:
+                                    of.write('restart: true\n')
+                                if not has_adaptive_restart:
+                                    of.write('adaptive_restart: true\n')
+                            of.close()
+
+                            # Add commands for adding ligand constraints
+                            command += 'cp output/pele.conf output/pele.conf.backup\n'
+                            command += 'cp output/adaptive.conf output/adaptive.conf.backup\n'
+
+                            # Modify pele.conf to add ligand constraints
+                            command += 'python ../'+equilibration_script_name+' '
+                            command += "output " # I think we should change this for a variable
+                            if isinstance(ligand_equilibration_cst, (int, float)):
+                                command += "--constraint_value "+str(float(ligand_equilibration_cst))+'\n'
+
+                            # Modify adaptive.conf to remove simulation steps
+                            command += 'python ../'+adaptive_script_name+' '
+                            command += "output " # I think we should change this for a variable
+                            command += '--iterations 0 '
+                            command += '--steps 0\n'
+
+                            # Launch equilibration
+                            command += 'python -m pele_platform.main input_equilibration.yaml\n'
+
+                            # Recover conf files
+                            command += 'cp output/pele.conf.backup output/pele.conf\n'
+                            command += 'cp output/adaptive.conf.backup output/adaptive.conf\n'
+                            # Add commands for launching equilibration only
+
+
                             continuation = True
 
                     if covalent_setup:
@@ -2852,7 +2910,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*125000/frags))) # with an integrator of 0.002fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*50000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -3098,7 +3156,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*125000/frags))) # with an integrator of 0.002fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*50000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -3504,6 +3562,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         if ignore_hydrogens:
             command += ' --ignore_hydrogens'
         command += ' --separator '+separator
+        command += ' --only_models '+','.join(self.models_names)
         if overwrite:
             command += ' --overwrite '
         os.system(command)
@@ -4095,6 +4154,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
+
+                        # skip models not loaded into the library
+                        if model not in self.models_names:
+                            continue
+
                         models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f,
                                               covalent_check=covalent_check, atom_mapping=atom_mapping,
