@@ -15,6 +15,7 @@ parser.add_argument('--skip_chains', default=False, action='store_true', help='S
 parser.add_argument('--return_failed', default=False, action='store_true', help='Output a file containing failed docking models.')
 parser.add_argument('--ignore_hydrogens', default=False, action='store_true', help='Ignore hydrogens for closes distance calculation.')
 parser.add_argument('--separator', default='-', help='Separator to use in naming model+ligand files.')
+parser.add_argument('--only_models', help='Comma separated list of models to be analysed.')
 parser.add_argument('--overwrite', default=False, action='store_true', help='Reanalyse docking simulations?')
 
 args=parser.parse_args()
@@ -26,6 +27,7 @@ skip_chains = args.skip_chains
 return_failed = args.return_failed
 ignore_hydrogens = args.ignore_hydrogens
 separator = args.separator
+only_models = args.only_models
 overwrite = args.overwrite
 
 def RMSD(ref_coord, curr_coord):
@@ -46,6 +48,10 @@ if atom_pairs != None:
 subjobs = {}
 mae_output = {}
 for model in os.listdir(docking_folder+'/output_models'):
+
+    # Skip models not given in only_models
+    if only_models != None  and model not in only_models:
+        continue
 
     # Check separator in model name
     if separator in model:
