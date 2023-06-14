@@ -2712,8 +2712,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             # Modify pele.conf to add ligand constraints
                             command += 'python ../'+equilibration_script_name+' '
                             command += "output " # I think we should change this for a variable
-                            if isinstance(ligand_equilibration_cst, (int, float)):
-                                command += "--constraint_value "+str(float(ligand_equilibration_cst))+'\n'
+                            if isinstance(ligand_equilibration_cst, (int, float)) and ligand_equilibration_cst != 1.0:
+                                command += "--constraint_value "+str(float(ligand_equilibration_cst))
+                            command += '\n'
 
                             # Modify adaptive.conf to remove simulation steps
                             command += 'python ../'+adaptive_script_name+' '
