@@ -2695,9 +2695,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     if 'adaptive_restart:' in l:
                                         has_adaptive_restart = True
                                     if l.startswith('iterations:'):
-                                        l = 'iterations: 0\n'
+                                        l = 'iterations: 1\n'
                                     if l.startswith('steps:'):
-                                        l = 'steps: 0\n'
+                                        l = 'steps: 1\n'
                                     of.write(l)
                                 if not has_restart:
                                     of.write('restart: true\n')
@@ -2719,8 +2719,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             # Modify adaptive.conf to remove simulation steps
                             command += 'python ../'+adaptive_script_name+' '
                             command += "output " # I think we should change this for a variable
-                            command += '--iterations 0 '
-                            command += '--steps 0\n'
+                            command += '--iterations 1 '
+                            command += '--steps 1\n'
 
                             # Launch equilibration
                             command += 'python -m pele_platform.main input_equilibration.yaml\n'
