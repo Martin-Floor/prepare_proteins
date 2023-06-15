@@ -3,6 +3,7 @@ import argparse
 import json
 import numpy as np
 import pandas as pd
+from pyrosetta.rosetta.core.scoring import bb_rmsd
 
 from multiprocessing import Pool, cpu_count
 
@@ -82,6 +83,7 @@ if os.path.exists(rosetta_folder+'/params'):
 if atom_pairs != None:
     with open(atom_pairs) as apf:
         atom_pairs = json.load(apf)
+
 
 def getPoseFromTag(tag, silent_file, params_dir=None):
 
@@ -636,6 +638,24 @@ def _calculateInteractingResidues(arguments):
                     neighbours_data[st].append(dM[n][st][r])
 
     return neighbours_data
+
+
+def calculate_rmsd_to_native(silent_file, reference_pdb, params_dir=None):
+    rmsd = []
+    initial = Pose()
+    if params_dir:
+        params = []
+        for p in os.listdir(params_dir):
+            params.append(params_dir+'/'+p)
+        generate_nonstandard_residue_set(initial, params)
+    pose_from_file(initial, reference_pdb)
+    initial.pdb_info().name("native PDB")
+    relaxed_structures = readPosesFromSilent(silent_file, params_dir)
+    for num, pose in enumerate(relaxed_structures):
+        print(f"calculating RMSD for pose {num}")
+        rmsd.append(bb_rmsd(initial, pose))
+    return rmsd
+
 
 def _calculateProtonationStates(arguments):
     """
