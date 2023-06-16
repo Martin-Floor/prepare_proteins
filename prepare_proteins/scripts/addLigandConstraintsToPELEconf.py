@@ -7,7 +7,7 @@ import shutil
 # ## Define input variables
 parser = argparse.ArgumentParser()
 parser.add_argument('pele_output', default=None, help='Path to the PELE output folder.')
-parser.add_argument('--constraint_value', default=5.0, help='Constraint energy constant.')
+parser.add_argument('--constraint_value', default=50.0, help='Constraint energy constant.')
 
 args=parser.parse_args()
 pele_output = args.pele_output
