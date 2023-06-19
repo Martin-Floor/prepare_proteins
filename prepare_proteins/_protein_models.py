@@ -2243,7 +2243,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              box_radius=10, steps=100, debug=False, iterations=5, cpus=96, equilibration_steps=100, ligand_energy_groups=None,
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
-                             spawning='independent', continuation=False, equilibration=True,  skip_models=None, skip_ligands=None,
+                             spawning='independent', continuation=False, equilibration=True, skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
@@ -4180,7 +4180,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def analyseRosettaCalculation(self, rosetta_folder, atom_pairs=None, energy_by_residue=False,
                                   interacting_residues=False, query_residues=None, overwrite=False,
                                   protonation_states=False, decompose_bb_hb_into_pair_energies=False,
-                                  binding_energy=False, cpus=None, return_jobs=False):
+                                  binding_energy=False, cpus=None, return_jobs=False, verbose=False):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
         between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
@@ -4258,6 +4258,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += '--decompose_bb_hb_into_pair_energies'
         if cpus != None:
             command += '--cpus '+str(cpus)
+        if verbose:
+            command += '--verbose '
         command += '\n'
 
         # Compile individual models for each job
