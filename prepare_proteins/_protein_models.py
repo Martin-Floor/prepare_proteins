@@ -868,7 +868,7 @@ chain to use for each model with the chains option.' % model)
             raise ValueError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
 
         if mpi_command == 'openmpi' and not isinstance(cpus, int):
-            raise ValueError('')
+            raise ValueError('You must define the number of CPU')
 
         # Create mutation job folder
         if not os.path.exists(job_folder):
@@ -2764,7 +2764,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
-                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]:
+                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]):
                             continuation = False
                             debug = False
 
