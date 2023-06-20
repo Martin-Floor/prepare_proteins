@@ -2764,7 +2764,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
-                        if membrane_residues or bias_to_point or com_bias1:
+                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]:
                             continuation = False
                             debug = False
 
