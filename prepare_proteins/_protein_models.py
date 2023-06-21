@@ -2327,7 +2327,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     fs = f.split(separator)
                     protein = fs[0]
                     ligand = fs[1]
-                    pose = fs[2].replace('.pdb','')
+                    pose = f.replace('.pdb','')
 
                     # Skip given protein models
                     if skip_models != None:
