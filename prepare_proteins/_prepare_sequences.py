@@ -48,8 +48,8 @@ class sequenceModels:
             command += ' --max_template_date=2022-01-01'
             command += ' --random_seed 1\n'
             if remove_extras:
-                command += 'rm -r $Path/output_models/msas\n'
-                command += 'rm -r $Path/output_models/*.pkl\n'
+                command += f'rm -r $Path/output_models/{model}/msas\n'
+                command += f'rm -r $Path/output_models/{model}/*.pkl\n'
 
             command += 'cd ..\n'
 
