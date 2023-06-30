@@ -1142,10 +1142,16 @@ has been carried out. Please run compareSequences() function before setting muta
 
                 if isinstance(param_files, str):
                     param_files = [param_files]
+
+                patch_line = ''
                 for param in param_files:
                     param_name = param.split('/')[-1]
                     shutil.copyfile(param, relax_folder+'/params/'+param_name)
+                    if not param_name.endswith('.params'):
+                        patch_line += ('../../params/'+param_name+' ')
                 flags.addOption('in:file:extra_res_path', '../../params')
+                if patch_line != '':
+                    flags.addOption('in:file:extra_patch_fa', patch_line)
 
             if membrane:
                 flags.addOption('mp::setup::spans_from_structure', 'true')
@@ -4704,6 +4710,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         params = None
         if os.path.exists(optimization_folder+'/params'):
             params = optimization_folder+'/params'
+            patch_line = ''
+            for p in os.listdir(params):
+                if not p.endswith('.params'):
+                    patch_line += (params+'/'+p+' ')
 
         for d in os.listdir(optimization_folder+'/output_models'):
             if os.path.isdir(optimization_folder+'/output_models/'+d):
@@ -4727,6 +4737,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += ' -silent '+optimization_folder+'/output_models/'+d+'/'+f
                         if params != None:
                             command += ' -extra_res_path '+params+' '
+                            if patch_line != '':
+                                command += ' -extra_patch_fa '+patch_line+' '
                         command += ' -tags '+best_model_tag
                         os.system(command)
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
