@@ -2271,6 +2271,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         Missing!
         """
 
+        if continuation:
+            continue_all = True
+        else:
+            continue_all = False
+
         energy_by_residue_types = ['all', 'lennard_jones', 'sgb', 'electrostatic']
         if energy_by_residue_type not in energy_by_residue_types:
             raise ValueError('%s not found. Try: %s' % (energy_by_residue_type, energy_by_residue_types))
@@ -2764,11 +2769,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
-                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]):
+                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]) and not continue_all:
                             continuation = False
                             debug = False
 
-                    elif energy_by_residue:
+                    if energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
                         if isinstance(ligand_energy_groups, dict):
                             command += ' --ligand_energy_groups ligand_energy_groups.json'
