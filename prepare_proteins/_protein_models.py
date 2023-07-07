@@ -982,7 +982,7 @@ chain to use for each model with the chains option.' % model)
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
-                                 skip_finished=True, null=False):
+                                 skip_finished=True, null=False, cartesian=False):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1052,8 +1052,13 @@ has been carried out. Please run compareSequences() function before setting muta
             # Create membrane scorefucntion
             if membrane:
                 # Create all-atom score function
+                weights_file = 'mpframework_smooth_fa_2012'
+                if cartesian:
+                    weights_file += '_cart'
+
                 sfxn = rosettaScripts.scorefunctions.new_scorefunction('mpframework_smooth_fa_2012',
-                                                                       weights_file='mpframework_smooth_fa_2012')
+                                                                       weights_file=weights_file)
+
                 # Add constraint weights to membrane score function
                 if cst_files != None:
                     reweights = (('chainbreak', 1.0),
@@ -1070,9 +1075,13 @@ has been carried out. Please run compareSequences() function before setting muta
             # Create all-atom scorefucntion
             else:
                 score_fxn_name = 'ref2015'
+
+                if cartesian:
+                    score_fxn_name += '_cart'
+
                 # Check if constraints are given
                 if cst_files != None:
-                    score_fxn_name = score_fxn_name+'_cst'
+                    score_fxn_name += '_cst'
 
                 # Create all-atom score function
                 sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
