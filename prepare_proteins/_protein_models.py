@@ -2705,25 +2705,27 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if ligand_equilibration_cst:
 
                             # Copy input_yaml for equilibration
-                            of = open(pele_folder+'/'+protein+separator+ligand+'/input_equilibration.yaml', 'w')
-                            has_restart = False
-                            has_adaptive_restart = False
-                            with open(pele_folder+'/'+protein+separator+ligand+'/input.yaml') as iy:
-                                for l in iy:
-                                    if 'restart:' in l:
-                                        has_restart = True
-                                    if 'adaptive_restart:' in l:
-                                        has_adaptive_restart = True
-                                    if l.startswith('iterations:'):
+                            oyml = open(pele_folder+'/'+protein+separator+ligand+'/input_equilibration.yaml', 'w')
+                            debug_line = False
+                            restart_line = False
+                            with open(pele_folder+'/'+protein+separator+ligand+'/input.yaml') as iyml:
+                                for l in iyml:
+                                    if 'debug: true' in l:
+                                        debug_line = True
+                                        oyml.write('restart: true\n')
+                                        oyml.write('adaptive_restart: true\n')
+                                        continue
+                                    elif 'restart: true' in l:
+                                        restart_line = True
+                                    elif l.startswith('iterations:'):
                                         l = 'iterations: 1\n'
-                                    if l.startswith('steps:'):
+                                    elif l.startswith('steps:'):
                                         l = 'steps: 1\n'
-                                    of.write(l)
-                                if not has_restart:
-                                    of.write('restart: true\n')
-                                if not has_adaptive_restart:
-                                    of.write('adaptive_restart: true\n')
-                            of.close()
+                                    oyml.write(l)
+                                if not debug_line and not restart_line:
+                                    oyml.write('restart: true\n')
+                                    oyml.write('adaptive_restart: true\n')
+                            oyml.close()
 
                             # Add commands for adding ligand constraints
                             command += 'cp output/pele.conf output/pele.conf.backup\n'
@@ -2760,22 +2762,24 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if continuation:
                         debug_line = False
                         restart_line = False
-                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
-                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
-                                for l in iyml:
-                                    if 'debug: true' in l:
-                                        debug_line = True
-                                        oyml.write('restart: true\n')
-                                        oyml.write('adaptive_restart: true\n')
-                                        continue
-                                    elif 'restart: true' in l:
-                                        continue
-                                    oyml.write(l)
-                                if not debug_line:
+                        # Copy input_yaml for equilibration
+                        oyml = open(pele_folder+'/'+protein+separator+ligand+'/input_restart.yaml', 'w')
+                        debug_line = False
+                        restart_line = False
+                        with open(pele_folder+'/'+protein+separator+ligand+'/input.yaml') as iyml:
+                            for l in iyml:
+                                if 'debug: true' in l:
+                                    debug_line = True
                                     oyml.write('restart: true\n')
                                     oyml.write('adaptive_restart: true\n')
-                        if covalent_setup:
-                            continuation = False
+                                    continue
+                                elif 'restart: true' in l:
+                                    restart_line = True
+                                oyml.write(l)
+                            if not debug_line and not restart_line:
+                                oyml.write('restart: true\n')
+                                oyml.write('adaptive_restart: true\n')
+                        oyml.close()
 
                         if extend_iterations:
                             _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
@@ -2800,13 +2804,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         else:
                             command += '\n'
-                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
-                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
-                                for l in iyml:
-                                    if 'debug: true' in l:
-                                        l = 'restart: true\n'
-                                    oyml.write(l)
-                        command += 'python -m pele_platform.main input_restart.yaml\n'
+                        # with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                        #     with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
+                        #         for l in iyml:
+                        #             if 'debug: true' in l:
+                        #                 l = 'restart: true\n'
+                        #             oyml.write(l)
+                        # command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif peptide:
                         command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
