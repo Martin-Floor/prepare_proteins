@@ -1,7 +1,7 @@
 ; Run parameters
 define					= 				;-DPOSRES ; -DPOSRES_IONS ;DFLEX_SPC; FLEXible SPC and POSition REStraints
 integrator				= steep    		; steepest descent algorithm
-nsteps              	= 2000     		; number of steps
+nsteps              	= 10000     		; number of steps
 emtol               	= 1000 			; convergence criterion
 emstep              	= 0.001   		; intial step size
 ; Constraints
