@@ -10,7 +10,7 @@ class sequenceModels:
         self.sequences_names = list(self.sequences.keys())
 
     def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=True):
+                       remove_extras=True, remove_msas=False):
         """
         Set up AlphaFold predictions for the loaded sequneces
         """
@@ -50,6 +50,9 @@ class sequenceModels:
             if remove_extras:
                 command += f'rm -r $Path/output_models/{model}/msas\n'
                 command += f'rm -r $Path/output_models/{model}/*.pkl\n'
+
+            if remove_msas:
+                command += f'rm -r $Path/output_models/{model}/msas\n'
 
             command += 'cd ..\n'
 

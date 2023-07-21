@@ -33,6 +33,26 @@ class filters:
             self.root.set('jump', str(self.jump))
             if self.confidence != 1.0:
                 self.root.set('confidence', str(self.confidence))
+    
+    class DisulfideEntropy:
+
+        def __init__(self, name="entropy", tightness=0,lower_bound=0):
+
+            self.type = 'filter'
+            self.name = name
+            self.tightness = tightness
+            self.lower_bound = lower_bound
+     
+            self.filter = filter
+
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('DisulfideEntropy')
+            self.root.set('name', str(self.name))
+            self.root.set('tightness', str(self.tightness))
+            self.root.set('lower_bound', str(self.lower_bound))
+
 
     class sasa:
 
