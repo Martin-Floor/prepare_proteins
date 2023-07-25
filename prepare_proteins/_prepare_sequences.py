@@ -62,10 +62,10 @@ class sequenceModels:
     
 
     def setUpAlphaFold_tunned_mn(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=True, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
+                       remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
         """
         Set up AlphaFold predictions for the loaded sequneces. This is a tunned version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
-        
+
         """
 
         # Create Job folders
@@ -121,6 +121,8 @@ class sequenceModels:
             jobs.append(command)
 
         return jobs
+    
+
     def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder):
         """
         Copy models from an AlphaFold calculation to an specfied output folder.
