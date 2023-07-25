@@ -977,7 +977,7 @@ chain to use for each model with the chains option.' % model)
                 jobs.append(command)
 
         return jobs
-    
+
     def createDisulfureBond(self, job_folder, cys_dic, nstruct=100, relax_cycles=0, cst_optimization=True,
                       executable='rosetta_scripts.mpi.linuxgccrelease',
                       param_files=None, mpi_command='slurm', cpus=None, remove_existing=False,repack=True,
@@ -2017,7 +2017,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
+    def analyseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
         """
         Extract score values from a site map calculation.
          Parameters
@@ -2100,7 +2100,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         sitemap_data = {}
         sitemap_data['Model'] = []
-        sitemap_data['Target Residue'] = []
         sitemap_data['Pocket'] = []
 
         input_folder = sitemap_folder+'/input_models'
@@ -2134,11 +2133,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 print('No sites were found for model %s and residue %s' % (m, r))
                             continue
 
-                    pocket = int(r)
+                    chain = r[0]
                     pocket_data = parseVolumeInfo(log_file)
 
                     sitemap_data['Model'].append(m)
-                    sitemap_data['Target Residue'].append(r)
                     sitemap_data['Pocket'].append(pocket)
 
                     for l in pocket_data:
@@ -2164,7 +2162,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             print('Volume points PDB not found for model %s and residue %s' % (m, r))
 
         sitemap_data = pd.DataFrame(sitemap_data)
-        sitemap_data.set_index(['Model', 'Target Residue', 'Pocket'], inplace=True)
+        sitemap_data.set_index(['Model', 'Pocket'], inplace=True)
 
         return sitemap_data
 
