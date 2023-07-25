@@ -2133,7 +2133,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 print('No sites were found for model %s and residue %s' % (m, r))
                             continue
 
-                    chain = r[0]
+                    pocket = r
                     pocket_data = parseVolumeInfo(log_file)
 
                     sitemap_data['Model'].append(m)
