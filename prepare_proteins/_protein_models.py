@@ -293,6 +293,33 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         self.removeModelAtoms(model, atoms_to_remove)
 
+    def removeAtomFromConectLines(self, residue_name, atom_name, verbose=True):
+        """
+        Remove the given (atom_name) atoms from all the connect lines involving
+        the given (residue_name) residues.
+        """
+
+        # Match all the atoms with the given residue and atom name
+
+        for model in self:
+            resnames = {}
+            for chain in self.structures[model].get_chains():
+                for residue in chain:
+                    resnames[(chain.id, residue.id[1])] = residue.resname
+
+            conects = []
+            count = 0
+            for conect in models.conects[model]:
+                new_conect = []
+                for atom in conect:
+                    if resnames[atom[:-1]] != residue_name and atom[-1] != atom_name:
+                        new_conect.append(atom)
+                    else:
+                        count += 1
+                conects.append(new_conect)
+            models.conects[model] = conects
+            print(f'Removed {count} from conect lines of model {model}')
+
     def addOXTAtoms(self):
         """
         Add missing OXT atoms for terminal residues when missing
@@ -392,7 +419,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return self.sequences
 
-    def calculateMSA(self, chains=None):
+    def calculateMSA(self, extra_sequences=None, chains=None):
         """
         Calculate a Multiple Sequence Alignment from the current models' sequences.
 
@@ -417,9 +444,17 @@ chain to use for each model with the chains option.' % model)
                 else:
                     sequences[model] = self.sequences[model]
 
-            self.msa = alignment.mafft.multipleSequenceAlignment(sequences, stderr=False)
+            if isinstance(extra_sequences, dict):
+                for s in extra_sequences:
+                    sequences[s] = extra_sequences[s]
         else:
-            self.msa = alignment.mafft.multipleSequenceAlignment(self.sequences, stderr=False)
+            sequences = self.sequences.copy()
+
+        if isinstance(extra_sequences, dict):
+            for s in extra_sequences:
+                sequences[s] = extra_sequences[s]
+
+        self.msa = alignment.mafft.multipleSequenceAlignment(sequences, stderr=False)
 
         return self.msa
 
@@ -3902,7 +3937,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Add data to dataframe
                 self.distance_data[model][label].append(value)
 
-            self.distance_data[model] = pd.DataFrame(self.distance_data[model])
+            self.distance_data[model] = pd.DataFrame(self.distance_data[model]).reset_index()
             self.distance_data[model].set_index('model', inplace=True)
 
         return self.distance_data
@@ -3968,6 +4003,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.models_data['metric_'+name] = values
 
         self.models_data = pd.DataFrame(self.models_data)
+        print(self.models_data)
         self.models_data.set_index('model', inplace=True)
 
         return self.models_data
