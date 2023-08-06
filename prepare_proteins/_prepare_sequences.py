@@ -4,9 +4,15 @@ import shutil
 
 class sequenceModels:
 
-    def __init__(self, models_fasta):
+    def __init__(self, sequences_fasta):
 
-        self.sequences = alignment.readFastaFile(models_fasta, replace_slash=True)
+        if isinstance(sequences_fasta, str):
+            self.sequences = alignment.readFastaFile(sequences_fasta, replace_slash=True)
+        elif isinstance(sequences_fasta, dict):
+            self.sequences = sequences_fasta
+        else:
+            raise ValueError('sequences_fasta must be a string or a dictionary containing the sequences!')
+
         self.sequences_names = list(self.sequences.keys())
 
     def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
@@ -59,7 +65,7 @@ class sequenceModels:
             jobs.append(command)
 
         return jobs
-    
+
 
     def setUpAlphaFold_tunned_mn(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
                        remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
@@ -121,7 +127,7 @@ class sequenceModels:
             jobs.append(command)
 
         return jobs
-    
+
     def setUpAlphaFold_tunned_mt(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
                        remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
         """
@@ -182,7 +188,7 @@ class sequenceModels:
             jobs.append(command)
 
         return jobs
-    
+
     def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder):
         """
         Copy models from an AlphaFold calculation to an specfied output folder.
