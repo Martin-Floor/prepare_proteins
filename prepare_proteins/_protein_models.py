@@ -1165,7 +1165,8 @@ chain to use for each model with the chains option.' % model)
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
-                                 skip_finished=True, null=False, cartesian=False):
+                                 skip_finished=True, null=False, cartesian=False, extra_flags=None,
+                                 sugars=False):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1320,6 +1321,14 @@ has been carried out. Please run compareSequences() function before setting muta
                                          nstruct=nstruct, s='../../input_models/'+model+'.pdb',
                                          output_silent_file=model+'_relax.out')
 
+            # Add extra flags
+            if extra_flags != None:
+                for o in extra_flags:
+                    if isinstance(o, tuple):
+                        flags.addOption(*o)
+                    else:
+                        flags.addOption(o)
+
             # Add relaxation with constraints options and write flags file
             if cst_optimization:
                 flags.add_relax_cst_options()
@@ -1347,7 +1356,15 @@ has been carried out. Please run compareSequences() function before setting muta
 
             if membrane:
                 flags.addOption('mp::setup::spans_from_structure', 'true')
-                flags.addOption('relax:constrain_relax_to_start_coords', '')
+                flags.addOption('relax:constrain_relax_to_start_coords')
+
+            if sugars:
+                flags.addOption('include_sugars')
+                flags.addOption('alternate_3_letter_codes', 'pdb_sugar')
+                flags.addOption('write_glycan_pdb_codes')
+                flags.addOption('auto_detect_glycan_connections')
+                flags.addOption('maintain_links')
+
             flags.write_flags(relax_folder+'/flags/'+model+'_relax.flags')
 
             # Create and append execution command
@@ -5144,7 +5161,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             print('Missing sequences in the given fasta file:')
             print('\t'+', '.join(missing_models))
 
-    def compareSequences(self, sequences_file):
+    def compareSequences(self, sequences_file, chain=None):
         """
         Compare models sequences to their given sequences and check for missing
         or changed sequence information.
@@ -5161,8 +5178,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             Dictionary containing missing or changed information.
         """
 
-        if self.multi_chain:
+        if self.multi_chain and chain == None:
             raise ValueError('PDBs contain multiple chains. Please select one chain.')
+
         self.readTargetSequences(sequences_file)
 
         # Iterate models to store sequence differences
@@ -5183,7 +5201,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Create a sequence alignement between current and target sequence
             to_align = {}
-            to_align['current'] = self.sequences[model]
+            if chain:
+                to_align['current'] = self.sequences[model][chain]
+            else:
+                to_align['current'] = self.sequences[model]
             to_align['target'] = self.target_sequences[model]
             msa = prepare_proteins.alignment.mafft.multipleSequenceAlignment(to_align, stderr=False, stdout=False)
 
