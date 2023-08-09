@@ -1987,7 +1987,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # command += '-enclosure '+str(enclosure)+' '
                 # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
-                command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
+
+                # For chain and residue index
+                if isinstance(r, tuple) and len(tuple) == 2:
+                    command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
+                # For chain only
+                elif isinstance(r, str) and len(r) == 1:
+                    command += '-siteasl \"chain.name '+str(r[0])
                 if sidechain:
                     command += ' and not (atom.pt ca,c,n,h,o)'
                 command += '\" '
@@ -4894,7 +4900,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True,
-                                          return_missing=False):
+                                          return_missing=False, sugars=False):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -4953,16 +4959,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command = executable
                         command += ' -silent '+optimization_folder+'/output_models/'+d+'/'+f
                         if params != None:
-                            command += ' -extra_res_path '+params+' '
+                            command += ' -extra_res_path '+params
                             if patch_line != '':
-                                command += ' -extra_patch_fa '+patch_line+' '
+                                command += ' -extra_patch_fa '+patch_line
                         command += ' -tags '+best_model_tag
+                        if sugars:
+                            command += ' -include_sugars'
                         os.system(command)
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
-
-
 
         self.getModelsSequences()
 
