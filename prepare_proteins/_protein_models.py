@@ -1653,7 +1653,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         Setup grid calculation for each model.
 
         Parameters
-        ==========
+        ==========  
         grid_folder : str
             Path to grid calculation folder
         center_atoms : tuple
@@ -1994,6 +1994,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # For chain only
                 elif isinstance(r, str) and len(r) == 1:
                     command += '-siteasl \"chain.name '+str(r[0])
+
                 if sidechain:
                     command += ' and not (atom.pt ca,c,n,h,o)'
                 command += '\" '
@@ -2169,26 +2170,33 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         for m in os.listdir(output_folder):
             for r in os.listdir(output_folder+'/'+m):
+
+                # Check if chain or residue was given
+                if len(r) == 1:
+                    pocket_type = 'chain'
+                else:
+                    pocket_type = 'residue'
+
                 if os.path.isdir(output_folder+'/'+m+'/'+r):
                     log_file = output_folder+'/'+m+'/'+r+'/'+m+'.log'
                     if os.path.exists(log_file):
                         completed = checkIfCompleted(log_file)
                     else:
                         if verbose:
-                            message = 'Log file for model %s and residue %s was not found!\n' % (m, r)
+                            message = 'Log file for model %s and '+pocket_type+' %s was not found!\n' % (m, r)
                             message += 'It seems the calculation has not run yet...'
                             print(message)
                         continue
 
                     if not completed:
                         if verbose:
-                            print('There was a problem with model %s and residue %s' % (m, r))
+                            print('There was a problem with model %s and '+pocket_type+' %s' % (m, r))
                         continue
                     else:
                         found = checkIfFound(log_file)
                         if not found:
                             if verbose:
-                                print('No sites were found for model %s and residue %s' % (m, r))
+                                print('No sites were found for model %s and '+pocket_type+' %s' % (m, r))
                             continue
 
                     pocket = r
