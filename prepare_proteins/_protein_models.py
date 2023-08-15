@@ -876,7 +876,7 @@ chain to use for each model with the chains option.' % model)
                 os.system(command)
 
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
-                      executable='rosetta_scripts.mpi.linuxgccrelease',
+                      executable='rosetta_scripts.mpi.linuxgccrelease', sugars=False,
                       param_files=None, mpi_command='slurm', cpus=None):
         """
         Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
@@ -896,6 +896,8 @@ chain to use for each model with the chains option.' % model)
             Number of structures to generate when relaxing mutant
         param_files : list
             Params file to use when reading model with Rosetta.
+        sugars : bool
+            Use carbohydrate aware Rosetta optimization
         """
 
         mpi_commands = ['slurm', 'openmpi', None]
@@ -1003,6 +1005,13 @@ chain to use for each model with the chains option.' % model)
                         param_name = param.split('/')[-1]
                         shutil.copyfile(param, job_folder+'/params/'+param_name)
                     flags.addOption('in:file:extra_res_path', '../../params')
+
+                if sugars:
+                    flags.addOption('include_sugars')
+                    flags.addOption('alternate_3_letter_codes', 'pdb_sugar')
+                    flags.addOption('write_glycan_pdb_codes')
+                    flags.addOption('auto_detect_glycan_connections')
+                    flags.addOption('maintain_links')
 
                 flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
 
@@ -1653,7 +1662,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         Setup grid calculation for each model.
 
         Parameters
-        ==========  
+        ==========
         grid_folder : str
             Path to grid calculation folder
         center_atoms : tuple
@@ -4973,6 +4982,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += ' -tags '+best_model_tag
                         if sugars:
                             command += ' -include_sugars'
+                            command += ' -alternate_3_letter_codes pdb_sugar'
+                            command += ' -write_glycan_pdb_codes'
+                            command += ' -auto_detect_glycan_connections'
+                            command += ' -maintain_links'
                         os.system(command)
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
