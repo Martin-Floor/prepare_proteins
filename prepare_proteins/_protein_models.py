@@ -875,6 +875,61 @@ chain to use for each model with the chains option.' % model)
                 command += ' --pele_poses\n'
                 os.system(command)
 
+    def createMetalConstraintFiles(self, job_folder, sugars=False, params_folder=None, models=None):
+        """
+        Create metal constraint files.
+
+        Parameters
+        ==========
+        job_folder : str
+            Folder path where to place the constraint files.
+        sugars : bool
+            Use carbohydrate aware Rosetta PDB reading.
+        params_folder : str
+            Path to a folder containing a set of params file to be employed.
+        models : list
+            Only consider models inside the given list.
+        """
+
+        # Create mutation job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+
+        output_folder = job_folder+'/cst_files'
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        # Copy models to input folder
+        self.saveModels(job_folder+'/input_models', models=models)
+
+        # Copy embeddingToMembrane.py script
+        _copyScriptFile(job_folder, 'createMetalConstraints.py',
+                        subfolder='pyrosetta')
+
+        jobs = []
+        for model in self:
+
+            # Skip models not in the given list
+            if models != None:
+                if model not in models:
+                    continue
+
+            command = 'cd '+output_folder+'\n'
+            command += 'python ../._createMetalConstraints.py '
+            command += '../input_models/'+model+'.pdb '
+            command += 'metal_'+model+'.cst '
+            if sugars:
+                command += '--sugars '
+            if params_folder != None:
+                command += '--params_folder '+params_folder+' '
+            command += '\ncd '+'../'*len(output_folder.split('/'))+'\n'
+            jobs.append(command)
+
+        return jobs
+
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
                       executable='rosetta_scripts.mpi.linuxgccrelease', sugars=False,
                       param_files=None, mpi_command='slurm', cpus=None):
