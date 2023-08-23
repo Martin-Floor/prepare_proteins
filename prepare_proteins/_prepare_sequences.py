@@ -4,13 +4,19 @@ import shutil
 
 class sequenceModels:
 
-    def __init__(self, models_fasta):
+    def __init__(self, sequences_fasta):
 
-        self.sequences = alignment.readFastaFile(models_fasta, replace_slash=True)
+        if isinstance(sequences_fasta, str):
+            self.sequences = alignment.readFastaFile(sequences_fasta, replace_slash=True)
+        elif isinstance(sequences_fasta, dict):
+            self.sequences = sequences_fasta
+        else:
+            raise ValueError('sequences_fasta must be a string or a dictionary containing the sequences!')
+
         self.sequences_names = list(self.sequences.keys())
 
     def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=True):
+                       remove_extras=False, remove_msas=False):
         """
         Set up AlphaFold predictions for the loaded sequneces
         """
@@ -48,8 +54,134 @@ class sequenceModels:
             command += ' --max_template_date=2022-01-01'
             command += ' --random_seed 1\n'
             if remove_extras:
-                command += 'rm -r $Path/output_models/msas\n'
-                command += 'rm -r $Path/output_models/*.pkl\n'
+                command += f'rm -r $Path/output_models/{model}/msas\n'
+                command += f'rm -r $Path/output_models/{model}/*.pkl\n'
+
+            if remove_msas:
+                command += f'rm -r $Path/output_models/{model}/msas\n'
+
+            command += 'cd ..\n'
+
+            jobs.append(command)
+
+        return jobs
+
+
+    def setUpAlphaFold_tunned_mn(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
+                       remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
+        """
+        Set up AlphaFold predictions for the loaded sequneces. This is a tunned version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
+
+        """
+
+        # Create Job folders
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        if not os.path.exists(job_folder+'/input_sequences'):
+            os.mkdir(job_folder+'/input_sequences')
+
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Check for finished models
+        excluded = []
+        if exclude_finished:
+            for model in os.listdir(job_folder+'/output_models'):
+                for f in os.listdir(job_folder+'/output_models/'+model):
+                    if f == 'ranked_0.pdb':
+                        excluded.append(model)
+
+        jobs = []
+        for model in self.sequences:
+            if exclude_finished and model in excluded:
+                continue
+            sequence = {}
+            sequence[model] = self.sequences[model]
+            alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
+            command = 'cd '+job_folder+'\n'
+            command += 'Path=$(pwd)\n'
+            command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
+            command += f' --nstruct={nstruct}'
+            command += f' --max_recycles={nrecycles}'
+            if max_extra_msa is not None:
+                command += f' --max_extra_msa={max_extra_msa}'
+            command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
+            command += ' --output_dir=$Path/output_models'
+            command += ' --model_preset='+model_preset
+            command += ' --max_template_date=2022-01-01'
+            command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
+
+            if keep_compress==False:
+                command += 'bzip2 -d *.pdb.bz2\n'
+
+            if remove_extras:
+                command += f'rm -r $Path/output_models/{model}/msas\n'
+                command += f'rm -r $Path/output_models/{model}/*.pkl\n'
+
+            if remove_msas:
+                command += f'rm -r $Path/output_models/{model}/msas\n'
+
+            command += 'cd ..\n'
+
+            jobs.append(command)
+
+        return jobs
+
+    def setUpAlphaFold_tunned_mt(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
+                       remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
+        """
+        Set up AlphaFold predictions for the loaded sequneces. This is a tunned version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
+
+        """
+
+        # Create Job folders
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        if not os.path.exists(job_folder+'/input_sequences'):
+            os.mkdir(job_folder+'/input_sequences')
+
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Check for finished models
+        excluded = []
+        if exclude_finished:
+            for model in os.listdir(job_folder+'/output_models'):
+                for f in os.listdir(job_folder+'/output_models/'+model):
+                    if f == 'ranked_0.pdb':
+                        excluded.append(model)
+
+        jobs = []
+        for model in self.sequences:
+            if exclude_finished and model in excluded:
+                continue
+            sequence = {}
+            sequence[model] = self.sequences[model]
+            alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
+            command = 'cd '+job_folder+'\n'
+            command += 'Path=$(pwd)\n'
+            command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /opt/cuda/10.1,.:/etc,$TMPDIR:/tmp -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
+            command += f' --nstruct={nstruct}'
+            command += f' --max_recycles={nrecycles}'
+            if max_extra_msa is not None:
+                command += f' --max_extra_msa={max_extra_msa}'
+            command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
+            command += ' --output_dir=$Path/output_models'
+            command += ' --model_preset='+model_preset
+            command += ' --max_template_date=2022-01-01'
+            command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
+
+            if keep_compress==False:
+                command += 'bzip2 -d *.pdb.bz2\n'
+
+            if remove_extras:
+                command += f'rm -r $Path/output_models/{model}/msas\n'
+                command += f'rm -r $Path/output_models/{model}/*.pkl\n'
+
+            if remove_msas:
+                command += f'rm -r $Path/output_models/{model}/msas\n'
 
             command += 'cd ..\n'
 

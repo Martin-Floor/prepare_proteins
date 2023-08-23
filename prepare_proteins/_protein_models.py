@@ -293,6 +293,33 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         self.removeModelAtoms(model, atoms_to_remove)
 
+    def removeAtomFromConectLines(self, residue_name, atom_name, verbose=True):
+        """
+        Remove the given (atom_name) atoms from all the connect lines involving
+        the given (residue_name) residues.
+        """
+
+        # Match all the atoms with the given residue and atom name
+
+        for model in self:
+            resnames = {}
+            for chain in self.structures[model].get_chains():
+                for residue in chain:
+                    resnames[(chain.id, residue.id[1])] = residue.resname
+
+            conects = []
+            count = 0
+            for conect in models.conects[model]:
+                new_conect = []
+                for atom in conect:
+                    if resnames[atom[:-1]] != residue_name and atom[-1] != atom_name:
+                        new_conect.append(atom)
+                    else:
+                        count += 1
+                conects.append(new_conect)
+            models.conects[model] = conects
+            print(f'Removed {count} from conect lines of model {model}')
+
     def addOXTAtoms(self):
         """
         Add missing OXT atoms for terminal residues when missing
@@ -392,7 +419,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return self.sequences
 
-    def calculateMSA(self, chains=None):
+    def calculateMSA(self, extra_sequences=None, chains=None):
         """
         Calculate a Multiple Sequence Alignment from the current models' sequences.
 
@@ -417,9 +444,17 @@ chain to use for each model with the chains option.' % model)
                 else:
                     sequences[model] = self.sequences[model]
 
-            self.msa = alignment.mafft.multipleSequenceAlignment(sequences, stderr=False)
+            if isinstance(extra_sequences, dict):
+                for s in extra_sequences:
+                    sequences[s] = extra_sequences[s]
         else:
-            self.msa = alignment.mafft.multipleSequenceAlignment(self.sequences, stderr=False)
+            sequences = self.sequences.copy()
+
+        if isinstance(extra_sequences, dict):
+            for s in extra_sequences:
+                sequences[s] = extra_sequences[s]
+
+        self.msa = alignment.mafft.multipleSequenceAlignment(sequences, stderr=False)
 
         return self.msa
 
@@ -840,8 +875,63 @@ chain to use for each model with the chains option.' % model)
                 command += ' --pele_poses\n'
                 os.system(command)
 
+    def createMetalConstraintFiles(self, job_folder, sugars=False, params_folder=None, models=None):
+        """
+        Create metal constraint files.
+
+        Parameters
+        ==========
+        job_folder : str
+            Folder path where to place the constraint files.
+        sugars : bool
+            Use carbohydrate aware Rosetta PDB reading.
+        params_folder : str
+            Path to a folder containing a set of params file to be employed.
+        models : list
+            Only consider models inside the given list.
+        """
+
+        # Create mutation job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+
+        output_folder = job_folder+'/cst_files'
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        # Copy models to input folder
+        self.saveModels(job_folder+'/input_models', models=models)
+
+        # Copy embeddingToMembrane.py script
+        _copyScriptFile(job_folder, 'createMetalConstraints.py',
+                        subfolder='pyrosetta')
+
+        jobs = []
+        for model in self:
+
+            # Skip models not in the given list
+            if models != None:
+                if model not in models:
+                    continue
+
+            command = 'cd '+output_folder+'\n'
+            command += 'python ../._createMetalConstraints.py '
+            command += '../input_models/'+model+'.pdb '
+            command += 'metal_'+model+'.cst '
+            if sugars:
+                command += '--sugars '
+            if params_folder != None:
+                command += '--params_folder '+params_folder+' '
+            command += '\ncd '+'../'*len(output_folder.split('/'))+'\n'
+            jobs.append(command)
+
+        return jobs
+
     def createMutants(self, job_folder, mutants, nstruct=100, relax_cycles=0, cst_optimization=True,
-                      executable='rosetta_scripts.mpi.linuxgccrelease',
+                      executable='rosetta_scripts.mpi.linuxgccrelease', sugars=False,
                       param_files=None, mpi_command='slurm', cpus=None):
         """
         Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
@@ -861,6 +951,8 @@ chain to use for each model with the chains option.' % model)
             Number of structures to generate when relaxing mutant
         param_files : list
             Params file to use when reading model with Rosetta.
+        sugars : bool
+            Use carbohydrate aware Rosetta optimization
         """
 
         mpi_commands = ['slurm', 'openmpi', None]
@@ -969,6 +1061,161 @@ chain to use for each model with the chains option.' % model)
                         shutil.copyfile(param, job_folder+'/params/'+param_name)
                     flags.addOption('in:file:extra_res_path', '../../params')
 
+                if sugars:
+                    flags.addOption('include_sugars')
+                    flags.addOption('alternate_3_letter_codes', 'pdb_sugar')
+                    flags.addOption('write_glycan_pdb_codes')
+                    flags.addOption('auto_detect_glycan_connections')
+                    flags.addOption('maintain_links')
+
+                flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
+
+                command = 'cd '+job_folder+'/output_models/'+model+'\n'
+                command += mpi_command+executable+' @ '+'../../flags/'+model+'_'+mutant+'.flags\n'
+                command += 'cd ../../..\n'
+                jobs.append(command)
+
+        return jobs
+
+    def createDisulfureBond(self, job_folder, cys_dic, nstruct=100, relax_cycles=0, cst_optimization=True,
+                      executable='rosetta_scripts.mpi.linuxgccrelease',
+                      param_files=None, mpi_command='slurm', cpus=None, remove_existing=False,repack=True,
+                      scorefxn="ref2015"):
+        """
+        Create Disulfure bonds from protein models. Cysteine residues must be given as a nested dictionary
+        with each protein as the first key and the name of the particular mutant as the second key.
+        The value of each inner dictionary is a list containing only one element string with the cisteine pairs with : separator.
+        It is recommended to use absolute pose positions.
+
+        The mover is ForceDisulfides
+
+        Parameters
+        ==========
+        job_folder : str
+            Folder path where to place the mutation job.
+        cys_dic : dict
+            Dictionary specify the cysteine bonds to generate. # It is better to use the pose numbering to avoid
+            problems with the chains. !!!!! IMPORTANT !!!!!! Adjust first the positions in a previous function
+            as in the case of mutate residue.
+
+        relax_cycles : int
+            Apply this number of relax cycles (default:0, i.e., no relax).
+        nstruct : int
+            Number of structures to generate when relaxing mutant
+        param_files : list
+            Params file to use when reading model with Rosetta.
+        """
+
+        # Check both residues are cysteine
+
+        mpi_commands = ['slurm', 'openmpi', None]
+        if mpi_command not in mpi_commands:
+            raise ValueError('Wrong mpi_command it should either: '+' '.join(mpi_commands))
+
+        if mpi_command == 'openmpi' and not isinstance(cpus, int):
+            raise ValueError('')
+
+        # Create mutation job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+        if not os.path.exists(job_folder+'/input_models'):
+            os.mkdir(job_folder+'/input_models')
+        if not os.path.exists(job_folder+'/flags'):
+            os.mkdir(job_folder+'/flags')
+        if not os.path.exists(job_folder+'/xml'):
+            os.mkdir(job_folder+'/xml')
+        if not os.path.exists(job_folder+'/output_models'):
+            os.mkdir(job_folder+'/output_models')
+
+        # Save considered models
+        considered_models = list(cys_dic.keys())
+        self.saveModels(job_folder+'/input_models', models=considered_models)
+
+        jobs = []
+
+        # Create all-atom score function
+        score_fxn_name = 'ref2015'
+        sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
+                                                               weights_file=score_fxn_name)
+
+        # Create and append execution command
+        if mpi_command == None:
+            mpi_command = ''
+        elif mpi_command == 'slurm':
+            mpi_command = 'srun '
+        elif mpi_command == 'openmpi':
+            mpi_command = 'mpirun -np '+str(cpus)+' '
+        else:
+            mpi_command = mpi_command+' '
+
+        for model in self.models_names:
+
+            # Skip models not in given cys_dic
+            if model not in considered_models:
+                continue
+
+            if not os.path.exists(job_folder+'/output_models/'+model):
+                os.mkdir(job_folder+'/output_models/'+model)
+
+            # Iterate each mutant
+            for mutant in cys_dic[model]:
+
+                # Create xml mutation (and minimization) protocol
+                xml = rosettaScripts.xmlScript()
+                protocol = []
+
+                # Add score function
+                xml.addScorefunction(sfxn)
+
+                for m in cys_dic[model][mutant]:
+                    disulfide = rosettaScripts.movers.ForceDisulfides(name='disulfide_'+str(m[0]),
+                                                          disulfides=m[0],
+                                                          remove_existing=remove_existing,
+                                                          repack=repack,
+                                                          scorefxn=scorefxn)
+                    xml.addMover(disulfide)
+                    protocol.append(disulfide)
+
+                if relax_cycles:
+                    # Create fastrelax mover
+                    relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
+                    xml.addMover(relax)
+                    protocol.append(relax)
+                else:
+                    # Turn off more than one structure when relax is not performed
+                    nstruct = 1
+
+                # Set protocol
+                xml.setProtocol(protocol)
+
+                # Add scorefunction output
+                xml.addOutputScorefunction(sfxn)
+
+                # Write XMl protocol file
+                xml.write_xml(job_folder+'/xml/'+model+'_'+mutant+'.xml')
+
+                # Create options for minimization protocol
+                flags = rosettaScripts.flags('../../xml/'+model+'_'+mutant+'.xml',
+                                             nstruct=nstruct, s='../../input_models/'+model+'.pdb',
+                                             output_silent_file=model+'_'+mutant+'.out')
+
+                # Add relaxation with constraints options and write flags file
+                if cst_optimization and relax_cycles:
+                    flags.add_relax_cst_options()
+                else:
+                    flags.add_relax_options()
+
+                # Add path to params files
+                if param_files != None:
+                    if not os.path.exists(job_folder+'/params'):
+                        os.mkdir(job_folder+'/params')
+                    if isinstance(param_files, str):
+                        param_files = [param_files]
+                    for param in param_files:
+                        param_name = param.split('/')[-1]
+                        shutil.copyfile(param, job_folder+'/params/'+param_name)
+                    flags.addOption('in:file:extra_res_path', '../../params')
+
                 flags.write_flags(job_folder+'/flags/'+model+'_'+mutant+'.flags')
 
                 command = 'cd '+job_folder+'/output_models/'+model+'\n'
@@ -982,7 +1229,8 @@ chain to use for each model with the chains option.' % model)
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
                                  membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
-                                 skip_finished=True, null=False):
+                                 skip_finished=True, null=False, cartesian=False, extra_flags=None,
+                                 sugars=False):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1052,8 +1300,13 @@ has been carried out. Please run compareSequences() function before setting muta
             # Create membrane scorefucntion
             if membrane:
                 # Create all-atom score function
+                weights_file = 'mpframework_smooth_fa_2012'
+                if cartesian:
+                    weights_file += '_cart'
+
                 sfxn = rosettaScripts.scorefunctions.new_scorefunction('mpframework_smooth_fa_2012',
-                                                                       weights_file='mpframework_smooth_fa_2012')
+                                                                       weights_file=weights_file)
+
                 # Add constraint weights to membrane score function
                 if cst_files != None:
                     reweights = (('chainbreak', 1.0),
@@ -1070,9 +1323,13 @@ has been carried out. Please run compareSequences() function before setting muta
             # Create all-atom scorefucntion
             else:
                 score_fxn_name = 'ref2015'
+
+                if cartesian:
+                    score_fxn_name += '_cart'
+
                 # Check if constraints are given
                 if cst_files != None:
-                    score_fxn_name = score_fxn_name+'_cst'
+                    score_fxn_name += '_cst'
 
                 # Create all-atom score function
                 sfxn = rosettaScripts.scorefunctions.new_scorefunction(score_fxn_name,
@@ -1128,6 +1385,14 @@ has been carried out. Please run compareSequences() function before setting muta
                                          nstruct=nstruct, s='../../input_models/'+model+'.pdb',
                                          output_silent_file=model+'_relax.out')
 
+            # Add extra flags
+            if extra_flags != None:
+                for o in extra_flags:
+                    if isinstance(o, tuple):
+                        flags.addOption(*o)
+                    else:
+                        flags.addOption(o)
+
             # Add relaxation with constraints options and write flags file
             if cst_optimization:
                 flags.add_relax_cst_options()
@@ -1142,14 +1407,28 @@ has been carried out. Please run compareSequences() function before setting muta
 
                 if isinstance(param_files, str):
                     param_files = [param_files]
+
+                patch_line = ''
                 for param in param_files:
                     param_name = param.split('/')[-1]
                     shutil.copyfile(param, relax_folder+'/params/'+param_name)
+                    if not param_name.endswith('.params'):
+                        patch_line += ('../../params/'+param_name+' ')
                 flags.addOption('in:file:extra_res_path', '../../params')
+                if patch_line != '':
+                    flags.addOption('in:file:extra_patch_fa', patch_line)
 
             if membrane:
                 flags.addOption('mp::setup::spans_from_structure', 'true')
-                flags.addOption('relax:constrain_relax_to_start_coords', '')
+                flags.addOption('relax:constrain_relax_to_start_coords')
+
+            if sugars:
+                flags.addOption('include_sugars')
+                flags.addOption('alternate_3_letter_codes', 'pdb_sugar')
+                flags.addOption('write_glycan_pdb_codes')
+                flags.addOption('auto_detect_glycan_connections')
+                flags.addOption('maintain_links')
+
             flags.write_flags(relax_folder+'/flags/'+model+'_relax.flags')
 
             # Create and append execution command
@@ -1772,7 +2051,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # command += '-enclosure '+str(enclosure)+' '
                 # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
-                command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
+
+                # For chain and residue index
+                if isinstance(r, tuple) and len(tuple) == 2:
+                    command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
+                # For chain only
+                elif isinstance(r, str) and len(r) == 1:
+                    command += '-siteasl \"chain.name '+str(r[0])
+
                 if sidechain:
                     command += ' and not (atom.pt ca,c,n,h,o)'
                 command += '\" '
@@ -1854,7 +2140,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def analiseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
+    def analyseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
         """
         Extract score values from a site map calculation.
          Parameters
@@ -1937,7 +2223,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         sitemap_data = {}
         sitemap_data['Model'] = []
-        sitemap_data['Target Residue'] = []
         sitemap_data['Pocket'] = []
 
         input_folder = sitemap_folder+'/input_models'
@@ -1949,33 +2234,39 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         for m in os.listdir(output_folder):
             for r in os.listdir(output_folder+'/'+m):
+
+                # Check if chain or residue was given
+                if len(r) == 1:
+                    pocket_type = 'chain'
+                else:
+                    pocket_type = 'residue'
+
                 if os.path.isdir(output_folder+'/'+m+'/'+r):
                     log_file = output_folder+'/'+m+'/'+r+'/'+m+'.log'
                     if os.path.exists(log_file):
                         completed = checkIfCompleted(log_file)
                     else:
                         if verbose:
-                            message = 'Log file for model %s and residue %s was not found!\n' % (m, r)
+                            message = 'Log file for model %s and '+pocket_type+' %s was not found!\n' % (m, r)
                             message += 'It seems the calculation has not run yet...'
                             print(message)
                         continue
 
                     if not completed:
                         if verbose:
-                            print('There was a problem with model %s and residue %s' % (m, r))
+                            print('There was a problem with model %s and '+pocket_type+' %s' % (m, r))
                         continue
                     else:
                         found = checkIfFound(log_file)
                         if not found:
                             if verbose:
-                                print('No sites were found for model %s and residue %s' % (m, r))
+                                print('No sites were found for model %s and '+pocket_type+' %s' % (m, r))
                             continue
 
-                    pocket = int(r)
+                    pocket = r
                     pocket_data = parseVolumeInfo(log_file)
 
                     sitemap_data['Model'].append(m)
-                    sitemap_data['Target Residue'].append(r)
                     sitemap_data['Pocket'].append(pocket)
 
                     for l in pocket_data:
@@ -2001,7 +2292,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             print('Volume points PDB not found for model %s and residue %s' % (m, r))
 
         sitemap_data = pd.DataFrame(sitemap_data)
-        sitemap_data.set_index(['Model', 'Target Residue', 'Pocket'], inplace=True)
+        sitemap_data.set_index(['Model', 'Pocket'], inplace=True)
 
         return sitemap_data
 
@@ -2270,6 +2561,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             Additional groups to consider when doing energy by residue reports.
         Missing!
         """
+
+        if continuation:
+            continue_all = True
+        else:
+            continue_all = False
 
         energy_by_residue_types = ['all', 'lennard_jones', 'sgb', 'electrostatic']
         if energy_by_residue_type not in energy_by_residue_types:
@@ -2685,25 +2981,27 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if ligand_equilibration_cst:
 
                             # Copy input_yaml for equilibration
-                            of = open(pele_folder+'/'+protein+separator+ligand+'/input_equilibration.yaml', 'w')
-                            has_restart = False
-                            has_adaptive_restart = False
-                            with open(pele_folder+'/'+protein+separator+ligand+'/input.yaml') as iy:
-                                for l in iy:
-                                    if 'restart:' in l:
-                                        has_restart = True
-                                    if 'adaptive_restart:' in l:
-                                        has_adaptive_restart = True
-                                    if l.startswith('iterations:'):
+                            oyml = open(pele_folder+'/'+protein+separator+ligand+'/input_equilibration.yaml', 'w')
+                            debug_line = False
+                            restart_line = False
+                            with open(pele_folder+'/'+protein+separator+ligand+'/input.yaml') as iyml:
+                                for l in iyml:
+                                    if 'debug: true' in l:
+                                        debug_line = True
+                                        oyml.write('restart: true\n')
+                                        oyml.write('adaptive_restart: true\n')
+                                        continue
+                                    elif 'restart: true' in l:
+                                        restart_line = True
+                                    elif l.startswith('iterations:'):
                                         l = 'iterations: 1\n'
-                                    if l.startswith('steps:'):
+                                    elif l.startswith('steps:'):
                                         l = 'steps: 1\n'
-                                    of.write(l)
-                                if not has_restart:
-                                    of.write('restart: true\n')
-                                if not has_adaptive_restart:
-                                    of.write('adaptive_restart: true\n')
-                            of.close()
+                                    oyml.write(l)
+                                if not debug_line and not restart_line:
+                                    oyml.write('restart: true\n')
+                                    oyml.write('adaptive_restart: true\n')
+                            oyml.close()
 
                             # Add commands for adding ligand constraints
                             command += 'cp output/pele.conf output/pele.conf.backup\n'
@@ -2740,22 +3038,24 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if continuation:
                         debug_line = False
                         restart_line = False
-                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
-                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
-                                for l in iyml:
-                                    if 'debug: true' in l:
-                                        debug_line = True
-                                        oyml.write('restart: true\n')
-                                        oyml.write('adaptive_restart: true\n')
-                                        continue
-                                    elif 'restart: true' in l:
-                                        continue
-                                    oyml.write(l)
-                                if not debug_line:
+                        # Copy input_yaml for equilibration
+                        oyml = open(pele_folder+'/'+protein+separator+ligand+'/input_restart.yaml', 'w')
+                        debug_line = False
+                        restart_line = False
+                        with open(pele_folder+'/'+protein+separator+ligand+'/input.yaml') as iyml:
+                            for l in iyml:
+                                if 'debug: true' in l:
+                                    debug_line = True
                                     oyml.write('restart: true\n')
                                     oyml.write('adaptive_restart: true\n')
-                        if covalent_setup:
-                            continuation = False
+                                    continue
+                                elif 'restart: true' in l:
+                                    restart_line = True
+                                oyml.write(l)
+                            if not debug_line and not restart_line:
+                                oyml.write('restart: true\n')
+                                oyml.write('adaptive_restart: true\n')
+                        oyml.close()
 
                         if extend_iterations:
                             _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
@@ -2764,11 +3064,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         command += 'python -m pele_platform.main input_restart.yaml\n'
 
-                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]):
+                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]) and not continue_all:
                             continuation = False
                             debug = False
 
-                    elif energy_by_residue:
+                    if energy_by_residue:
                         command += 'python ../'+ebr_script_name+' output --energy_type '+energy_by_residue_type
                         if isinstance(ligand_energy_groups, dict):
                             command += ' --ligand_energy_groups ligand_energy_groups.json'
@@ -2780,13 +3080,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         else:
                             command += '\n'
-                        with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
-                            with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
-                                for l in iyml:
-                                    if 'debug: true' in l:
-                                        l = 'restart: true\n'
-                                    oyml.write(l)
-                        command += 'python -m pele_platform.main input_restart.yaml\n'
+                        # with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
+                        #     with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
+                        #         for l in iyml:
+                        #             if 'debug: true' in l:
+                        #                 l = 'restart: true\n'
+                        #             oyml.write(l)
+                        # command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif peptide:
                         command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
@@ -3732,7 +4032,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Add data to dataframe
                 self.distance_data[model][label].append(value)
 
-            self.distance_data[model] = pd.DataFrame(self.distance_data[model])
+            self.distance_data[model] = pd.DataFrame(self.distance_data[model]).reset_index()
             self.distance_data[model].set_index('model', inplace=True)
 
         return self.distance_data
@@ -3798,6 +4098,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.models_data['metric_'+name] = values
 
         self.models_data = pd.DataFrame(self.models_data)
+        print(self.models_data)
         self.models_data.set_index('model', inplace=True)
 
         return self.models_data
@@ -4671,7 +4972,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True,
-                                          return_missing=False):
+                                          return_missing=False, sugars=False):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -4704,6 +5005,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         params = None
         if os.path.exists(optimization_folder+'/params'):
             params = optimization_folder+'/params'
+            patch_line = ''
+            for p in os.listdir(params):
+                if not p.endswith('.params'):
+                    patch_line += (params+'/'+p+' ')
 
         for d in os.listdir(optimization_folder+'/output_models'):
             if os.path.isdir(optimization_folder+'/output_models/'+d):
@@ -4726,14 +5031,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command = executable
                         command += ' -silent '+optimization_folder+'/output_models/'+d+'/'+f
                         if params != None:
-                            command += ' -extra_res_path '+params+' '
+                            command += ' -extra_res_path '+params
+                            if patch_line != '':
+                                command += ' -extra_patch_fa '+patch_line
                         command += ' -tags '+best_model_tag
+                        if sugars:
+                            command += ' -include_sugars'
+                            command += ' -alternate_3_letter_codes pdb_sugar'
+                            command += ' -write_glycan_pdb_codes'
+                            command += ' -auto_detect_glycan_connections'
+                            command += ' -maintain_links'
                         os.system(command)
                         self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
-
-
 
         self.getModelsSequences()
 
@@ -4932,7 +5243,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             print('Missing sequences in the given fasta file:')
             print('\t'+', '.join(missing_models))
 
-    def compareSequences(self, sequences_file):
+    def compareSequences(self, sequences_file, chain=None):
         """
         Compare models sequences to their given sequences and check for missing
         or changed sequence information.
@@ -4949,8 +5260,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             Dictionary containing missing or changed information.
         """
 
-        if self.multi_chain:
+        if self.multi_chain and chain == None:
             raise ValueError('PDBs contain multiple chains. Please select one chain.')
+
         self.readTargetSequences(sequences_file)
 
         # Iterate models to store sequence differences
@@ -4971,7 +5283,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Create a sequence alignement between current and target sequence
             to_align = {}
-            to_align['current'] = self.sequences[model]
+            if chain:
+                to_align['current'] = self.sequences[model][chain]
+            else:
+                to_align['current'] = self.sequences[model]
             to_align['target'] = self.target_sequences[model]
             msa = prepare_proteins.alignment.mafft.multipleSequenceAlignment(to_align, stderr=False, stdout=False)
 

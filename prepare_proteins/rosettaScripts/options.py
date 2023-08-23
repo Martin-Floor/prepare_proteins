@@ -33,7 +33,7 @@ class flags:
         self.relax_cst = False
         self.relax = False
 
-    def addOption(self, option, value):
+    def addOption(self, option, value=None):
         self.others[option] = value
 
     def add_relax_options(self):
@@ -111,7 +111,10 @@ class flags:
 
             if self.others != {}:
                 for option in self.others:
-                    ff.write('-'+option+' '+self.others[option]+'\n')
+                    if self.others[option] == None:
+                        ff.write('-'+option+'\n')
+                    else:
+                        ff.write('-'+option+' '+self.others[option]+'\n')
 
             if self.flags_files != []:
                 for flag_file in self.flags_files:

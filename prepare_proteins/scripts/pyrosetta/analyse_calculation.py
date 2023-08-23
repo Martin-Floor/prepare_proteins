@@ -681,13 +681,16 @@ def _calculateProtonationStates(arguments):
         chain = res_info.split()[1]
 
         if resname.startswith('HIS'):
+
+            if ':' in resname:
+                resname = resname.split(':')[0]
             if resname == 'HIS_D':
                 his_type = 'HID'
             if resname == 'HIS':
                 his_type = 'HIE'
 
-            protonation_data['Model'],  = '_'.join(tag.split('_')[:-1])
-            protonation_data['Pose'] = tag.split('_')[-1]
+            protonation_data['Model'].append('_'.join(tag.split('_')[:-1]))
+            protonation_data['Pose'].append(tag.split('_')[-1])
             protonation_data['Chain'].append(chain)
             protonation_data['Residue'].append(res)
             protonation_data['Residue state'].append(his_type)
