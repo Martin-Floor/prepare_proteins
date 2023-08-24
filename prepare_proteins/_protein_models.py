@@ -3387,7 +3387,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         md_folder : str
             Path to the job folder where the MD input files are located.
         sim_time : int
-            Number of simulation steps
+            Simulation time in ns
         frags : int
             Number of fragments to divide the simulation.
         program : str
@@ -3446,7 +3446,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*100000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
@@ -3457,7 +3457,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*50000/frags))) # with an integrator of 0.002fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*500000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -3465,7 +3465,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 sys.stdout.write(line)
