@@ -4316,7 +4316,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return pele_data
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder,
-                            separator='-', covalent_check=True):
+                            separator='-', only_extract_new=True, covalent_check=True,
+                            remove_previous=False):
         """
         Extract docking poses present in a docking_data dataframe. The docking DataFrame
         contains the same structure as the self.docking_data dataframe, parameter of
@@ -4333,6 +4334,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the folder where the docking structures will be saved.
         separator : str
             Symbol used to separate protein, ligand, and docking pose index.
+        only_extract_new : bool
+            Only extract models not present in the output_folder
+        remove_previous : bool
+            Remove all content in the output folder
         """
 
         # Check the separator is not in model or ligand names
@@ -4343,8 +4348,38 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if separator in ligand:
                     raise ValueError('The separator %s was found in ligand name %s. Please use a different separator symbol.' % (separator, ligand))
 
+        # Remove output_folder
+        if os.path.exists(output_folder):
+            if remove_previous:
+                shutil.rmtree(output_folder)
+
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
+        else:
+            # Gather already extracted models
+            if only_extract_new:
+                extracted_models = set()
+                for model in os.listdir(output_folder):
+                    if not os.path.isdir(output_folder+'/'+model):
+                        continue
+                    for f in os.listdir(output_folder+'/'+model):
+                        if f.endswith('.pdb'):
+                            m,l = f.split(separator)[:2]
+                            extracted_models.add((m,l))
+
+                # Filter docking data to not include the already extracted models
+                extracted_indexes = []
+                for i in docking_data.index:
+                    if i[:2] in extracted_models:
+                        extracted_indexes.append(i)
+                docking_data = docking_data[~docking_data.index.isin(extracted_indexes)]
+                if docking_data.empty:
+                    print('All models were already extracted!')
+                    print('Set only_extract_new=False to extract them again!')
+                    return
+                else:
+                    print(f'{len(extracted_models)} models were already extracted!')
+                    print(f'Extracting {docking_data.shape[0]} new models')
 
         # Copy analyse docking script (it depends on schrodinger so we leave it out.)
         _copyScriptFile(output_folder, 'extract_docking.py')
