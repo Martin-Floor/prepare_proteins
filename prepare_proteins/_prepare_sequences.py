@@ -189,7 +189,7 @@ class sequenceModels:
 
         return jobs
 
-    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder):
+    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix=''):
         """
         Copy models from an AlphaFold calculation to an specfied output folder.
 
@@ -215,7 +215,7 @@ class sequenceModels:
 
         for m in self:
             if m in models_paths:
-                shutil.copyfile(models_paths[m], output_folder+'/'+m+'.pdb')
+                shutil.copyfile(models_paths[m], output_folder+'/'+prefix+m+'.pdb')
             else:
                 print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
 
