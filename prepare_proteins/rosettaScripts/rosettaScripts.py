@@ -102,7 +102,6 @@ class taskOperations:
 
         def __init__(self, name, selector, operation=None):
 
-
             if operation == None or operation not in ['RestrictToRepackingRLT', 'PreventRepackingRLT']:
                 raise ValueError('Must define one of these operations: RestrictToRepackingRLT, PreventRepackingRLT')
 
@@ -117,6 +116,32 @@ class taskOperations:
             self.root.set('name', self.name)
             self.root.set('selector', self.selector)
             self.xml.SubElement(self.root, self.operation)
+
+    class restrictToRepacking:
+
+        def __init__(self, name):
+
+            self.name = name
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('RestrictToRepacking')
+            self.root.set('name', self.name)
+
+    class preventResiduesFromRepacking:
+
+        def __init__(self, name, residues):
+
+            self.name = name
+            self.residues = residues
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('PreventResiduesFromRepacking')
+            self.root.set('name', self.name)
+            self.root.set('residues', ','.join(self.residues))
 
     class extraRotamersGeneric:
 
