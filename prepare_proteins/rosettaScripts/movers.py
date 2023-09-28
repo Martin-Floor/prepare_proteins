@@ -1041,6 +1041,10 @@ class movers:
             if self.scorefxn != None:
                 self.root.set('scorefxn', self.scorefxn)
 
+            if self.ligandchain != None:
+                self.root.set('ligandchain', self.ligandchain)
+
+
     class rigidBodyPerturbNoCenterMover:
 
         def __init__(self, name='rigidBodyPerturbNoCenter', rot_mag=0.1, trans_mag=0.4):
