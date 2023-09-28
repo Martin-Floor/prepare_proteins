@@ -87,6 +87,28 @@ class movers:
             if self.task_operations != None:
                 self.root.set('task_operations', ','.join([t.name for t in self.task_operations]))
 
+    class rotamerTrialsMinMover:
+
+        def __init__(self, name='rotamerTrialsMinMover', scorefxn=None, task_operations=None, nonideal=False):
+
+            self.type = 'mover'
+            self.name = name
+            self.scorefxn = scorefxn
+            self.task_operations = task_operations
+            self.nonideal = nonideal
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('RotamerTrialsMinMover')
+            self.root.set('name', self.name)
+            if self.scorefxn != None:
+                self.root.set('scorefxn', self.scorefxn.name)
+            if self.task_operations != None:
+                self.root.set('task_operations', ','.join([t.name for t in self.task_operations]))
+            if self.nonideal:
+                self.root.set('nonideal', str(self.nonideal).lower())
+
     class minMover:
 
         def __init__(self, name="minMover", jump=None, abs_score_convergence_threshold=None,
@@ -776,18 +798,18 @@ class movers:
 
     class ForceDisulfides:
         def __init__(self, name='ForceDisulfides', disulfides=None, remove_existing=False, repack=True,scorefxn="ref2015"):
-        
+
 
             if disulfides == None:
                 raise ValueError('disulfides = None. You need to give a colon separator respair cs list')
-            
+
             self.type = 'mover'
             self.name = name
             self.disulfides = str(disulfides)
             self.remove_existing = str(remove_existing).lower()
             self.repack = str(repack).lower()
             self.scorefxn = scorefxn
-            
+
 
         def generateXml(self):
             self.xml = ElementTree
@@ -797,8 +819,8 @@ class movers:
             self.root.set('repack', self.repack)
             self.root.set('remove_existing', self.remove_existing)
             self.root.set('scorefxn', self.scorefxn)
-            
-            
+
+
     class atomTree:
 
         def __init__(self, name='AtomTree', fold_tree_file=None):
