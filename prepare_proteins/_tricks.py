@@ -3,7 +3,8 @@ import shutil
 import os
 import networkx as nx
 import pandas as pd
-
+import uuid
+import re
 import prepare_proteins
 
 
