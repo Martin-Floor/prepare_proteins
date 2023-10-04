@@ -145,6 +145,53 @@ class tricks:
                     tmp.write(l)
         shutil.move(input_pdb + '.tmp', input_pdb)
 
+    def checkLastEpoch(host, server_path, separator='-'):
+        """
+        Return the last epoch ran for each pele folder.
+
+        Parameters
+        ==========
+        host : str
+            Name of the remote host where pele folder resides.
+        server_path : str
+            Path to the PELE folder in the remote host.
+        separator : str
+            Separator used to split the pele folder names into protein and ligand.
+
+        Returns
+        =======
+        last_epoch : dict
+            Last epoch for each protein and ligand combination based on finding the
+            specific epoch folder in each pele folder path.
+
+        Caveats:
+            - This function does not check the content of the PELE folders, only the presence
+              of the epoch folders.
+        """
+
+        log_file = '.'+str(uuid.uuid4())+'.log'
+        os.system('ssh '+host+' ls '+server_path+'/*/*/output > '+log_file)
+
+        last_epoch = {}
+        with open(log_file) as f:
+            for l in f:
+                if 'output' in l:
+                    model_ligand = l.split('/')[-3]#.split('@')[0]
+                    if separator not in model_ligand:
+                        raise ValueError(f'Separator "{separator}" not found in pele folder {model_ligand}')
+                    elif len(model_ligand.split(separator)) != 2:
+                        raise ValueError(f'Separator "{separator}" seems incorrect for pele folder {model_ligand}')
+
+                    model, ligand = model_ligand.split(separator)
+                    last_epoch[model, ligand] = None
+                else:
+                    try: int(l)
+                    except: continue
+                    last_epoch[model, ligand] = int(l)
+        os.remove(log_file)
+
+        return last_epoch
+
     def _getBondPele(pele_params, ligand_name):
         """
         Calculate the bonds and distance for pele params

@@ -5245,7 +5245,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 check_file = False
                 hydrogens = True
 
-            self._write_conect_lines(model, output_folder+'/'+model+'.pdb',check_file=check_file,hydrogens=hydrogens)
+            self._write_conect_lines(model, output_folder+'/'+model+'.pdb', check_file=check_file, hydrogens=hydrogens)
 
             if convert_to_mae:
                 cwd = os.getcwd()
