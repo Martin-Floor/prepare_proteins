@@ -153,7 +153,8 @@ class tricks:
         Parameters
         ==========
         host : str
-            Name of the remote host where pele folder resides.
+            Name of the remote host where pele folder resides. Use localhost for
+            a local pele folder.
         server_path : str
             Path to the PELE folder in the remote host.
         separator : str
@@ -171,7 +172,11 @@ class tricks:
         """
 
         log_file = '.'+str(uuid.uuid4())+'.log'
-        os.system('ssh '+host+' ls '+server_path+'/*/*/output > '+log_file)
+
+        if host == 'localhost':
+            os.system('ls '+server_path+'/*/*/output > '+log_file)
+        else:
+            os.system('ssh '+host+' ls '+server_path+'/*/*/output > '+log_file)
 
         last_epoch = {}
         with open(log_file) as f:
