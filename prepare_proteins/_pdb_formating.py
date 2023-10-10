@@ -1,204 +1,18 @@
-import math
-import shutil
 import os
+import shutil
 import networkx as nx
 import pandas as pd
-import uuid
-import re
+import math
 import prepare_proteins
+from Bio import PDB
 
+class pdb_formating:
 
-class tricks:
-    """
-    Collection of useful functions to fix PDB formats that, ideally, should not be
-    useful.
-    """
+    def __init__(self):
+        pass
 
-    def getProteinLigandInputFiles(pele_folder, protein, ligand, separator='-'):
-        """
-        Returns the paths of the input PDB files of a PELE simulation folder
-        for a specific protein and ligand.
-        """
-
-        pdb_files = []
-        for d in os.listdir(pele_folder):
-
-            if d == 'templates':
-                continue
-
-            if separator not in d:
-                raise ValueError('Separator %s not found in PELE folder.' % separator)
-            if d.count(separator) > 1:
-                raise ValueError('Separator %s appears more than one time in the PELE folder!' % separator)
-
-            protein_name = d.split(separator)[0]
-            ligand_name = d.split(separator)[1]
-
-            if protein == protein_name and ligand == ligand_name:
-                for f in os.listdir(pele_folder + '/' + d):
-                    if f.endswith('.pdb'):
-                        pdb_files.append(pele_folder + '/' + d + '/' + f)
-
-        return pdb_files
-
-    def changeResidueAtomNames(input_pdb, residue, atom_names, verbose=False):
-        """
-        Change the atom names of a specific residue in a pdb file.
-
-        Parameters
-        ==========
-        input_pdb : str
-            Path to the target PDB file
-        residue : tuple
-            Residue to change as (chain_id, resname)
-        atom_names : dict
-            Mapping the old atom names to the new atom names
-        """
-
-        if not isinstance(residue, tuple):
-            raise ValueError('The residue must be a two element tuple (chain, resid)')
-
-        found = {}
-        for atom in atom_names:
-            found[atom] = False
-
-        with open(input_pdb + '.tmp', 'w') as tmp:
-            with open(input_pdb) as pdb:
-                for l in pdb:
-                    if l.startswith('ATOM') or l.startswith('HETATM'):
-                        index, name, resname, chain, resid = (int(l[7:12]), l[12:16], l[17:20], l[21], int(l[22:27]))
-                        if (chain, resid) == residue:
-                            old_atom_name = name
-                            if old_atom_name in atom_names:
-                                new_atom_name = atom_names[old_atom_name]
-                                if len(new_atom_name) != len(old_atom_name):
-                                    raise ValueError('The new and old atom names should be the same length.')
-                                found[old_atom_name] = True
-
-                                if verbose:
-                                    print(f'Replacing atom name "{old_atom_name}" by "{new_atom_name}"')
-
-                                l = l.replace(old_atom_name, new_atom_name)
-
-                    tmp.write(l)
-        shutil.move(input_pdb + '.tmp', input_pdb)
-        for atom in found:
-            if not found[atom]:
-                print('Given atom %s was not found in residue %s' % (atom, residue))
-
-    def displaceLigandAtomNames(input_pdb, atom, alignment='right', verbose=False):
-        """
-        Displace the name of the ligand atom name in the PDB.
-
-        Parameters
-        ==========
-        input_pdb : str
-            Path to the target PDB file
-        atom : tuple
-            Residue to change as (resname, atom_name)
-        """
-        if alignment not in ['right', 'left']:
-            raise ValueError('Alignment must be either "left" or "right"')
-
-        with open(input_pdb + '.tmp', 'w') as tmp:
-            with open(input_pdb) as pdb:
-                for l in pdb:
-                    if l.startswith('ATOM') or l.startswith('HETATM'):
-                        atom_name = l.split()[2]
-                        resname = l.split()[3]
-                        if (resname, atom_name) == atom:
-                            if alignment == 'right':
-                                if verbose:
-                                    print('Changing atom name %s-%s to the right' % atom)
-                                l = l.replace(atom_name + ' ', ' ' + atom_name)
-                            elif alignment == 'left':
-                                if verbose:
-                                    print('Changing atom name %s-%s to the left' % atom)
-                                l = l.replace(' ' + atom_name, atom_name + ' ')
-                    tmp.write(l)
-        shutil.move(input_pdb + '.tmp', input_pdb)
-
-    def displaceResidueAtomNames(input_pdb, atom, alignment='right'):
-        """
-        Displace the name of the atom name of a specific residue in the PDB.
-
-        Parameters
-        ==========
-        input_pdb : str
-            Path to the target PDB file
-        atom : tuple
-            Residue to change as (resname, atom_name)
-        """
-        if alignment not in ['right', 'left']:
-            raise ValueError('Alignment must be either "left" or "right"')
-
-        with open(input_pdb + '.tmp', 'w') as tmp:
-            with open(input_pdb) as pdb:
-                for l in pdb:
-                    if l.startswith('ATOM') or l.startswith('HETATM'):
-                        atom_name = l.split()[2]
-                        resname = l.split()[3]
-                        if (resname, atom_name) == atom:
-                            if alignment == 'right':
-                                l = l.replace(atom_name + ' ', ' ' + atom_name)
-                            elif alignment == 'left':
-                                l = l.replace(' ' + atom_name, atom_name + ' ')
-                    tmp.write(l)
-        shutil.move(input_pdb + '.tmp', input_pdb)
-
-    def checkLastEpoch(host, server_path, separator='-'):
-        """
-        Return the last epoch ran for each pele folder.
-
-        Parameters
-        ==========
-        host : str
-            Name of the remote host where pele folder resides. Use localhost for
-            a local pele folder.
-        server_path : str
-            Path to the PELE folder in the remote host.
-        separator : str
-            Separator used to split the pele folder names into protein and ligand.
-
-        Returns
-        =======
-        last_epoch : dict
-            Last epoch for each protein and ligand combination based on finding the
-            specific epoch folder in each pele folder path.
-
-        Caveats:
-            - This function does not check the content of the PELE folders, only the presence
-              of the epoch folders.
-        """
-
-        log_file = '.'+str(uuid.uuid4())+'.log'
-
-        if host == 'localhost':
-            os.system('ls '+server_path+'/*/*/output > '+log_file)
-        else:
-            os.system('ssh '+host+' ls '+server_path+'/*/*/output > '+log_file)
-
-        last_epoch = {}
-        with open(log_file) as f:
-            for l in f:
-                if 'output' in l:
-                    model_ligand = l.split('/')[-3]#.split('@')[0]
-                    if separator not in model_ligand:
-                        raise ValueError(f'Separator "{separator}" not found in pele folder {model_ligand}')
-                    elif len(model_ligand.split(separator)) != 2:
-                        raise ValueError(f'Separator "{separator}" seems incorrect for pele folder {model_ligand}')
-
-                    model, ligand = model_ligand.split(separator)
-                    last_epoch[model, ligand] = None
-                else:
-                    try: int(l)
-                    except: continue
-                    last_epoch[model, ligand] = int(l)
-        os.remove(log_file)
-
-        return last_epoch
-
-    def _getBondPele(pele_params, ligand_name):
+    
+    def _getBondPele(self, pele_params, ligand_name):
         """
         Calculate the bonds and distance for pele params
         :param pele_params: path to the pele_params file
@@ -245,7 +59,7 @@ class tricks:
                         ignore_index=True)
         return df_pele
 
-    def _getBondRosetta(rosetta_params):
+    def _getBondRosetta(self, rosetta_params):
         """
         Get the bonds from rosetta params file.
 
@@ -279,7 +93,7 @@ class tricks:
                                                ignore_index=True)
         return df_rosetta
 
-    def _getBondTopology(df_pdb):
+    def _getBondTopology(self, df_pdb):
         """
         Calculate the bond topology for a certain dataframe
 
@@ -295,23 +109,20 @@ class tricks:
         """
         G = nx.from_pandas_edgelist(df_pdb, source='AnSource', target='AnTarget')
         dist_pdb = dict(nx.all_pairs_shortest_path_length(G))
-        # dist_pdb = dict(nx.all_pairs_dijkstra_path_length(G))
         matrix_pdb_an = {}
 
         for node1 in dist_pdb:
             if node1[0] not in matrix_pdb_an.keys():
                 matrix_pdb_an[node1[0]] = {}
-            # matrix_pdb_an[node1[0]][node1] = set()
             matrix_pdb_an[node1[0]][node1] = []
 
             for node2 in dist_pdb[node1]:
-                # matrix_pdb_an[node1[0]][node1].add(f"{dist_pdb[node1][node2]}{node2[0]}")
                 matrix_pdb_an[node1[0]][node1].append(f"{dist_pdb[node1][node2]}{node2[0]}")
             sorted(matrix_pdb_an[node1[0]][node1])
 
         return matrix_pdb_an
 
-    def _mapSymmetrycal(ros_an, pel_ans, df_pele, df_rosetta):
+    def _mapSymmetrycal(self, ros_an, pel_ans, df_pele, df_rosetta):
         """
         Maps the symmetrical atoms with the help of the individual connections or the distances
         Parameters
@@ -353,7 +164,7 @@ class tricks:
 
         return equi[0] if len(equi) == 1 else pel_ans
 
-    def mapPeleToRosettaParams(paramsRosetta, paramsPele, chain):
+    def mapPeleToRosettaParams(self, paramsRosetta, paramsPele, chain):
         """
         Function to map the rosetta atom names with the pele atom names
 
@@ -372,8 +183,21 @@ class tricks:
             Dictionary with the mapped atom names
 
         """
-        df_pele = self._getBondPele(paramsPele, chain).sort_index()
-        df_rosetta = self._getBondRosetta(paramsRosetta).sort_index()
+        if paramsRosetta.endswith('.params'):
+            df_rosetta = self._getBondRosetta(paramsRosetta).sort_index()
+        elif paramsRosetta.endswith('.pdb'):
+            df_rosetta = self._getBondPDB(paramsRosetta).sort_index()
+        else:
+            raise ValueError('The file extension is not valid. It should be .params or .pdb')
+        
+        if paramsPele.endswith('.pdb'):
+            df_pele = self._getBondPDB(paramsPele).sort_index()
+        #if paramsPele.endswith('z'):
+        #    df_pele = self._getBondPele(paramsPele, chain).sort_index()
+        else:
+            #raise ValueError('The file extension is not valid. It should be .params or .pdb')
+            df_pele = self._getBondPele(paramsPele, chain).sort_index()
+
         matrix_pele = self._getBondTopology(df_pele)
         matrix_rosetta = self._getBondTopology(df_rosetta)
 
@@ -385,7 +209,7 @@ class tricks:
                 pele_set_an = matrix_pele[pele_elem][pele_an]
                 for rosetta_an in rosetta_elem:
                     rosetta_set_an = rosetta_elem[rosetta_an]
-                    if rosetta_set_an == pele_set_an:
+                    if sorted(rosetta_set_an) == sorted(pele_set_an):
                         if rosetta_an not in equival.keys():
                             equival[rosetta_an] = []
                         equival[rosetta_an].append(pele_an)
@@ -394,7 +218,7 @@ class tricks:
             raise ValueError("Can't map any atom_name. Check if the number atoms are the same.")
 
         # Correct the atoms that have symmetry
-        # Dict[rosetta_an] = pele_an
+        # TODO add distance information from conect lines of the pdb
         prev_pel_an = ''
         not_mapped = {}
         count = 0
@@ -432,7 +256,7 @@ class tricks:
 
         return equival
 
-    def _readPELECharges(pele_params, ligand):
+    def _readPELECharges(self, pele_params, ligand):
         """
         Read the PELE charges from the pele params file
 
@@ -478,7 +302,7 @@ class tricks:
 
         return charges
 
-    def _readRosettaCharges(rosetta_params):
+    def _readRosettaCharges(self, rosetta_params):
         """
         Read the rosetta charges from the rosetta params file
 
@@ -508,7 +332,7 @@ class tricks:
 
         return charges
 
-    def _updateParamsCharges(params_file, new_charges):
+    def _updateParamsCharges(self, params_file, new_charges):
         """
         Update the charges of the params file
 
@@ -533,7 +357,7 @@ class tricks:
                     tmp.write(l)
             shutil.move(params_file + '.tmp', params_file)
 
-    def getPELEChargesIntoParams(rosetta_params, pele_params, mapping, ligand=None):
+    def getPELEChargesIntoParams(self, rosetta_params, pele_params, ligand=None):
         """
         Get the pele charges to the rosetta params file
         Parameters
@@ -582,3 +406,135 @@ class tricks:
 
         self._updateParamsCharges(rosetta_params, new_charges)
         print("Copied the charges from pele to rosetta")
+    
+
+    def getBioAtoms(pdb_file):
+        """
+        Get the Biopython atoms from a certain pdb
+        :param pdb_file: pdb input file
+        :return:
+        """
+        parser = PDB.PDBParser()
+        structure = parser.get_structure('struc', pdb_file)
+        struc_atom = list(structure.get_atoms())
+        return struc_atom
+    
+    def _getBondPDB(pdb):
+        """
+        Get the bounds from the pdb
+        Parameters
+        ----------
+        pdb: str
+            Path to the pdb
+
+        Returns
+        -------
+        df_mol: pd.dataframe
+            Dataframe with the bounds and distance
+        atom_names: dict
+            Dictionary with the atom numbers and atom names
+
+        """
+        from openbabel import openbabel
+
+        with open(pdb) as file:
+            # Read pdb to load atom_names and position of the atoms
+            atom_names = {}
+            for l in file:
+                if l.startswith("HETATM"):
+                    atom_names[l.split()[1]] = l.split()[2]
+
+            # Make molfile from pdb
+            obConversion = openbabel.OBConversion()
+            obConversion.SetInAndOutFormats("pdb", "mol2")
+            mol = openbabel.OBMol()
+            obConversion.ReadFile(mol, pdb)
+
+            # Create the dataframe with the bounds
+            df_mol = pd.DataFrame(columns=['AnSource', 'AnTarget'])
+            for bond in openbabel.OBMolBondIter(mol):
+                df_mol = df_mol.append({'AnSource': atom_names[str(bond.GetBeginAtomIdx())],
+                                        'AnTarget': atom_names[str(bond.GetEndAtomIdx())]},
+                                    ignore_index=True)
+        return df_mol, atom_names
+
+    def getBondDF(pdb, atoms_pdb):
+        """
+        Calculate the bound dataframe
+        :param pdb: input file, pdb format
+        :param atoms_pdb: dict with the biopython atom names
+        :return: dataframe with the bound of the atom names
+        """
+        from openbabel import openbabel
+        
+        obConversion = openbabel.OBConversion()
+        obConversion.SetInAndOutFormats("pdb", "mol2")
+        mol = openbabel.OBMol()
+        obConversion.ReadFile(mol, pdb)
+        df_mol = pd.DataFrame(columns=['AnSource', 'AnTarget'])
+
+        for bond in openbabel.OBMolBondIter(mol):
+            df_mol = df_mol.append({'AnSource': atoms_pdb[bond.GetBeginAtomIdx() - 1].name,
+                                    'AnTarget': atoms_pdb[bond.GetEndAtomIdx() - 1].name},
+                                   ignore_index=True)
+
+        return df_mol
+    
+    def writePDBfromMapping(self, pdb, mapping):
+        with open(pdb) as params:
+            with open(pdb + '.tmp', 'w') as tmp:
+                for l in params:
+                    if l.startswith('ATOM'):
+                        ls = l.split()
+                        atom_name = ls[1]
+                        new_atom_name = mapping[atom_name]
+                        l = l.replace(atom_name, new_atom_name)
+                    elif l.startswith('BOND'):
+                        ls = l.split()
+                        atom_name1 = ls[1]
+                        atom_name2 = ls[2]
+                        new_atom_name1 = mapping[atom_name1]
+                        new_atom_name2 = mapping[atom_name2]
+                        l = l.replace(atom_name1, new_atom_name1)
+                        l = l.replace(atom_name2, new_atom_name2)
+                    elif l.startswith('CHI'):
+                        ls = l.split()
+                        atom_name1 = ls[2]
+                        atom_name2 = ls[3]
+                        atom_name3 = ls[4]
+                        atom_name4 = ls[5]
+                        new_atom_name1 = mapping[atom_name1]
+                        new_atom_name2 = mapping[atom_name2]
+                        new_atom_name3 = mapping[atom_name3]
+                        new_atom_name4 = mapping[atom_name4]
+                        l = l.replace(atom_name1, new_atom_name1)
+                        l = l.replace(atom_name2, new_atom_name2)
+                        l = l.replace(atom_name3, new_atom_name3)
+                        l = l.replace(atom_name4, new_atom_name4)
+                    elif l.startswith('NBR_ATOM') or l.startswith('FIRST_SIDECHAIN_ATOM'):
+                        ls = l.split()
+                        atom_name1 = ls[1]
+                        new_atom_name1 = mapping[atom_name1]
+                        l = l.replace(atom_name1, new_atom_name1)
+                    elif l.startswith('LOWER_CONNECT'):
+                        lower = l.split()[1]
+                    elif l.startswith('UPPER_CONNECT'):
+                        upper = l.split()[1]
+                    elif l.startswith('ICOOR_INTERNAL'):
+                        l = l.replace('UPPER', upper)
+                        l = l.replace('LOWER', lower)
+                        ls = l.split()
+                        atom_name1 = ls[1]
+                        atom_name2 = ls[5]
+                        atom_name3 = ls[6]
+                        atom_name4 = ls[7]
+                        new_atom_name1 = mapping[atom_name1]
+                        new_atom_name2 = mapping[atom_name2]
+                        new_atom_name3 = mapping[atom_name3]
+                        new_atom_name4 = mapping[atom_name4]
+                        l = l.replace(atom_name1, new_atom_name1)
+                        l = l.replace(atom_name2, new_atom_name2)
+                        l = l.replace(atom_name3, new_atom_name3)
+                        l = l.replace(atom_name4, new_atom_name4)
+                    tmp.write(l)
+            shutil.move(pdb + '.tmp', pdb)        

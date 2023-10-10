@@ -3,6 +3,7 @@ import argparse
 import json
 import numpy as np
 import pandas as pd
+from pyrosetta.rosetta.core.scoring import bb_rmsd
 
 from multiprocessing import Pool, cpu_count
 
@@ -82,6 +83,7 @@ if os.path.exists(rosetta_folder+'/params'):
 if atom_pairs != None:
     with open(atom_pairs) as apf:
         atom_pairs = json.load(apf)
+
 
 def getPoseFromTag(tag, silent_file, params_dir=None):
 
@@ -531,6 +533,21 @@ def _calculateDistances(arguments):
         distances.setdefault(label, [])
 
         # Add atom pair distance
+        if pair[0][0] not in coordinates:
+            raise ValueError('Chain %s not found in pose %s' % (pair[0][0], tag))
+        elif pair[0][1] not in coordinates[pair[0][0]]:
+            raise ValueError('Residue %s not found in chain %s and pose %s' % (pair[0][1], pair[0][0], tag))
+        elif pair[0][2] not in coordinates[pair[0][0]][pair[0][1]]:
+            raise ValueError('Atom %s not found in residue %s of chain %s in pose %s' % (pair[0][2], pair[0][1], pair[0][0], tag))
+
+        if pair[1][0] not in coordinates:
+            raise ValueError('Chain %s not found in pose %s' % (pair[1][0], tag))
+        elif pair[1][1] not in coordinates[pair[1][0]]:
+            raise ValueError('Residue %s not found in chain %s and pose %s' % (pair[1][1], pair[1][0], tag))
+        elif pair[1][2] not in coordinates[pair[1][0]][pair[1][1]]:
+            raise ValueError('Atom %s not found in residue %s of chain %s in pose %s' % (pair[1][2], pair[1][1], pair[1][0], tag))
+
+        # Add atom pair distance
         c1 = coordinates[pair[0][0]][pair[0][1]][pair[0][2]]
         c2 = coordinates[pair[1][0]][pair[1][1]][pair[1][2]]
         distances[label] = np.linalg.norm(c1-c2)
@@ -622,6 +639,24 @@ def _calculateInteractingResidues(arguments):
 
     return neighbours_data
 
+
+def calculate_rmsd_to_native(silent_file, reference_pdb, params_dir=None):
+    rmsd = []
+    initial = Pose()
+    if params_dir:
+        params = []
+        for p in os.listdir(params_dir):
+            params.append(params_dir+'/'+p)
+        generate_nonstandard_residue_set(initial, params)
+    pose_from_file(initial, reference_pdb)
+    initial.pdb_info().name("native PDB")
+    relaxed_structures = readPosesFromSilent(silent_file, params_dir)
+    for num, pose in enumerate(relaxed_structures):
+        print(f"calculating RMSD for pose {num}")
+        rmsd.append(bb_rmsd(initial, pose))
+    return rmsd
+
+
 def _calculateProtonationStates(arguments):
     """
     Calculate protonation states data for a single pose
@@ -646,13 +681,16 @@ def _calculateProtonationStates(arguments):
         chain = res_info.split()[1]
 
         if resname.startswith('HIS'):
+
+            if ':' in resname:
+                resname = resname.split(':')[0]
             if resname == 'HIS_D':
                 his_type = 'HID'
             if resname == 'HIS':
                 his_type = 'HIE'
 
-            protonation_data['Model'],  = '_'.join(tag.split('_')[:-1])
-            protonation_data['Pose'] = tag.split('_')[-1]
+            protonation_data['Model'].append('_'.join(tag.split('_')[:-1]))
+            protonation_data['Pose'].append(tag.split('_')[-1])
             protonation_data['Chain'].append(chain)
             protonation_data['Residue'].append(res)
             protonation_data['Residue state'].append(his_type)
@@ -700,15 +738,22 @@ if protonation_states:
 
 for model in silent_file:
 
+    if verbose:
+        print('Checking calculations for model %s' % model)
+
     # Check whether csv files exist
     file_exists = {}
 
     # Check score files
+
     score_file = scores_folder+'/'+model+'.csv'
     if not os.path.exists(score_file):
         # Create dictionary entries for scores
         scores = readScoreFromSilent(silent_file[model])
         scores.to_csv(score_file, index=False)
+    else:
+        if verbose:
+            print('\tScore file %s was found' % score_file)
 
     if binding_energy:
         binding_energy_file = binding_energy_folder+'/'+model+'.csv'
@@ -721,6 +766,8 @@ for model in silent_file:
 
             file_exists['be'] = False
         else:
+            if verbose:
+                print('\tBinding energy score file %s was found' % binding_energy_file)
             file_exists['be'] = True
 
     if atom_pairs != None:
@@ -733,6 +780,8 @@ for model in silent_file:
             distances['Pose'] = []
             file_exists['distances'] = False
         else:
+            if verbose:
+                print('\tDistance score file %s was found' % distance_file)
             file_exists['distances'] = True
 
     if energy_by_residue:
@@ -747,6 +796,8 @@ for model in silent_file:
             ebr['Residue'] = []
             file_exists['ebr'] = False
         else:
+            if verbose:
+                print('\tEnergy-by-residue score file %s was found' % ebr_file)
             file_exists['ebr'] = True
 
     if interacting_residues:
@@ -772,6 +823,8 @@ for model in silent_file:
             mutate_to = 'G'
             file_exists['neighbours'] = False
         else:
+            if verbose:
+                print('\tInteracting residues score file %s was found' % neighbours_file)
             file_exists['neighbours'] = True
 
     if protonation_states:
@@ -786,11 +839,15 @@ for model in silent_file:
             protonation_data['Residue state'] = []
             file_exists['protonation'] = False
         else:
+            if verbose:
+                print('\tProtonation score file %s was found' % protonation_file)
             file_exists['protonation'] = True
 
     # Skip model processing if all files are found
     skip = [file_exists[x] for x in file_exists]
     if all(skip):
+        if verbose:
+            print('\tAll calculations were completed for model %s' % model)
         continue
 
     be_jobs = []
@@ -802,6 +859,7 @@ for model in silent_file:
     # for pose in readPosesFromSilent(silent_file[model], params_dir=params):
     for tag in getTagsFromSilent(silent_file[model], params_dir=params):
 
+        # Calculate binding energy
         if binding_energy and not file_exists['be']:
             for chain in binding_energy_chains:
                 be_jobs.append([tag, chain, silent_file[model], params])
@@ -810,12 +868,15 @@ for model in silent_file:
         if atom_pairs != None and not file_exists['distances']:
             distance_jobs.append([tag, atom_pairs[model], silent_file[model], params])
 
+        # Calculate energy by residue
         if energy_by_residue and not file_exists['ebr']:
             ebr_jobs.append([tag, silent_file[model], params])
 
+        # Calculate neighbours
         if interacting_residues and not file_exists['neighbours']:
             neighbours_jobs.append([tag, silent_file[model], params])
 
+        # Calculate protonation
         if protonation_states and not file_exists['protonation']:
             protonation_jobs.append([tag, silent_file[model], params])
 
@@ -824,6 +885,8 @@ for model in silent_file:
     pool = Pool(cpus)
 
     if len(be_jobs) > 0:
+        if verbose:
+            print('\tCalculating %s binding energies' % len(be_jobs))
         be_results = pool.map(_calculateBE, be_jobs)
 
         for ber in be_results:
@@ -834,6 +897,8 @@ for model in silent_file:
         be.to_csv(binding_energy_file, index=False)
 
     if len(distance_jobs) > 0:
+        if verbose:
+            print('\tCalculating %s distances' % len(distance_jobs))
         distance_results = pool.map(_calculateDistances, distance_jobs)
 
         # Add distance values to distance dictionary
@@ -847,6 +912,8 @@ for model in silent_file:
         distances.to_csv(distance_file, index=False)
 
     if len(ebr_jobs) > 0:
+        if verbose:
+            print('\tCalculating %s energy by residue scores' % len(ebr_jobs))
         ebr_results = pool.map(_calculateEnergyByResidue, ebr_jobs)
 
         # Add distance values to distance dictionary
@@ -864,7 +931,8 @@ for model in silent_file:
         ebr.to_csv(ebr_file, index=False)
 
     if len(neighbours_jobs) > 0:
-
+        if verbose:
+            print('\tCalculating %s interaction scores' % len(neighbours_jobs))
         neighbours_results = pool.map(_calculateInteractingResidues, neighbours_jobs)
 
         # Add distance values to distance dictionary
@@ -882,7 +950,8 @@ for model in silent_file:
         neighbours_data.to_csv(neighbours_file, index=False)
 
     if len(protonation_jobs) > 0:
-
+        if verbose:
+            print('\tCalculating the protonation of %s poses' % len(protonation_jobs))
         protonation_results = pool.map(_calculateProtonationStates, protonation_jobs)
 
         # Add distance values to distance dictionary
