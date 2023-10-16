@@ -100,15 +100,18 @@ class taskOperations:
 
     class operateOnResidueSubset:
 
-        def __init__(self, name, selector, operation=None):
+        def __init__(self, name, selector, operation=None, aas=None):
 
 
-            if operation == None or operation not in ['RestrictToRepackingRLT', 'PreventRepackingRLT']:
-                raise ValueError('Must define one of these operations: RestrictToRepackingRLT, PreventRepackingRLT')
+            if operation == None or operation not in ['RestrictToRepackingRLT', 'PreventRepackingRLT', 'RestrictAbsentCanonicalAASRLT']:
+                raise ValueError('Must define one of these operations: RestrictToRepackingRLT, PreventRepackingRLT, RestrictAbsentCanonicalAASRLT')
 
             self.name = name
             self.selector = selector
             self.operation = operation
+            self.aas = aas
+            if aas == None and operation == 'RestrictAbsentCanonicalAASRLT':
+                raise ValueError('Designable amino acids must be defined for RestrictAbsentCanonicalAASRLT operation.')
 
         def generateXml(self):
 
@@ -116,7 +119,48 @@ class taskOperations:
             self.root = self.xml.Element('OperateOnResidueSubset')
             self.root.set('name', self.name)
             self.root.set('selector', self.selector)
+            if self.aas != None:
+                self.root.set('aas', self.aas)
             self.xml.SubElement(self.root, self.operation)
+
+    class DetectProteinLigandInterface:
+
+        def __init__(self, name, cut1=6.0, cut2=8.0, cut3=10.0, cut4=12.0, design=True, catres_interface=True):
+
+            self.name = name
+            self.cut1 = cut1
+            self.cut2 = cut2
+            self.cut3 = cut3
+            self.cut4 = cut4
+            self.design = design
+            self.catres_interface = catres_interface
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('DetectProteinLigandInterface')
+            self.root.set('name', self.name)
+            self.root.set('cut1', str(self.cut1))
+            self.root.set('cut2', str(self.cut2))
+            self.root.set('cut3', str(self.cut3))
+            self.root.set('cut4', str(self.cut4))
+            self.root.set('design', str(int(self.design)))
+            self.root.set('catres_interface', str(int(self.catres_interface)))
+
+    class RestrictAbsentCanonicalAAS:
+
+        def __init__(self, name, resnum=0, keep_aas=None):
+            self.name = name
+            self.resnum = resnum
+            self.keep_aas = keep_aas
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('RestrictAbsentCanonicalAAS')
+            self.root.set('name', self.name)
+            self.root.set('resnum', str(self.resnum))
+            self.root.set('keep_aas', self.keep_aas)
 
     class extraRotamersGeneric:
 
@@ -137,3 +181,25 @@ class taskOperations:
             self.root.set('ex2', str(self.ex2))
             self.root.set('ex1_sample_level', str(self.ex1_sample_level))
             self.root.set('ex2_sample_level', str(self.ex2_sample_level))
+
+
+            #<ReadResfile name="(&string)" filename="(&string)" selector="(&string)" />
+
+    class ReadResfile:
+
+        def __init__(self, name='ReadResfile', filename=None, selector=None):
+
+            self.name = name
+            if filename == None:
+                raise ValuError('File must be given to ReadResfile task operation.')
+            self.filename = filename
+            self.selector = selector
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('ReadResfile')
+            self.root.set('name', self.name)
+            self.root.set('filename', self.filename)
+            if self.selector != None:
+                self.root.set('selector', self.selector)
