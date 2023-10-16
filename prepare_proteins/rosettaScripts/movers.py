@@ -4,9 +4,9 @@ class movers:
 
     class fastRelax:
 
-        def __init__(self, name="fastRelax", scorefxn=None, disable_design=False, movemap_factory=None,
+        def __init__(self, name="fastRelax", scorefxn=None, disable_design=None, movemap_factory=None,
                      task_operations=None, optimize_jumps=None, task_factory=False, packer_palette=False,
-                     repeats=5, relaxscript=False, cst_file=False, batch=False,
+                     repeats=5, relaxscript=False, cst_file=None, batch=False,
                      cartesian=False, dualspace=False, ramp_down_constraints=False,
                      bondangle=False, bondlength=False, min_type=False, movemaps=None,
                      delete_virtual_residues_after_FastRelax=False):
@@ -16,9 +16,11 @@ class movers:
             self.repeats = repeats
             self.scorefxn = scorefxn
             self.movemap_dict = movemaps
+            self.disable_design = disable_design
             self.optimize_jumps = optimize_jumps
             self.task_operations = task_operations
             self.movemap_factory = movemap_factory
+            self.cst_file = cst_file
 
         def generateXml(self):
 
@@ -32,6 +34,12 @@ class movers:
                     self.root.set('scorefxn', self.scorefxn)
                 else:
                     self.root.set('scorefxn', self.scorefxn.name)
+
+            if self.cst_file != None:
+                self.root.set('cst_file', self.cst_file)
+
+            if self.disable_design != None:
+                self.root.set('disable_design', str(int(self.disable_design)))
 
             if self.task_operations != None:
                 self.root.set('task_operations', ','.join([t.name for t in self.task_operations]))
@@ -247,6 +255,36 @@ class movers:
                 self.root.set('filter_name', self.filter_name)
             if self.ms_whenfail != None:
                 self.root.set('ms_whenfail', self.ms_whenfail)
+
+    class Superimpose:
+
+            def __init__(self, name='Superimpose_mover',ref_pose=None, ref_range=[1,0], target_range=[1,0], CA_only=True):
+
+                self.type = 'mover'
+                self.name = name
+                self.ref_start = ref_range[0]
+                self.ref_end = ref_range[-1]
+                self.target_start = target_range[0]
+                self.target_end = target_range[-1]
+                self.ref_pose = ref_pose
+                self.CA_only = CA_only
+
+            def generateXml(self):
+
+                self.xml = ElementTree
+                self.root = self.xml.Element('PackRotamersMover')
+                self.root.set('name', self.name)
+                if self.ref_pose != None:
+                    self.root.set('ref_pose', self.ref_pose)
+                else:
+                    raise ValuError('ref_pose must be given as argument.')
+
+                self.root.set('ref_start', self.ref_start)
+                self.root.set('ref_end', self.ref_end)
+                self.root.set('target_start', self.target_start)
+                self.root.set('target_end', self.target_end)
+
+                self.root.set('CA_only', self.CA_only)
 
     class peptideStubMover:
 
@@ -1118,6 +1156,54 @@ class movers:
             self.root.set('cst_file', self.cst_file)
             if self.add_constraints:
                 self.root.set('add_constraints', str(self.add_constraints))
+
+    class FavorSequenceProfile:
+
+        def __init__(self, name='FavorSequenceProfile', weight=1, use_starting=True, pssm=None, matrix=None, scaling=None, scorefxns=None):
+
+            self.type = 'mover'
+            self.name = name
+            self.weight = weight
+            self.pssm = pssm
+            self.use_starting = use_starting
+            self.scorefxns = scorefxns
+
+            possible_matrices = ['MATCH','IDENTITY','BLOSUM62']
+            if not matrix in possible_matrices:
+                raise ValuError('Matrix must be one of the following '+','.join(possible_matrices))
+            self.matrix = matrix
+
+            possible_scalings = ['prob','global','none']
+            if not scaling in possible_scalings:
+                raise ValuError('Scaling must be one of the following '+','.join(possible_scalings))
+            self.scaling = scaling
+
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('FavorSequenceProfile')
+            self.root.set('name', self.name)
+            if self.pssm != None:
+                if self.use_starting:
+                    raise ValueError('If pssm is selected use_starting should be false.')
+                self.root.set('pssm', self.pssm)
+            elif self.use_starting:
+                self.root.set('use_starting', str(int(self.use_starting)))
+
+            self.root.set('weight', str(self.weight))
+
+            if self.scorefxns != None:
+                self.root.set('scorefxns', self.scorefxns)
+
+            if self.matrix != None:
+                self.root.set('matrix', self.matrix)
+
+            if self.scaling != None:
+                self.root.set('scaling', self.scaling)
+
+
+
 
     class atomCoordinateCstMover:
 
