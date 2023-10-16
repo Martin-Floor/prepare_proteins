@@ -123,6 +123,32 @@ class taskOperations:
                 self.root.set('aas', self.aas)
             self.xml.SubElement(self.root, self.operation)
 
+    class restrictToRepacking:
+
+        def __init__(self, name):
+
+            self.name = name
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('RestrictToRepacking')
+            self.root.set('name', self.name)
+
+    class preventResiduesFromRepacking:
+
+        def __init__(self, name, residues):
+
+            self.name = name
+            self.residues = residues
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('PreventResiduesFromRepacking')
+            self.root.set('name', self.name)
+            self.root.set('residues', ','.join(self.residues))
+
     class DetectProteinLigandInterface:
 
         def __init__(self, name, cut1=6.0, cut2=8.0, cut3=10.0, cut4=12.0, design=True, catres_interface=True):
@@ -161,6 +187,7 @@ class taskOperations:
             self.root.set('name', self.name)
             self.root.set('resnum', str(self.resnum))
             self.root.set('keep_aas', self.keep_aas)
+
 
     class extraRotamersGeneric:
 

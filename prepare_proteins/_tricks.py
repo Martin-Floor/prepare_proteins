@@ -3,7 +3,8 @@ import shutil
 import os
 import networkx as nx
 import pandas as pd
-
+import uuid
+import re
 import prepare_proteins
 
 
@@ -13,7 +14,7 @@ class tricks:
     useful.
     """
 
-    def getProteinLigandInputFiles(self, pele_folder, protein, ligand, separator='-'):
+    def getProteinLigandInputFiles(pele_folder, protein, ligand, separator='-'):
         """
         Returns the paths of the input PDB files of a PELE simulation folder
         for a specific protein and ligand.
@@ -40,7 +41,7 @@ class tricks:
 
         return pdb_files
 
-    def changeResidueAtomNames(self, input_pdb, residue, atom_names):
+    def changeResidueAtomNames(input_pdb, residue, atom_names, verbose=False):
         """
         Change the atom names of a specific residue in a pdb file.
 
@@ -73,6 +74,10 @@ class tricks:
                                 if len(new_atom_name) != len(old_atom_name):
                                     raise ValueError('The new and old atom names should be the same length.')
                                 found[old_atom_name] = True
+
+                                if verbose:
+                                    print(f'Replacing atom name "{old_atom_name}" by "{new_atom_name}"')
+
                                 l = l.replace(old_atom_name, new_atom_name)
 
                     tmp.write(l)
@@ -81,7 +86,7 @@ class tricks:
             if not found[atom]:
                 print('Given atom %s was not found in residue %s' % (atom, residue))
 
-    def displaceLigandAtomNames(self, input_pdb, atom, alignment='right', verbose=False):
+    def displaceLigandAtomNames(input_pdb, atom, alignment='right', verbose=False):
         """
         Displace the name of the ligand atom name in the PDB.
 
@@ -113,7 +118,7 @@ class tricks:
                     tmp.write(l)
         shutil.move(input_pdb + '.tmp', input_pdb)
 
-    def displaceResidueAtomNames(self, input_pdb, atom, alignment='right'):
+    def displaceResidueAtomNames(input_pdb, atom, alignment='right'):
         """
         Displace the name of the atom name of a specific residue in the PDB.
 
@@ -141,7 +146,59 @@ class tricks:
                     tmp.write(l)
         shutil.move(input_pdb + '.tmp', input_pdb)
 
-    def _getBondPele(self, pele_params, ligand_name):
+    def checkLastEpoch(host, server_path, separator='-'):
+        """
+        Return the last epoch ran for each pele folder.
+
+        Parameters
+        ==========
+        host : str
+            Name of the remote host where pele folder resides. Use localhost for
+            a local pele folder.
+        server_path : str
+            Path to the PELE folder in the remote host.
+        separator : str
+            Separator used to split the pele folder names into protein and ligand.
+
+        Returns
+        =======
+        last_epoch : dict
+            Last epoch for each protein and ligand combination based on finding the
+            specific epoch folder in each pele folder path.
+
+        Caveats:
+            - This function does not check the content of the PELE folders, only the presence
+              of the epoch folders.
+        """
+
+        log_file = '.'+str(uuid.uuid4())+'.log'
+
+        if host == 'localhost':
+            os.system('ls '+server_path+'/*/*/output > '+log_file)
+        else:
+            os.system('ssh '+host+' ls '+server_path+'/*/*/output > '+log_file)
+
+        last_epoch = {}
+        with open(log_file) as f:
+            for l in f:
+                if 'output' in l:
+                    model_ligand = l.split('/')[-3]#.split('@')[0]
+                    if separator not in model_ligand:
+                        raise ValueError(f'Separator "{separator}" not found in pele folder {model_ligand}')
+                    elif len(model_ligand.split(separator)) != 2:
+                        raise ValueError(f'Separator "{separator}" seems incorrect for pele folder {model_ligand}')
+
+                    model, ligand = model_ligand.split(separator)
+                    last_epoch[model, ligand] = None
+                else:
+                    try: int(l)
+                    except: continue
+                    last_epoch[model, ligand] = int(l)
+        os.remove(log_file)
+
+        return last_epoch
+
+    def _getBondPele(pele_params, ligand_name):
         """
         Calculate the bonds and distance for pele params
         :param pele_params: path to the pele_params file
@@ -188,7 +245,7 @@ class tricks:
                         ignore_index=True)
         return df_pele
 
-    def _getBondRosetta(self, rosetta_params):
+    def _getBondRosetta(rosetta_params):
         """
         Get the bonds from rosetta params file.
 
@@ -222,7 +279,7 @@ class tricks:
                                                ignore_index=True)
         return df_rosetta
 
-    def _getBondTopology(self, df_pdb):
+    def _getBondTopology(df_pdb):
         """
         Calculate the bond topology for a certain dataframe
 
@@ -254,7 +311,7 @@ class tricks:
 
         return matrix_pdb_an
 
-    def _mapSymmetrycal(self, ros_an, pel_ans, df_pele, df_rosetta):
+    def _mapSymmetrycal(ros_an, pel_ans, df_pele, df_rosetta):
         """
         Maps the symmetrical atoms with the help of the individual connections or the distances
         Parameters
@@ -296,7 +353,7 @@ class tricks:
 
         return equi[0] if len(equi) == 1 else pel_ans
 
-    def mapPeleToRosettaParams(self, paramsRosetta, paramsPele, chain):
+    def mapPeleToRosettaParams(paramsRosetta, paramsPele, chain):
         """
         Function to map the rosetta atom names with the pele atom names
 
@@ -375,7 +432,7 @@ class tricks:
 
         return equival
 
-    def _readPELECharges(self, pele_params, ligand):
+    def _readPELECharges(pele_params, ligand):
         """
         Read the PELE charges from the pele params file
 
@@ -421,7 +478,7 @@ class tricks:
 
         return charges
 
-    def _readRosettaCharges(self, rosetta_params):
+    def _readRosettaCharges(rosetta_params):
         """
         Read the rosetta charges from the rosetta params file
 
@@ -451,7 +508,7 @@ class tricks:
 
         return charges
 
-    def _updateParamsCharges(self, params_file, new_charges):
+    def _updateParamsCharges(params_file, new_charges):
         """
         Update the charges of the params file
 
@@ -476,7 +533,7 @@ class tricks:
                     tmp.write(l)
             shutil.move(params_file + '.tmp', params_file)
 
-    def getPELEChargesIntoParams(self, rosetta_params, pele_params, mapping, ligand=None):
+    def getPELEChargesIntoParams(rosetta_params, pele_params, mapping, ligand=None):
         """
         Get the pele charges to the rosetta params file
         Parameters

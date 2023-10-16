@@ -1711,8 +1711,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
-                     outerbox=(30,30,30), useflexmae=True, peptide=False,
-                     mae_input=True, cst_positions=None):
+                        outerbox=(30,30,30), useflexmae=True, peptide=False,
+                        mae_input=True, cst_positions=None, models=None):
         """
         Setup grid calculation for each model.
 
@@ -1756,6 +1756,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create grid input files
         jobs = []
         for model in self.models_names:
+
+            if models != None:
+                if model not in models:
+                    continue
 
             if all([isinstance(x, (float, int)) for x in center_atoms[model]]):
                 x = float(center_atoms[model][0])
@@ -1855,9 +1859,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
-                      poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                      energy_by_residue=False, use_new_version=False, cst_fragments=None):
+    def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder, models=None,
+                          poses_per_lig=100, precision='SP', use_ligand_charges=False,
+                          energy_by_residue=False, use_new_version=False, cst_fragments=None):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
@@ -1912,6 +1916,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Set up docking jobs
         jobs = []
         for grid in grids_paths:
+
+            # Skip if models are given and not in models
+            if models != None:
+                if grid not in models:
+                    continue
+
             # Create ouput folder
             if not os.path.exists(docking_folder+'/output_models/'+grid):
                 os.mkdir(docking_folder+'/output_models/'+grid)
@@ -2536,7 +2546,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True, skip_models=None, skip_ligands=None,
                              extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
-                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
+                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
                              ligand_equilibration_cst=True):
         """
@@ -2731,7 +2741,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if not os.path.exists(output_folder+'/ligand'):
                                     os.makedirs(output_folder+'/ligand')
                                 self._setUpCovalentLigandParameterization(protein, index, covalent_base_aa,
-                                                                         output_folder=output_folder+'/ligand')
+                                                                          output_folder=output_folder+'/ligand')
 
                                 # Copy covalent parameterization script
                                 _copyScriptFile(output_folder, 'covalentLigandParameterization.py')
@@ -2978,6 +2988,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += "--epsilon "+str(epsilon)+"\n"
                             continuation = True
 
+                        if covalent_setup:
+                            command += covalent_command
+                            continuation = True
+
                         if ligand_equilibration_cst:
 
                             # Copy input_yaml for equilibration
@@ -3030,10 +3044,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
 
                             continuation = True
-
-                    if covalent_setup:
-                        command += covalent_command
-                        continuation = True
 
                     if continuation:
                         debug_line = False
@@ -4316,7 +4326,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return pele_data
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder,
-                            separator='-', covalent_check=True):
+                            separator='-', only_extract_new=True, covalent_check=True,
+                            remove_previous=False):
         """
         Extract docking poses present in a docking_data dataframe. The docking DataFrame
         contains the same structure as the self.docking_data dataframe, parameter of
@@ -4333,6 +4344,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the folder where the docking structures will be saved.
         separator : str
             Symbol used to separate protein, ligand, and docking pose index.
+        only_extract_new : bool
+            Only extract models not present in the output_folder
+        remove_previous : bool
+            Remove all content in the output folder
         """
 
         # Check the separator is not in model or ligand names
@@ -4343,8 +4358,38 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if separator in ligand:
                     raise ValueError('The separator %s was found in ligand name %s. Please use a different separator symbol.' % (separator, ligand))
 
+        # Remove output_folder
+        if os.path.exists(output_folder):
+            if remove_previous:
+                shutil.rmtree(output_folder)
+
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
+        else:
+            # Gather already extracted models
+            if only_extract_new:
+                extracted_models = set()
+                for model in os.listdir(output_folder):
+                    if not os.path.isdir(output_folder+'/'+model):
+                        continue
+                    for f in os.listdir(output_folder+'/'+model):
+                        if f.endswith('.pdb'):
+                            m,l = f.split(separator)[:2]
+                            extracted_models.add((m,l))
+
+                # Filter docking data to not include the already extracted models
+                extracted_indexes = []
+                for i in docking_data.index:
+                    if i[:2] in extracted_models:
+                        extracted_indexes.append(i)
+                docking_data = docking_data[~docking_data.index.isin(extracted_indexes)]
+                if docking_data.empty:
+                    print('All models were already extracted!')
+                    print('Set only_extract_new=False to extract them again!')
+                    return
+                else:
+                    print(f'{len(extracted_models)} models were already extracted!')
+                    print(f'Extracting {docking_data.shape[0]} new models')
 
         # Copy analyse docking script (it depends on schrodinger so we leave it out.)
         _copyScriptFile(output_folder, 'extract_docking.py')
@@ -4972,7 +5017,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True,
-                                          return_missing=False, sugars=False):
+                                          return_missing=False, sugars=False, conect_update=False):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -5042,7 +5087,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += ' -auto_detect_glycan_connections'
                             command += ' -maintain_links'
                         os.system(command)
-                        self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
+                        self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh,
+                                              conect_update=conect_update)
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
@@ -5199,7 +5245,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 check_file = False
                 hydrogens = True
 
-            self._write_conect_lines(model, output_folder+'/'+model+'.pdb',check_file=check_file,hydrogens=hydrogens)
+            self._write_conect_lines(model, output_folder+'/'+model+'.pdb', check_file=check_file, hydrogens=hydrogens)
 
             if convert_to_mae:
                 cwd = os.getcwd()
