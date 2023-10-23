@@ -16,10 +16,13 @@ class sequenceModels:
         self.sequences_names = list(self.sequences.keys())
 
     def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=False, remove_msas=False):
+                       remove_extras=False, remove_msas=False, only_models=None):
         """
         Set up AlphaFold predictions for the loaded sequneces
         """
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
 
         # Create Job folders
         if not os.path.exists(job_folder):
@@ -35,12 +38,22 @@ class sequenceModels:
         excluded = []
         if exclude_finished:
             for model in os.listdir(job_folder+'/output_models'):
+
+                if not isinstance(only_models, type(None)):
+                    if model not in only_models:
+                        continue
+
                 for f in os.listdir(job_folder+'/output_models/'+model):
                     if f == 'ranked_0.pdb':
                         excluded.append(model)
 
         jobs = []
         for model in self.sequences:
+
+            if not isinstance(only_models, type(None)):
+                if model not in only_models:
+                    continue
+
             if exclude_finished and model in excluded:
                 continue
             sequence = {}
@@ -68,7 +81,8 @@ class sequenceModels:
 
 
     def setUpAlphaFold_tunned_mn(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
+                       remove_extras=False, remove_msas=False, nstruct=1, nrecycles=1,
+                       max_extra_msa=None, keep_compress=False):
         """
         Set up AlphaFold predictions for the loaded sequneces. This is a tunned version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
 
