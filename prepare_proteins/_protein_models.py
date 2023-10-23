@@ -16,10 +16,14 @@ from pkg_resources import resource_stream, Requirement, resource_listdir
 import numpy as np
 from Bio import PDB
 from Bio.PDB.DSSP import DSSP
+from Bio.PDB.Polypeptide import three_to_one
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import mdtraj as md
 import fileinput
+
+from scipy.spatial import distance_matrix
 
 import prepare_proteins
 
@@ -744,6 +748,111 @@ chain to use for each model with the chains option.' % model)
         # self.calculateSecondaryStructure(_save_structure=True)
 
         # Missing save models and reload them to take effect.
+
+    def removeNotAlignedRegions(self, ref_structure, max_ca_ca=5.0, remove_low_confidence_unaligned_loops=False,
+                                confidence_threshold=50.0, min_loop_length=10):
+        """
+        Remove models regions that not aligned with the given reference structure. The mapping is based on
+        the current structural alignment of the reference and the target models. The termini are removed
+        if they don't align with the reference structure. Internal loops that do not align with the given
+        reference structure can optionally be removed if they have a confidence score lower than the one
+        defined as threshold.
+
+        Parameters
+        ==========
+        ref_structure : str or Bio.PDB.Structure.Structure
+            Path to the input PDB or model name to use as reference. Otherwise a Bio.PDB.Structure object
+            can be given.
+        max_ca_ca : float
+            Maximum CA-CA distance for two residues to be considered aligned.
+        remove_low_confidence_unaligned_loops : bool
+            Remove not aligned loops with low confidence from the model
+        confidence_threshold : float
+            Threshold to consider a loop region not algined as low confidence for their removal.
+        min_loop_length : int
+            Length of the internal unaligned region to be considered a loop.
+
+        Returns
+        =======
+
+        """
+
+        # Check input structure input
+        if isinstance(ref_structure, str):
+            if ref_structure.endswith('.pdb'):
+                ref_structure = prepare_proteins._readPDB('ref', ref_structure)
+            else:
+                if ref_structure in self.models_names:
+                    ref_structure = self.structures[ref_structure]
+                else:
+                    raise ValueError('Reference structure was not found in models')
+        elif not isinstance(ref_structure, PDB.Structure.Structure):
+            raise ValueError('ref_structure should be a  Bio.PDB.Structure.Structure or string object')
+
+        # Iterate models
+        for i,model in enumerate(self):
+
+            # Get structurally aligned residues to reference structure
+            aligned_residues = _getAlignedResiduesBasedOnStructuralAlignment(ref_structure, self.structures[model])
+
+            ### Remove unaligned termini ###
+
+            # Get structurally aligned residues to reference structure
+            target_residues = [r for r in self.structures[model].get_residues() if r.id[0] == ' ']
+
+            n_terminus = set()
+            for ar,tr in zip(aligned_residues, target_residues):
+                if ar == '-':
+                    n_terminus.add(tr.id[1])
+                else:
+                    break
+
+            c_terminus = set()
+            for ar,tr in reversed(list(zip(aligned_residues, target_residues))):
+                if ar == '-':
+                    c_terminus.add(tr.id[1])
+                else:
+                    break
+
+            n_terminus = sorted(list(n_terminus))
+            c_terminus = sorted(list(c_terminus))
+
+    #         ### Remove unaligned low confidence loops ###
+    #         if remove_low_confidence_unaligned_loops:
+    #             loops = []
+    #             loop = []
+    #             loops_to_remove = []
+    #             for ar,tr in zip(aligned_residues, target_residues):
+    #                 if ar == '-':
+    #                     loop.append(tr)
+    #                 else:
+    #                     loops.append(loop)
+    #                     loop = []
+
+    #             for loop in loops:
+    #                 if len(loop) >= min_loop_length:
+    #                     low_confidence_residues = []
+    #                     for r in loop:
+    #                         for a in r:
+    #                             if a.bfactor < confidence_threshold:
+    #                                 low_confidence_residues.append(r)
+    #                                 break
+    #                     if len(low_confidence_residues) > min_loop_length:
+    #                         for r in low_confidence_residues:
+    #                             loops_to_remove.append(r.id[1])
+    #         print(model, ','.join([str(x) for x in loops_to_remove]))
+
+            remove_this = []
+            for c in self.structures[model].get_chains():
+                for r in c.get_residues():
+                    if r.id[1] in n_terminus or r.id[1] in c_terminus:# or r.id[1] in low_confidence_residues:
+                        remove_this.append(r)
+                chain = c
+                # Remove residues
+                for r in remove_this:
+                    chain.detach_child(r.id)
+
+        self.getModelsSequences()
 
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
                                   trajectory_chain_indexes=None, reference_chain_indexes=None,
@@ -1616,7 +1725,7 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
+    def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False, models=None,
                                     epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False,
                                     fill_loops=False, protonation_states=None, noepik=False, mae_input=False,
                                     noprotassign=False, use_new_version=False, **kwargs):
@@ -1644,6 +1753,10 @@ compareSequences() function before adding missing loops.')
         # Generate jobs
         jobs = []
         for model in self.models_names:
+
+            if models != None and model not in models:
+                continue
+
             if fill_loops:
                 if model not in self.target_sequences:
                     raise ValueError('Target sequence for model %s was not given. First\
@@ -3766,8 +3879,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return(output_paths)
 
-
-
     def removeBoundaryConditions(self,path,command,step='md',remove_water=False):
         """
         Remove boundary conditions from gromacs simulation trajectory file
@@ -4474,7 +4585,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             plt.close()
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
-                                       return_failed=False, covalent_check=True,
+                                       return_failed=False, covalent_check=True, models=None,
                                        atom_mapping=None, conect_update=False):
         """
         Read structures from a Schrodinger calculation.
@@ -4485,7 +4596,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the output folder from a prepwizard calculation
         """
 
-        models = []
+        all_models = []
         failed_models = []
         for d in os.listdir(prepwizard_folder+'/output_models'):
             if os.path.isdir(prepwizard_folder+'/output_models/'+d):
@@ -4506,14 +4617,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if model not in self.models_names:
                             continue
 
-                        models.append(model)
+                        # Skip models not in the given models list
+                        if models != None and model not in models:
+                            continue
+
+                        all_models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f,
                                               covalent_check=covalent_check, atom_mapping=atom_mapping,
                                               conect_update=conect_update)
 
         self.getModelsSequences()
 
-        missing_models = set(self.models_names) - set(models)
+        missing_models = set(self.models_names) - set(all_models)
         if missing_models != set():
             print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
@@ -5905,3 +6020,58 @@ def _readRosettaScoreFile(score_file, indexing=False):
         scores = scores.set_index(['Model', 'Pose'])
 
     return scores
+
+def _getAlignedResiduesBasedOnStructuralAlignment(ref_struct, target_struct, max_ca_ca=5.0):
+    """
+    Return a sequence string with aligned residues based on a structural alignment. All residues
+    not structurally aligned are returned as '-'.
+
+    Parameters
+    ==========
+    ref_struct : str
+        Reference structure
+    target_struct : str
+        Target structure
+    max_ca_ca : float
+        Maximum CA-CA distance to be considered aligned
+
+    Returns
+    =======
+    aligned_residues : str
+        Full-length sequence string containing only aligned residues.
+    """
+
+    # Get sequences
+    r_sequence = ''.join([three_to_one(r.resname) for r in ref_struct.get_residues() if r.id[0] == ' '])
+    t_sequence = ''.join([three_to_one(r.resname) for r in target_struct.get_residues() if r.id[0] == ' '])
+
+    # Get alpha-carbon coordinates
+    r_ca_coord = np.array([a.coord for a in ref_struct.get_atoms() if a.name == 'CA'])
+    t_ca_coord = np.array([a.coord for a in target_struct.get_atoms() if a.name == 'CA'])
+
+    # Map residues based on a CA-CA distances
+    D = distance_matrix(t_ca_coord, r_ca_coord) # Calculate CA-CA distance matrix
+    D =  np.where(D <= max_ca_ca, D, np.inf) #< Cap matrix to max_ca_ca
+
+    # Map residues to the closest CA-CA distance
+    mapping = {}
+
+    # Start mapping from closest distance avoiding double assignments
+    while not np.isinf(D).all():
+        i,j = np.unravel_index(D.argmin(), D.shape)
+        mapping[i] = j
+        D[i].fill(np.inf) # This avoids double assignments
+        D[:,j].fill(np.inf) # This avoids double assignments
+
+    # Create alignment based on the structural alignment mapping
+    aligned_residues = []
+    for i,r in enumerate(t_sequence):
+        if i in mapping:
+            aligned_residues.append(r)
+        else:
+            aligned_residues.append('-')
+
+    # Join list to get aligned sequences
+    aligned_residues = ''.join(aligned_residues)
+
+    return aligned_residues
