@@ -1336,7 +1336,8 @@ chain to use for each model with the chains option.' % model)
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
-                                 membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
+                                 membrane=False, membrane_thickness=15, param_files=None,
+                                 patch_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
                                  skip_finished=True, null=False, cartesian=False, extra_flags=None,
                                  sugars=False):
