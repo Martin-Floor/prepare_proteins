@@ -1339,7 +1339,7 @@ chain to use for each model with the chains option.' % model)
                                  membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
                                  skip_finished=True, null=False, cartesian=False, extra_flags=None,
-                                 sugars=False):
+                                 sugars=False, symmetry=False, rosetta_path=None):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1360,6 +1360,9 @@ chain to use for each model with the chains option.' % model)
             os.mkdir(relax_folder+'/xml')
         if not os.path.exists(relax_folder+'/output_models'):
             os.mkdir(relax_folder+'/output_models')
+        if symmetry:
+            if not os.path.exists(relax_folder+'/symmetry'):
+                os.mkdir(relax_folder+'/symmetry')
 
         if parallelisation not in ['mpirun', 'srun']:
             raise ValueError('Are you sure about your parallelisation type?')
@@ -1375,6 +1378,20 @@ chain to use for each model with the chains option.' % model)
 
         # Save all models
         self.saveModels(relax_folder+'/input_models', models=models)
+
+        if symmetry and rosetta_path == None:
+            raise ValueError('To run relax with symmetry absolute rosetta path must be given to run make_symmdef_file.pl script.')
+
+        if symmetry:
+            for m in self.models_names:
+
+                # Skip models not in the given list
+                if models != None:
+                    if model not in models:
+                        continue
+
+                os.system(rosetta_path+'/main/source/src/apps/public/symmetry/make_symmdef_file.pl -p '+relax_folder+'/input_models/'+m+'.pdb > '+relax_folder+'/symmetry/'+m+'.symm')
+
 
         # Check that sequence comparison has been done before adding mutational steps
         if mutations:
@@ -1445,6 +1462,13 @@ has been carried out. Please run compareSequences() function before setting muta
                                                                        weights_file=score_fxn_name)
             xml.addScorefunction(sfxn)
 
+            # Detect symmetry if specified
+            if symmetry:
+                #detect_symmetry = rosettaScripts.movers.DetectSymmetry(subunit_tolerance=1, plane_tolerance=1)
+                setup_symmetry = rosettaScripts.movers.SetupForSymmetry(definition='../../symmetry/'+model+'.symm')
+                xml.addMover(setup_symmetry)
+                protocol.append(setup_symmetry)
+
             # Create mutation movers if needed
             if mutations:
                 if self.sequence_differences[model]['mutations'] != {}:
@@ -1489,9 +1513,14 @@ has been carried out. Please run compareSequences() function before setting muta
             # Write XMl protocol file
             xml.write_xml(relax_folder+'/xml/'+model+'_relax.xml')
 
+            if symmetry:
+                input_model = model+'_INPUT.pdb'
+            else:
+                input_model = model+'.pdb'
+
             # Create options for minimization protocol
             flags = rosettaScripts.flags('../../xml/'+model+'_relax.xml',
-                                         nstruct=nstruct, s='../../input_models/'+model+'.pdb',
+                                         nstruct=nstruct, s='../../input_models/'+input_model,
                                          output_silent_file=model+'_relax.out')
 
             # Add extra flags
