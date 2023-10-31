@@ -149,7 +149,7 @@ class tricks:
     def checkLastEpoch(host, server_path, separator='-'):
         """
         Return the last epoch ran for each pele folder.
-
+check
         Parameters
         ==========
         host : str
@@ -197,6 +197,68 @@ class tricks:
         os.remove(log_file)
 
         return last_epoch
+
+    def checkFailureType(host, server_path, models=None, separator='-'):
+        """
+        Return the last epoch ran for each pele folder.
+
+        Parameters
+        ==========
+        host : str
+            Name of the remote host where pele folder resides. Use localhost for
+            a local pele folder.
+        server_path : str
+            Path to the PELE folder in the remote host.
+        models : list
+            List of models name for which to query their error files.
+        separator : str
+            Separator used to split the pele folder names into protein and ligand.
+
+        Returns
+        =======
+        last_epoch : dict
+            Last epoch for each protein and ligand combination based on finding the
+            specific epoch folder in each pele folder path.
+
+        Caveats:
+            - This function does not check the content of the PELE folders, only the presence
+              of the epoch folders.
+        """
+
+        log_file = '.'+str(uuid.uuid4())+'.log'
+
+        if host == 'localhost':
+            os.system('ls '+server_path+'/*err > '+log_file)
+        else:
+            os.system('ssh '+host+' ls '+server_path+'/*err > '+log_file)
+
+        error_types = {}
+        with open(log_file) as f:
+            for l in f:
+                err_file = l.split('/')[-1].strip()
+                model = err_file.split('_')[1].split(separator)[0]
+                ligand = err_file.split('_')[1].split(separator)[1]
+
+                if models != None and model not in models:
+                    continue
+
+                log_err_file = '.'+str(uuid.uuid4())+'.err'
+                os.system('ssh '+host+' cat '+server_path+'/'+err_file+' > '+log_err_file)
+
+                with open(log_err_file) as ef:
+                    error_type = None
+                    for l in ef:
+                        if 'Out Of Memory' in l:
+                            error_type = 'Out of memory'
+                        elif 'ChainFactory::addLink' in l:
+                            if l.split()[7] == 'segment':
+                                error_type = 'Template for '+l.split()[16].replace(',', '')
+                    error_types[(model, ligand)] = error_type
+
+                os.remove(log_err_file)
+            os.remove(log_file)
+
+            return error_types
 
     def _getBondPele(pele_params, ligand_name):
         """
