@@ -247,6 +247,7 @@ class movers:
             self.root.set('mover_name', self.mover.name)
             self.root.set('trials', str(self.trials))
             self.root.set('temperature', str(self.temperature))
+            self.root.set('preapply', str(self.preapply))
             if self.scorefxn != None:
                 self.root.set('scorefxn_name', self.scorefxn.name)
             if self.recover_low != None:
@@ -383,7 +384,7 @@ class movers:
 
         def __init__(self, name, selector=None, selector_scorefunction=None,
                      perturber=None, filter_type=None, perturbation_angle=None,
-                     closure_attempts=100, stop_when_n_solutions_found=100):
+                     closure_attempts=100, stop_when_n_solutions_found=100, pre_selection_mover=None):
 
             self.type = 'mover'
             self.name = name
@@ -391,6 +392,8 @@ class movers:
             self.selector_scorefunction = selector_scorefunction
             self.closure_attempts = closure_attempts
             self.stop_when_n_solutions_found = stop_when_n_solutions_found
+            self.pre_selection_mover = pre_selection_mover
+
             self.added_perturbers = {}
             self.filters = {}
             self.close_bonds = {}
@@ -442,6 +445,8 @@ class movers:
             self.root.set('stop_when_n_solutions_found', str(self.stop_when_n_solutions_found))
             self.root.set('selector', self.selector)
             self.root.set('selector_scorefunction', self.selector_scorefunction)
+            if self.pre_selection_mover != None:
+                self.root.set('pre_selection_mover', self.pre_selection_mover)
 
             self.residues = {}
             for i in range(len(self.kic_residues)):
@@ -1453,6 +1458,37 @@ class movers:
                 self.root.set('two_step', str(int(self.two_step)))
             if self.reference_name != None:
                 self.root.set('reference_name', self.reference_name)
+
+    class DetectSymmetry:
+        # WARNING: It only works with cyclic symmetries from C2 to C99.
+
+        def __init__(self, name="DetectSymmetry", subunit_tolerance=0.01, plane_tolerance=0.001):
+            self.type = 'mover'
+            self.name = name
+            self.subunit_tolerance = subunit_tolerance
+            self.plane_tolerance = plane_tolerance
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('DetectSymmetry')
+            self.root.set('name', self.name)
+            self.root.set('subunit_tolerance', str(self.subunit_tolerance))
+            self.root.set('plane_tolerance', str(self.plane_tolerance))
+
+    class SetupForSymmetry:
+        # WARNING: It only works with cyclic symmetries from C2 to C99.
+
+        def __init__(self, name="SetupForSymmetry", definition=None):
+            self.type = 'mover'
+            self.name = name
+            self.definition = definition
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('SetupForSymmetry')
+            self.root.set('name', self.name)
+            self.root.set('definition', self.definition)
+
 
 class rosetta_MP:
 
