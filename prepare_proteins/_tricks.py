@@ -582,3 +582,27 @@ class tricks:
 
         self._updateParamsCharges(rosetta_params, new_charges)
         print("Copied the charges from pele to rosetta")
+
+
+    def changePELEResidueNames(model_folder,output_folder):
+        """
+        Function to change PELE protonation residue name changes back to normal.
+
+        Parameters
+        ----------
+        model_folder: str
+            Path to the folder with pele models.
+        output_folder: str
+            Path to the folder to dump new models.
+        """
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        for f in os.listdir(model_folder):
+            new_line = []
+            with open(model_folder+'/'+f) as file:
+                for line in file:
+                    new_line.append(line.replace('HID','HIS').replace('HIE','HIS').replace('HIP','HIS').replace('ASH','ASP').replace('GLH','GLU').replace('CYT','CYS').replace('LYN','LYS'))
+            with open(output_folder+'/'+f,'w') as file:
+                for line in new_line:
+                    file.write(line)
