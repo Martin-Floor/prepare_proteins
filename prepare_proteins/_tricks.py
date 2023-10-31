@@ -664,7 +664,72 @@ check
             new_line = []
             with open(model_folder+'/'+f) as file:
                 for line in file:
-                    new_line.append(line.replace('HID','HIS').replace('HIE','HIS').replace('HIP','HIS').replace('ASH','ASP').replace('GLH','GLU').replace('CYT','CYS').replace('LYN','LYS'))
+                    new_line.append(line.replace('HID','HIS').replace('HIE','HIS').replace('HIP','HIS').replace('ASH','ASP').replace('GLH','GLU').replace('CYT','CYS').replace('LYN','LYS').replace('HOH','WAT').replace('OW',' O').replace('1HW',' H1').replace('2HW',' H2'))
             with open(output_folder+'/'+f,'w') as file:
                 for line in new_line:
                     file.write(line)
+
+    def ligandToPolymer(model_folder,output_folder,polymer_sequence_dict,lig_atom_name):
+        """
+        Function to convert ligand to multiple residue polymer.
+
+        Parameters
+        ----------
+        model_folder: str
+            Path to the folder with pele models.
+        output_folder: str
+            Path to the folder to dump new models.
+        polymer_sequence_dict: dict
+            Dictionary with the positions of the polymer as keys and theit three-letter codes as values
+        lig_atom_name: dict
+            Nested dictionary with the positions of the polymer as keys and a dictionary mapping the atom names of the lig to the polymer. 
+        """
+        for file in os.listdir(model_folder):
+            #ligand_dict = {1:'ETY',2:'TPA',3:'ETY',4:'TPA',5:'ETY',6:'TPA',7:'ETY',8:'TPA',9:'ETY'}
+
+            new_lines = []
+
+            if not os.path.exists(output_folder):
+                os.mkdir(output_folder)
+
+            f = open(output_folder+'/'+file,'w')
+
+            rev_lig_atom_name = {}
+            for res in lig_atom_name:
+                rev_lig_atom_name[res] = {}
+                for old_name,new_name in lig_atom_name[res].items():
+                    rev_lig_atom_name[res][new_name] = old_name
+
+            lines_to_write = []
+            lig_lines = {}
+
+            for line in open(model_folder+'/'+file):
+                if line.startswith('HETATM') and 'LIG' in line:
+
+                    atom = line[12:17].strip()
+
+                    for p in lig_atom_name:
+                        if atom in lig_atom_name[p].values():
+                            atom_name = rev_lig_atom_name[p][atom].ljust(4)
+                            residue_label = polymer_sequence_dict[int(p)]
+                            new_line = 'ATOM  '+line[6:12]+atom_name+' '+residue_label+line[20:22]+str(p).rjust(4)+' '+line[27:]
+
+
+                            if p not in lig_lines:
+                                lig_lines[p] = []
+                            lig_lines[p].append(new_line)
+
+                elif 'CONECT' in line or 'END' in line:
+                    continue
+                else:
+                    lines_to_write.append(line)
+                    #f.write(line)
+
+            for p in lig_lines:
+                for l in lig_lines[p]:
+                    #print(l[:-1])
+                    lines_to_write.append(l)
+
+            for l in lines_to_write:
+                f.write(l)
+            f.write('END')
