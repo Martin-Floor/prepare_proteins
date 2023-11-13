@@ -2206,11 +2206,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-reportsize '+str(reportsize)+' '
 
                 # For chain and residue index
-                if isinstance(r, tuple) and len(tuple) == 2:
+                if isinstance(r, tuple) and len(r) == 2:
                     command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
                 # For chain only
                 elif isinstance(r, str) and len(r) == 1:
                     command += '-siteasl \"chain.name '+str(r[0])
+                else:
+                    raise ValueError('Wrong residue type data structure. Should be {model:[(chain,residue)]}')
 
                 if sidechain:
                     command += ' and not (atom.pt ca,c,n,h,o)'
