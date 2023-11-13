@@ -3216,8 +3216,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
                             extend_script_name = '._extendAdaptiveIteartions.py'
                             command += 'python ../'+extend_script_name+' output\n'
-
-                        command += 'python -m pele_platform.main input_restart.yaml\n'
+                        if not energy_by_residue:
+                            command += 'python -m pele_platform.main input_restart.yaml\n'
 
                         if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]) and not continue_all:
                             continuation = False
@@ -3235,6 +3235,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         else:
                             command += '\n'
+
+                        command += 'python -m pele_platform.main input_restart.yaml\n'
                         # with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
                         #     with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
                         #         for l in iyml:
