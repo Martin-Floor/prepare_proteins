@@ -295,7 +295,7 @@ class movers:
             def generateXml(self):
 
                 self.xml = ElementTree
-                self.root = self.xml.Element('PackRotamersMover')
+                self.root = self.xml.Element('Superimpose_mover')
                 self.root.set('name', self.name)
                 if self.ref_pose != None:
                     self.root.set('ref_pose', self.ref_pose)
@@ -1476,7 +1476,6 @@ class movers:
             self.root.set('plane_tolerance', str(self.plane_tolerance))
 
     class SetupForSymmetry:
-        # WARNING: It only works with cyclic symmetries from C2 to C99.
 
         def __init__(self, name="SetupForSymmetry", definition=None):
             self.type = 'mover'
@@ -1488,6 +1487,19 @@ class movers:
             self.root = self.xml.Element('SetupForSymmetry')
             self.root.set('name', self.name)
             self.root.set('definition', self.definition)
+
+    class ConvertRealToVirtualMover:
+
+        def __init__(self, name="ConvertRealToVirtualMover", residue_selector=None):
+            self.type = 'mover'
+            self.name = name
+            self.residue_selector = residue_selector
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('ConvertRealToVirtualMover')
+            self.root.set('name', self.name)
+            self.root.set('residue_selector', self.residue_selector)
 
 
 class rosetta_MP:
