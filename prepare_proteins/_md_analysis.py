@@ -44,6 +44,8 @@ class md_analysis:
                 traj_path = path+'/output_models/'+model+'/'+replica+'/'+step
 
                 if not os.path.exists(traj_path) or len(os.listdir(traj_path))==0:
+                    self.trajectory_paths[model][replica] = ''
+                    self.topology_paths[model][replica] = ''
                     print('WARNING: model '+model+' has no trajectories')
 
                 else:
@@ -162,7 +164,7 @@ class md_analysis:
         return jobs
 
 
-    def calculateDistances(self,folder='MD_analysis_data',calculate=True,overwrite=False):
+    def calculateDistances(self,folder='MD_analysis_data',calculate=False,overwrite=False):
 
         if not os.path.exists(folder):
             os.mkdir(folder)
