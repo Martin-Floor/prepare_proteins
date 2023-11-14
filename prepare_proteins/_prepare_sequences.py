@@ -233,6 +233,48 @@ class sequenceModels:
             else:
                 print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
 
+    def mutate_fasta(self,model,mut_position=int,wt_res=str,new_res=str,start_position=1):
+
+        """
+            Mutates a protein sequence based and updates the sequences dictionary.
+
+            To avoid runtime error, **import copy** and make a copy of self.sequences before iterating the sequences.
+    
+            Parameters:
+            - model: A string representing the model identifier.
+            - mut_position: An integer representing the position in the sequence to be mutated.
+            - wt_res: A string representing the wild-type (original) residue at the mutation position.
+            - new_res: A string representing the new residue to replace the wild-type residue.
+            - start_position: An integer representing the starting position of the sequence (default is 1).
+            
+            Raises:
+            - AssertionError: If the wild-type residue at the specified position does not match the given wt_res.
+            - AssertionError: If the mutation operation does not result in the expected new_res at the mutated position.
+
+        
+        """
+
+        seq = self.sequences[model]
+        pos = mut_position - start_position
+
+        assert(seq[pos] == wt_res)
+
+        mutant_seq = seq[:pos]+new_res+seq[pos+1:]
+
+        assert(mutant_seq[pos] == new_res)
+        assert(len(seq) == len(mutant_seq))
+
+        new_seq_id = model+"_"+wt_res+str(mut_position)+new_res
+
+        self.sequences[new_seq_id] = mutant_seq
+
+        self.sequences_names.append(new_seq_id)
+
+
+        return 
+
+
+
     def __iter__(self):
         #returning __iter__ object
         self._iter_n = -1
@@ -245,3 +287,6 @@ class sequenceModels:
             return self.sequences_names[self._iter_n]
         else:
             raise StopIteration
+
+
+
