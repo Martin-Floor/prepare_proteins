@@ -1340,7 +1340,7 @@ chain to use for each model with the chains option.' % model)
                                  patch_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
                                  skip_finished=True, null=False, cartesian=False, extra_flags=None,
-                                 sugars=False, symmetry=False, rosetta_path=None):
+                                 sugars=False, symmetry=False, rosetta_path=None, ca_constraint=False):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1400,6 +1400,11 @@ chain to use for each model with the chains option.' % model)
                 raise ValueError('Mutations have been enabled but no sequence comparison\
 has been carried out. Please run compareSequences() function before setting mutation=True.')
 
+        # Check if other cst files have been given.
+        if ca_constraint:
+            if not cst_files:
+                cst_files = {}
+
         # Create flags files
         jobs = []
         for model in self.models_names:
@@ -1419,6 +1424,19 @@ has been carried out. Please run compareSequences() function before setting muta
                     scores = _readRosettaScoreFile(score_file)
                     if scores.shape[0] >= nstruct:
                         continue
+
+            if ca_constraint:
+                if not os.path.exists(relax_folder+'/cst_files'):
+                    os.mkdir(relax_folder+'/cst_files')
+
+                if not os.path.exists(relax_folder+'/cst_files/'+model):
+                    os.mkdir(relax_folder+'/cst_files/'+model)
+
+                cst_file = relax_folder+'/cst_files/'+model+'/'+model+'_CA.cst'
+                _createCAConstraintFile(self.structures[model], cst_file)
+
+                cst_files.setdefault(model, [])
+                cst_files[model].append(cst_file)
 
             # Create xml minimization protocol
             xml = rosettaScripts.xmlScript()
@@ -1484,8 +1502,25 @@ has been carried out. Please run compareSequences() function before setting muta
             if cst_files != None:
                 if model not in cst_files:
                     raise ValueError('Model %s is not in the cst_files dictionary!' % model)
-                set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
-                                                                   cst_file='../../../'+cst_files[model])
+
+                if isinstance(cst_files[model], str):
+                    cst_files[model] = [cst_files[model]]
+
+                if not os.path.exists(relax_folder+'/cst_files'):
+                    os.mkdir(relax_folder+'/cst_files')
+
+                if not os.path.exists(relax_folder+'/cst_files/'+model):
+                    os.mkdir(relax_folder+'/cst_files/'+model)
+
+                for cst_file in cst_files[model]:
+
+                    cst_file_name = cst_file.split('/')[-1]
+
+                    if not os.path.exists(relax_folder+'/cst_files/'+model+'/'+cst_file_name):
+                        shutil.copyfile(cst_file, relax_folder+'/cst_files/'+model+'/'+cst_file_name)
+
+                    set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
+                                                                       cst_file='../../cst_files/'+model+'/'+cst_file_name)
                 xml.addMover(set_cst)
                 protocol.append(set_cst)
 
@@ -1556,6 +1591,7 @@ has been carried out. Please run compareSequences() function before setting muta
                 flags.addOption('in:file:extra_res_path', '../../params')
                 if patch_line != '':
                     flags.addOption('in:file:extra_patch_fa', patch_line)
+
 
             if membrane:
                 flags.addOption('mp::setup::spans_from_structure', 'true')
@@ -2131,8 +2167,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         ==========
         job_folder : str
             Path to the calculation folder
-        target_residues : list
-            List of atoms (chain_id, index) for which to calculate sitemap pockets
+        target_residues : dict
+            Dictionary per model with the list of atoms (chain_id, index) for which
+            to calculate sitemap pockets
         """
 
         # Create site map job folders
@@ -2206,11 +2243,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += '-reportsize '+str(reportsize)+' '
 
                 # For chain and residue index
-                if isinstance(r, tuple) and len(tuple) == 2:
+                if isinstance(r, tuple) and len(r) == 2:
                     command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
+
                 # For chain only
                 elif isinstance(r, str) and len(r) == 1:
                     command += '-siteasl \"chain.name '+str(r[0])
+                else:
+                    raise ValueError('Incorrect residue definition!')
 
                 if sidechain:
                     command += ' and not (atom.pt ca,c,n,h,o)'
@@ -5345,7 +5385,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             self.readModelFromPDB(model, pdb_path)
 
     def saveModels(self, output_folder, keep_residues={}, models=None, convert_to_mae=False,
-                   **keywords):
+                   write_conect_lines=True, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -5390,7 +5430,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 check_file = False
                 hydrogens = True
 
-            self._write_conect_lines(model, output_folder+'/'+model+'.pdb', check_file=check_file, hydrogens=hydrogens)
+            if write_conect_lines:
+                self._write_conect_lines(model, output_folder+'/'+model+'.pdb', check_file=check_file, hydrogens=hydrogens)
 
             if convert_to_mae:
                 cwd = os.getcwd()
@@ -6105,3 +6146,50 @@ def _getAlignedResiduesBasedOnStructuralAlignment(ref_struct, target_struct, max
     aligned_residues = ''.join(aligned_residues)
 
     return aligned_residues
+
+def _createCAConstraintFile(structure, cst_file, sd=1.0):
+    """
+    Create a cst file restraining all alpha carbons to their input coordinates
+    with an harmonic constraint.
+
+    Parameters
+    ==========
+    structure : Bio.PDB.Structure.Structure
+        Biopython structure object
+    cst_file : str
+        Path to the output constraint file
+    sd : float
+        Standard deviation parameter of the HARMONIC constraint.
+    """
+
+    cst_file = open(cst_file, 'w')
+    ref_res = None
+
+    for r in structure.get_residues():
+
+        if r.id[0] != ' ':
+            continue
+
+        res, chain = r.id[1], r.get_parent().id
+
+        if not ref_res:
+            ref_res, ref_chain = res, chain
+
+        # Update reference if chain changes
+        if ref_chain != chain:
+            ref_res, ref_chain = res, chain
+
+        for atom in r.get_atoms():
+            if atom.name == 'CA':
+                ca_atom = atom
+
+        ca_coordinte = list(ca_atom.coord)
+
+        cst_line = 'CoordinateConstraint '
+        cst_line += 'CA '+str(res)+chain+' '
+        cst_line += ' CA '+str(ref_res)+ref_chain+' '
+        cst_line += str(' '.join([str('%.4f' % c) for c in ca_coordinte]))+' '
+        cst_line += 'HARMONIC 0 '+str(sd)+'\n'
+        cst_file.write(cst_line)
+
+    cst_file.close()

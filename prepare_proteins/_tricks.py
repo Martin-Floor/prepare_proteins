@@ -434,10 +434,10 @@ check
             Dictionary with the mapped atom names
 
         """
-        df_pele = self._getBondPele(paramsPele, chain).sort_index()
-        df_rosetta = self._getBondRosetta(paramsRosetta).sort_index()
-        matrix_pele = self._getBondTopology(df_pele)
-        matrix_rosetta = self._getBondTopology(df_rosetta)
+        df_pele = tricks._getBondPele(paramsPele, chain).sort_index()
+        df_rosetta = tricks._getBondRosetta(paramsRosetta).sort_index()
+        matrix_pele = tricks._getBondTopology(df_pele)
+        matrix_rosetta = tricks._getBondTopology(df_rosetta)
 
         # Get the atoms map by their sets
         equival = {}  # Dict[rosetta_an] = pele_an
@@ -463,7 +463,7 @@ check
         for ros_an in equival.keys():
             # If atoms have more than one equivalent
             if len(equival[ros_an]) > 1:
-                pel_an = self._mapSymmetrycal(ros_an, equival[ros_an], df_pele, df_rosetta)
+                pel_an = tricks._mapSymmetrycal(ros_an, equival[ros_an], df_pele, df_rosetta)
                 if isinstance(pel_an, list):
                     not_mapped[ros_an] = equival[ros_an].copy()
                     shallow_copy = dict(equival)
@@ -669,7 +669,7 @@ check
                 for line in new_line:
                     file.write(line)
 
-    def ligandToPolymer(model_folder,output_folder,polymer_sequence_dict,lig_atom_name):
+    def ligandToPolymer(model_folder, output_folder,polymer_sequence_dict,lig_atom_name):
         """
         Function to convert ligand to multiple residue polymer.
 
@@ -682,7 +682,7 @@ check
         polymer_sequence_dict: dict
             Dictionary with the positions of the polymer as keys and theit three-letter codes as values
         lig_atom_name: dict
-            Nested dictionary with the positions of the polymer as keys and a dictionary mapping the atom names of the lig to the polymer. 
+            Nested dictionary with the positions of the polymer as keys and a dictionary mapping the atom names of the lig to the polymer.
         """
         for file in os.listdir(model_folder):
             #ligand_dict = {1:'ETY',2:'TPA',3:'ETY',4:'TPA',5:'ETY',6:'TPA',7:'ETY',8:'TPA',9:'ETY'}
