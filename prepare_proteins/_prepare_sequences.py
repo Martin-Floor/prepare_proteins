@@ -105,7 +105,7 @@ class sequenceModels:
         if exclude_finished:
             for model in os.listdir(job_folder+'/output_models'):
                 for f in os.listdir(job_folder+'/output_models/'+model):
-                    if f == 'ranked_0.pdb':
+                    if f == 'ranked_0.pdb' or f == 'ranked__0.pdb.bz2':
                         excluded.append(model)
 
         jobs = []
@@ -205,16 +205,18 @@ class sequenceModels:
 
         return jobs
 
-    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix=''):
+    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='', return_missing=False):
         """
         Copy models from an AlphaFold calculation to an specfied output folder.
 
         Parameters
         ==========
         af_folder : str
-            Path to the Alpha fold folder calculation
+            Path to the Alpha fold folder calculation.
         output_folder : str
-            Path to the output folder where to store the models
+            Path to the output folder where to store the models.
+        return_missing : bool
+            Return a list with the missing models.
         """
 
         # Get paths to models in alphafold folder
@@ -231,6 +233,8 @@ class sequenceModels:
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
 
+        if return_missing:
+            missing = []
         for m in self:
             if m in models_paths:
                 if models_paths[m].endswith('.pdb'):
@@ -240,7 +244,12 @@ class sequenceModels:
                     pdbfile = open(output_folder+'/'+prefix+m+'.pdb', 'wb')
                     shutil.copyfileobj(file, pdbfile)
             else:
+                if return_missing:
+                    missing.append(m)
                 print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
+
+        if return_missing:
+            return missing
 
     def loadAFScores(self, af_folder, only_indexes=None):
         """
