@@ -16,10 +16,14 @@ from pkg_resources import resource_stream, Requirement, resource_listdir
 import numpy as np
 from Bio import PDB
 from Bio.PDB.DSSP import DSSP
+from Bio.PDB.Polypeptide import three_to_one
+
 import pandas as pd
 import matplotlib.pyplot as plt
 import mdtraj as md
 import fileinput
+
+from scipy.spatial import distance_matrix
 
 import prepare_proteins
 
@@ -745,6 +749,111 @@ chain to use for each model with the chains option.' % model)
 
         # Missing save models and reload them to take effect.
 
+    def removeNotAlignedRegions(self, ref_structure, max_ca_ca=5.0, remove_low_confidence_unaligned_loops=False,
+                                confidence_threshold=50.0, min_loop_length=10):
+        """
+        Remove models regions that not aligned with the given reference structure. The mapping is based on
+        the current structural alignment of the reference and the target models. The termini are removed
+        if they don't align with the reference structure. Internal loops that do not align with the given
+        reference structure can optionally be removed if they have a confidence score lower than the one
+        defined as threshold.
+
+        Parameters
+        ==========
+        ref_structure : str or Bio.PDB.Structure.Structure
+            Path to the input PDB or model name to use as reference. Otherwise a Bio.PDB.Structure object
+            can be given.
+        max_ca_ca : float
+            Maximum CA-CA distance for two residues to be considered aligned.
+        remove_low_confidence_unaligned_loops : bool
+            Remove not aligned loops with low confidence from the model
+        confidence_threshold : float
+            Threshold to consider a loop region not algined as low confidence for their removal.
+        min_loop_length : int
+            Length of the internal unaligned region to be considered a loop.
+
+        Returns
+        =======
+
+        """
+
+        # Check input structure input
+        if isinstance(ref_structure, str):
+            if ref_structure.endswith('.pdb'):
+                ref_structure = prepare_proteins._readPDB('ref', ref_structure)
+            else:
+                if ref_structure in self.models_names:
+                    ref_structure = self.structures[ref_structure]
+                else:
+                    raise ValueError('Reference structure was not found in models')
+        elif not isinstance(ref_structure, PDB.Structure.Structure):
+            raise ValueError('ref_structure should be a  Bio.PDB.Structure.Structure or string object')
+
+        # Iterate models
+        for i,model in enumerate(self):
+
+            # Get structurally aligned residues to reference structure
+            aligned_residues = _getAlignedResiduesBasedOnStructuralAlignment(ref_structure, self.structures[model])
+
+            ### Remove unaligned termini ###
+
+            # Get structurally aligned residues to reference structure
+            target_residues = [r for r in self.structures[model].get_residues() if r.id[0] == ' ']
+
+            n_terminus = set()
+            for ar,tr in zip(aligned_residues, target_residues):
+                if ar == '-':
+                    n_terminus.add(tr.id[1])
+                else:
+                    break
+
+            c_terminus = set()
+            for ar,tr in reversed(list(zip(aligned_residues, target_residues))):
+                if ar == '-':
+                    c_terminus.add(tr.id[1])
+                else:
+                    break
+
+            n_terminus = sorted(list(n_terminus))
+            c_terminus = sorted(list(c_terminus))
+
+    #         ### Remove unaligned low confidence loops ###
+    #         if remove_low_confidence_unaligned_loops:
+    #             loops = []
+    #             loop = []
+    #             loops_to_remove = []
+    #             for ar,tr in zip(aligned_residues, target_residues):
+    #                 if ar == '-':
+    #                     loop.append(tr)
+    #                 else:
+    #                     loops.append(loop)
+    #                     loop = []
+
+    #             for loop in loops:
+    #                 if len(loop) >= min_loop_length:
+    #                     low_confidence_residues = []
+    #                     for r in loop:
+    #                         for a in r:
+    #                             if a.bfactor < confidence_threshold:
+    #                                 low_confidence_residues.append(r)
+    #                                 break
+    #                     if len(low_confidence_residues) > min_loop_length:
+    #                         for r in low_confidence_residues:
+    #                             loops_to_remove.append(r.id[1])
+    #         print(model, ','.join([str(x) for x in loops_to_remove]))
+
+            remove_this = []
+            for c in self.structures[model].get_chains():
+                for r in c.get_residues():
+                    if r.id[1] in n_terminus or r.id[1] in c_terminus:# or r.id[1] in low_confidence_residues:
+                        remove_this.append(r)
+                chain = c
+                # Remove residues
+                for r in remove_this:
+                    chain.detach_child(r.id)
+
+        self.getModelsSequences()
+
     def alignModelsToReferencePDB(self, reference, output_folder, chain_indexes=None,
                                   trajectory_chain_indexes=None, reference_chain_indexes=None,
                                   aligment_mode='aligned', verbose=False, reference_residues=None):
@@ -1227,10 +1336,11 @@ chain to use for each model with the chains option.' % model)
 
     def setUpRosettaOptimization(self, relax_folder, nstruct=1000, relax_cycles=5,
                                  cst_files=None, mutations=False, models=None, cst_optimization=True,
-                                 membrane=False, membrane_thickness=15, param_files=None, parallelisation='srun',
+                                 membrane=False, membrane_thickness=15, param_files=None,
+                                 patch_files=None, parallelisation='srun',
                                  executable='rosetta_scripts.mpi.linuxgccrelease', cpus=None,
                                  skip_finished=True, null=False, cartesian=False, extra_flags=None,
-                                 sugars=False):
+                                 sugars=False, symmetry=False, rosetta_path=None, ca_constraint=False):
         """
         Set up minimizations using Rosetta FastRelax protocol.
 
@@ -1251,6 +1361,9 @@ chain to use for each model with the chains option.' % model)
             os.mkdir(relax_folder+'/xml')
         if not os.path.exists(relax_folder+'/output_models'):
             os.mkdir(relax_folder+'/output_models')
+        if symmetry:
+            if not os.path.exists(relax_folder+'/symmetry'):
+                os.mkdir(relax_folder+'/symmetry')
 
         if parallelisation not in ['mpirun', 'srun']:
             raise ValueError('Are you sure about your parallelisation type?')
@@ -1267,11 +1380,30 @@ chain to use for each model with the chains option.' % model)
         # Save all models
         self.saveModels(relax_folder+'/input_models', models=models)
 
+        if symmetry and rosetta_path == None:
+            raise ValueError('To run relax with symmetry absolute rosetta path must be given to run make_symmdef_file.pl script.')
+
+        if symmetry:
+            for m in self.models_names:
+
+                # Skip models not in the given list
+                if models != None:
+                    if model not in models:
+                        continue
+
+                os.system(rosetta_path+'/main/source/src/apps/public/symmetry/make_symmdef_file.pl -p '+relax_folder+'/input_models/'+m+'.pdb > '+relax_folder+'/symmetry/'+m+'.symm')
+
+
         # Check that sequence comparison has been done before adding mutational steps
         if mutations:
             if self.sequence_differences == {}:
                 raise ValueError('Mutations have been enabled but no sequence comparison\
 has been carried out. Please run compareSequences() function before setting mutation=True.')
+
+        # Check if other cst files have been given.
+        if ca_constraint:
+            if not cst_files:
+                cst_files = {}
 
         # Create flags files
         jobs = []
@@ -1292,6 +1424,19 @@ has been carried out. Please run compareSequences() function before setting muta
                     scores = _readRosettaScoreFile(score_file)
                     if scores.shape[0] >= nstruct:
                         continue
+
+            if ca_constraint:
+                if not os.path.exists(relax_folder+'/cst_files'):
+                    os.mkdir(relax_folder+'/cst_files')
+
+                if not os.path.exists(relax_folder+'/cst_files/'+model):
+                    os.mkdir(relax_folder+'/cst_files/'+model)
+
+                cst_file = relax_folder+'/cst_files/'+model+'/'+model+'_CA.cst'
+                _createCAConstraintFile(self.structures[model], cst_file)
+
+                cst_files.setdefault(model, [])
+                cst_files[model].append(cst_file)
 
             # Create xml minimization protocol
             xml = rosettaScripts.xmlScript()
@@ -1336,6 +1481,13 @@ has been carried out. Please run compareSequences() function before setting muta
                                                                        weights_file=score_fxn_name)
             xml.addScorefunction(sfxn)
 
+            # Detect symmetry if specified
+            if symmetry:
+                #detect_symmetry = rosettaScripts.movers.DetectSymmetry(subunit_tolerance=1, plane_tolerance=1)
+                setup_symmetry = rosettaScripts.movers.SetupForSymmetry(definition='../../symmetry/'+model+'.symm')
+                xml.addMover(setup_symmetry)
+                protocol.append(setup_symmetry)
+
             # Create mutation movers if needed
             if mutations:
                 if self.sequence_differences[model]['mutations'] != {}:
@@ -1350,8 +1502,25 @@ has been carried out. Please run compareSequences() function before setting muta
             if cst_files != None:
                 if model not in cst_files:
                     raise ValueError('Model %s is not in the cst_files dictionary!' % model)
-                set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
-                                                                   cst_file='../../../'+cst_files[model])
+
+                if isinstance(cst_files[model], str):
+                    cst_files[model] = [cst_files[model]]
+
+                if not os.path.exists(relax_folder+'/cst_files'):
+                    os.mkdir(relax_folder+'/cst_files')
+
+                if not os.path.exists(relax_folder+'/cst_files/'+model):
+                    os.mkdir(relax_folder+'/cst_files/'+model)
+
+                for cst_file in cst_files[model]:
+
+                    cst_file_name = cst_file.split('/')[-1]
+
+                    if not os.path.exists(relax_folder+'/cst_files/'+model+'/'+cst_file_name):
+                        shutil.copyfile(cst_file, relax_folder+'/cst_files/'+model+'/'+cst_file_name)
+
+                    set_cst = rosettaScripts.movers.constraintSetMover(add_constraints=True,
+                                                                       cst_file='../../cst_files/'+model+'/'+cst_file_name)
                 xml.addMover(set_cst)
                 protocol.append(set_cst)
 
@@ -1380,9 +1549,14 @@ has been carried out. Please run compareSequences() function before setting muta
             # Write XMl protocol file
             xml.write_xml(relax_folder+'/xml/'+model+'_relax.xml')
 
+            if symmetry:
+                input_model = model+'_INPUT.pdb'
+            else:
+                input_model = model+'.pdb'
+
             # Create options for minimization protocol
             flags = rosettaScripts.flags('../../xml/'+model+'_relax.xml',
-                                         nstruct=nstruct, s='../../input_models/'+model+'.pdb',
+                                         nstruct=nstruct, s='../../input_models/'+input_model,
                                          output_silent_file=model+'_relax.out')
 
             # Add extra flags
@@ -1417,6 +1591,7 @@ has been carried out. Please run compareSequences() function before setting muta
                 flags.addOption('in:file:extra_res_path', '../../params')
                 if patch_line != '':
                     flags.addOption('in:file:extra_patch_fa', patch_line)
+
 
             if membrane:
                 flags.addOption('mp::setup::spans_from_structure', 'true')
@@ -1616,10 +1791,10 @@ compareSequences() function before adding missing loops.')
 
         return jobs
 
-    def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False,
+    def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False, models=None,
                                     epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False,
                                     fill_loops=False, protonation_states=None, noepik=False, mae_input=False,
-                                    noprotassign=False, use_new_version=False, **kwargs):
+                                    noprotassign=False, use_new_version=False, replace_symbol=None, **kwargs):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -1639,43 +1814,52 @@ compareSequences() function before adding missing loops.')
 
         # Save all input models
         self.saveModels(prepare_folder+'/input_models', convert_to_mae=mae_input,
-                        remove_hydrogens=remove_hydrogens, **kwargs)
+                        remove_hydrogens=remove_hydrogens, replace_symbol=replace_symbol, **kwargs)
 
         # Generate jobs
         jobs = []
         for model in self.models_names:
+
+            if models != None and model not in models:
+                continue
+
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[0], replace_symbol[1])
+            else:
+                model_name = model
+
             if fill_loops:
                 if model not in self.target_sequences:
                     raise ValueError('Target sequence for model %s was not given. First\
 make sure of reading the target sequences with the function readTargetSequences()' % model)
                 sequence = {}
                 sequence[model] = self.target_sequences[model]
-                fasta_file = prepare_folder+'/input_models/'+model+'.fasta'
+                fasta_file = prepare_folder+'/input_models/'+model_name+'.fasta'
                 alignment.writeFastaFile(sequence, fasta_file)
 
             # Create model output folder
-            output_folder = prepare_folder+'/output_models/'+model
+            output_folder = prepare_folder+'/output_models/'+model_name
             if not os.path.exists(output_folder):
                 os.mkdir(output_folder)
 
             if fill_loops:
                 command = 'cd '+prepare_folder+'/input_models/\n'
                 command += 'pwd=$(pwd)\n'
-                command += 'cd ../output_models/'+model+'\n'
+                command += 'cd ../output_models/'+model_name+'\n'
             else:
                 command = 'cd '+output_folder+'\n'
 
             command += '"${SCHRODINGER}/utilities/prepwizard" '
             if mae_input:
-                command += '../../input_models/'+model+'.mae '
+                command += '../../input_models/'+model_name+'.mae '
             else:
-                command += '../../input_models/'+model+'.pdb '
-            command += model+'.pdb '
+                command += '../../input_models/'+model_name+'.pdb '
+            command += model_name+'.pdb '
             command += '-fillsidechains '
             command += '-disulfides '
             if fill_loops:
                 command += '-fillloops '
-                command += '-fasta_file "$pwd"/'+model+'.fasta '
+                command += '-fasta_file "$pwd"/'+model_name+'.fasta '
             if remove_hydrogens:
                 command += '-rehtreat '
             if noepik:
@@ -1702,7 +1886,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     else:
                         command += '-force '+str(ps[0])+" "+str(ps[1])+' '
 
-            command += '-JOBNAME '+model+' '
+            command += '-JOBNAME '+model_name+' '
             command += '-HOST localhost:1 '
             command += '-WAIT\n'
             command += 'cd ../../..\n'
@@ -1711,8 +1895,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpDockingGrid(self, grid_folder, center_atoms, innerbox=(10,10,10),
-                     outerbox=(30,30,30), useflexmae=True, peptide=False,
-                     mae_input=True, cst_positions=None):
+                        outerbox=(30,30,30), useflexmae=True, peptide=False,
+                        mae_input=True, cst_positions=None, models=None):
         """
         Setup grid calculation for each model.
 
@@ -1756,6 +1940,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create grid input files
         jobs = []
         for model in self.models_names:
+
+            if models != None:
+                if model not in models:
+                    continue
 
             if all([isinstance(x, (float, int)) for x in center_atoms[model]]):
                 x = float(center_atoms[model][0])
@@ -1855,9 +2043,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder,
-                      poses_per_lig=100, precision='SP', use_ligand_charges=False,
-                      energy_by_residue=False, use_new_version=False, cst_fragments=None):
+    def setUpGlideDocking(self, docking_folder, grids_folder, ligands_folder, models=None,
+                          poses_per_lig=100, precision='SP', use_ligand_charges=False,
+                          energy_by_residue=False, use_new_version=False, cst_fragments=None):
         """
         Set docking calculations for all the proteins and set of ligands located
         grid_folders and ligands_folder folders, respectively. The ligands must be provided
@@ -1912,6 +2100,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Set up docking jobs
         jobs = []
         for grid in grids_paths:
+
+            # Skip if models are given and not in models
+            if models != None:
+                if grid not in models:
+                    continue
+
             # Create ouput folder
             if not os.path.exists(docking_folder+'/output_models/'+grid):
                 os.mkdir(docking_folder+'/output_models/'+grid)
@@ -1971,15 +2165,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10, enclosure=0.5,
                              maxvdw=1.1, resolution='fine', reportsize=100, overwrite=False,
-                             maxdist=8.0, sidechain=True, only_models=None):
+                             maxdist=8.0, sidechain=True, only_models=None, replace_symbol=None,
+                             write_conect_lines=True):
         """
         Generates a SiteMap calculation for model poses (no ligand) near specified residues.
         Parameters
         ==========
         job_folder : str
             Path to the calculation folder
-        target_residues : list
-            List of atoms (chain_id, index) for which to calculate sitemap pockets
+        target_residues : dict
+            Dictionary per model with a list of lists of residues (chain_id, residues) for which
+            to calculate sitemap pockets.
+        replace_symbol : str
+            Symbol to replace for saving the models
         """
 
         # Create site map job folders
@@ -1997,7 +2195,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         script_path = job_folder+'/._prepareForSiteMap.py'
 
         #Save all input models
-        self.saveModels(job_folder+'/input_models')
+        self.saveModels(job_folder+'/input_models', write_conect_lines=write_conect_lines,
+                        replace_symbol=replace_symbol)
 
         # Create input files
         jobs = []
@@ -2008,15 +2207,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if model not in only_models:
                     continue
 
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[0], replace_symbol[1])
+            else:
+                model_name = model
+
             # Create an output folder for each model
-            output_folder = job_folder+'/output_models/'+model
+            output_folder = job_folder+'/output_models/'+model_name
             if not os.path.exists(output_folder):
                 os.mkdir(output_folder)
 
             # Generate input protein files
-            input_protein = job_folder+'/input_models/'+model+'.pdb'
+            input_protein = job_folder+'/input_models/'+model_name+'.pdb'
 
-            input_mae = job_folder+'/output_models/'+model+'/'+model+'_protein.mae'
+            input_mae = job_folder+'/output_models/'+model_name+'/'+model_name+'_protein.mae'
             if not os.path.exists(input_mae) or overwrite:
                 command = 'run '+script_path+' '
                 command += input_protein+' '
@@ -2027,22 +2231,31 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not isinstance(target_residues, dict):
                 raise ValueError('Problem: target_residues must be a dictionary!')
 
-            elif isinstance(target_residues[model], tuple):
+            if model not in target_residues:
+                raise ValueError(f'Problem: model {model} not found in target_residues dictionary!')
+
+            elif isinstance(target_residues[model], (str,tuple)):
                 target_residues[model] = [target_residues[model]]
 
-            for r in target_residues[model]:
+            elif isinstance(target_residues[model][0], (str,tuple)):
+                target_residues[model] = [target_residues[model]]
 
-                label = ''.join([str(x) for x in r])
+            for residue_selection in target_residues[model]:
+
+                label = ''
+                for r in residue_selection:
+                    label += ''.join([str(x) for x in r])+'_'
+                label = label[:-1]
 
                 # Create folder
                 if not os.path.exists(output_folder+'/'+label):
                     os.mkdir(output_folder+'/'+label)
 
                 # Add site map command
-                command = 'cd '+job_folder+'/output_models/'+model+'/'+label+'\n'
+                command = 'cd '+job_folder+'/output_models/'+model_name+'/'+label+'\n'
                 command += '"${SCHRODINGER}/sitemap" '
-                command += '-j '+model+' '
-                command += '-prot ../'+model+'_protein.mae'+' '
+                command += '-j '+model_name+' '
+                command += '-prot ../'+model_name+'_protein.mae'+' '
                 command += '-sitebox '+str(site_box)+' '
                 command += '-resolution '+str(resolution)+' '
                 command += '-keepvolpts yes '
@@ -2052,16 +2265,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
 
-                # For chain and residue index
-                if isinstance(r, tuple) and len(tuple) == 2:
-                    command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
-                # For chain only
-                elif isinstance(r, str) and len(r) == 1:
-                    command += '-siteasl \"chain.name '+str(r[0])
-
-                if sidechain:
-                    command += ' and not (atom.pt ca,c,n,h,o)'
-                command += '\" '
+                command += '-siteasl \"'
+                for r in residue_selection:
+                    if isinstance(r, tuple) and len(r) == 2:
+                        command += '(chain.name '+str(r[0])+' and res.num {'+str(r[1])+'} '
+                    elif isinstance(r, str) and len(r) == 1:
+                        command += '\"(chain.name '+str(r[0])+' '
+                    else:
+                        raise ValueError('Incorrect residue definition!')
+                    if sidechain:
+                        command += 'and not (atom.pt ca,c,n,h,o)) or '
+                    else:
+                        command += ') or '
+                command = command[:-4]+'\" '
                 command += '-HOST localhost:1 '
                 command += '-TMPLAUNCHDIR '
                 command += '-WAIT\n'
@@ -2140,7 +2356,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def analyseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
+    def analyseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True,
+                                  output_models=None, replace_symbol=None):
         """
         Extract score values from a site map calculation.
          Parameters
@@ -2221,6 +2438,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         found = False
             return found
 
+        if replace_symbol and not isinstance(replace_symbol, tuple) and not len(replace_symbol) == 2:
+            raise ValueError('replace_symbol must be a tuple: (old_symbol,  new_symbol)')
+
         sitemap_data = {}
         sitemap_data['Model'] = []
         sitemap_data['Pocket'] = []
@@ -2232,8 +2452,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not os.path.exists(output_models):
                 os.mkdir(output_models)
 
-        for m in os.listdir(output_folder):
-            for r in os.listdir(output_folder+'/'+m):
+        for model in os.listdir(output_folder):
+
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[1], replace_symbol[0])
+            else:
+                model_name = model
+
+            for r in os.listdir(output_folder+'/'+model):
 
                 # Check if chain or residue was given
                 if len(r) == 1:
@@ -2241,32 +2467,32 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     pocket_type = 'residue'
 
-                if os.path.isdir(output_folder+'/'+m+'/'+r):
-                    log_file = output_folder+'/'+m+'/'+r+'/'+m+'.log'
+                if os.path.isdir(output_folder+'/'+model+'/'+r):
+                    log_file = output_folder+'/'+model+'/'+r+'/'+model+'.log'
                     if os.path.exists(log_file):
                         completed = checkIfCompleted(log_file)
                     else:
                         if verbose:
-                            message = 'Log file for model %s and '+pocket_type+' %s was not found!\n' % (m, r)
+                            message = 'Log file for model %s and '+pocket_type+' %s was not found!\n' % (model, r)
                             message += 'It seems the calculation has not run yet...'
                             print(message)
                         continue
 
                     if not completed:
                         if verbose:
-                            print('There was a problem with model %s and '+pocket_type+' %s' % (m, r))
+                            print('There was a problem with model %s and '+pocket_type+' %s' % (model, r))
                         continue
                     else:
                         found = checkIfFound(log_file)
                         if not found:
                             if verbose:
-                                print('No sites were found for model %s and '+pocket_type+' %s' % (m, r))
+                                print('No sites were found for model %s and '+pocket_type+' %s' % (model, r))
                             continue
 
                     pocket = r
                     pocket_data = parseVolumeInfo(log_file)
 
-                    sitemap_data['Model'].append(m)
+                    sitemap_data['Model'].append(model_name)
                     sitemap_data['Pocket'].append(pocket)
 
                     for l in pocket_data:
@@ -2275,19 +2501,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     if output_models:
                         print('Storing Volume Points models at %s' % output_models)
-                        input_file = input_folder+'/'+m+'.pdb'
-                        volpoint_file = output_folder+'/'+m+'/'+r+'/'+m+'_site_1_volpts.pdb'
+                        input_file = input_folder+'/'+model+'.pdb'
+                        volpoint_file = output_folder+'/'+model+'/'+r+'/'+model+'_site_1_volpts.pdb'
                         if os.path.exists(volpoint_file):
 
-                            istruct = _readPDB(m+'_input', input_file)
+                            istruct = _readPDB(model+'_input', input_file)
                             imodel = [x for x in istruct.get_models()][0]
-                            vstruct = _readPDB(m+'_volpts', volpoint_file)
+                            vstruct = _readPDB(model+'_volpts', volpoint_file)
                             vpt_chain = PDB.Chain.Chain('V')
                             for r in vstruct.get_residues():
                                 vpt_chain.add(r)
                             imodel.add(vpt_chain)
 
-                            _saveStructureToPDB(istruct, output_models+'/'+m+'_vpts.pdb')
+                            _saveStructureToPDB(istruct, output_models+'/'+model_name+'_vpts.pdb')
                         else:
                             print('Volume points PDB not found for model %s and residue %s' % (m, r))
 
@@ -2297,7 +2523,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return sitemap_data
 
     def definePocketResiduesWithSiteMap(self, volpts_models, distance_to_points=2.5, only_models=None,
-                                        output_file=None, overwrite=False):
+                                        output_file=None, overwrite=False, replace_symbol=None):
         """
         Calculates the active site residues based on the volume points from a sitemap
         calcualtion. The models should be written with the option output_models from
@@ -2323,6 +2549,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not output_file.endswith('.json'):
             output_file = output_file+'.json'
 
+        if replace_symbol and not isinstance(replace_symbol, tuple) and not len(replace_symbol) == 2:
+            raise ValueError('replace_symbol must be a tuple: (old_symbol,  new_symbol)')
+
         if not os.path.exists(output_file) or overwrite:
 
             residues = {}
@@ -2333,8 +2562,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if model not in only_models:
                         continue
 
+                if replace_symbol:
+                    model_name = model.replace(replace_symbol[0], replace_symbol[1])
+                else:
+                    model_name = model
+
                 # Check if the volume points model file exists
-                volpts_file = volpts_models+'/'+model+'_vpts.pdb'
+                volpts_file = volpts_models+'/'+model_name+'_vpts.pdb'
                 if not os.path.exists(volpts_file):
                     print('Model %s not found in the volume points folder %s!' % (model, volpts_models))
 
@@ -2355,6 +2589,41 @@ make sure of reading the target sequences with the function readTargetSequences(
             residues[model] = np.array(list(residues[model]))
 
         return residues
+
+    def getInContactResidues(self, residue_selection, distance_threshold=2.5, sidechain_selection=False,
+                             return_residues=False, only_protein=False, sidechain=False, backbone=False):
+        """
+        Get residues in close contact to a residue selection
+        """
+
+        in_contact = {}
+        for model in self:
+
+            # Get structure coordinates
+            structure = self.structures[model]
+            selected_coordinates = _getStructureCoordinates(structure, sidechain=sidechain_selection,
+                                                            only_residues=residue_selection[model])
+            selected_atoms = _getStructureCoordinates(structure, sidechain=sidechain_selection,
+                                                      only_residues=residue_selection[model], return_atoms=True)
+
+            other_coordinates = _getStructureCoordinates(structure, sidechain=sidechain,
+                                                        exclude_residues=residue_selection[model])
+            other_atoms = _getStructureCoordinates(structure, sidechain=sidechain,
+                                                   exclude_residues=residue_selection[model], return_atoms=True)
+
+            # Compute the distance matrix between the two set of coordinates
+            M = distance_matrix(selected_coordinates, other_coordinates)
+            in_contact[model] = np.array(other_atoms)[np.argwhere(M <= distance_threshold)[:,1]]
+            in_contact[model] = [tuple(a) for a in in_contact[model]]
+
+            # Only return tuple residues
+            if return_residues:
+                residues = []
+                for atom in in_contact[model]:
+                    residues.append(tuple(atom[:2]))
+                in_contact[model] = list(set(residues))
+
+        return in_contact
 
     def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
                                     only_ligands=None):
@@ -2535,8 +2804,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True, skip_models=None, skip_ligands=None,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
-                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False,covalent_setup=False, covalent_base_aa=None,
+                             extend_iterations=False, only_models=None, only_ligands=None, only_combinations=None, ligand_templates=None, seed=12345, log_file=False,
+                             nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
                              ligand_equilibration_cst=True):
         """
@@ -2645,6 +2914,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if ligand not in only_ligands:
                             continue
 
+                    if only_combinations and (protein, ligand) not in only_combinations:
+                        continue
+
                     # Create PELE job folder for each docking
                     if not os.path.exists(pele_folder+'/'+protein+separator+ligand):
                         os.mkdir(pele_folder+'/'+protein+separator+ligand)
@@ -2731,7 +3003,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if not os.path.exists(output_folder+'/ligand'):
                                     os.makedirs(output_folder+'/ligand')
                                 self._setUpCovalentLigandParameterization(protein, index, covalent_base_aa,
-                                                                         output_folder=output_folder+'/ligand')
+                                                                          output_folder=output_folder+'/ligand')
 
                                 # Copy covalent parameterization script
                                 _copyScriptFile(output_folder, 'covalentLigandParameterization.py')
@@ -2978,6 +3250,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += "--epsilon "+str(epsilon)+"\n"
                             continuation = True
 
+                        if covalent_setup:
+                            command += covalent_command
+                            continuation = True
+
                         if ligand_equilibration_cst:
 
                             # Copy input_yaml for equilibration
@@ -3031,10 +3307,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                             continuation = True
 
-                    if covalent_setup:
-                        command += covalent_command
-                        continuation = True
-
                     if continuation:
                         debug_line = False
                         restart_line = False
@@ -3061,8 +3333,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
                             extend_script_name = '._extendAdaptiveIteartions.py'
                             command += 'python ../'+extend_script_name+' output\n'
-
-                        command += 'python -m pele_platform.main input_restart.yaml\n'
+                        if not energy_by_residue:
+                            command += 'python -m pele_platform.main input_restart.yaml\n'
 
                         if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]) and not continue_all:
                             continuation = False
@@ -3080,6 +3352,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += 'python ../'+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         else:
                             command += '\n'
+
+                        command += 'python -m pele_platform.main input_restart.yaml\n'
                         # with open(pele_folder+'/'+protein+separator+ligand+'/'+'input_restart.yaml', 'w') as oyml:
                         #     with open(pele_folder+'/'+protein+separator+ligand+'/'+'input.yaml') as iyml:
                         #         for l in iyml:
@@ -3387,7 +3661,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         md_folder : str
             Path to the job folder where the MD input files are located.
         sim_time : int
-            Number of simulation steps
+            Simulation time in ns
         frags : int
             Number of fragments to divide the simulation.
         program : str
@@ -3446,7 +3720,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*100000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 #if water_traj == True:
@@ -3457,7 +3731,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*50000/frags))) # with an integrator of 0.002fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*500000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
 
@@ -3465,7 +3739,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
                 if 'NUMBER_OF_STEPS' in line:
-                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # with an integrator of 0.004fs
+                    line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
                 sys.stdout.write(line)
@@ -3755,8 +4029,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 output_paths.append(traj_path+'/'+traj_name)
 
         return(output_paths)
-
-
 
     def removeBoundaryConditions(self,path,command,step='md',remove_water=False):
         """
@@ -4316,7 +4588,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return pele_data
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder,
-                            separator='-', covalent_check=True):
+                            separator='-', only_extract_new=True, covalent_check=True,
+                            remove_previous=False):
         """
         Extract docking poses present in a docking_data dataframe. The docking DataFrame
         contains the same structure as the self.docking_data dataframe, parameter of
@@ -4333,6 +4606,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the folder where the docking structures will be saved.
         separator : str
             Symbol used to separate protein, ligand, and docking pose index.
+        only_extract_new : bool
+            Only extract models not present in the output_folder
+        remove_previous : bool
+            Remove all content in the output folder
         """
 
         # Check the separator is not in model or ligand names
@@ -4343,8 +4620,38 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if separator in ligand:
                     raise ValueError('The separator %s was found in ligand name %s. Please use a different separator symbol.' % (separator, ligand))
 
+        # Remove output_folder
+        if os.path.exists(output_folder):
+            if remove_previous:
+                shutil.rmtree(output_folder)
+
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
+        else:
+            # Gather already extracted models
+            if only_extract_new:
+                extracted_models = set()
+                for model in os.listdir(output_folder):
+                    if not os.path.isdir(output_folder+'/'+model):
+                        continue
+                    for f in os.listdir(output_folder+'/'+model):
+                        if f.endswith('.pdb'):
+                            m,l = f.split(separator)[:2]
+                            extracted_models.add((m,l))
+
+                # Filter docking data to not include the already extracted models
+                extracted_indexes = []
+                for i in docking_data.index:
+                    if i[:2] in extracted_models:
+                        extracted_indexes.append(i)
+                docking_data = docking_data[~docking_data.index.isin(extracted_indexes)]
+                if docking_data.empty:
+                    print('All models were already extracted!')
+                    print('Set only_extract_new=False to extract them again!')
+                    return
+                else:
+                    print(f'{len(extracted_models)} models were already extracted!')
+                    print(f'Extracting {docking_data.shape[0]} new models')
 
         # Copy analyse docking script (it depends on schrodinger so we leave it out.)
         _copyScriptFile(output_folder, 'extract_docking.py')
@@ -4429,8 +4736,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             plt.close()
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
-                                       return_failed=False, covalent_check=True,
-                                       atom_mapping=None, conect_update=False):
+                                       return_failed=False, covalent_check=True, models=None,
+                                       atom_mapping=None, conect_update=False, replace_symbol=None):
         """
         Read structures from a Schrodinger calculation.
 
@@ -4440,7 +4747,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the output folder from a prepwizard calculation
         """
 
-        models = []
+        if replace_symbol and not isinstance(replace_symbol, tuple) and len(replace_symbol) != 2:
+            raise ValueError('replace_symbol must be a tuple: (old_symbol, new_symbol)')
+
+        all_models = []
         failed_models = []
         for d in os.listdir(prepwizard_folder+'/output_models'):
             if os.path.isdir(prepwizard_folder+'/output_models/'+d):
@@ -4451,24 +4761,34 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if 'error' in l.lower():
                                     print('Error was found in log file: %s. Please check the calculation!' % f)
                                     model = f.replace('.log', '')
+
+                                    if replace_symbol:
+                                        model = model.replace(replace_symbol[1], replace_symbol[0])
+
                                     failed_models.append(model)
                                     break
 
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
 
+                        if replace_symbol:
+                            model = model.replace(replace_symbol[1], replace_symbol[0])
+
                         # skip models not loaded into the library
                         if model not in self.models_names:
                             continue
 
-                        models.append(model)
+                        # Skip models not in the given models list
+                        if models != None and model not in models:
+                            continue
+
+                        all_models.append(model)
                         self.readModelFromPDB(model, prepwizard_folder+'/output_models/'+d+'/'+f,
                                               covalent_check=covalent_check, atom_mapping=atom_mapping,
                                               conect_update=conect_update)
 
         self.getModelsSequences()
-
-        missing_models = set(self.models_names) - set(models)
+        missing_models = set(self.models_names) - set(all_models)
         if missing_models != set():
             print('Missing models in prepwizard folder:')
             print('\t'+', '.join(missing_models))
@@ -4972,7 +5292,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadModelsFromRosettaOptimization(self, optimization_folder, filter_score_term='score',
                                           min_value=True, tags=None, wat_to_hoh=True,
-                                          return_missing=False, sugars=False):
+                                          return_missing=False, sugars=False, conect_update=False):
         """
         Load the best energy models from a set of silent files inside a specfic folder.
         Useful to get the best models from a relaxation run.
@@ -5042,7 +5362,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += ' -auto_detect_glycan_connections'
                             command += ' -maintain_links'
                         os.system(command)
-                        self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh)
+                        self.readModelFromPDB(model, best_model_tag+'.pdb', wat_to_hoh=wat_to_hoh,
+                                              conect_update=conect_update)
                         os.remove(best_model_tag+'.pdb')
                         models.append(model)
 
@@ -5154,7 +5475,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             self.readModelFromPDB(model, pdb_path)
 
     def saveModels(self, output_folder, keep_residues={}, models=None, convert_to_mae=False,
-                   **keywords):
+                   write_conect_lines=True, replace_symbol=None, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -5170,7 +5491,16 @@ make sure of reading the target sequences with the function readTargetSequences(
             _copyScriptFile(output_folder, 'PDBtoMAE.py')
             script_name = '._PDBtoMAE.py'
 
+        if replace_symbol:
+            if not isinstance(replace_symbol, tuple) or len(replace_symbol) != 2:
+                raise ValueError('replace_symbol must be a tuple (old_symbol, new_symbol)')
+
         for model in self.models_names:
+
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[0], replace_symbol[1])
+            else:
+                model_name = model
 
             # Skip models not in the given list
             if models != None:
@@ -5184,7 +5514,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 kr = []
 
             _saveStructureToPDB(self.structures[model],
-                                output_folder+'/'+model+'.pdb',
+                                output_folder+'/'+model_name+'.pdb',
                                 keep_residues=kr,
                                 **keywords)
 
@@ -5199,7 +5529,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 check_file = False
                 hydrogens = True
 
-            self._write_conect_lines(model, output_folder+'/'+model+'.pdb',check_file=check_file,hydrogens=hydrogens)
+            if write_conect_lines:
+                self._write_conect_lines(model, output_folder+'/'+model_name+'.pdb',
+                                         check_file=check_file, hydrogens=hydrogens)
 
             if convert_to_mae:
                 cwd = os.getcwd()
@@ -5207,7 +5539,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command = 'run ._PDBtoMAE.py'
                 os.system(command)
                 os.chdir(cwd)
-                os.remove(output_folder+'/'+model+'.pdb')
+                os.remove(output_folder+'/'+model_name+'.pdb')
 
     def removeModel(self, model):
         """
@@ -5806,6 +6138,56 @@ def _get_atom_tuple(atom):
             atom.get_parent().id[1],
             atom.name)
 
+def _getStructureCoordinates(structure, as_dict=False, return_atoms=False, only_protein=False,
+                            sidechain=False, backbone=False, only_residues=None,
+                            exclude_residues=None):
+    """
+    Get the coordinates for each atom in the structure.
+    """
+
+    if as_dict:
+        if return_atoms:
+            raise ValueError('as_dict and return_atoms are not compatible!')
+        coordinates = {}
+    else:
+        coordinates = []
+
+    for atom in structure.get_atoms():
+        residue = atom.get_parent()
+        chain = residue.get_parent()
+        residue_tuple = (chain.id, residue.id[1])
+        atom_tuple = (chain.id, residue.id[1], atom.name)
+
+        if exclude_residues and residue_tuple in exclude_residues:
+            continue
+
+        if only_residues and residue_tuple not in only_residues:
+            continue
+
+        if only_protein or sidechain or backbone:
+            if residue.id[0] != ' ':
+                continue
+
+        if sidechain:
+            if atom.name in ['N', 'CA', 'C', 'O']:
+                continue
+
+        elif backbone:
+            if atom.name not in ['N', 'CA', 'C', 'O']:
+                continue
+
+        if as_dict:
+            coordinates[atom_tuple] = atom.coord
+        elif return_atoms:
+            coordinates.append(atom_tuple)
+        else:
+            coordinates.append(atom.coord)
+
+    if not as_dict:
+        coordinates = np.array(coordinates)
+
+    return coordinates
+
 def _readRosettaScoreFile(score_file, indexing=False):
     """
     Generates an iterator from the poses in the silent file
@@ -5859,3 +6241,105 @@ def _readRosettaScoreFile(score_file, indexing=False):
         scores = scores.set_index(['Model', 'Pose'])
 
     return scores
+
+def _getAlignedResiduesBasedOnStructuralAlignment(ref_struct, target_struct, max_ca_ca=5.0):
+    """
+    Return a sequence string with aligned residues based on a structural alignment. All residues
+    not structurally aligned are returned as '-'.
+
+    Parameters
+    ==========
+    ref_struct : str
+        Reference structure
+    target_struct : str
+        Target structure
+    max_ca_ca : float
+        Maximum CA-CA distance to be considered aligned
+
+    Returns
+    =======
+    aligned_residues : str
+        Full-length sequence string containing only aligned residues.
+    """
+
+    # Get sequences
+    r_sequence = ''.join([three_to_one(r.resname) for r in ref_struct.get_residues() if r.id[0] == ' '])
+    t_sequence = ''.join([three_to_one(r.resname) for r in target_struct.get_residues() if r.id[0] == ' '])
+
+    # Get alpha-carbon coordinates
+    r_ca_coord = np.array([a.coord for a in ref_struct.get_atoms() if a.name == 'CA'])
+    t_ca_coord = np.array([a.coord for a in target_struct.get_atoms() if a.name == 'CA'])
+
+    # Map residues based on a CA-CA distances
+    D = distance_matrix(t_ca_coord, r_ca_coord) # Calculate CA-CA distance matrix
+    D =  np.where(D <= max_ca_ca, D, np.inf) #< Cap matrix to max_ca_ca
+
+    # Map residues to the closest CA-CA distance
+    mapping = {}
+
+    # Start mapping from closest distance avoiding double assignments
+    while not np.isinf(D).all():
+        i,j = np.unravel_index(D.argmin(), D.shape)
+        mapping[i] = j
+        D[i].fill(np.inf) # This avoids double assignments
+        D[:,j].fill(np.inf) # This avoids double assignments
+
+    # Create alignment based on the structural alignment mapping
+    aligned_residues = []
+    for i,r in enumerate(t_sequence):
+        if i in mapping:
+            aligned_residues.append(r)
+        else:
+            aligned_residues.append('-')
+
+    # Join list to get aligned sequences
+    aligned_residues = ''.join(aligned_residues)
+
+    return aligned_residues
+
+def _createCAConstraintFile(structure, cst_file, sd=1.0):
+    """
+    Create a cst file restraining all alpha carbons to their input coordinates
+    with an harmonic constraint.
+
+    Parameters
+    ==========
+    structure : Bio.PDB.Structure.Structure
+        Biopython structure object
+    cst_file : str
+        Path to the output constraint file
+    sd : float
+        Standard deviation parameter of the HARMONIC constraint.
+    """
+
+    cst_file = open(cst_file, 'w')
+    ref_res = None
+
+    for r in structure.get_residues():
+
+        if r.id[0] != ' ':
+            continue
+
+        res, chain = r.id[1], r.get_parent().id
+
+        if not ref_res:
+            ref_res, ref_chain = res, chain
+
+        # Update reference if chain changes
+        if ref_chain != chain:
+            ref_res, ref_chain = res, chain
+
+        for atom in r.get_atoms():
+            if atom.name == 'CA':
+                ca_atom = atom
+
+        ca_coordinte = list(ca_atom.coord)
+
+        cst_line = 'CoordinateConstraint '
+        cst_line += 'CA '+str(res)+chain+' '
+        cst_line += ' CA '+str(ref_res)+ref_chain+' '
+        cst_line += str(' '.join([str('%.4f' % c) for c in ca_coordinte]))+' '
+        cst_line += 'HARMONIC 0 '+str(sd)+'\n'
+        cst_file.write(cst_line)
+
+    cst_file.close()
