@@ -733,3 +733,41 @@ check
             for l in lines_to_write:
                 f.write(l)
             f.write('END')
+
+    def polymerToLigand(models_folder,output_folder,ligand_chain='L'):
+
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        lig_atom_name = {}
+
+        for model in os.listdir(models_folder):
+
+            f = open(output_folder+'/'+model, 'w')
+            counter = 10
+
+            if model not in lig_atom_name:
+                lig_atom_name[model] = {}
+
+            for line in open(models_folder+'/'+model,'r'):
+                if line[20:23].strip() == ligand_chain:
+                    counter = counter+1
+
+                    atom_name = (line[-4]+str(counter)).ljust(4)
+
+                    if int(line[23:26]) not in lig_atom_name[model]:
+                        lig_atom_name[model][int(line[23:26])] = {}
+
+                    #lig_atom_name[int(line[23:26])][line[12:17].strip()] = 'W'+str(counter)
+                    lig_atom_name[model][int(line[23:26])][line[12:17].strip()] = line[-4]+str(counter)
+
+                    if line.startswith('HETATM'):
+                        new_line = 'ATOM  '+line[6:12]+atom_name+' LIG'+' '+ligand_chain+' '+'0'.rjust(3)+line[26:]
+                    else:
+                        new_line = line[:12]+atom_name+' LIG'+' '+ligand_chain+' '+'0'.rjust(3)+line[26:]
+                    f.write(new_line)
+                elif line.startswith('ATOM') or line.startswith('HETATM') or line.startswith('TER') or line.startswith('END'):
+                    f.write(line)
+            f.close()
+
+        return lig_atom_name
