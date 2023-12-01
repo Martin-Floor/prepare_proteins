@@ -56,13 +56,6 @@ class md_analysis:
                         self.topology_paths[model][replica] =  (traj_path+'/'+topol_name)
 
 
-                    if waterless_traj:
-                        for file in os.listdir(traj_path):
-                            if file.endswith('.tpr'):
-                                os.system('echo 24 '+option+' | '+command+' convert-tpr -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact -n '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
-                        else:
-
-
                     for file in os.listdir(traj_path):
                         if not os.path.exists(traj_path+'/'+topol_name):
                             print('WARNING: No gro file')
