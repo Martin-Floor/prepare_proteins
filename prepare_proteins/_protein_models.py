@@ -3330,7 +3330,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpMDSimulations(self ,md_folder, sim_time,nvt_time=2,npt_time=0.2,frags=1, program='gromacs',
                            temperature=298.15, only_models=None, command_name='gmx_mpi', ff='amber99sb-star-ildn',
-                           water_traj=False, ion_chain=False, replicas=1):
+                           system_output='System', ion_chain=False, replicas=1):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -3398,9 +3398,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
-                #if water_traj == True:
-                #    if line.strip().startswith('compressed-x-grps'):
-                #        line = 'compressed_x_grps = '+'System'+ '\n'
+                if 'SYSTEM_OUTPUT' in line:
+                    line = line.replace('SYSTEM_OUTPUT', system_output)
 
                 sys.stdout.write(line)
 
@@ -3409,6 +3408,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*50000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
+                if 'SYSTEM_OUTPUT' in line:
+                    line = line.replace('SYSTEM_OUTPUT', system_output)
 
                 sys.stdout.write(line)
 
@@ -3417,6 +3418,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # with an integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
+                if 'SYSTEM_OUTPUT' in line:
+                    line = line.replace('SYSTEM_OUTPUT', system_output)
                 sys.stdout.write(line)
 
             jobs = []
@@ -3567,7 +3570,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                      temperature=298.15,frags=5,program='gromacs',
                                      command_name='gmx_mpi',ff='amber99sb-star-ildn',
                                      separator='_',ligand_chains=['L'],replicas=1,
-                                     charge=None):
+                                     charge=None, system_output='System'):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations for apo proteins and using the Gromacs software.
@@ -3644,9 +3647,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
-                #if water_traj == True:
-                #    if line.strip().startswith('compressed-x-grps'):
-                #        line = 'compressed_x_grps = '+'System'+ '\n'
+                if 'SYSTEM_OUTPUT' in line:
+                    line = line.replace('SYSTEM_OUTPUT', system_output)
 
                 sys.stdout.write(line)
 
@@ -3655,6 +3657,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*500000/frags))) # with an integrator of 0.002fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
+                if 'SYSTEM_OUTPUT' in line:
+                    line = line.replace('SYSTEM_OUTPUT', system_output)
 
                 sys.stdout.write(line)
 
@@ -3663,6 +3667,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # integrator of 0.004fs
                 if 'TEMPERATURE' in line:
                     line = line.replace('TEMPERATURE', str(temperature))
+                if 'SYSTEM_OUTPUT' in line:
+                    line = line.replace('SYSTEM_OUTPUT', system_output)
                 sys.stdout.write(line)
 
             jobs = []

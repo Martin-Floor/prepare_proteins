@@ -9,7 +9,7 @@ nstvout		                = 0         	; don't write velocities
 nstfout         	        = 0         	; don't write forces
 nstenergy               	= 2500      	; save energies every 10 ps
 nstlog                 		= 2500      	; update log file every 10 ps
-compressed-x-grps       	= System    	; write xtc for the whole system
+compressed-x-grps       	= SYSTEM_OUTPUT  ; write xtc for the whole system
 nstxout-compressed     		= 2500	    	; write coordinates every 10 ps to .xtc file
 ; Bond parameters
 continuation	    		= yes		; Restarting after NVT
