@@ -4885,9 +4885,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if protonation_states:
             command += '--protonation_states '
         if decompose_bb_hb_into_pair_energies:
-            command += '--decompose_bb_hb_into_pair_energies'
+            command += '--decompose_bb_hb_into_pair_energies '
         if cpus != None:
-            command += '--cpus '+str(cpus)
+            command += '--cpus '+str(cpus)+' '
         if verbose:
             command += '--verbose '
         command += '\n'
