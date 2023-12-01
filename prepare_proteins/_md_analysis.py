@@ -36,12 +36,12 @@ class md_analysis:
             option = '0'
 
         #Remove boundary conditions from gromacs simulation trajectory file and get paths
-
         for model in self.models:
             self.trajectory_paths[model] = {}
             self.topology_paths[model] = {}
             for replica in os.listdir(path+'/output_models/'+model):
                 traj_path = path+'/output_models/'+model+'/'+replica+'/'+step
+                top_em = path+'/output_models/'+model+'/'+replica+'/em/prot_em.gro'
 
                 if not os.path.exists(traj_path) or len(os.listdir(traj_path))==0:
                     self.trajectory_paths[model][replica] = ''
@@ -118,9 +118,8 @@ class md_analysis:
 
                     if not os.path.exists(traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1]) and os.path.exists(traj_path+'/'+topol_name) and remove_water == True:
                         os.system('echo '+option+' | '+command+' editconf -ndef -f '+traj_path+'/'+topol_name+' -o '+traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
-
-
-
+                    if not os.path.exists(top_em.split('.')[0]+'_no_water.gro') and os.path.exists(top_em) and remove_water == True:
+                        os.system('echo '+option+' | '+command+' editconf -ndef -f '+top_em+' -o '+top_em.split('.')[0]+'_no_water.gro')
 
     def setupCalculateDistances(self,job_folder='MD_analysis_data',overwrite=False):
 

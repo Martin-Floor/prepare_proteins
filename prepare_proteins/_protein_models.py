@@ -1797,7 +1797,7 @@ compareSequences() function before adding missing loops.')
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False, models=None,
                                     epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False,
                                     fill_loops=False, protonation_states=None, noepik=False, mae_input=False,
-                                    noprotassign=False, use_new_version=False, **kwargs):
+                                    noprotassign=False, use_new_version=False, replace_symbol=None, **kwargs):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -1817,7 +1817,7 @@ compareSequences() function before adding missing loops.')
 
         # Save all input models
         self.saveModels(prepare_folder+'/input_models', convert_to_mae=mae_input,
-                        remove_hydrogens=remove_hydrogens, **kwargs)
+                        remove_hydrogens=remove_hydrogens, replace_symbol=replace_symbol, **kwargs)
 
         # Generate jobs
         jobs = []
@@ -1826,38 +1826,43 @@ compareSequences() function before adding missing loops.')
             if models != None and model not in models:
                 continue
 
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[0], replace_symbol[1])
+            else:
+                model_name = model
+
             if fill_loops:
                 if model not in self.target_sequences:
                     raise ValueError('Target sequence for model %s was not given. First\
 make sure of reading the target sequences with the function readTargetSequences()' % model)
                 sequence = {}
                 sequence[model] = self.target_sequences[model]
-                fasta_file = prepare_folder+'/input_models/'+model+'.fasta'
+                fasta_file = prepare_folder+'/input_models/'+model_name+'.fasta'
                 alignment.writeFastaFile(sequence, fasta_file)
 
             # Create model output folder
-            output_folder = prepare_folder+'/output_models/'+model
+            output_folder = prepare_folder+'/output_models/'+model_name
             if not os.path.exists(output_folder):
                 os.mkdir(output_folder)
 
             if fill_loops:
                 command = 'cd '+prepare_folder+'/input_models/\n'
                 command += 'pwd=$(pwd)\n'
-                command += 'cd ../output_models/'+model+'\n'
+                command += 'cd ../output_models/'+model_name+'\n'
             else:
                 command = 'cd '+output_folder+'\n'
 
             command += '"${SCHRODINGER}/utilities/prepwizard" '
             if mae_input:
-                command += '../../input_models/'+model+'.mae '
+                command += '../../input_models/'+model_name+'.mae '
             else:
-                command += '../../input_models/'+model+'.pdb '
-            command += model+'.pdb '
+                command += '../../input_models/'+model_name+'.pdb '
+            command += model_name+'.pdb '
             command += '-fillsidechains '
             command += '-disulfides '
             if fill_loops:
                 command += '-fillloops '
-                command += '-fasta_file "$pwd"/'+model+'.fasta '
+                command += '-fasta_file "$pwd"/'+model_name+'.fasta '
             if remove_hydrogens:
                 command += '-rehtreat '
             if noepik:
@@ -1884,7 +1889,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     else:
                         command += '-force '+str(ps[0])+" "+str(ps[1])+' '
 
-            command += '-JOBNAME '+model+' '
+            command += '-JOBNAME '+model_name+' '
             command += '-HOST localhost:1 '
             command += '-WAIT\n'
             command += 'cd ../../..\n'
@@ -2163,7 +2168,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpSiteMapForModels(self, job_folder, target_residues, site_box=10, enclosure=0.5,
                              maxvdw=1.1, resolution='fine', reportsize=100, overwrite=False,
-                             maxdist=8.0, sidechain=True, only_models=None):
+                             maxdist=8.0, sidechain=True, only_models=None, replace_symbol=None,
+                             write_conect_lines=True):
         """
         Generates a SiteMap calculation for model poses (no ligand) near specified residues.
         Parameters
@@ -2171,8 +2177,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         job_folder : str
             Path to the calculation folder
         target_residues : dict
-            Dictionary per model with the list of atoms (chain_id, index) for which
-            to calculate sitemap pockets
+            Dictionary per model with a list of lists of residues (chain_id, residues) for which
+            to calculate sitemap pockets.
+        replace_symbol : str
+            Symbol to replace for saving the models
         """
 
         # Create site map job folders
@@ -2190,7 +2198,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         script_path = job_folder+'/._prepareForSiteMap.py'
 
         #Save all input models
-        self.saveModels(job_folder+'/input_models')
+        self.saveModels(job_folder+'/input_models', write_conect_lines=write_conect_lines,
+                        replace_symbol=replace_symbol)
 
         # Create input files
         jobs = []
@@ -2201,15 +2210,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if model not in only_models:
                     continue
 
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[0], replace_symbol[1])
+            else:
+                model_name = model
+
             # Create an output folder for each model
-            output_folder = job_folder+'/output_models/'+model
+            output_folder = job_folder+'/output_models/'+model_name
             if not os.path.exists(output_folder):
                 os.mkdir(output_folder)
 
             # Generate input protein files
-            input_protein = job_folder+'/input_models/'+model+'.pdb'
+            input_protein = job_folder+'/input_models/'+model_name+'.pdb'
 
-            input_mae = job_folder+'/output_models/'+model+'/'+model+'_protein.mae'
+            input_mae = job_folder+'/output_models/'+model_name+'/'+model_name+'_protein.mae'
             if not os.path.exists(input_mae) or overwrite:
                 command = 'run '+script_path+' '
                 command += input_protein+' '
@@ -2220,22 +2234,31 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not isinstance(target_residues, dict):
                 raise ValueError('Problem: target_residues must be a dictionary!')
 
-            elif isinstance(target_residues[model], tuple):
+            if model not in target_residues:
+                raise ValueError(f'Problem: model {model} not found in target_residues dictionary!')
+
+            elif isinstance(target_residues[model], (str,tuple)):
                 target_residues[model] = [target_residues[model]]
 
-            for r in target_residues[model]:
+            elif isinstance(target_residues[model][0], (str,tuple)):
+                target_residues[model] = [target_residues[model]]
 
-                label = ''.join([str(x) for x in r])
+            for residue_selection in target_residues[model]:
+
+                label = ''
+                for r in residue_selection:
+                    label += ''.join([str(x) for x in r])+'_'
+                label = label[:-1]
 
                 # Create folder
                 if not os.path.exists(output_folder+'/'+label):
                     os.mkdir(output_folder+'/'+label)
 
                 # Add site map command
-                command = 'cd '+job_folder+'/output_models/'+model+'/'+label+'\n'
+                command = 'cd '+job_folder+'/output_models/'+model_name+'/'+label+'\n'
                 command += '"${SCHRODINGER}/sitemap" '
-                command += '-j '+model+' '
-                command += '-prot ../'+model+'_protein.mae'+' '
+                command += '-j '+model_name+' '
+                command += '-prot ../'+model_name+'_protein.mae'+' '
                 command += '-sitebox '+str(site_box)+' '
                 command += '-resolution '+str(resolution)+' '
                 command += '-keepvolpts yes '
@@ -2245,19 +2268,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # command += '-maxvdw '+str(maxvdw)+' '
                 command += '-reportsize '+str(reportsize)+' '
 
-                # For chain and residue index
-                if isinstance(r, tuple) and len(r) == 2:
-                    command += '-siteasl \"chain.name '+str(r[0])+' and res.num {'+str(r[1])+'}'
-
-                # For chain only
-                elif isinstance(r, str) and len(r) == 1:
-                    command += '-siteasl \"chain.name '+str(r[0])
-                else:
-                    raise ValueError('Wrong residue type data structure. Should be {model:[(chain,residue)]}')
-
-                if sidechain:
-                    command += ' and not (atom.pt ca,c,n,h,o)'
-                command += '\" '
+                command += '-siteasl \"'
+                for r in residue_selection:
+                    if isinstance(r, tuple) and len(r) == 2:
+                        command += '(chain.name '+str(r[0])+' and res.num {'+str(r[1])+'} '
+                    elif isinstance(r, str) and len(r) == 1:
+                        command += '\"(chain.name '+str(r[0])+' '
+                    else:
+                        raise ValueError('Incorrect residue definition!')
+                    if sidechain:
+                        command += 'and not (atom.pt ca,c,n,h,o)) or '
+                    else:
+                        command += ') or '
+                command = command[:-4]+'\" '
                 command += '-HOST localhost:1 '
                 command += '-TMPLAUNCHDIR '
                 command += '-WAIT\n'
@@ -2336,7 +2359,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     jobs.append(command)
         return jobs
 
-    def analyseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True, output_models=None):
+    def analyseSiteMapCalculation(self, sitemap_folder, failed_value=0, verbose=True,
+                                  output_models=None, replace_symbol=None):
         """
         Extract score values from a site map calculation.
          Parameters
@@ -2417,6 +2441,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         found = False
             return found
 
+        if replace_symbol and not isinstance(replace_symbol, tuple) and not len(replace_symbol) == 2:
+            raise ValueError('replace_symbol must be a tuple: (old_symbol,  new_symbol)')
+
         sitemap_data = {}
         sitemap_data['Model'] = []
         sitemap_data['Pocket'] = []
@@ -2428,8 +2455,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not os.path.exists(output_models):
                 os.mkdir(output_models)
 
-        for m in os.listdir(output_folder):
-            for r in os.listdir(output_folder+'/'+m):
+        for model in os.listdir(output_folder):
+
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[1], replace_symbol[0])
+            else:
+                model_name = model
+
+            for r in os.listdir(output_folder+'/'+model):
 
                 # Check if chain or residue was given
                 if len(r) == 1:
@@ -2437,32 +2470,32 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     pocket_type = 'residue'
 
-                if os.path.isdir(output_folder+'/'+m+'/'+r):
-                    log_file = output_folder+'/'+m+'/'+r+'/'+m+'.log'
+                if os.path.isdir(output_folder+'/'+model+'/'+r):
+                    log_file = output_folder+'/'+model+'/'+r+'/'+model+'.log'
                     if os.path.exists(log_file):
                         completed = checkIfCompleted(log_file)
                     else:
                         if verbose:
-                            message = 'Log file for model %s and '+pocket_type+' %s was not found!\n' % (m, r)
+                            message = 'Log file for model %s and '+pocket_type+' %s was not found!\n' % (model, r)
                             message += 'It seems the calculation has not run yet...'
                             print(message)
                         continue
 
                     if not completed:
                         if verbose:
-                            print('There was a problem with model %s and '+pocket_type+' %s' % (m, r))
+                            print('There was a problem with model %s and '+pocket_type+' %s' % (model, r))
                         continue
                     else:
                         found = checkIfFound(log_file)
                         if not found:
                             if verbose:
-                                print('No sites were found for model %s and '+pocket_type+' %s' % (m, r))
+                                print('No sites were found for model %s and '+pocket_type+' %s' % (model, r))
                             continue
 
                     pocket = r
                     pocket_data = parseVolumeInfo(log_file)
 
-                    sitemap_data['Model'].append(m)
+                    sitemap_data['Model'].append(model_name)
                     sitemap_data['Pocket'].append(pocket)
 
                     for l in pocket_data:
@@ -2471,19 +2504,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     if output_models:
                         print('Storing Volume Points models at %s' % output_models)
-                        input_file = input_folder+'/'+m+'.pdb'
-                        volpoint_file = output_folder+'/'+m+'/'+r+'/'+m+'_site_1_volpts.pdb'
+                        input_file = input_folder+'/'+model+'.pdb'
+                        volpoint_file = output_folder+'/'+model+'/'+r+'/'+model+'_site_1_volpts.pdb'
                         if os.path.exists(volpoint_file):
 
-                            istruct = _readPDB(m+'_input', input_file)
+                            istruct = _readPDB(model+'_input', input_file)
                             imodel = [x for x in istruct.get_models()][0]
-                            vstruct = _readPDB(m+'_volpts', volpoint_file)
+                            vstruct = _readPDB(model+'_volpts', volpoint_file)
                             vpt_chain = PDB.Chain.Chain('V')
                             for r in vstruct.get_residues():
                                 vpt_chain.add(r)
                             imodel.add(vpt_chain)
 
-                            _saveStructureToPDB(istruct, output_models+'/'+m+'_vpts.pdb')
+                            _saveStructureToPDB(istruct, output_models+'/'+model_name+'_vpts.pdb')
                         else:
                             print('Volume points PDB not found for model %s and residue %s' % (m, r))
 
@@ -2493,7 +2526,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return sitemap_data
 
     def definePocketResiduesWithSiteMap(self, volpts_models, distance_to_points=2.5, only_models=None,
-                                        output_file=None, overwrite=False):
+                                        output_file=None, overwrite=False, replace_symbol=None):
         """
         Calculates the active site residues based on the volume points from a sitemap
         calcualtion. The models should be written with the option output_models from
@@ -2519,6 +2552,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not output_file.endswith('.json'):
             output_file = output_file+'.json'
 
+        if replace_symbol and not isinstance(replace_symbol, tuple) and not len(replace_symbol) == 2:
+            raise ValueError('replace_symbol must be a tuple: (old_symbol,  new_symbol)')
+
         if not os.path.exists(output_file) or overwrite:
 
             residues = {}
@@ -2529,8 +2565,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if model not in only_models:
                         continue
 
+                if replace_symbol:
+                    model_name = model.replace(replace_symbol[0], replace_symbol[1])
+                else:
+                    model_name = model
+
                 # Check if the volume points model file exists
-                volpts_file = volpts_models+'/'+model+'_vpts.pdb'
+                volpts_file = volpts_models+'/'+model_name+'_vpts.pdb'
                 if not os.path.exists(volpts_file):
                     print('Model %s not found in the volume points folder %s!' % (model, volpts_models))
 
@@ -2551,6 +2592,41 @@ make sure of reading the target sequences with the function readTargetSequences(
             residues[model] = np.array(list(residues[model]))
 
         return residues
+
+    def getInContactResidues(self, residue_selection, distance_threshold=2.5, sidechain_selection=False,
+                             return_residues=False, only_protein=False, sidechain=False, backbone=False):
+        """
+        Get residues in close contact to a residue selection
+        """
+
+        in_contact = {}
+        for model in self:
+
+            # Get structure coordinates
+            structure = self.structures[model]
+            selected_coordinates = _getStructureCoordinates(structure, sidechain=sidechain_selection,
+                                                            only_residues=residue_selection[model])
+            selected_atoms = _getStructureCoordinates(structure, sidechain=sidechain_selection,
+                                                      only_residues=residue_selection[model], return_atoms=True)
+
+            other_coordinates = _getStructureCoordinates(structure, sidechain=sidechain,
+                                                        exclude_residues=residue_selection[model])
+            other_atoms = _getStructureCoordinates(structure, sidechain=sidechain,
+                                                   exclude_residues=residue_selection[model], return_atoms=True)
+
+            # Compute the distance matrix between the two set of coordinates
+            M = distance_matrix(selected_coordinates, other_coordinates)
+            in_contact[model] = np.array(other_atoms)[np.argwhere(M <= distance_threshold)[:,1]]
+            in_contact[model] = [tuple(a) for a in in_contact[model]]
+
+            # Only return tuple residues
+            if return_residues:
+                residues = []
+                for atom in in_contact[model]:
+                    residues.append(tuple(atom[:2]))
+                in_contact[model] = list(set(residues))
+
+        return in_contact
 
     def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
                                     only_ligands=None):
@@ -2731,7 +2807,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              separator='-', use_peleffy=True, usesrun=True, energy_by_residue=False, ebr_new_flag=False, ninety_degrees_version=False,
                              analysis=False, energy_by_residue_type='all', peptide=False, equilibration_mode='equilibrationLastSnapshot',
                              spawning='independent', continuation=False, equilibration=True, skip_models=None, skip_ligands=None,
-                             extend_iterations=False, only_models=None, only_ligands=None, ligand_templates=None, seed=12345, log_file=False,
+                             extend_iterations=False, only_models=None, only_ligands=None, only_combinations=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
                              ligand_equilibration_cst=True):
@@ -2840,6 +2916,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if only_ligands != None:
                         if ligand not in only_ligands:
                             continue
+
+                    if only_combinations and (protein, ligand) not in only_combinations:
+                        continue
 
                     # Create PELE job folder for each docking
                     if not os.path.exists(pele_folder+'/'+protein+separator+ligand):
@@ -4667,7 +4746,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def loadModelsFromPrepwizardFolder(self, prepwizard_folder, return_missing=False,
                                        return_failed=False, covalent_check=True, models=None,
-                                       atom_mapping=None, conect_update=False):
+                                       atom_mapping=None, conect_update=False, replace_symbol=None):
         """
         Read structures from a Schrodinger calculation.
 
@@ -4676,6 +4755,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         prepwizard_folder : str
             Path to the output folder from a prepwizard calculation
         """
+
+        if replace_symbol and not isinstance(replace_symbol, tuple) and len(replace_symbol) != 2:
+            raise ValueError('replace_symbol must be a tuple: (old_symbol, new_symbol)')
 
         all_models = []
         failed_models = []
@@ -4688,11 +4770,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if 'error' in l.lower():
                                     print('Error was found in log file: %s. Please check the calculation!' % f)
                                     model = f.replace('.log', '')
+
+                                    if replace_symbol:
+                                        model = model.replace(replace_symbol[1], replace_symbol[0])
+
                                     failed_models.append(model)
                                     break
 
                     if f.endswith('.pdb'):
                         model = f.replace('.pdb', '')
+
+                        if replace_symbol:
+                            model = model.replace(replace_symbol[1], replace_symbol[0])
 
                         # skip models not loaded into the library
                         if model not in self.models_names:
@@ -4708,7 +4797,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                                               conect_update=conect_update)
 
         self.getModelsSequences()
-
         missing_models = set(self.models_names) - set(all_models)
         if missing_models != set():
             print('Missing models in prepwizard folder:')
@@ -5396,7 +5484,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             self.readModelFromPDB(model, pdb_path)
 
     def saveModels(self, output_folder, keep_residues={}, models=None, convert_to_mae=False,
-                   write_conect_lines=True, **keywords):
+                   write_conect_lines=True, replace_symbol=None, **keywords):
         """
         Save all models as PDBs into the output_folder.
 
@@ -5412,7 +5500,16 @@ make sure of reading the target sequences with the function readTargetSequences(
             _copyScriptFile(output_folder, 'PDBtoMAE.py')
             script_name = '._PDBtoMAE.py'
 
+        if replace_symbol:
+            if not isinstance(replace_symbol, tuple) or len(replace_symbol) != 2:
+                raise ValueError('replace_symbol must be a tuple (old_symbol, new_symbol)')
+
         for model in self.models_names:
+
+            if replace_symbol:
+                model_name = model.replace(replace_symbol[0], replace_symbol[1])
+            else:
+                model_name = model
 
             # Skip models not in the given list
             if models != None:
@@ -5426,7 +5523,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 kr = []
 
             _saveStructureToPDB(self.structures[model],
-                                output_folder+'/'+model+'.pdb',
+                                output_folder+'/'+model_name+'.pdb',
                                 keep_residues=kr,
                                 **keywords)
 
@@ -5442,7 +5539,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 hydrogens = True
 
             if write_conect_lines:
-                self._write_conect_lines(model, output_folder+'/'+model+'.pdb', check_file=check_file, hydrogens=hydrogens)
+                self._write_conect_lines(model, output_folder+'/'+model_name+'.pdb',
+                                         check_file=check_file, hydrogens=hydrogens)
 
             if convert_to_mae:
                 cwd = os.getcwd()
@@ -5450,7 +5548,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command = 'run ._PDBtoMAE.py'
                 os.system(command)
                 os.chdir(cwd)
-                os.remove(output_folder+'/'+model+'.pdb')
+                os.remove(output_folder+'/'+model_name+'.pdb')
 
     def removeModel(self, model):
         """
@@ -6048,6 +6146,56 @@ def _get_atom_tuple(atom):
     return (atom.get_parent().get_parent().id,
             atom.get_parent().id[1],
             atom.name)
+
+def _getStructureCoordinates(structure, as_dict=False, return_atoms=False, only_protein=False,
+                            sidechain=False, backbone=False, only_residues=None,
+                            exclude_residues=None):
+    """
+    Get the coordinates for each atom in the structure.
+    """
+
+    if as_dict:
+        if return_atoms:
+            raise ValueError('as_dict and return_atoms are not compatible!')
+        coordinates = {}
+    else:
+        coordinates = []
+
+    for atom in structure.get_atoms():
+        residue = atom.get_parent()
+        chain = residue.get_parent()
+        residue_tuple = (chain.id, residue.id[1])
+        atom_tuple = (chain.id, residue.id[1], atom.name)
+
+        if exclude_residues and residue_tuple in exclude_residues:
+            continue
+
+        if only_residues and residue_tuple not in only_residues:
+            continue
+
+        if only_protein or sidechain or backbone:
+            if residue.id[0] != ' ':
+                continue
+
+        if sidechain:
+            if atom.name in ['N', 'CA', 'C', 'O']:
+                continue
+
+        elif backbone:
+            if atom.name not in ['N', 'CA', 'C', 'O']:
+                continue
+
+        if as_dict:
+            coordinates[atom_tuple] = atom.coord
+        elif return_atoms:
+            coordinates.append(atom_tuple)
+        else:
+            coordinates.append(atom.coord)
+
+    if not as_dict:
+        coordinates = np.array(coordinates)
+
+    return coordinates
 
 def _readRosettaScoreFile(score_file, indexing=False):
     """
