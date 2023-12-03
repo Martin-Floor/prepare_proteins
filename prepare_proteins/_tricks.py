@@ -733,3 +733,24 @@ check
             for l in lines_to_write:
                 f.write(l)
             f.write('END')
+
+    def mergeDockingPosesFolders(docking_folders, output_folder):
+        """
+        Merge different model-extracted folders into a single one.
+        """
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        for df in docking_folders:
+            for p in os.listdir(df):
+                if not os.path.isdir(df+'/'+p):
+                    continue
+
+                if not os.path.exists(output_folder+'/'+p):
+                    os.mkdir(output_folder+'/'+p)
+
+                for m in os.listdir(df+'/'+p):
+                    if not m.endswith('.pdb'):
+                        continue
+                    pdb_path = df+'/'+p+'/'+m
+                    shutil.copyfile(pdb_path, output_folder+'/'+p+'/'+m)
