@@ -17,7 +17,7 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads=None,lig_atoms=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,peptide=False,ligand=False,remove_traj_files=False):
+    def __init__(self,path,triads=None,lig_atoms=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,waterless_traj=False,peptide=False,ligand=False,remove_traj_files=False):
 
         self.trajectory_paths = {}
         self.topology_paths = {}
@@ -49,12 +49,12 @@ class md_analysis:
                     print('WARNING: model '+model+' has no trajectories')
 
                 else:
-
                     self.trajectory_paths[model][replica] = (traj_path+'/'+traj_name)
                     if remove_water:
                         self.topology_paths[model][replica] =  (traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
                     else:
                         self.topology_paths[model][replica] =  (traj_path+'/'+topol_name)
+
 
                     for file in os.listdir(traj_path):
                         if not os.path.exists(traj_path+'/'+topol_name):
@@ -62,6 +62,12 @@ class md_analysis:
                             continue
 
                         if file.endswith('.xtc') and not file.endswith('_noPBC.xtc') and not os.path.exists(traj_path+'/'+file.split(".")[0]+'_noPBC.xtc'):
+
+                            if waterless_traj:
+                                os.system('echo 24 '+option+' | '+command+' convert-tpr -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -o '+traj_path+'/'+file.split(".")[0] +'_no_water.tpr -n '+'/'.join(traj_path.split('/')[:-1])+'/topol/index.ndx')
+                                tpr_file = traj_path+'/'+file.split(".")[0] +'_no_water.tpr'
+                            else:
+                                tpr_file = traj_path+'/'+file.split(".")[0] +'.tpr'
 
                             if peptide:
                                 for line in open(traj_path+'/'+topol_name).readlines():
@@ -90,12 +96,12 @@ class md_analysis:
                                 with open('/'.join(traj_path.split('/')[:-1])+'/md/index.ndx','a') as f:
                                     f.write(line)
 
-                                os.system('echo 20 '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact -n '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
+                                os.system('echo 20 '+option+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact -n '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
                                 #os.system('echo 20 '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file.split(".")[0]+'_noPBC_int.xtc -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc whole -ur compact')
                             elif ligand:
-                                os.system('echo 1 '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact')
+                                os.system('echo 1 '+option+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact')
                             else:
-                                os.system('echo '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
+                                os.system('echo '+option+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
 
                     if not os.path.exists(traj_path+'/'+traj_name) and os.path.exists(traj_path+'/'+topol_name):
                         os.system(command+' trjcat -f '+traj_path+'/*_noPBC.xtc -o '+traj_path+'/'+traj_name+' -cat')
