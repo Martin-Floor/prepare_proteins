@@ -1380,10 +1380,10 @@ chain to use for each model with the chains option.' % model)
         # Save all models
         self.saveModels(relax_folder+'/input_models', models=models)
 
-        if symmetry != None and rosetta_path == None:
+        if symmetry and rosetta_path == None:
             raise ValueError('To run relax with symmetry absolute rosetta path must be given to run make_symmdef_file.pl script.')
 
-        if symmetry != None:
+        if symmetry:
             for m in self.models_names:
 
                 # Skip models not in the given list
@@ -4885,9 +4885,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if protonation_states:
             command += '--protonation_states '
         if decompose_bb_hb_into_pair_energies:
-            command += '--decompose_bb_hb_into_pair_energies'
+            command += '--decompose_bb_hb_into_pair_energies '
         if cpus != None:
-            command += '--cpus '+str(cpus)
+            command += '--cpus '+str(cpus)+' '
         if verbose:
             command += '--verbose '
         command += '\n'
