@@ -4,6 +4,7 @@ import numpy as np
 import io
 import shutil
 import pandas as pd
+import subprocess
 
 import mdtraj as md
 
@@ -17,7 +18,10 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads=None,lig_atoms=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,waterless_traj=False,peptide=False,ligand=False,remove_traj_files=False):
+    def __init__(self, path,triads=None, lig_atoms=None, command='gmx', step='md',
+                 traj_name='prot_md_cat_noPBC.xtc', topol_name='prot_md_1.gro', remove_water=True,
+                 waterless_traj=False, peptide=False, ligand=False, remove_traj_files=False,
+                 output_group=None):
 
         self.trajectory_paths = {}
         self.topology_paths = {}
@@ -62,10 +66,34 @@ class md_analysis:
                             print('WARNING: No gro file')
                             continue
 
+                        if not output_group:
+
+                            os.system('echo q | '+command+' make_ndx -f '+traj_path+'/'+topol_name+' -o '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx > ndx.tmp')
+                            groups = {}
+                            with open('ndx.tmp') as idxf:
+                                cond = False
+                                for l in idxf:
+                                    if cond and  l.strip() == '':
+                                        cond = False
+                                        continue
+                                    if l.startswith('  0 System'):
+                                        cond = True
+                                    if cond:
+                                        if l.strip() != '':
+                                            ls = l.split()[:2]
+                                            groups[int(ls[0])] = ls[1]
+                            message = 'No output_group given. Please select one from:\n'
+                            for g in groups:
+                                message += f'{g}: {groups[g]}\n'
+                            os.remove('ndx.tmp')
+                            raise ValueError(message)
+
                         if file.endswith('.xtc') and not file.endswith('_noPBC.xtc') and not os.path.exists(traj_path+'/'+file.split(".")[0]+'_noPBC.xtc'):
 
                             if waterless_traj:
-                                os.system('echo 24 '+option+' | '+command+' convert-tpr -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -o '+traj_path+'/'+file.split(".")[0] +'_no_water.tpr -n '+'/'.join(traj_path.split('/')[:-1])+'/topol/index.ndx')
+                                if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/topol/index.ndx'):
+                                    os.system('echo q | '+command+' make_ndx -f '+traj_path+'/'+topol_name+' -o '+'/'.join(traj_path.split('/')[:-1])+'/topol/index.ndx')
+                                os.system('echo '+str(output_group)+' '+option+' | '+command+' convert-tpr -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -o '+traj_path+'/'+file.split(".")[0] +'_no_water.tpr -n '+'/'.join(traj_path.split('/')[:-1])+'/topol/index.ndx')
                                 tpr_file = traj_path+'/'+file.split(".")[0] +'_no_water.tpr'
                             else:
                                 tpr_file = traj_path+'/'+file.split(".")[0] +'.tpr'
@@ -100,9 +128,10 @@ class md_analysis:
                                 os.system('echo 20 '+option+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact -n '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
                                 #os.system('echo 20 '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file.split(".")[0]+'_noPBC_int.xtc -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc whole -ur compact')
                             elif ligand:
-                                os.system('echo 1 '+option+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact')
+                                option = '24'
+                                os.system('echo 1 '+option+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -n '+'/'.join(traj_path.split('/')[:-1])+'/topol/index.ndx -center -pbc res -ur compact')
                             else:
-                                os.system('echo '+option+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
+                                os.system('echo '+str(output_group)+' | '+command+' trjconv -s '+ tpr_file +' -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
 
                     if not os.path.exists(traj_path+'/'+traj_name) and os.path.exists(traj_path+'/'+topol_name):
                         os.system(command+' trjcat -f '+traj_path+'/*_noPBC.xtc -o '+traj_path+'/'+traj_name+' -cat')
@@ -111,9 +140,9 @@ class md_analysis:
                             os.system('rm '+traj_path+'/prot_md_?_noPBC.xtc')
 
                     if not os.path.exists(traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1]) and os.path.exists(traj_path+'/'+topol_name) and remove_water == True:
-                        os.system('echo '+option+' | '+command+' editconf -ndef -f '+traj_path+'/'+topol_name+' -o '+traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
+                        os.system('echo '+str(output_group)+' | '+command+' editconf -ndef -f '+traj_path+'/'+topol_name+' -o '+traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1]+' -n '+'/'.join(traj_path.split('/')[:-1])+'/topol/index.ndx')
                     if not os.path.exists(top_em.split('.')[0]+'_no_water.gro') and os.path.exists(top_em) and remove_water == True:
-                        os.system('echo '+option+' | '+command+' editconf -ndef -f '+top_em+' -o '+top_em.split('.')[0]+'_no_water.gro')
+                        os.system('echo '+str(output_group)+' | '+command+' editconf -ndef -f '+top_em+' -o '+top_em.split('.')[0]+'_no_water.gro')
                         os.system('echo 1 1 | gmx  trjconv -s '+tpr_em+' -f '+top_em.split('.')[0]+'_no_water.gro'+' -o '+top_em.split('.')[0]+'_no_water_noPBC.gro'+' -center -pbc res -ur compact')
 
     def setupCalculateDistances(self,job_folder='MD_analysis_data',overwrite=False):
