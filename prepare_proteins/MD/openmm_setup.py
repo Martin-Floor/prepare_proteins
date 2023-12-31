@@ -141,9 +141,10 @@ class openmm_md:
         self.modeller.addSolvent(self.forcefield)
 
     def parameterizePDBLigands(self, parameters_folder, charges=None, skip_ligands=None, overwrite=False,
-                           metal_ligand=None, metal_bonds=None, cpus=None, return_qm_jobs=False,
-                           force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
-                           extra_mol2=None, add_counterions=None):
+                               metal_ligand=None, add_bonds=None, cpus=None, return_qm_jobs=False,
+                               force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
+                               extra_mol2=None, add_counterions=None, save_amber_pdb=False, solvate=True,
+                               regenerate_amber_files=False):
 
         def topologyFromResidue(residue, topol, positions):
             top = topology.Topology()
@@ -245,6 +246,12 @@ class openmm_md:
                         else:
                             atom_types[l.split()[0]] = l.split()[4]
             return atom_types
+
+        if regenerate_amber_files:
+            if os.path.exists(parameters_folder+'/'+self.pdb_name+'.prmtop'):
+                os.remove(parameters_folder+'/'+self.pdb_name+'.prmtop')
+            if os.path.exists(parameters_folder+'/'+self.pdb_name+'.inpcrd'):
+                os.remove(parameters_folder+'/'+self.pdb_name+'.inpcrd')
 
         if os.path.exists(parameters_folder+'/'+self.pdb_name+'.prmtop') and os.path.exists(parameters_folder+'/'+self.pdb_name+'.inpcrd'):
             if not overwrite:
@@ -447,7 +454,7 @@ class openmm_md:
 
         # Renumber PDB
         renum_pdb = pdb_file.replace('.pdb', '_renum.pdb')
-        if not os.path.exists(renum_pdb):
+        if not os.path.exists(renum_pdb) or regenerate_amber_files:
             command =  'pdb4amber -i '
             command += pdb_file+' '
             command += '-o '+renum_pdb+'\n'
@@ -659,7 +666,6 @@ class openmm_md:
                     continue
                 if not metal_ligand:
                     tlf.write('loadamberprep '+par_folder[residue]+'/'+residue+'.prepi\n')
-    #             if residue not in metal_ligand:
                 tlf.write('loadamberparams '+par_folder[residue]+'/'+residue+'.frcmod\n')
 
             if extra_frcmod:
@@ -672,27 +678,37 @@ class openmm_md:
             if metal_ligand:
                 tlf.write('loadamberparams '+mcpb_frcmod+'\n')
                 tlf.write('mol = loadpdb '+mcpb_pdb+'\n')
-
-                # Add bonds
-                if metal_bonds:
-                    for bond in metal_bonds:
-                        tlf.write('bond mol.'+str(bond[0][0])+'.'+bond[0][1]+' '
-                                       'mol.'+str(bond[1][0])+'.'+bond[1][1]+'\n')
             else:
                 tlf.write('mol = loadpdb '+renum_pdb+'\n')
 
-            tlf.write('solvatebox mol TIP3PBOX 12\n')
+            # Add bonds
+            if add_bonds:
+                for bond in add_bonds:
+                    tlf.write('bond mol.'+str(bond[0][0])+'.'+bond[0][1]+' '
+                                   'mol.'+str(bond[1][0])+'.'+bond[1][1]+'\n')
+
+            if solvate:
+                tlf.write('solvatebox mol TIP3PBOX 12\n')
 
             if add_counterions:
                 tlf.write('addIons2 mol Na+ 0\n')
                 tlf.write('addIons2 mol Cl- 0\n')
 
+            if save_amber_pdb:
+                tlf.write('savepdb mol '+parameters_folder+'/'+self.pdb_name+'_amber.pdb\n')
+
             tlf.write('saveamberparm mol '+parameters_folder+'/'+self.pdb_name+'.prmtop '+parameters_folder+'/'+self.pdb_name+'.inpcrd\n')
+
+
         os.system('tleap -s -f '+parameters_folder+'/tleap.in')
 
+        # Define prmtop and inpcrd file paths
+        self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
+        self.inpcrd_file = parameters_folder+'/'+self.pdb_name+'.inpcrd'
+
         # Set topology and positions to amber's
-        self.prmtop = AmberPrmtopFile(parameters_folder+'/'+self.pdb_name+'.prmtop')
-        self.inpcrd = AmberInpcrdFile(parameters_folder+'/'+self.pdb_name+'.inpcrd')
+        self.prmtop = AmberPrmtopFile(self.prmtop_file)
+        self.inpcrd = AmberInpcrdFile(self.inpcrd_file)
 
         self.modeller.topology = self.prmtop.topology
         self.modeller.positions = self.inpcrd.positions
