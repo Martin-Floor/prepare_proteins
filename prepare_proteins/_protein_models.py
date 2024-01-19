@@ -15,6 +15,7 @@ from pkg_resources import resource_stream, Requirement, resource_listdir
 
 import numpy as np
 from Bio import PDB
+from Bio.PDB.Polypeptide import aa3
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import three_to_one
 
@@ -313,16 +314,66 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
             conects = []
             count = 0
-            for conect in models.conects[model]:
+            for conect in self.conects[model]:
                 new_conect = []
                 for atom in conect:
                     if resnames[atom[:-1]] != residue_name and atom[-1] != atom_name:
                         new_conect.append(atom)
                     else:
                         count += 1
+                if new_conect == []:
+                    continue
                 conects.append(new_conect)
-            models.conects[model] = conects
-            print(f'Removed {count} from conect lines of model {model}')
+            self.conects[model] = conects
+            if verbose:
+                print(f'Removed {count} from conect lines of model {model}')
+
+    def removeCaps(self, models=None, remove_ace=True, remove_nma=True):
+        """
+        Remove caps from models.
+        """
+
+        for model in self:
+
+            if models and model not in models:
+                continue
+
+            for chain in self.structures[model].get_chains():
+
+                st_residues = [r for r in chain if r.resname in aa3]
+
+                ACE = None
+                NMA = None
+                NT = None
+                CT = None
+
+                for residue in self.structures[model].get_residues():
+                    if residue.resname == 'ACE':
+                        ACE = residue
+                    elif residue.resname == 'NMA':
+                        NMA = residue
+
+                for i, residue in enumerate(chain):
+
+                    if ACE and residue.id[1] == ACE.id[1] + 1 and residue.resname in aa3:
+                        NT = residue
+                    elif not ACE and i == 0:
+                        NT = residue
+                    if NMA and residue.id[1] == NMA.id[1] and residue.resname in aa3:
+                        CT = residue
+                    elif not NMA and i == len(st_residues)-1:
+                        CT = residue
+
+                # Remove termini
+                if ACE and remove_ace:
+                    for a in ACE:
+                        self.removeAtomFromConectLines('ACE', a, verbose=False)
+                    chain.detach_child(ACE.id)
+
+                if NMA and remove_nma:
+                    for a in NMA:
+                        self.removeAtomFromConectLines('NMA', a, verbose=False)
+                    chain.detach_child(NMA.id)
 
     def addOXTAtoms(self):
         """
@@ -337,7 +388,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         for model in self:
             for chain in self.structures[model].get_chains():
                 residues = [r for r in chain if r.id[0] == ' ']
+                if residues == []:
+                    continue
                 last_atoms = {a.name:a for a in residues[-1]}
+
                 if 'OXT' not in last_atoms:
 
                     oxt_coord = _computeCartesianFromInternal(last_atoms['C'].coord,
@@ -1796,7 +1850,8 @@ compareSequences() function before adding missing loops.')
     def setUpPrepwizardOptimization(self, prepare_folder, pH=7.0, epik_pH=False, samplewater=False, models=None,
                                     epik_pHt=False, remove_hydrogens=False, delwater_hbond_cutoff=False,
                                     fill_loops=False, protonation_states=None, noepik=False, mae_input=False,
-                                    noprotassign=False, use_new_version=False, replace_symbol=None, **kwargs):
+                                    noprotassign=False, use_new_version=False, replace_symbol=None, captermini=False,
+                                    keepfarwat=False, **kwargs):
         """
         Set up an structure optimization with the Schrodinger Suite prepwizard.
 
@@ -1859,9 +1914,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += model_name+'.pdb '
             command += '-fillsidechains '
             command += '-disulfides '
+            if keepfarwat:
+                command += '-keepfarwat '
             if fill_loops:
                 command += '-fillloops '
                 command += '-fasta_file "$pwd"/'+model_name+'.fasta '
+            if captermini:
+                command += '-captermini '
             if remove_hydrogens:
                 command += '-rehtreat '
             if noepik:
