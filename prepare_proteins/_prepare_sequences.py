@@ -59,6 +59,7 @@ class sequenceModels:
 
             if exclude_finished and model in excluded:
                 continue
+                
             sequence = {}
             sequence[model] = self.sequences[model]
             alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
@@ -68,7 +69,9 @@ class sequenceModels:
             command += ' --output_dir=$Path/output_models'
             command += ' --model_preset='+model_preset
             command += ' --max_template_date=2022-01-01'
-            if not gpu_relax:
+            if gpu_relax:
+                command += ' --use_gpu_relax=True'
+            else:
                 command += ' --use_gpu_relax=False'
             command += ' --random_seed 1\n'
             if remove_extras:
