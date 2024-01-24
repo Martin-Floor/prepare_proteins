@@ -69,7 +69,7 @@ class sequenceModels:
             command += ' --model_preset='+model_preset
             command += ' --max_template_date=2022-01-01'
             if not gpu_relax:
-                command += ' --use_gpu_relax=False\n'
+                command += ' --use_gpu_relax=False'
             command += ' --random_seed 1\n'
             if remove_extras:
                 command += f'rm -r $Path/output_models/{model}/msas\n'
