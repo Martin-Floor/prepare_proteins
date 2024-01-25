@@ -3469,10 +3469,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                                     temperature=298.15,frags=5,
-                                     command_name='gmx_mpi',ff='amber99sb-star-ildn',
-                                     ligand_chains=None,ion_chains=None,replicas=1,
-                                     charge=None, system_output='System'):
+                           temperature=298.15,frags=5, models=None,
+                           command_name='gmx_mpi',ff='amber99sb-star-ildn',
+                           ligand_chains=None, ion_chains=None,replicas=1,
+                           charge=None, system_output='System'):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
@@ -3512,6 +3512,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             Force field to use for simulation.
         """
 
+        if isinstance(models, str):
+            models = [models]
+
         # Create MD job folders
         if not os.path.exists(md_folder):
             os.mkdir(md_folder)
@@ -3527,6 +3530,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(md_folder+'/output_models')
 
         if ligand_chains != None:
+            if isinstance(ligand_chains, str):
+                ligand_chains = [ligand_chains]
             if not os.path.exists(md_folder+'/ligand_params'):
                 os.mkdir(md_folder+'/ligand_params')
 
@@ -3578,6 +3583,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         jobs = []
         for model in self.models_names:
 
+            if models and model not in models:
+                continue
+
             # Create additional folders
             if not os.path.exists(md_folder+'/input_models/'+model):
                 os.mkdir(md_folder+'/input_models/'+model)
@@ -3588,7 +3596,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             for i in range(replicas):
                 if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)):
                     os.mkdir(md_folder+'/output_models/'+model+'/'+str(i))
-
 
             parser = PDB.PDBParser()
             structure = parser.get_structure('protein', md_folder+'/input_models/'+model+'.pdb')
