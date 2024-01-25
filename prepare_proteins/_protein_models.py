@@ -17,7 +17,6 @@ import numpy as np
 from Bio import PDB
 from Bio.PDB.Polypeptide import aa3
 from Bio.PDB.DSSP import DSSP
-from Bio.PDB.Polypeptide import three_to_one
 
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -3469,8 +3468,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                                     temperature=298.15,frags=5,
-                                     command_name='gmx_mpi',ff='amber99sb-star-ildn',
+                                     equilibration_dt=2,production_dt=4,temperature=298.15,frags=5,
+                                     remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
                                      ligand_chains=None,ion_chains=None,replicas=1,
                                      charge=None, system_output='System'):
         """
@@ -3526,6 +3525,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(md_folder+'/output_models'):
             os.mkdir(md_folder+'/output_models')
 
+        possible_command_names = ['gmx','gmx_mpi']
+        command_name = None
+        for command in possible_command_names:
+            if shutil.which(command) != None:
+                command_name = command
+        if command_name == None:
+            raise ValueError('Gromacs executable is required for the setup and was not found. The following executable names were tested: '+','.join(possible_command_names))
+
         if ligand_chains != None:
             if not os.path.exists(md_folder+'/ligand_params'):
                 os.mkdir(md_folder+'/ligand_params')
@@ -3545,8 +3552,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Replace parameters in the mdp file with given arguments
         for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
+            if 'TIME_INTEGRATOR' in line:
+                line = line.replace('TIME_INTEGRATOR',str(production_dt/1000))
             if 'NUMBER_OF_STEPS' in line:
-                line = line.replace('NUMBER_OF_STEPS',str(int(sim_time*250000/frags))) # integrator of 0.004fs
+                line = line.replace('NUMBER_OF_STEPS',str(int((sim_time*(1e6/production_dt))/frags)))
             if 'TEMPERATURE' in line:
                 line = line.replace('TEMPERATURE', str(temperature))
             if 'SYSTEM_OUTPUT' in line:
@@ -3555,8 +3564,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             sys.stdout.write(line)
 
         for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
+            if 'TIME_INTEGRATOR' in line:
+                line = line.replace('TIME_INTEGRATOR',str(equilibration_dt/1000))
             if 'NUMBER_OF_STEPS' in line:
-                line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*500000/frags))) # with an integrator of 0.002fs
+                line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*(1e6/equilibration_dt))))
             if 'TEMPERATURE' in line:
                 line = line.replace('TEMPERATURE', str(temperature))
             if 'SYSTEM_OUTPUT' in line:
@@ -3565,8 +3576,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             sys.stdout.write(line)
 
         for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
+            if 'TIME_INTEGRATOR' in line:
+                line = line.replace('TIME_INTEGRATOR',str(equilibration_dt/1000))
             if 'NUMBER_OF_STEPS' in line:
-                line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*250000/frags))) # integrator of 0.004fs
+                line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*(1e6/equilibration_dt))))
             if 'TEMPERATURE' in line:
                 line = line.replace('TEMPERATURE', str(temperature))
             if 'SYSTEM_OUTPUT' in line:
@@ -3635,12 +3648,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             for i in range(replicas):
                 command = 'cd '+md_folder+'\n'
                 command += "export GMXLIB=$(pwd)/FF" +'\n'
-
                 # Set up commands
                 # Define setup gmx commands to be run locally in order to get correct indexes
-
                 command_local = command
-
                 command_local += 'mkdir output_models/'+model+'/'+str(i)+'/topol'+'\n'
                 command_local += 'cp input_models/'+model+'/protein.pdb output_models/'+model+'/'+str(i)+'/topol/protein.pdb'+'\n'
                 if ligand_chains != None:
@@ -3761,8 +3771,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/em/prot_em.tpr"):
                     command += 'mkdir em'+'\n'
                     command += 'cd em'+'\n'
-                    command += command_name+' grompp -f ../../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
-                    command += command_name+' mdrun -v -deffnm prot_em'+'\n'
+                    command += remote_command_name+' grompp -f ../../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr'+'\n'
+                    command += remote_command_name+' mdrun -v -deffnm prot_em'+'\n'
                     command += 'cd ..'+'\n'
 
 
@@ -3788,7 +3798,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     if ligand_chains != None:
                         for ligand_name in ligand_res.values():
-                            command += 'echo '+group_dics[ligand_name]['System_&_!H*']+' | '+command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/posre_'+ligand_name+'.itp -fc 1000 1000 1000'+'\n'
+                            command += 'echo '+group_dics[ligand_name]['System_&_!H*']+' | '+remote_command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/posre_'+ligand_name+'.itp -fc 1000 1000 1000'+'\n'
 
                     if ion_residues != []:
                         grp_name = 'Protein'
@@ -3797,10 +3807,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                         sel = group_dics['complex'][grp_name]
                     else:
                         sel = group_dics['complex']['Protein']
-                    command += 'echo '+sel+' | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx\n'
+                    command += 'echo '+sel+' | '+remote_command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx\n'
 
-                    command += command_name+' grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx\n'
-                    command += command_name+' mdrun -v -deffnm prot_nvt'+'\n'
+                    command += remote_command_name+' grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx\n'
+                    command += remote_command_name+' mdrun -v -deffnm prot_nvt'+'\n'
                     command += 'cd ..'+'\n'
 
                 # NPT equilibration
@@ -3835,17 +3845,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for i in range(len(FClist)+1):
                     if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/npt/prot_npt_'+str(i+1)+'.tpr'):
                         if i == 0:
-                            command += command_name+' grompp -f npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro -n ../topol/index.ndx\n'
-                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
+                            command += remote_command_name+' grompp -f npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro -n ../topol/index.ndx\n'
+                            command += remote_command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
                         else:
                             if ligand_chains != None:
                                 for ligand_name in ligand_res.values():
-                                    command += 'echo '+group_dics[ligand_name]['System_&_!H*']+' | '+command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/'+ligand_name+'_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
+                                    command += 'echo '+group_dics[ligand_name]['System_&_!H*']+' | '+remote_command_name+' genrestr -f ../topol/'+ligand_name+'.acpype/'+ligand_name+'_GMX.gro -n ../topol/'+ligand_name+'_index.ndx -o ../topol/'+ligand_name+'.acpype/'+ligand_name+'_ligand.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+'\n'
 
-                            command += 'echo '+sel+' | '+command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx\n'
+                            command += 'echo '+sel+' | '+remote_command_name+' genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp  -fc '+FClist[i-1]+' '+FClist[i-1]+' '+FClist[i-1]+' -n ../topol/index.ndx\n'
 
-                            command += command_name+' grompp -f npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro -n ../topol/index.ndx\n'
-                            command += command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
+                            command += remote_command_name+' grompp -f npt.mdp -c prot_npt_'+str(i)+'.gro -t prot_npt_'+str(i)+'.cpt -p ../topol/topol.top -o prot_npt_'+str(i+1)+'.tpr -r prot_npt_'+str(i)+'.gro -n ../topol/index.ndx\n'
+                            command += remote_command_name+' mdrun -v -deffnm prot_npt_'+str(i+1)+'\n'
                 command += 'cd ..'+'\n'
 
 
@@ -3872,14 +3882,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for i in range(1,frags+1):
                     if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'.xtc'):
                         if i == 1:
-                            command += command_name+' grompp -f md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_md_' + str(i) + '\n'
+                            command += remote_command_name+' grompp -f md.mdp -c ../npt/prot_npt_' + str(len(FClist)+1) + '.gro  -t ../npt/prot_npt_' + str(len(FClist)+1) + '.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
+                            command += remote_command_name+' mdrun -v -deffnm prot_md_' + str(i) + '\n'
                         else:
-                            command += command_name+' grompp -f md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
-                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+'\n'
+                            command += remote_command_name+' grompp -f md.mdp -c prot_md_'+str(i-1)+'.gro -t prot_md_'+str(i-1)+'.cpt -p ../topol/topol.top -o prot_md_'+str(i)+'.tpr -n ../topol/index.ndx'+'\n'
+                            command += remote_command_name+' mdrun -v -deffnm prot_md_'+str(i)+'\n'
                     else:
                         if os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+'/md/prot_md_'+str(i)+'_prev.cpt'):
-                            command += command_name+' mdrun -v -deffnm prot_md_'+str(i)+' -cpi prot_md_'+str(i)+'_prev.cpt'+'\n'
+                            command += remote_command_name+' mdrun -v -deffnm prot_md_'+str(i)+' -cpi prot_md_'+str(i)+'_prev.cpt'+'\n'
 
                 jobs.append(command)
 
@@ -6130,8 +6140,8 @@ def _getAlignedResiduesBasedOnStructuralAlignment(ref_struct, target_struct, max
     """
 
     # Get sequences
-    r_sequence = ''.join([three_to_one(r.resname) for r in ref_struct.get_residues() if r.id[0] == ' '])
-    t_sequence = ''.join([three_to_one(r.resname) for r in target_struct.get_residues() if r.id[0] == ' '])
+    r_sequence = ''.join([ PDB.Polypeptide.three_to_one(r.resname) for r in ref_struct.get_residues() if r.id[0] == ' '])
+    t_sequence = ''.join([ PDB.Polypeptide.three_to_one(r.resname) for r in target_struct.get_residues() if r.id[0] == ' '])
 
     # Get alpha-carbon coordinates
     r_ca_coord = np.array([a.coord for a in ref_struct.get_atoms() if a.name == 'CA'])
