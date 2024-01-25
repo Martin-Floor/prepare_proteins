@@ -1,7 +1,7 @@
 ; Run parameters
 integrator		= md		; leap-frog integrator
 nsteps			= NUMBER_OF_STEPS	; 100ns
-dt		    	= 0.004		; 4 fs with virtual sites
+dt		    	= TIME_INTEGRATOR		; 4 fs with virtual sites
 ; Output control
 nstxout                 = 0             ; don't write coordinates to .trr file
 nstvout                 = 0             ; don't write velocities
