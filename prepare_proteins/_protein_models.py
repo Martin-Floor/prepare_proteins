@@ -3551,6 +3551,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
 
         # Replace parameters in the mdp file with given arguments
+        for line in fileinput.input(md_folder+'/scripts/em.mdp', inplace=True):
+            if 'SYSTEM_OUTPUT' in line:
+                line = line.replace('SYSTEM_OUTPUT', system_output)
+            sys.stdout.write(line)
+
         for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
             if 'TIME_INTEGRATOR' in line:
                 line = line.replace('TIME_INTEGRATOR',str(production_dt/1000))
