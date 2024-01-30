@@ -3511,6 +3511,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             Force field to use for simulation.
         """
 
+        if isinstance(models, str):
+            models = [models]
+
         # Create MD job folders
         if not os.path.exists(md_folder):
             os.mkdir(md_folder)
@@ -3534,6 +3537,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError('Gromacs executable is required for the setup and was not found. The following executable names were tested: '+','.join(possible_command_names))
 
         if ligand_chains != None:
+            if isinstance(ligand_chains, str):
+                ligand_chains = [ligand_chains]
             if not os.path.exists(md_folder+'/ligand_params'):
                 os.mkdir(md_folder+'/ligand_params')
 
@@ -3596,6 +3601,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         jobs = []
         for model in self.models_names:
 
+            if models and model not in models:
+                continue
+
             # Create additional folders
             if not os.path.exists(md_folder+'/input_models/'+model):
                 os.mkdir(md_folder+'/input_models/'+model)
@@ -3606,7 +3614,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             for i in range(replicas):
                 if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)):
                     os.mkdir(md_folder+'/output_models/'+model+'/'+str(i))
-
 
             parser = PDB.PDBParser()
             structure = parser.get_structure('protein', md_folder+'/input_models/'+model+'.pdb')
