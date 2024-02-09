@@ -3020,9 +3020,17 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         # Check regional thresholds format
                         for m in regional_thresholds:
+                            rm = regional_thresholds[m]
 
-                            if not isinstance(regional_thresholds[m], float):
-                                raise ValueError('The regional thresholds should be floats') # Review this check for more complex region definitions
+                            incorrect = False
+                            if not isinstance(rm, float) and not isinstance(rm, tuple):
+                                incorrect = True
+                            elif isinstance(rm, tuple) and len(rm) != 2:
+                                incorrect = True
+                            elif isinstance(rm, tuple) and (not isinstance(rm[0], (int,float)) or not isinstance(rm[1], (int,float))):
+                                incorrect = True
+                            if incorrect:
+                                raise ValueError('The regional thresholds should be floats or two-elements tuples of floats') # Review this check for more complex region definitions
 
                         with open(pele_folder+'/'+protein+separator+ligand+'/metrics_thresholds.json', 'w') as jf:
                             json.dump(regional_thresholds, jf)
@@ -3348,6 +3356,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
+                        if energy_by_residue:
+                            command += 'python '+rel_path_to_root+ebr_script_name+' output --energy_type '+energy_by_residue_type
+                            if isinstance(ligand_energy_groups, dict):
+                                command += ' --ligand_energy_groups ligand_energy_groups.json'
+                                command += ' --ligand_index '+str(ligand_index)
+                            if ebr_new_flag:
+                                command += ' --new_version '
+                            if peptide:
+                                command += ' --peptide \n'
+                                command += 'python '+rel_path_to_root+peptide_script_name+' output '+" ".join(models[model])+'\n'
+                            else:
+                                command += '\n'
+
                         if protein in membrane_residues:
                             command += 'python '+rel_path_to_root+mem_res_script+' '
                             command += "output " # I think we should change this for a variable
@@ -3465,27 +3486,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                             continuation = False
                             debug = False
 
-                    if energy_by_residue:
-                        command += 'python '+rel_path_to_root+ebr_script_name+' output --energy_type '+energy_by_residue_type
-                        if isinstance(ligand_energy_groups, dict):
-                            command += ' --ligand_energy_groups ligand_energy_groups.json'
-                            command += ' --ligand_index '+str(ligand_index)
-                        if ebr_new_flag:
-                            command += ' --new_version '
-                        if peptide:
-                            command += ' --peptide \n'
-                            command += 'python '+rel_path_to_root+peptide_script_name+' output '+" ".join(models[model])+'\n'
-                        else:
-                            command += '\n'
-
-                        command += 'python -m pele_platform.main input_restart.yaml\n'
-                        # with open(protein_ligand_folder+'/'+'input_restart.yaml', 'w') as oyml:
-                        #     with open(protein_ligand_folder+'/'+'input.yaml') as iyml:
-                        #         for l in iyml:
-                        #             if 'debug: true' in l:
-                        #                 l = 'restart: true\n'
-                        #             oyml.write(l)
-                        # command += 'python -m pele_platform.main input_restart.yaml\n'
                     elif peptide:
                         command += 'python '+rel_path_to_root+peptide_script_name+' output '+" ".join(models[model])+'\n'
                         with open(protein_ligand_folder+'/'+'input_restart.yaml', 'w') as oyml:
@@ -3496,6 +3496,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     oyml.write(l)
                         if nonbonded_energy == None:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
+
                     elif extend_iterations and not continuation:
                         raise ValueError('extend_iterations must be used together with the continuation keyword')
 
