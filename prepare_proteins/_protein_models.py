@@ -4589,7 +4589,16 @@ make sure of reading the target sequences with the function readTargetSequences(
             return failed, self.docking_data[self.docking_data.index.isin(bp)]
         return self.docking_data[self.docking_data.index.isin(bp)]
 
-    def getBestDockingPosesIteratively(self, metrics, ligands=None, distance_step=0.1, angle_step=1.0):
+    def getBestDockingPosesIteratively(self, metrics, ligands=None, distance_step=0.1, angle_step=1.0, fixed=None):
+
+        # Create a list for fixed metrics
+        if not fixed:
+            fixed = []
+        elif isinstance(fixed, str):
+            fixed = [fixed]
+
+        if set(metrics.keys()) - set(fixed) == set():
+            raise ValueError('You must leave at least one metric not fixed')
 
         metrics = metrics.copy()
 
@@ -4638,15 +4647,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                     metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
                     metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
 
-            lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1])][0]
+            lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
 
             if self.docking_metric_type[lowest_metric] == 'distance':
                 step = distance_step
             if self.docking_metric_type[lowest_metric] == 'angle':
-                step = angular_step
+                step = angle_step
 
             if isinstance(metrics[lowest_metric], float):
                 metrics[lowest_metric] += step
+
+            # Change to list to allow item assignment
+            if isinstance(metrics[lowest_metric], tuple):
+                metrics[lowest_metric] = list(metrics[lowest_metric])
+
             if isinstance(metrics[lowest_metric], list):
                 metrics[lowest_metric][0] -= step
                 metrics[lowest_metric][1] += step
