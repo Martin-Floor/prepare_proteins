@@ -117,6 +117,8 @@ class proteinModels:
         self.ss = {} # secondary structure strings are stored here
         self.docking_data = None # secondary structure strings are stored here
         self.docking_distances = {}
+        self.docking_angles = {}
+        self.docking_metric_type = {}
         self.docking_ligands = {}
         self.rosetta_data = None # Rosetta data is stored here
         self.sequence_differences = {} # Store missing/changed sequence information
@@ -3013,7 +3015,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                             if ligand not in regional_metrics[m][protein]:
                                 raise ValueError(f'Ligand {ligand} was not found in the regional_metrics dictionary for protein {protein} and metric {m}')
 
-                            reg_met[m] = regional_metrics[m][protein][ligand]
+                            # Check if distance_ and angle_ prefix were given
+                            reg_met[m] = {}
+                            for protein in regional_metrics[m]:
+                                reg_met[m][protein] = {}
+                                for ligand in regional_metrics[m][protein]:
+                                    reg_met[m][protein][ligand] = []
+                                    for v in regional_metrics[m][protein][ligand]:
+                                        if not v.startswith('distance_') and not v.startswith('angle_'):
+                                            if len(v.split('_')) == 2:
+                                                v = 'distance_'+v
+                                            elif len(v.split('_')) == 3:
+                                                v = 'angle_'+v
+                                        reg_met[m][protein][ligand].append(v)
 
                         with open(pele_folder+'/'+protein+separator+ligand+'/metrics.json', 'w') as jf:
                             json.dump(reg_met, jf)
@@ -3534,6 +3548,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'metrics.json '
                         command += 'metrics_thresholds.json '
                         command += '--separator '+separator+' '
+                        if angles:
+                            command += '--angles '
                         command += '\n'
 
                     command += 'cd ../../'
@@ -4023,7 +4039,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists('/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro') and remove_water == True:
                     os.system('echo 1 | gmx editconf -ndef -f '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10.gro -o '+'/'.join(traj_path.split('/')[:-1])+'/npt/prot_npt_10_no_water.gro')
 
-    def analyseDocking(self, docking_folder, protein_atoms=None, atom_pairs=None,
+    def analyseDocking(self, docking_folder, protein_atoms=None, angles=None, atom_pairs=None,
                        skip_chains=False, return_failed=False, ignore_hydrogens=False,
                        separator='-', overwrite=True):
         """
@@ -4072,25 +4088,37 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(docking_folder+'/.analysis/atom_pairs'):
             os.mkdir(docking_folder+'/.analysis/atom_pairs')
 
+        # Create analysis folder
+        if angles:
+            if not os.path.exists(docking_folder+'/.analysis/angles'):
+                os.mkdir(docking_folder+'/.analysis/angles')
+
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         prepare_proteins._copyScriptFile(docking_folder+'/.analysis', 'analyse_docking.py')
         script_path = docking_folder+'/.analysis/._analyse_docking.py'
 
         # Write protein_atoms dictionary to json file
-        if protein_atoms != None:
+        if protein_atoms:
             with open(docking_folder+'/.analysis/._protein_atoms.json', 'w') as jf:
                 json.dump(protein_atoms, jf)
 
         # Write atom_pairs dictionary to json file
-        if atom_pairs != None:
+        if atom_pairs:
             with open(docking_folder+'/.analysis/._atom_pairs.json', 'w') as jf:
                 json.dump(atom_pairs, jf)
 
+        # Write angles dictionary to json file
+        if angles:
+            with open(docking_folder+'/.analysis/._angles.json', 'w') as jf:
+                json.dump(angles, jf)
+
         command = 'run '+docking_folder+'/.analysis/._analyse_docking.py '+docking_folder
-        if atom_pairs != None:
+        if atom_pairs:
             command += ' --atom_pairs '+docking_folder+'/.analysis/._atom_pairs.json'
-        elif protein_atoms != None:
+        elif protein_atoms:
             command += ' --protein_atoms '+docking_folder+'/.analysis/._protein_atoms.json'
+        if angles:
+            command += ' --angles '+docking_folder+'/.analysis/._angles.json'
         if skip_chains:
             command += ' --skip_chains'
         if return_failed:
@@ -4115,7 +4143,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split('.')[0]
 
-            # # Read the CSV file into pandas
+            # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
             self.docking_distances[model][ligand] = pd.read_csv(docking_folder+'/.analysis/atom_pairs/'+f)
             self.docking_distances[model][ligand].set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
@@ -4123,6 +4151,16 @@ make sure of reading the target sequences with the function readTargetSequences(
             self.docking_ligands.setdefault(model, [])
             if ligand not in self.docking_ligands[model]:
                 self.docking_ligands[model].append(ligand)
+
+        if angles:
+            for f in os.listdir(docking_folder+'/.analysis/atom_pairs'):
+                model = f.split(separator)[0]
+                ligand = f.split(separator)[1].split('.')[0]
+
+                # Read the CSV file into pandas
+                self.docking_angles.setdefault(model, {})
+                self.docking_angles[model][ligand] = pd.read_csv(docking_folder+'/.analysis/angles/'+f)
+                self.docking_angles[model][ligand].set_index(['Protein', 'Ligand', 'Pose'], inplace=True)
 
         if return_failed:
             with open(docking_folder+'/.analysis/._failed_dockings.json') as jifd:
@@ -4438,10 +4476,35 @@ make sure of reading the target sequences with the function readTargetSequences(
                             continue
 
                         ligand_series = model_series[model_series.index.get_level_values('Ligand') == ligand]
-                        distances = catalytic_labels[name][model][ligand]
-                        distance_values = self.docking_distances[model][ligand][distances].min(axis=1).tolist()
-                        assert ligand_series.shape[0] == len(distance_values)
-                        values += distance_values
+
+                        # Check input metric
+                        # Check how metrics will be combined
+                        distance_metric = False
+                        angle_metric = False
+                        for x in catalytic_labels[name][model][ligand]:
+                            if len(x.split('-')) == 2:
+                                distance_metric = True
+                            elif len(x.split('-')) == 3:
+                                angle_metric = True
+
+                        if distance_metric and angle_metric:
+                            raise ValueError(f'Metric {m} combines distances and angles which is not supported.')
+
+                        if distance_metric:
+                            distances = catalytic_labels[name][model][ligand]
+                            distance_values = self.docking_distances[model][ligand][distances].min(axis=1).tolist()
+                            assert ligand_series.shape[0] == len(distance_values)
+                            values += distance_values
+                            self.docking_metric_type[name] = 'distance'
+                        elif angle_metric:
+                            angles = catalytic_labels[name][model][ligand]
+                            if len(angles) > 1:
+                                raise ValueError('Combining more than one angle into a metric is not currently supported.')
+                            angle_values = self.docking_angles[model][ligand][angles].min(axis=1).tolist()
+                            assert ligand_series.shape[0] == len(angle_values)
+                            values += angle_values
+                            self.docking_metric_type[name] = 'angle'
+
                 self.docking_data['metric_'+name] = values
 
     def getBestDockingPoses(self, filter_values, n_models=1, return_failed=False,
@@ -4499,9 +4562,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for metric in filter_values:
 
                     if metric not in ['Score', 'RMSD']:
-                        ligand_data = ligand_data[ligand_data[metric] < filter_values[metric]]
+                        # Add prefix if not given
+                        if not metric.startswith('metric_'):
+                            metric_label = 'metric_'+metric
+                        else:
+                            metric_label = metric
+
+                        # Filter values according to the type of threshold given
+                        if isinstance(filter_values[metric], float):
+                            ligand_data = ligand_data[ligand_data[metric_label] <= filter_values[metric]]
+                        elif isinstance(filter_values[metric], (tuple,list)):
+                            ligand_data = ligand_data[ligand_data[metric_label] >= filter_values[metric][0]]
+                            ligand_data = ligand_data[ligand_data[metric_label] <= filter_values[metric][1]]
                     else:
-                        ligand_data = ligand_data[ligand_data[metric] < filter_values[metric]]
+                        ligand_data = ligand_data[ligand_data[metric_label] < filter_values[metric]]
 
                 if ligand_data.empty:
                     failed.append((model, ligand))
@@ -4515,40 +4589,73 @@ make sure of reading the target sequences with the function readTargetSequences(
             return failed, self.docking_data[self.docking_data.index.isin(bp)]
         return self.docking_data[self.docking_data.index.isin(bp)]
 
-    def getBestDockingPosesIteratively(self, metrics, ligands=None, min_threshold=3.5,
-                                       max_threshold=5.0, step_size=0.1):
+    def getBestDockingPosesIteratively(self, metrics, ligands=None, distance_step=0.1, angle_step=1.0):
+
+        metrics = metrics.copy()
+
         extracted = []
         selected_indexes = []
 
-        for t in np.arange(min_threshold, max_threshold+(step_size/10), step_size):
-            filter_values = {(m if  m.startswith('metric_') else 'metric_'+m):t for m in metrics}
-            best_poses = self.getBestDockingPoses(filter_values, n_models=1)
+        # Define all protein and ligand combinations with docking data
+        protein_and_ligands = set([x[:2] for x in self.docking_data.index])
+
+        extracted = set() # Save extracted models
+        selected_indexes = []
+        while len(extracted) < len(protein_and_ligands):
+
+            # Get best poses with current thresholds
+            best_poses = self.getBestDockingPoses(metrics, n_models=1)
+
+            # Save indexes of best models
+            selected_protein_ligands = set()
+            for index in best_poses.index:
+                if index[:2] not in extracted: # Omit selected models in previous iterations
+                    selected_indexes.append(index)
+                    selected_protein_ligands.add(index[:2])
+
+            # Store models extracted at this iteration
+            for pair in selected_protein_ligands:
+                extracted.add(pair)
+
+            # Get docking data for missing entries
             mask = []
-            if not isinstance(ligands, type(None)):
-                for level in best_poses.index.get_level_values('Ligand'):
-                    if level in ligands:
-                        mask.append(True)
-                    else:
-                        mask.append(False)
-                pele_data = best_poses[mask]
-            else:
-                pele_data = best_poses
+            for index in self.docking_data.index:
+                if index[:2] in (protein_and_ligands-extracted):
+                    mask.append(True)
+                else:
+                    mask.append(False)
 
-            for row in pele_data.index:
-                if row[:2] not in extracted:
-                    selected_indexes.append(row)
-                if row[:2] not in extracted:
-                    extracted.append(row[:2])
+            remaining_data = self.docking_data[mask]
 
-        final_mask = []
-        for row in self.docking_data.index:
-            if row in selected_indexes:
-                final_mask.append(True)
-            else:
-                final_mask.append(False)
-        pele_data = self.docking_data[final_mask]
+            # Compute metric acceptance for each metric for all missing pairs
+            metric_acceptance = {}
+            for metric in metrics:
+                if not metric.startswith('metric_'):
+                    metric_label = 'metric_'+metric
+                if isinstance(metrics[metric], float):
+                    metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
+                elif isinstance(metrics[metric], (tuple, list)):
+                    metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
+                    metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
 
-        return pele_data
+            lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1])][0]
+
+            if self.docking_metric_type[lowest_metric] == 'distance':
+                step = distance_step
+            if self.docking_metric_type[lowest_metric] == 'angle':
+                step = angular_step
+
+            if isinstance(metrics[lowest_metric], float):
+                metrics[lowest_metric] += step
+            if isinstance(metrics[lowest_metric], list):
+                metrics[lowest_metric][0] -= step
+                metrics[lowest_metric][1] += step
+
+        # Get rows with the selected indexes
+        mask = self.docking_data.index.isin(selected_indexes)
+        best_poses = self.docking_data[mask]
+
+        return best_poses
 
     def extractDockingPoses(self, docking_data, docking_folder, output_folder,
                             separator='-', only_extract_new=True, covalent_check=True,

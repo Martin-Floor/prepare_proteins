@@ -15,6 +15,8 @@ parser.add_argument('metrics', default=None, help='Path to the JSON file contani
 parser.add_argument('metrics_thresholds', default=None, help='Path to the JSON file with the thresholds for defining the regions.')
 parser.add_argument('--separator', default='_', help='Separator used for the protein and ligand for file names')
 parser.add_argument('--max_spawnings', default=10, help='Maximum allowed spawings')
+parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
+
 args=parser.parse_args()
 
 ### Define functions
@@ -22,8 +24,11 @@ with open(args.metrics) as jf:
     metrics = json.load(jf)
 with open(args.metrics_thresholds) as jf:
     metrics_thresholds = json.load(jf)
+
 separator = args.separator
-max_spawnings = args.max_spawnings # Not used yet
+max_spawnings = args.max_spawnings
+angles = args.angles
+
 verbose = True
 cwd = os.getcwd()
 
@@ -55,6 +60,10 @@ def getSpawningEpochPaths(spawning_index):
     """
     spawning_epochs_paths = []
     spawning_output_dir = cwd+'/'+str(spawning_index)+'/output/output'
+
+    if not os.path.exists(spawning_output_dir):
+        return None
+
     for e in os.listdir(spawning_output_dir):
         try:
             spawning_epochs_paths.append(int(e))
@@ -109,6 +118,7 @@ def readIterationFiles(report_files):
             for l in itf:
                 if l.startswith('#Task'):
                     l = l.replace('Binding Energy', 'Binding_Energy')
+                    l = l.replace('BindingEnergy', 'Binding_Energy')
                     terms = l.split()
                     continue
                 for t,v in zip(terms, l.split()):
@@ -138,10 +148,35 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
     report_files = getReportFiles(epoch_folder)
     report_data = readIterationFiles(report_files)
 
-    # Add metrics to dataframe
+    # Add metrics to dataframe\
+    metric_type = {} # Store metric type
     for m in metrics:
-        distances = [d for d in metrics[m]]
-        report_data[m] = report_data[distances].min(axis=1).tolist()
+
+        # Check how metrics will be combined
+        distances = False
+        angles = False
+        for x in metrics[m]:
+            if 'distance_' in x:
+                distances = True
+            elif 'angle' in x:
+                angles = True
+
+        if distances and angles:
+            raise ValueError(f'Metric {m} combines distances and angles which is not supported.')
+
+        elif distances:
+            metric_type[m] = 'distance'
+            # Combine distances into metrics
+            distances = [d for d in metrics[m] if d.startswith('distance_')]
+            report_data[m] = report_data[distances].min(axis=1).tolist()
+
+        elif angles:
+            metric_type[m] = 'angle'
+            # Combine angles into metric
+            angles = [d for d in metrics[m] if d.startswith('angle_')]
+            if len(angles) > 1:
+                raise ValueError('Combininig1 more than one angle into a metric is not currently supported.')
+            report_data[m] = report_data[angles].min(axis=1).tolist()
 
     # Compute target region probability by trajectory
     probability = {}
@@ -154,7 +189,19 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
         # Compute acceptance
         acceptance = np.ones(trajectory_data[m].shape, dtype=bool)
         for m in metrics:
-            acceptance = acceptance & ((trajectory_data[m] <= metrics_thresholds[m]).to_numpy())
+
+            # Skip metric filters that do not have a defined threshold
+            if m not in metrics_thresholds:
+                continue
+
+            # Filter by values lower than the given value
+            if isinstance(metrics_thresholds[m], float):
+                acceptance = acceptance & ((trajectory_data[m] <= metrics_thresholds[m]).to_numpy())
+
+            # Filter by values inside the two values
+            elif isinstance(metrics_thresholds[m], list):
+                acceptance = acceptance & ((trajectory_data[m] >= metrics_thresholds[m][0]).to_numpy())
+                acceptance = acceptance & ((trajectory_data[m] <= metrics_thresholds[m][1]).to_numpy())
 
         # Compute conditional probability
         prior = np.concatenate([np.array([True]),acceptance[:-1]])
@@ -180,7 +227,8 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
 
         # Find best poses iteratively
         best_pose = np.empty(0) # Placeholder
-        step = 0.1
+        distance_step = 0.1
+        angular_step = 1.0
         while best_pose.shape[0] == 0:
 
             # Filter dataframe by metrics' thresholds
@@ -192,15 +240,35 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
                 if m not in metrics_thresholds:
                     continue
 
-                metric_acceptance[m] = report_data[report_data[m] <= metrics_thresholds[m]].shape[0]
-                filtered = filtered[filtered[m] <= metrics_thresholds[m]]
+                # Filter by values lower than the given value
+                if isinstance(metrics_thresholds[m], float):
+                    metric_acceptance[m] = report_data[report_data[m] <= metrics_thresholds[m]].shape[0]
+                    filtered = filtered[filtered[m] <= metrics_thresholds[m]]
+
+                # Filter by values inside the two values
+                elif isinstance(metrics_thresholds[m], list):
+                    metric_filter = report_data[metrics_thresholds[m][0] <= report_data[m]]
+                    metric_acceptance[m] = metric_filter[metric_filter[m] <= metrics_thresholds[m][1]].shape[0]
+                    filtered = filtered[metrics_thresholds[m][0] <= filtered[m]]
+                    filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
 
             best_pose = filtered.nsmallest(1, 'Binding Energy')
 
             # If the pose was not found, update the metric with lowest acceptance
             if best_pose.shape[0] == 0:
+
                 lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1])][0]
-                metrics_thresholds[lowest_metric] += step
+
+                if metric_type[lowest_metric] == 'distance':
+                    step = distance_step
+                elif metric_type[lowest_metric] == 'angle':
+                    step = angular_step
+
+                if isinstance(metrics_thresholds[lowest_metric], float):
+                    metrics_thresholds[lowest_metric] += step
+                if isinstance(metrics_thresholds[lowest_metric], list):
+                    metrics_thresholds[lowest_metric][0] -= step
+                    metrics_thresholds[lowest_metric][1] += step
 
         accepted_iteration = False
 
@@ -294,10 +362,23 @@ spawning_indexes = getSpawningIndexes()
 # Check last iteration for the last spawning
 current_spawning = spawning_indexes[-1]
 
+checkIteration('0/output/output/equilibration_1',
+               metrics, metrics_thresholds)
+
 while current_spawning <= 10:
+
+    # Restart reading of metrics
+    with open(args.metrics) as jf:
+        metrics = json.load(jf)
+    with open(args.metrics_thresholds) as jf:
+        metrics_thresholds = json.load(jf)
 
     # Get last epoch for the current spawning
     epochs_paths = getSpawningEpochPaths(current_spawning)
+
+    if not epochs_paths:
+        raise ValueError(f'There are not epoch folders for the current spawning {current_spawning}')
+
     current_epoch = list(epochs_paths.keys())[-1]
 
     print(f'Checking current spawning {current_spawning} and epoch {current_epoch}')
@@ -324,7 +405,6 @@ while current_spawning <= 10:
             restart_line = False
             restart_adaptive_line = False
             with open(original_yaml) as yf:
-                restart = False
                 adaptive_restart = False
                 for l in yf:
                     if l.startswith('debug:'):
@@ -336,7 +416,7 @@ while current_spawning <= 10:
                 restart_yaml.write(l)
                 if not restart_line:
                     restart_yaml.write('restart: true\n')
-                if not adaptive_restart:
+                if not restart_adaptive_line:
                     restart_yaml.write('adaptive_restart: true\n')
             restart_yaml.close()
 
@@ -344,6 +424,10 @@ while current_spawning <= 10:
         command += 'python -m pele_platform.main input_restart.yaml\n'
         command += 'cd ..\n'
         os.system(command)
+
+        if not os.path.exists(cwd+'/'+str(current_spawning)+'/output/output/'+str(new_epoch)):
+            print(f'Something went wrong. The output for epoch {new_epoch} in spawning {current_spawning} was not found.')
+            exit()
 
     else:
         current_spawning += 1
@@ -360,6 +444,12 @@ while current_spawning <= 10:
 
         # Set PELE input files
         new_yaml = open(str(current_spawning)+'/input.yaml', 'w')
+
+        if angles:
+            restart_yaml = open(cwd+'/'+str(current_spawning)+'/input_restart.yaml', 'w')
+            restart_line = False
+            restart_adaptive_line = False
+
         with open(original_yaml) as yf:
             for l in yf:
                 if l.startswith('iterations:'):
@@ -368,17 +458,41 @@ while current_spawning <= 10:
                     l = 'equilibration: false\n'
                 elif l.startswith('equilibration_steps:') or l.startswith('equilibration_mode:'):
                     continue
-                elif l.startswith('debug:'):
-                    continue
+                if angles:
+                    if l.startswith('debug:'):
+                        restart_yaml.write(l)
+                    if l.startswith('restart: true'):
+                        restart_line = True
+                    elif l.startswith('adaptive_restart: true'):
+                        restart_adaptive_line = True
+                else:
+                    if l.startswith('debug:'):
+                        continue
                 new_yaml.write(l)
+                restart_yaml.write(l)
+
+            if angles and not restart_line:
+                restart_yaml.write('restart: true\n')
+            if angles and not restart_adaptive_line:
+                restart_yaml.write('adaptive_restart: true\n')
+
         new_yaml.close()
+        if angles:
+            restart_yaml.close()
 
         # Run next spawning
         command = 'cd '+str(current_spawning)+'\n'
         command += 'python -m pele_platform.main input.yaml\n'
+        if angles:
+
+            # Get topology
+            command += 'python ../../._addAnglesToPELEConf.py output '
+            command += '../0/._angles.json '
+            command += '../0/output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+            command += 'python -m pele_platform.main input_restart.yaml\n'
         command += 'cd ..\n'
         os.system(command)
 
 if verbose:
-    print('Maximum spawnings {max_spawnings} reached.')
+    print(f'Maximum spawnings {max_spawnings} reached.')
     print('The regional spawning scheme has finished')
