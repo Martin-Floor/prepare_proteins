@@ -14,17 +14,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument('metrics', default=None, help='Path to the JSON file contanining the regional definitions')
 parser.add_argument('metrics_thresholds', default=None, help='Path to the JSON file with the thresholds for defining the regions.')
 parser.add_argument('--separator', default='_', help='Separator used for the protein and ligand for file names')
-parser.add_argument('--max_spawnings', default=10, help='Maximum allowed spawings')
+parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawnings allowed.')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
 
 args=parser.parse_args()
 
-### Define functions
-with open(args.metrics) as jf:
-    metrics = json.load(jf)
-with open(args.metrics_thresholds) as jf:
-    metrics_thresholds = json.load(jf)
-
+### Define variables
 separator = args.separator
 max_spawnings = args.max_spawnings
 angles = args.angles
@@ -40,6 +35,7 @@ for f in os.listdir(cwd+'/0'):
         protein, ligand, pose = f.split(separator)
         pose = pose.replace('.pdb', '')
 
+# Define functions
 def getSpawningIndexes():
     """
     Get the integers for the integer-named (spwaning) folders from the root directory.
@@ -96,6 +92,31 @@ def getReportFiles(epoch_folder):
 
     return report_files
 
+def getTrajectoryFiles(epoch_folder):
+    """
+    Gets a dictionary with all report files for the given epoch.
+
+    Parameters
+    ==========
+    epoch_folder : str
+        Path to the epoch folder.
+
+    Returns
+    =======
+    report_files : dict
+        Dictionary containing the path to all the report files (keys: trajectory_index, values: path)
+    """
+    trf = []
+    for f in sorted(os.listdir(epoch_folder)):
+        if f.startswith('trajectory_') and f.endswith('.xtc'):
+            trf.append((int(f.split('_')[1]), f))
+
+    trajectory_files = {}
+    for i, f in sorted(trf):
+        trajectory_files[i] = epoch_folder+'/'+f
+
+    return trajectory_files
+
 def readIterationFiles(report_files):
     """
     Read all report files into a dataframe
@@ -138,6 +159,16 @@ def readIterationFiles(report_files):
 
     return report_data
 
+def clusterTrajectories(trajectory_files, report_data, metric):
+    """
+    Cluster trajectories by ligand RMSD and taking as cluster centers the structure
+    with the lowest value in the given metric.
+    """
+
+    regional_mask = report_data['Regional Acceptance'].to_numpy()
+
+    print(trajectory_files)
+
 def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
                    # late_arrival=0.2, conditional=0.1):
     """
@@ -146,9 +177,10 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
 
     # Get iteration data
     report_files = getReportFiles(epoch_folder)
+    trajectory_files = getTrajectoryFiles(epoch_folder)
     report_data = readIterationFiles(report_files)
 
-    # Add metrics to dataframe\
+    # Add metrics to dataframe
     metric_type = {} # Store metric type
     for m in metrics:
 
@@ -158,7 +190,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
         for x in metrics[m]:
             if 'distance_' in x:
                 distances = True
-            elif 'angle' in x:
+            elif 'angle_' in x:
                 angles = True
 
         if distances and angles:
@@ -175,43 +207,38 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
             # Combine angles into metric
             angles = [d for d in metrics[m] if d.startswith('angle_')]
             if len(angles) > 1:
-                raise ValueError('Combininig1 more than one angle into a metric is not currently supported.')
+                raise ValueError('Combining more than one angle into a metric is not currently supported.')
             report_data[m] = report_data[angles].min(axis=1).tolist()
+
+    # Add region membership information to report dataframe
+    region_acceptance = np.ones(report_data.shape[0], dtype=bool)
+    for m in metrics:
+
+        # Skip metric filters that do not have a defined threshold
+        if m not in metrics_thresholds:
+            continue
+
+        acceptance = np.ones(report_data[m].shape[0], dtype=bool)
+        if isinstance(metrics_thresholds[m], float):
+            acceptance = acceptance & ((report_data[m] <= metrics_thresholds[m]).to_numpy())
+        elif isinstance(metrics_thresholds[m], list):
+            acceptance = acceptance & ((report_data[m] >= metrics_thresholds[m][0]).to_numpy())
+            acceptance = acceptance & ((report_data[m] <= metrics_thresholds[m][1]).to_numpy())
+        report_data[m+' Acceptance'] = acceptance
+        region_acceptance = region_acceptance & acceptance
+    report_data['Regional Acceptance'] = region_acceptance
 
     # Compute target region probability by trajectory
     probability = {}
     conditional = {}
     for t in report_data.index.levels[0]:
 
-        # Filter data by all metric thresholds
+        # Get trajectory data
         trajectory_data = report_data[report_data.index.get_level_values('Trajectory') == t]
 
-        # Compute acceptance
-        acceptance = np.ones(trajectory_data[m].shape, dtype=bool)
-        for m in metrics:
-
-            # Skip metric filters that do not have a defined threshold
-            if m not in metrics_thresholds:
-                continue
-
-            # Filter by values lower than the given value
-            if isinstance(metrics_thresholds[m], float):
-                acceptance = acceptance & ((trajectory_data[m] <= metrics_thresholds[m]).to_numpy())
-
-            # Filter by values inside the two values
-            elif isinstance(metrics_thresholds[m], list):
-                acceptance = acceptance & ((trajectory_data[m] >= metrics_thresholds[m][0]).to_numpy())
-                acceptance = acceptance & ((trajectory_data[m] <= metrics_thresholds[m][1]).to_numpy())
-
-        # Compute conditional probability
-        prior = np.concatenate([np.array([True]),acceptance[:-1]])
-        if np.sum(~acceptance) == 0:
-            conditional[t] = 0
-        else:
-            conditional[t] = np.sum((prior) & (~acceptance))/np.sum(~acceptance)
-
         # Compute trajectory probability
-        probability[t] = np.sum(acceptance)/trajectory_data.shape[0]
+        region_acceptance = trajectory_data['Regional Acceptance'] == True
+        probability[t] = np.sum(region_acceptance)/trajectory_data.shape[0]
 
     # Compute overall simulation probability
     P = sum([1.0 for t in probability if probability[t] >= theta])/len(probability)
@@ -224,6 +251,9 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
     if P < fraction:
         if verbose:
             print('Continuation was rejected')
+
+        # Cluster trajectories by ligand
+        # clusterTrajectories(trajectory_files, report_data, 'Binding Energy')
 
         # Find best poses iteratively
         best_pose = np.empty(0) # Placeholder
@@ -356,20 +386,18 @@ def extendOneEpoch(spawning_index, current_epoch):
 
 ### Start main here ###
 
-# Check  first iteration
+# Get spawning folders indexes
 spawning_indexes = getSpawningIndexes()
 
-# Check last iteration for the last spawning
+# Check last spawning
 current_spawning = spawning_indexes[-1]
 
-checkIteration('0/output/output/equilibration_1',
-               metrics, metrics_thresholds)
-
-while current_spawning <= 10:
+while current_spawning <= max_spawnings:
 
     # Restart reading of metrics
     with open(args.metrics) as jf:
         metrics = json.load(jf)
+
     with open(args.metrics_thresholds) as jf:
         metrics_thresholds = json.load(jf)
 
