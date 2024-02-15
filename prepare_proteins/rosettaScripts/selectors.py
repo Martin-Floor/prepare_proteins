@@ -35,7 +35,7 @@ class residueSelectors:
 
     class neighborhood:
 
-        def __init__(self, name, selector, distance=6):
+        def __init__(self, name, selector, distance=6, include_focus_in_subset=True):
 
             self.name = name
             self.selector = selector
@@ -48,6 +48,22 @@ class residueSelectors:
             self.root.set('name', self.name)
             self.root.set('selector', self.selector)
             self.root.set('distance', str(self.distance))
+
+    class closeContacts:
+
+        def __init__(self, name, residue_selector, contact_threshold=4.5):
+
+            self.name = name
+            self.residue_selector = residue_selector
+            self.contact_threshold = contact_threshold
+
+        def generateXml(self):
+
+            self.xml = ElementTree
+            self.root = self.xml.Element('CloseContact')
+            self.root.set('name', self.name)
+            self.root.set('residue_selector', self.residue_selector)
+            self.root.set('contact_threshold', str(self.contact_threshold))
 
 
     class notSelector:

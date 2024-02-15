@@ -19,6 +19,7 @@ energy_type = args.energy_type
 peptide = args.peptide
 ligand_index = args.ligand_index
 ligand_energy_groups = args.ligand_energy_groups
+new_version = args.new_version
 
 ### Ligand energy groups ###
 

@@ -149,7 +149,7 @@ class tricks:
     def checkLastEpoch(host, server_path, separator='-'):
         """
         Return the last epoch ran for each pele folder.
-
+check
         Parameters
         ==========
         host : str
@@ -197,6 +197,68 @@ class tricks:
         os.remove(log_file)
 
         return last_epoch
+
+    def checkFailureType(host, server_path, models=None, separator='-'):
+        """
+        Return the last epoch ran for each pele folder.
+
+        Parameters
+        ==========
+        host : str
+            Name of the remote host where pele folder resides. Use localhost for
+            a local pele folder.
+        server_path : str
+            Path to the PELE folder in the remote host.
+        models : list
+            List of models name for which to query their error files.
+        separator : str
+            Separator used to split the pele folder names into protein and ligand.
+
+        Returns
+        =======
+        last_epoch : dict
+            Last epoch for each protein and ligand combination based on finding the
+            specific epoch folder in each pele folder path.
+
+        Caveats:
+            - This function does not check the content of the PELE folders, only the presence
+              of the epoch folders.
+        """
+
+        log_file = '.'+str(uuid.uuid4())+'.log'
+
+        if host == 'localhost':
+            os.system('ls '+server_path+'/*err > '+log_file)
+        else:
+            os.system('ssh '+host+' ls '+server_path+'/*err > '+log_file)
+
+        error_types = {}
+        with open(log_file) as f:
+            for l in f:
+                err_file = l.split('/')[-1].strip()
+                model = err_file.split('_')[1].split(separator)[0]
+                ligand = err_file.split('_')[1].split(separator)[1]
+
+                if models != None and model not in models:
+                    continue
+
+                log_err_file = '.'+str(uuid.uuid4())+'.err'
+                os.system('ssh '+host+' cat '+server_path+'/'+err_file+' > '+log_err_file)
+
+                with open(log_err_file) as ef:
+                    error_type = None
+                    for l in ef:
+                        if 'Out Of Memory' in l:
+                            error_type = 'Out of memory'
+                        elif 'ChainFactory::addLink' in l:
+                            if l.split()[7] == 'segment':
+                                error_type = 'Template for '+l.split()[16].replace(',', '')
+                    error_types[(model, ligand)] = error_type
+
+                os.remove(log_err_file)
+            os.remove(log_file)
+
+            return error_types
 
     def _getBondPele(pele_params, ligand_name):
         """
@@ -372,10 +434,10 @@ class tricks:
             Dictionary with the mapped atom names
 
         """
-        df_pele = self._getBondPele(paramsPele, chain).sort_index()
-        df_rosetta = self._getBondRosetta(paramsRosetta).sort_index()
-        matrix_pele = self._getBondTopology(df_pele)
-        matrix_rosetta = self._getBondTopology(df_rosetta)
+        df_pele = tricks._getBondPele(paramsPele, chain).sort_index()
+        df_rosetta = tricks._getBondRosetta(paramsRosetta).sort_index()
+        matrix_pele = tricks._getBondTopology(df_pele)
+        matrix_rosetta = tricks._getBondTopology(df_rosetta)
 
         # Get the atoms map by their sets
         equival = {}  # Dict[rosetta_an] = pele_an
@@ -401,7 +463,7 @@ class tricks:
         for ros_an in equival.keys():
             # If atoms have more than one equivalent
             if len(equival[ros_an]) > 1:
-                pel_an = self._mapSymmetrycal(ros_an, equival[ros_an], df_pele, df_rosetta)
+                pel_an = tricks._mapSymmetrycal(ros_an, equival[ros_an], df_pele, df_rosetta)
                 if isinstance(pel_an, list):
                     not_mapped[ros_an] = equival[ros_an].copy()
                     shallow_copy = dict(equival)
@@ -582,3 +644,151 @@ class tricks:
 
         self._updateParamsCharges(rosetta_params, new_charges)
         print("Copied the charges from pele to rosetta")
+
+
+    def changePELEResidueNames(model_folder,output_folder):
+        """
+        Function to change PELE protonation residue name changes back to normal.
+
+        Parameters
+        ----------
+        model_folder: str
+            Path to the folder with pele models.
+        output_folder: str
+            Path to the folder to dump new models.
+        """
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        for f in os.listdir(model_folder):
+            new_line = []
+            with open(model_folder+'/'+f) as file:
+                for line in file:
+                    new_line.append(line.replace('HID','HIS').replace('HIE','HIS').replace('HIP','HIS').replace('ASH','ASP').replace('GLH','GLU').replace('CYT','CYS').replace('LYN','LYS').replace('HOH','WAT').replace('OW',' O').replace('1HW',' H1').replace('2HW',' H2'))
+            with open(output_folder+'/'+f,'w') as file:
+                for line in new_line:
+                    file.write(line)
+
+    def ligandToPolymer(model_folder, output_folder,polymer_sequence_dict,lig_atom_name):
+        """
+        Function to convert ligand to multiple residue polymer.
+
+        Parameters
+        ----------
+        model_folder: str
+            Path to the folder with pele models.
+        output_folder: str
+            Path to the folder to dump new models.
+        polymer_sequence_dict: dict
+            Dictionary with the positions of the polymer as keys and theit three-letter codes as values
+        lig_atom_name: dict
+            Nested dictionary with the positions of the polymer as keys and a dictionary mapping the atom names of the lig to the polymer.
+        """
+        for file in os.listdir(model_folder):
+            #ligand_dict = {1:'ETY',2:'TPA',3:'ETY',4:'TPA',5:'ETY',6:'TPA',7:'ETY',8:'TPA',9:'ETY'}
+
+            new_lines = []
+
+            if not os.path.exists(output_folder):
+                os.mkdir(output_folder)
+
+            f = open(output_folder+'/'+file,'w')
+
+            rev_lig_atom_name = {}
+            for res in lig_atom_name:
+                rev_lig_atom_name[res] = {}
+                for old_name,new_name in lig_atom_name[res].items():
+                    rev_lig_atom_name[res][new_name] = old_name
+
+            lines_to_write = []
+            lig_lines = {}
+
+            for line in open(model_folder+'/'+file):
+                if line.startswith('HETATM') and 'LIG' in line:
+
+                    atom = line[12:17].strip()
+
+                    for p in lig_atom_name:
+                        if atom in lig_atom_name[p].values():
+                            atom_name = rev_lig_atom_name[p][atom].ljust(4)
+                            residue_label = polymer_sequence_dict[int(p)]
+                            new_line = 'ATOM  '+line[6:12]+atom_name+' '+residue_label+line[20:22]+str(p).rjust(4)+' '+line[27:]
+
+
+                            if p not in lig_lines:
+                                lig_lines[p] = []
+                            lig_lines[p].append(new_line)
+
+                elif 'CONECT' in line or 'END' in line:
+                    continue
+                else:
+                    lines_to_write.append(line)
+                    #f.write(line)
+
+            for p in lig_lines:
+                for l in lig_lines[p]:
+                    #print(l[:-1])
+                    lines_to_write.append(l)
+
+            for l in lines_to_write:
+                f.write(l)
+            f.write('END')
+
+    def mergeDockingPosesFolders(docking_folders, output_folder):
+        """
+        Merge different model-extracted folders into a single one.
+        """
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        for df in docking_folders:
+            for p in os.listdir(df):
+                if not os.path.isdir(df+'/'+p):
+                    continue
+
+                if not os.path.exists(output_folder+'/'+p):
+                    os.mkdir(output_folder+'/'+p)
+
+                for m in os.listdir(df+'/'+p):
+                    if not m.endswith('.pdb'):
+                        continue
+                    pdb_path = df+'/'+p+'/'+m
+                    shutil.copyfile(pdb_path, output_folder+'/'+p+'/'+m)
+
+    def polymerToLigand(models_folder,output_folder,ligand_chain='L'):
+
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        lig_atom_name = {}
+
+        for model in os.listdir(models_folder):
+
+            f = open(output_folder+'/'+model, 'w')
+            counter = 10
+
+            if model not in lig_atom_name:
+                lig_atom_name[model] = {}
+
+            for line in open(models_folder+'/'+model,'r'):
+                if line[20:23].strip() == ligand_chain:
+                    counter = counter+1
+
+                    atom_name = (line[-4]+str(counter)).ljust(4)
+
+                    if int(line[23:26]) not in lig_atom_name[model]:
+                        lig_atom_name[model][int(line[23:26])] = {}
+
+                    #lig_atom_name[int(line[23:26])][line[12:17].strip()] = 'W'+str(counter)
+                    lig_atom_name[model][int(line[23:26])][line[12:17].strip()] = line[-4]+str(counter)
+
+                    if line.startswith('HETATM'):
+                        new_line = 'ATOM  '+line[6:12]+atom_name+' LIG'+' '+ligand_chain+' '+'0'.rjust(3)+line[26:]
+                    else:
+                        new_line = line[:12]+atom_name+' LIG'+' '+ligand_chain+' '+'0'.rjust(3)+line[26:]
+                    f.write(new_line)
+                elif line.startswith('ATOM') or line.startswith('HETATM') or line.startswith('TER') or line.startswith('END'):
+                    f.write(line)
+            f.close()
+
+        return lig_atom_name
