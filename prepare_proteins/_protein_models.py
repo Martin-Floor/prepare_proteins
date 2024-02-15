@@ -3018,16 +3018,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                             # Check if distance_ and angle_ prefix were given
                             reg_met[m] = {}
                             for protein in regional_metrics[m]:
-                                reg_met[m][protein] = {}
                                 for ligand in regional_metrics[m][protein]:
-                                    reg_met[m][protein][ligand] = []
+                                    reg_met[m] = []
                                     for v in regional_metrics[m][protein][ligand]:
+
+                                        if '-' in v:
+                                            v = v.replace('-', '_')
+
                                         if not v.startswith('distance_') and not v.startswith('angle_'):
                                             if len(v.split('_')) == 2:
                                                 v = 'distance_'+v
                                             elif len(v.split('_')) == 3:
                                                 v = 'angle_'+v
-                                        reg_met[m][protein][ligand].append(v)
+                                        reg_met[m].append(v)
 
                         with open(pele_folder+'/'+protein+separator+ligand+'/metrics.json', 'w') as jf:
                             json.dump(reg_met, jf)
