@@ -3471,7 +3471,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                      equilibration_dt=2,production_dt=4,temperature=298.15,frags=5,
                                      remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
                                      ligand_chains=None,ion_chains=None,replicas=1,
-                                     charge=None, system_output='System'):
+                                     charge=None, system_output='System',models = None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
