@@ -4638,35 +4638,37 @@ make sure of reading the target sequences with the function readTargetSequences(
                     mask.append(False)
 
             remaining_data = self.docking_data[mask]
-
             # Compute metric acceptance for each metric for all missing pairs
-            metric_acceptance = {}
-            for metric in metrics:
-                if not metric.startswith('metric_'):
-                    metric_label = 'metric_'+metric
-                if isinstance(metrics[metric], float):
-                    metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
-                elif isinstance(metrics[metric], (tuple, list)):
-                    metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
-                    metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
+            if not remaining_data.empty:
+                metric_acceptance = {}
+                for metric in metrics:
+                    if not metric.startswith('metric_'):
+                        metric_label = 'metric_'+metric
+                    else:
+                        metric_label = metric
+                    if isinstance(metrics[metric], float):
+                        metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
+                    elif isinstance(metrics[metric], (tuple, list)):
+                        metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
+                        metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
 
-            lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric_doc = lowest_metric.replace("metric_", "")
+                if self.docking_metric_type[lowest_metric_doc] == 'distance':
+                    step = distance_step
+                if self.docking_metric_type[lowest_metric_doc] == 'angle':
+                    step = angle_step
 
-            if self.docking_metric_type[lowest_metric] == 'distance':
-                step = distance_step
-            if self.docking_metric_type[lowest_metric] == 'angle':
-                step = angle_step
+                if isinstance(metrics[lowest_metric], float):
+                    metrics[lowest_metric] += step
 
-            if isinstance(metrics[lowest_metric], float):
-                metrics[lowest_metric] += step
+                # Change to list to allow item assignment
+                if isinstance(metrics[lowest_metric], tuple):
+                    metrics[lowest_metric] = list(metrics[lowest_metric])
 
-            # Change to list to allow item assignment
-            if isinstance(metrics[lowest_metric], tuple):
-                metrics[lowest_metric] = list(metrics[lowest_metric])
-
-            if isinstance(metrics[lowest_metric], list):
-                metrics[lowest_metric][0] -= step
-                metrics[lowest_metric][1] += step
+                if isinstance(metrics[lowest_metric], list):
+                    metrics[lowest_metric][0] -= step
+                    metrics[lowest_metric][1] += step
 
         # Get rows with the selected indexes
         mask = self.docking_data.index.isin(selected_indexes)
