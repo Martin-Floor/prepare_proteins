@@ -3018,16 +3018,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                             # Check if distance_ and angle_ prefix were given
                             reg_met[m] = {}
                             for protein in regional_metrics[m]:
-                                reg_met[m][protein] = {}
                                 for ligand in regional_metrics[m][protein]:
-                                    reg_met[m][protein][ligand] = []
+                                    reg_met[m] = []
                                     for v in regional_metrics[m][protein][ligand]:
+
+                                        if '-' in v:
+                                            v = v.replace('-', '_')
+
                                         if not v.startswith('distance_') and not v.startswith('angle_'):
                                             if len(v.split('_')) == 2:
                                                 v = 'distance_'+v
                                             elif len(v.split('_')) == 3:
                                                 v = 'angle_'+v
-                                        reg_met[m][protein][ligand].append(v)
+                                        reg_met[m].append(v)
 
                         with open(pele_folder+'/'+protein+separator+ligand+'/metrics.json', 'w') as jf:
                             json.dump(reg_met, jf)
@@ -3560,10 +3563,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                           equilibration_dt=2, production_dt=4,temperature=298.15,frags=5,
-                           remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
-                           ligand_chains=None,ion_chains=None,replicas=1,
-                           charge=None, system_output='System', models=None):
+                                     equilibration_dt=2,production_dt=4,temperature=298.15,frags=5,
+                                     remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
+                                     ligand_chains=None,ion_chains=None,replicas=1,
+                                     charge=None, system_output='System', models = None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
@@ -4637,35 +4640,37 @@ make sure of reading the target sequences with the function readTargetSequences(
                     mask.append(False)
 
             remaining_data = self.docking_data[mask]
-
             # Compute metric acceptance for each metric for all missing pairs
-            metric_acceptance = {}
-            for metric in metrics:
-                if not metric.startswith('metric_'):
-                    metric_label = 'metric_'+metric
-                if isinstance(metrics[metric], float):
-                    metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
-                elif isinstance(metrics[metric], (tuple, list)):
-                    metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
-                    metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
+            if not remaining_data.empty:
+                metric_acceptance = {}
+                for metric in metrics:
+                    if not metric.startswith('metric_'):
+                        metric_label = 'metric_'+metric
+                    else:
+                        metric_label = metric
+                    if isinstance(metrics[metric], float):
+                        metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
+                    elif isinstance(metrics[metric], (tuple, list)):
+                        metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
+                        metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
 
-            lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric_doc = lowest_metric.replace("metric_", "")
+                if self.docking_metric_type[lowest_metric_doc] == 'distance':
+                    step = distance_step
+                if self.docking_metric_type[lowest_metric_doc] == 'angle':
+                    step = angle_step
 
-            if self.docking_metric_type[lowest_metric] == 'distance':
-                step = distance_step
-            if self.docking_metric_type[lowest_metric] == 'angle':
-                step = angle_step
+                if isinstance(metrics[lowest_metric], float):
+                    metrics[lowest_metric] += step
 
-            if isinstance(metrics[lowest_metric], float):
-                metrics[lowest_metric] += step
+                # Change to list to allow item assignment
+                if isinstance(metrics[lowest_metric], tuple):
+                    metrics[lowest_metric] = list(metrics[lowest_metric])
 
-            # Change to list to allow item assignment
-            if isinstance(metrics[lowest_metric], tuple):
-                metrics[lowest_metric] = list(metrics[lowest_metric])
-
-            if isinstance(metrics[lowest_metric], list):
-                metrics[lowest_metric][0] -= step
-                metrics[lowest_metric][1] += step
+                if isinstance(metrics[lowest_metric], list):
+                    metrics[lowest_metric][0] -= step
+                    metrics[lowest_metric][1] += step
 
         # Get rows with the selected indexes
         mask = self.docking_data.index.isin(selected_indexes)
