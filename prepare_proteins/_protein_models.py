@@ -3113,6 +3113,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
+                    protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
@@ -3393,7 +3394,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if protein in bias_to_point:
                             command += 'python '+rel_path_to_root+btp_script+' '
                             command += "output " # I think we should change this for a variable
-                            command += ",".join([str(x) for x in bias_to_point[protein]])+'\n'
+                            command += "point_"+",".join([str(x) for x in bias_to_point[protein]])+" "
+                            command += "--epsilon "+str(epsilon)+"\n"
                             continuation = True
 
                         if protein in com_bias1 and ligand in com_bias1[protein]:
@@ -3492,7 +3494,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if extend_iterations:
                             _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
                             extend_script_name = '._extendAdaptiveIteartions.py'
-                            command += 'python '+rel_path_to_root+extend_script_name+' output\n'
+                            command += 'python '+rel_path_to_root+extend_script_name+' output '+str(iterations)+'\n'
                         if not energy_by_residue:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
 
