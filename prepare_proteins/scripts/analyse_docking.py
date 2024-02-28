@@ -286,14 +286,14 @@ for model in sorted(mae_output):
                 #         data["Closest distance"].append(np.amin(M))
                 #         data["Closest atom"].append(atom_names[np.where(M == np.amin(M))[1][0]])
 
-# Create dataframes
-csv_name = model+separator+ligand+'.csv'
-if atom_pairs:
-    distance_data = pd.DataFrame(distance_data)
-    distance_data.to_csv(docking_folder+'/.analysis/atom_pairs/'+csv_name, index=False)
-if angles:
-    angle_data = pd.DataFrame(angle_data)
-    angle_data.to_csv(docking_folder+'/.analysis/angles/'+csv_name, index=False)
+    # Create dataframes
+    csv_name = model+separator+ligand+'.csv'
+    if atom_pairs:
+        distance_data = pd.DataFrame(distance_data)
+        distance_data.to_csv(docking_folder+'/.analysis/atom_pairs/'+csv_name, index=False)
+    if angles:
+        angle_data = pd.DataFrame(angle_data)
+        angle_data.to_csv(docking_folder+'/.analysis/angles/'+csv_name, index=False)
 
 csv_name = 'docking_data.csv'
 if not os.path.exists(docking_folder+'/.analysis/'+csv_name) or overwrite:

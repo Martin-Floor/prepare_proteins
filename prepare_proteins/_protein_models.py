@@ -3116,6 +3116,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
+                    protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
@@ -3396,7 +3397,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if protein in bias_to_point:
                             command += 'python '+rel_path_to_root+btp_script+' '
                             command += "output " # I think we should change this for a variable
-                            command += ",".join([str(x) for x in bias_to_point[protein]])+'\n'
+                            command += "point_"+",".join([str(x) for x in bias_to_point[protein]])+" "
+                            command += "--epsilon "+str(epsilon)+"\n"
                             continuation = True
 
                         if protein in com_bias1 and ligand in com_bias1[protein]:
@@ -3495,7 +3497,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if extend_iterations:
                             _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
                             extend_script_name = '._extendAdaptiveIteartions.py'
-                            command += 'python '+rel_path_to_root+extend_script_name+' output\n'
+                            command += 'python '+rel_path_to_root+extend_script_name+' output '+str(iterations)+'\n'
                         if not energy_by_residue:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
 
@@ -3561,10 +3563,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                           equilibration_dt=2, production_dt=4,temperature=298.15,frags=5,
-                           remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
-                           ligand_chains=None,ion_chains=None,replicas=1,
-                           charge=None, system_output='System', models=None):
+                                     equilibration_dt=2,production_dt=4,temperature=298.15,frags=5,
+                                     remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
+                                     ligand_chains=None,ion_chains=None,replicas=1,
+                                     charge=None, system_output='System', models = None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
@@ -4638,35 +4640,37 @@ make sure of reading the target sequences with the function readTargetSequences(
                     mask.append(False)
 
             remaining_data = self.docking_data[mask]
-
             # Compute metric acceptance for each metric for all missing pairs
-            metric_acceptance = {}
-            for metric in metrics:
-                if not metric.startswith('metric_'):
-                    metric_label = 'metric_'+metric
-                if isinstance(metrics[metric], float):
-                    metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
-                elif isinstance(metrics[metric], (tuple, list)):
-                    metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
-                    metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
+            if not remaining_data.empty:
+                metric_acceptance = {}
+                for metric in metrics:
+                    if not metric.startswith('metric_'):
+                        metric_label = 'metric_'+metric
+                    else:
+                        metric_label = metric
+                    if isinstance(metrics[metric], float):
+                        metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
+                    elif isinstance(metrics[metric], (tuple, list)):
+                        metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
+                        metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
 
-            lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric_doc = lowest_metric.replace("metric_", "")
+                if self.docking_metric_type[lowest_metric_doc] == 'distance':
+                    step = distance_step
+                if self.docking_metric_type[lowest_metric_doc] == 'angle':
+                    step = angle_step
 
-            if self.docking_metric_type[lowest_metric] == 'distance':
-                step = distance_step
-            if self.docking_metric_type[lowest_metric] == 'angle':
-                step = angle_step
+                if isinstance(metrics[lowest_metric], float):
+                    metrics[lowest_metric] += step
 
-            if isinstance(metrics[lowest_metric], float):
-                metrics[lowest_metric] += step
+                # Change to list to allow item assignment
+                if isinstance(metrics[lowest_metric], tuple):
+                    metrics[lowest_metric] = list(metrics[lowest_metric])
 
-            # Change to list to allow item assignment
-            if isinstance(metrics[lowest_metric], tuple):
-                metrics[lowest_metric] = list(metrics[lowest_metric])
-
-            if isinstance(metrics[lowest_metric], list):
-                metrics[lowest_metric][0] -= step
-                metrics[lowest_metric][1] += step
+                if isinstance(metrics[lowest_metric], list):
+                    metrics[lowest_metric][0] -= step
+                    metrics[lowest_metric][1] += step
 
         # Get rows with the selected indexes
         mask = self.docking_data.index.isin(selected_indexes)
