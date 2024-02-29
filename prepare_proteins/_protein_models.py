@@ -4580,6 +4580,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             ligand_data = ligand_data[ligand_data[metric_label] >= filter_values[metric][0]]
                             ligand_data = ligand_data[ligand_data[metric_label] <= filter_values[metric][1]]
                     else:
+                        metric_label = metric
                         ligand_data = ligand_data[ligand_data[metric_label] < filter_values[metric]]
 
                 if ligand_data.empty:
