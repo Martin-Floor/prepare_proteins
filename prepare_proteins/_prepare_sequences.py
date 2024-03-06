@@ -352,3 +352,64 @@ class sequenceModels:
             return self.sequences_names[self._iter_n]
         else:
             raise StopIteration
+
+    def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv', cpus=40):
+        """
+        Set up InterProScan analysis to search for domains in a set of proteins
+        """
+
+        if isinstance(not_exclude, str):
+                not_exclude = [not_exclude]
+
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        if not os.path.exists(job_folder+'/input_fasta'):
+                os.mkdir(job_folder+'/input_fasta')
+
+        if not os.path.exists(job_folder+'/output'):
+                os.mkdir(job_folder+'/output')
+
+        input_file = 'input_fasta/input.fasta'
+
+        alignment.writeFastaFile(self.sequences, job_folder+'/'+input_file)
+
+        appl_list_all = ["Gene3D","PANTHER","Pfam","Coils","SUPERFAMILY","SFLD","Hamap",
+                            "ProSiteProfiles","SMART","CDD","PRINTS","PIRSR","ProSitePatterns","AntiFam",
+                            "MobiDBLite","PIRSF","FunFam","NCBIfam"]
+
+        for appl in not_exclude:
+            if appl not in appl_list_all:
+                raise ValueError('Application not found. Available applications: '+' ,'.join(appl_list_all))
+
+        appl_list = []
+        for appl in appl_list_all:
+            if appl not in not_exclude:
+                appl_list.append(appl)
+
+        jobs = []
+
+
+        output_file = 'output/interproscan_output.tsv'
+
+        command = "cd "+job_folder+"\n"
+        command += "Path=$(pwd)\n"
+        command += "bash /home/bubbles/Programs/interproscan-5.66-98.0/interproscan.sh" # only in bubbles
+        command += " -i $Path/"+input_file
+        command += " -f "+output_format
+        command += " -o $Path/"+output_file
+        command += " -cpu "+str(cpus)
+        for n,appl in enumerate(appl_list):
+            if n == 0:
+                command += " -exclappl "+appl
+            else:
+                command += ","+appl
+        command += "\n"
+
+        command += "cd ..\n"
+
+        jobs.append(command)
+
+        print('Remember Interproscan is only installed in bubbles at the moment')
+
+        return jobs
