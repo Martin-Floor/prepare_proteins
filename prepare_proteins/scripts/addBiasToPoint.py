@@ -11,8 +11,9 @@ parser.add_argument('--ligand_chain', default='L', help='Ligand chain')
 parser.add_argument('--ligand_index', default=1, help='Ligand index')
 args=parser.parse_args()
 
+coords = args.point.replace("point_","")
 pele_output = args.pele_output
-point = [float(x) for x in args.point.split(',')]
+point = [float(x) for x in coords.split(',')]
 epsilon = float(args.epsilon)
 ligand_chain = args.ligand_chain
 ligand_index = int(args.ligand_index)

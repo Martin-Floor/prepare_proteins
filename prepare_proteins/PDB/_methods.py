@@ -1,6 +1,7 @@
 from Bio import PDB
 import os
 import shutil
+import numpy as np
 
 def retrievePDBs(pdb_codes, names=None, pdb_directory='PDB'):
     """
@@ -130,3 +131,14 @@ def chainsAsStructure(chains):
     structure.add(model)
 
     return structure
+
+def getStructureCoordinates(structure):
+    """
+    Get PDB coordinates as a anumpy array.
+    """
+    coordinates = []
+    for atom in structure.get_atoms():
+        coordinates.append(atom.coord)
+    coordinates = np.array(coordinates)
+
+    return coordinates

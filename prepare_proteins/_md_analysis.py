@@ -4,6 +4,7 @@ import numpy as np
 import io
 import shutil
 import pandas as pd
+import subprocess
 
 import mdtraj as md
 
@@ -17,101 +18,112 @@ import prepare_proteins
 
 class md_analysis:
 
-    def __init__(self,path,triads=None,lig_atoms=None,command='gmx',step='md',traj_name='prot_md_cat_noPBC.xtc',topol_name='prot_md_1.gro',remove_water=True,peptide=False,ligand=False,remove_traj_files=False):
+    def __init__(self,md_folder, command='gmx', output_group='System', ligand=False, remove_redundant_files=False, overwrite=False):
 
-        self.trajectory_paths = {}
-        self.topology_paths = {}
+        self.models = [folder for folder in os.listdir(md_folder+'/output_models/') if os.path.isdir(md_folder+'/output_models/'+folder)]
+
+        self.traj_paths = {}
+        self.traj_paths['nvt'] = {}
+        self.traj_paths['npt'] = {}
+        self.traj_paths['md'] = {}
+
+        self.top_paths = {}
+
         self.distances = {}
-        self.angles = {}
-        self.triads = triads
-        self.models = [folder for folder in os.listdir(path+'/output_models/') if os.path.isdir(path+'/output_models/'+folder)]
-        self.lig_atoms = lig_atoms
 
-        if remove_water == True:
-            if peptide or ligand:
-                option = '18'
-            else:
-                option = '1'
-        else:
-            option = '0'
-
-        #Remove boundary conditions from gromacs simulation trajectory file and get paths
         for model in self.models:
-            self.trajectory_paths[model] = {}
-            self.topology_paths[model] = {}
-            for replica in os.listdir(path+'/output_models/'+model):
-                traj_path = path+'/output_models/'+model+'/'+replica+'/'+step
-                top_em = path+'/output_models/'+model+'/'+replica+'/em/prot_em.gro'
+            self.traj_paths['nvt'][model] = {}
+            self.traj_paths['npt'][model] = {}
+            self.traj_paths['md'][model] = {}
+            self.top_paths[model] = {}
 
-                if not os.path.exists(traj_path) or len(os.listdir(traj_path))==0:
-                    self.trajectory_paths[model][replica] = ''
-                    self.topology_paths[model][replica] = ''
-                    print('WARNING: model '+model+' has no trajectories')
+            for replica in os.listdir(md_folder+'/output_models/'+model):
+                # Define paths
+                top_path = md_folder+'/output_models/'+model+'/'+replica+'/em/prot_em.gro'
 
+                nvt_path = md_folder+'/output_models/'+model+'/'+replica+'/nvt/prot_nvt.xtc'
+                npt_path = md_folder+'/output_models/'+model+'/'+replica+'/npt'
+                md_path = md_folder+'/output_models/'+model+'/'+replica+'/md'
+
+                # Print warnings for missing files
+                if not os.path.exists(top_path):
+                    self.top_paths[model][replica] = ''
+                    print('WARNING: Topology for model '+model+' and replica '+replica+' could not be found. EM gro does not exist')
+
+                if not os.path.exists(nvt_path):
+                    self.traj_paths['nvt'][model][replica] = ''
+                    print('WARNING: NVT trajectory for model '+model+' and replica '+replica+' could not be found. NVT xtc does not exist')
+
+                if not os.path.exists(npt_path) or len(os.listdir(npt_path))==0:
+                    self.traj_paths['npt'][model][replica] = ''
+                    print('WARNING: NPT trajectory for model '+model+' and replica '+replica+' could not be found. Folder does not exist or is empty')
+
+                if not os.path.exists(md_path) or len(os.listdir(md_path))==0:
+                    self.traj_paths['md'][model][replica] = ''
+                    print('WARNING: MD trajectory for model '+model+' and replica '+replica+' could not be found. Folder does not exist or is empty')
+
+                # Get groups from topol index
+                index_path = md_folder+'/'+'output_models/'+model+'/'+replica+'/topol/index.ndx'
+                group_dics = _readGromacsIndexFile(index_path)
+                if output_group not in group_dics:
+                    raise ValueError('The selected output group is not available in the topol/index.ndx file. The following groups are available: '+','.join(group_dics.keys()))
+
+
+                # Remove PBC
+                # In case of ligand PBC center is between protein ligand interface
+                if ligand:
+                    centering_selector = group_dics['Protein']
                 else:
+                    centering_selector = group_dics['Protein']
 
-                    self.trajectory_paths[model][replica] = (traj_path+'/'+traj_name)
-                    if remove_water:
-                        self.topology_paths[model][replica] =  (traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
-                    else:
-                        self.topology_paths[model][replica] =  (traj_path+'/'+topol_name)
 
-                    for file in os.listdir(traj_path):
-                        if not os.path.exists(traj_path+'/'+topol_name):
-                            print('WARNING: No gro file')
-                            continue
+                # TOP
+                if not os.path.exists(top_path.replace('.gro','_noPBC.gro')) or overwrite:
+                    os.system('echo -e '+centering_selector+' '+group_dics[output_group]+' | '+command+'  trjconv -s '+top_path.replace('.gro','.tpr')+' -f '+top_path+' -o '+top_path.replace('.gro','_noPBC.gro')+' -center -pbc res -ur compact'+' -n '+index_path)
+                    if remove_redundant_files:
+                        os.remove(top_path)
 
-                        if file.endswith('.xtc') and not file.endswith('_noPBC.xtc') and not os.path.exists(traj_path+'/'+file.split(".")[0]+'_noPBC.xtc'):
+                self.top_paths[model][replica] = top_path.replace('.gro','_noPBC.gro')
 
-                            if peptide:
-                                for line in open(traj_path+'/'+topol_name).readlines():
-                                    if 'ACE' in line:
-                                        atom_num = int(line[16:21])-2
-                                        break
+                # NVT
+                if not os.path.exists(nvt_path.replace('.xtc','_noPBC.xtc')) or overwrite:
+                    os.system('echo '+centering_selector+' '+group_dics[output_group]+' | '+command+'  trjconv -s '+nvt_path.replace('.xtc','.tpr')+' -f '+nvt_path+' -o '+nvt_path.replace('.xtc','_noPBC.xtc')+' -center -pbc res -ur compact'+' -n '+index_path)
+                    if remove_redundant_files:
+                        os.remove(nvt_path)
 
-                                line = '[ chainA ]\n'
-                                counter = 0
-                                for x in range(1,atom_num):
-                                    if counter == 0:
-                                        line += str(x).rjust(4)
-                                    else:
-                                        line += str(x).rjust(5)
+                self.traj_paths['nvt'][model][replica] = nvt_path.replace('.xtc','_noPBC.xtc')
 
-                                    counter += 1
-                                    if counter == 15:
-                                        line += '\n'
-                                        #lines.append(line)
-                                        counter = 0
-                                        #line = ''
-                                line += '\n'
+                # NPT
+                if not os.path.exists(npt_path+'/prot_npt_cat_noPBC.xtc') or overwrite:
+                    remove_paths = []
+                    for file in os.listdir(npt_path):
+                        if file.endswith('.xtc') and 'noPBC' not in file:
+                            path = npt_path+'/'+file
+                            os.system('echo '+centering_selector+' '+group_dics[output_group]+' | '+command+'  trjconv -s '+path.replace('.xtc','.tpr')+' -f '+path+' -o '+path.replace('.xtc','_noPBC.xtc')+' -center -pbc res -ur compact'+' -n '+index_path)
+                            remove_paths.append(path)
+                    os.system(command+' trjcat -f '+npt_path+'/*_noPBC.xtc -o '+npt_path+'/prot_npt_cat_noPBC.xtc -cat')
+                    if remove_redundant_files:
+                        [os.remove(path) for path in remove_paths]
 
-                                os.system('echo q | '+command+' make_ndx -f '+traj_path+'/'+topol_name+' -o '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
+                self.traj_paths['npt'][model][replica] = npt_path+'/prot_npt_cat_noPBC.xtc'
 
-                                with open('/'.join(traj_path.split('/')[:-1])+'/md/index.ndx','a') as f:
-                                    f.write(line)
+                # MD
+                if not os.path.exists(md_path+'/prot_md_cat_noPBC.xtc') or overwrite:
+                    remove_paths = []
+                    for file in os.listdir(md_path):
+                        if file.endswith('.xtc') and 'noPBC' not in file:
+                            path = md_path+'/'+file
+                            os.system('echo '+centering_selector+' '+group_dics[output_group]+' | '+command+'  trjconv -s '+path.replace('.xtc','.tpr')+' -f '+path+' -o '+path.replace('.xtc','_noPBC.xtc')+' -center -pbc res -ur compact'+' -n '+index_path)
+                            remove_paths.append(path)
+                    os.system(command+' trjcat -f '+md_path+'/*_noPBC.xtc -o '+md_path+'/prot_md_cat_noPBC.xtc -cat')
+                    if remove_redundant_files:
+                        [os.remove(path) for path in remove_paths]
 
-                                os.system('echo 20 '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact -n '+'/'.join(traj_path.split('/')[:-1])+'/md/index.ndx')
-                                #os.system('echo 20 '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file.split(".")[0]+'_noPBC_int.xtc -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc whole -ur compact')
-                            elif ligand:
-                                os.system('echo 1 '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -center -pbc res -ur compact')
-                            else:
-                                os.system('echo '+option+' | '+command+' trjconv -s '+ traj_path+'/'+file.split(".")[0] +'.tpr -f '+traj_path+'/'+file+' -o '+traj_path+'/'+file.split(".")[0]+'_noPBC.xtc -pbc mol -ur compact')
+                self.traj_paths['md'][model][replica] = md_path+'/prot_md_cat_noPBC.xtc'
 
-                    if not os.path.exists(traj_path+'/'+traj_name) and os.path.exists(traj_path+'/'+topol_name):
-                        os.system(command+' trjcat -f '+traj_path+'/*_noPBC.xtc -o '+traj_path+'/'+traj_name+' -cat')
-                        if remove_traj_files:
-                            os.system('rm '+traj_path+'/prot_md_?.xtc')
-                            os.system('rm '+traj_path+'/prot_md_?_noPBC.xtc')
 
-                    if not os.path.exists(traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1]) and os.path.exists(traj_path+'/'+topol_name) and remove_water == True:
-                        os.system('echo '+option+' | '+command+' editconf -ndef -f '+traj_path+'/'+topol_name+' -o '+traj_path+'/'+topol_name.split('.')[0]+'_no_water.'+topol_name.split('.')[1])
-                    if not os.path.exists(top_em.split('.')[0]+'_no_water.gro') and os.path.exists(top_em) and remove_water == True:
-                        os.system('echo '+option+' | '+command+' editconf -ndef -f '+top_em+' -o '+top_em.split('.')[0]+'_no_water.gro')
+    def setupCalculateDistances(self,metrics,step='md',job_folder='MD_analysis_data',overwrite=False):
 
-    def setupCalculateDistances(self,job_folder='MD_analysis_data',overwrite=False):
-
-        if self.triads == None:
-            raise ValueError('Triads were not given to the object')
 
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
@@ -128,164 +140,71 @@ class md_analysis:
                 sof.write(l)
 
         jobs = []
-        for model in self.trajectory_paths:
+        for model in self.traj_paths[step]:
             if not os.path.exists(job_folder+'/'+model):
                 os.mkdir(job_folder+'/'+model)
-            for replica in self.trajectory_paths[model]:
-                if not os.path.exists(self.trajectory_paths[model][replica]):
+            for replica in self.traj_paths[step][model]:
+
+                # Check if trajectory and topology files were generated correctly
+                if not os.path.exists(self.traj_paths[step][model][replica]):
                     print('WARNING: trajectory file for model '+model+' and replica '+replica+' does not exist.')
                     continue
-                if not os.path.exists(self.topology_paths[model][replica]):
+                if not os.path.exists(self.top_paths[model][replica]):
                     print('WARNING: topology file for model '+model+' and replica '+replica+' does not exist.')
                     continue
 
+                job_traj_path = model+'/'+replica+'/'+self.traj_paths[step][model][replica].split('/')[-1]
+                job_top_path = model+'/'+replica+'/'+self.top_paths[model][replica].split('/')[-1]
+
+                # Copy trajectory and topology files
                 if not os.path.exists(job_folder+'/'+model+'/'+replica):
                     os.mkdir(job_folder+'/'+model+'/'+replica)
-                if not os.path.exists(job_folder+'/'+model+'/'+replica+'/'+self.trajectory_paths[model][replica].split('/')[-1]):
-                    shutil.copyfile(self.trajectory_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.trajectory_paths[model][replica].split('/')[-1])
-                if not os.path.exists(job_folder+'/'+model+'/'+replica+'/'+self.topology_paths[model][replica].split('/')[-1]):
-                    shutil.copyfile(self.topology_paths[model][replica],job_folder+'/'+model+'/'+replica+'/'+self.topology_paths[model][replica].split('/')[-1])
+                if not os.path.exists(job_folder+'/'+job_traj_path):
+                    shutil.copyfile(self.traj_paths[step][model][replica],job_folder+'/'+job_traj_path)
+                if not os.path.exists(job_folder+'/'+job_top_path):
+                    shutil.copyfile(self.top_paths[model][replica],job_folder+'/'+job_top_path)
 
                 new_path = job_folder+'/'+model+'/'+replica
 
                 if not os.path.exists(new_path+'/dist.json') or overwrite:
-                    command = 'cd '+job_folder+'\n'
-                    command += 'python ._'+script_name+' -p '+new_path +' '
-                    command += '--triad '+','.join(self.triads[model])+' '
-                    if self.lig_atoms != None:
-                        with open(new_path+'/lig_atoms.json','w') as f:
-                            print(self.lig_atoms[model])
-                            json.dump(self.lig_atoms[model],f)
-                        command += ' --lig_atoms lig_atoms.json '
+                    command = 'cd '+job_folder+'/'+model+'/'+replica+'/'+'\n'
+                    command += 'python ../../._'+script_name+' '
+                    command += '--trajectory '+self.traj_paths[step][model][replica].split('/')[-1]+' '
+                    command += '--topology '+self.top_paths[model][replica].split('/')[-1]+' '
+                    if metrics[model] != None:
+                        with open(new_path+'/metrics.json','w') as f:
+                            json.dump(metrics[model],f)
+                        command += '--metrics metrics.json '
                     command += '\n'
                     command += 'cd ..\n'
                     jobs.append(command)
         return jobs
 
 
-    def calculateDistances(self,folder='MD_analysis_data',calculate=False,overwrite=False):
+    def readDistances(self,folder='MD_analysis_data'):
 
         if not os.path.exists(folder):
             os.mkdir(folder)
 
-        for model in self.trajectory_paths:
+        for model in self.top_paths:
             self.distances[model] = {}
-            for replica,path in self.trajectory_paths[model].items():
-                if (os.path.exists(folder+'/'+model+'/'+replica+'/dist.json') and not overwrite):
+            for replica in self.top_paths[model]:
+                if os.path.exists(folder+'/'+model+'/'+replica+'/dist.json'):
                     with open(folder+'/'+model+'/'+replica+'/dist.json','r') as f:
                         self.distances[model][replica] = json.load(f)
                     print('Reading distance for '+model)
                     continue
 
-                ### WARNING: Option not implemented  with replicas ###
-                if calculate:
-                    if os.trajectory_paths.exists(path) and os.trajectory_paths.exists('/'.join(path.split('/')[:-2])+'/md/prot_md_1.gro'):
-                        print('Calculating distance for '+model)
-                        t = md.load(path, top='/'.join(path.split('/')[:-2])+'/md/prot_md_1.gro')
-                        #t = t[0:100] #Test#
-                        dist_dic = {}
-                        dist_dic['ser_his'] = []
-                        dist_dic['asp_his'] = []
-                        dist_dic['pep'] = []
-
-                        for frame in t:
-                            top = frame.top
-
-                            ser = self.triads[model][0][1:]
-                            his = self.triads[model][1].split('-')[0][1:]
-                            his_name = self.triads[model][1].split('-')[1]
-                            asp = self.triads[model][2][1:]
-                            asp_res_name = self.triads[model][2][0]
-
-                            carbonyl = self.carbonyls[model]
-
-                            pep_atom = top.select('resSeq '+carbonyl+' and name C')
-
-                            ser_atom = top.select('resSeq '+ser+' and name HG')
-
-                            if his_name == 'NE2':
-                                his_asp_atom = top.select('resSeq '+his+' and name HD1')
-                                heavy_his_asp_atom = top.select('resSeq '+his+' and name ND1')
-                                his_ser_atom = top.select('resSeq '+his+' and name NE2')
-
-                            elif his_name == 'ND1':
-                                his_asp_atom = top.select('resSeq '+his+' and name HE2')
-                                his_ser_atom = top.select('resSeq '+his+' and name ND1')
-
-                            if asp_res_name == 'D':
-                                asp_atom1 = top.select('resSeq '+asp+' and name OD1')
-                                asp_atom2 = top.select('resSeq '+asp+' and name OD2')
-
-                            elif asp_res_name == 'G':
-                                asp_atom1 = top.select('resSeq '+asp+' and name OE1')
-                                asp_atom2 = top.select('resSeq '+asp+' and name OE2')
-
-                            if len(his_asp_atom) == 0:
-                                print('WARNING: wrong protonation in model '+model)
-                                break
-
-                            dist1 = float(np.linalg.norm(frame.xyz[0][asp_atom1] - frame.xyz[0][his_asp_atom]))
-                            dist2 = float(np.linalg.norm(frame.xyz[0][asp_atom2] - frame.xyz[0][his_asp_atom]))
-
-                            if dist1 > dist2:
-                                asp_atom = asp_atom2
-                                asp_dist = dist2
-                            else:
-                                asp_atom = asp_atom1
-                                asp_dist = dist1
-
-                            dist_dic['ser_his'].append(float(np.linalg.norm(frame.xyz[0][ser_atom] - frame.xyz[0][his_ser_atom])))
-                            dist_dic['asp_his'].append(asp_dist)
-                            dist_dic['pep'].append(float(np.linalg.norm(frame.xyz[0][ser_atom] - frame.xyz[0][pep_atom])))
-
-                        with open(folder+'/'+model+'_dist.json', 'w') as f:
-                            json.dump(dist_dic,f)
-
-                        self.distances[model] = dist_dic
-
     def plot_distances(self,threshold=0.45,lim=True):
-        '''
-        def options2(model,replica):
 
-            y1 = self.distances[model][replica]['ser_his']
-            x1 = [x*0.1 for x in range(len(y1))]
-
-            y2 = self.distances[model][replica]['asp_his']
-            x2 = [x*0.1 for x in range(len(y2))]
-
-            y3 = self.distances[model][replica]['pep']
-            x3 = [x*0.1 for x in range(len(y3))]
-
-            plt.plot(x1,y1)
-            plt.plot(x2,y2)
-            plt.plot(x3,y3)
-            plt.axhline(y=threshold, color='r', linestyle='-')
-            if lim:
-                plt.ylim(0.1,1)
-
-            plt.xlabel("time (ns)")
-            plt.ylabel("distance")
-            plt.legend(['ser-his','his-asp','pep'])
-            plt.show()
-
-        def options1(model):
-            interact(options2,model = fixed(model),replica=self.distances[model].keys())
-        '''
         def options1(model):
             if self.distances[model] != {}:
                 for replica in self.distances[model]:
-                    y1 = np.array(self.distances[model][replica]['ser_his'])*10
-                    x1 = [x*0.1 for x in range(len(y1))]
+                    for metric in self.distances[model][replica]:
+                        y = np.array(self.distances[model][replica][metric])*10
+                        x = [x*0.1 for x in range(len(y))]
+                        plt.plot(x,y)
 
-                    y2 = np.array(self.distances[model][replica]['asp_his'])*10
-                    x2 = [x*0.1 for x in range(len(y2))]
-
-                    y3 = np.array(self.distances[model][replica]['pep'])*10
-                    x3 = [x*0.1 for x in range(len(y3))]
-
-                    plt.plot(x1,y1)
-                    plt.plot(x2,y2)
-                    plt.plot(x3,y3)
                     plt.axhline(y=threshold, color='r', linestyle='-')
                     if lim:
                         plt.ylim(1,10)
@@ -293,46 +212,58 @@ class md_analysis:
                     plt.title(replica)
                     plt.xlabel("time (ns)")
                     plt.ylabel("distance (Å)")
-                    plt.legend(['ser-his','his-acd','ser-pep'])
+                    plt.legend(list(self.distances[model][replica].keys()))
                     plt.show()
             else:
                 print('No distance data for model '+model)
 
         interact(options1,model = sorted(self.distances.keys()))
 
+    def get_distance_prob(self,threshold=0.45,group_metrics=None):
 
-    def get_distance_prob(self,threshold=0.45):
         data = {}
+        column_names = []
         for protein in self.distances:
             for replica in self.distances[protein]:
+                masks = {}
+                for metric in self.distances[protein][replica]:
+                    if (protein,replica) not in data:
+                        data[(protein,replica)] = []
 
-                n_frames = len(self.distances[protein][replica]['ser_his'])
-                ser_mask = [x < threshold for x in self.distances[protein][replica]['ser_his']]
-                asp_mask = [x < threshold for x in self.distances[protein][replica]['asp_his']]
-                pep_mask = [x < threshold for x in self.distances[protein][replica]['pep']]
-                ct_mask = [(x and y) for x,y in zip(ser_mask,asp_mask)]
-                all_mask = [(x and y and z) for x,y,z in zip(ser_mask,asp_mask,pep_mask)]
+                    n_frames = len(self.distances[protein][replica][metric])
+                    metric_mask = [x < threshold for x in self.distances[protein][replica][metric]]
 
-                data[(protein,replica)] = [np.mean(self.distances[protein][replica]['ser_his']),
-                                            np.std(self.distances[protein][replica]['ser_his']),
-                                            np.mean(self.distances[protein][replica]['asp_his']),
-                                            np.std(self.distances[protein][replica]['asp_his']),
-                                            np.mean(self.distances[protein][replica]['pep']),
-                                            np.std(self.distances[protein][replica]['pep']),
-                                            ser_mask.count(True)/n_frames,
-                                            asp_mask.count(True)/n_frames,
-                                            pep_mask.count(True)/n_frames,
-                                            ct_mask.count(True)/n_frames,
-                                            all_mask.count(True)/n_frames]
+                    masks[metric] = (metric_mask)
 
-                column_names = ['ser_his_mean','ser_his_std',
-                                'acd_his_mean','acd_his_std',
-                                'ser_pep_mean','ser_pep_std',
-                                'ser_his_per','acd_his_per',
-                                'ser_pep_per','ct_per','all_per']
+                    #data[(protein,replica)].append(np.mean(self.distances[protein][replica][metric])
+                    #data[(protein,replica)].append(np.std(self.distances[protein][replica][metric])
+                    data[(protein,replica)].append(metric_mask.count(True)/n_frames)
+                    if metric not in column_names:
+                        column_names.append(metric)
+
+                if group_metrics != None:
+                    for group in group_metrics:
+                        group_mask = [True]*n_frames
+                        for metric in masks:
+                            if metric in group_metrics[group]:
+                                group_mask = [x and y for x, y in zip(masks[metric], group_mask)]
+
+                        data[(protein,replica)].append(group_mask.count(True)/n_frames)
+                        column_names.append(group)
 
         df = pd.DataFrame(data).transpose()
 
         df.columns = column_names
 
         return(df)
+
+def _readGromacsIndexFile(file):
+
+    f = open(file, 'r')
+    groups = [x.replace('[','').replace(']','').replace('\n','').strip() for x in f.readlines() if x.startswith('[')]
+
+    group_dict = {}
+    for i,g in enumerate(groups):
+        group_dict[g] = str(i)
+
+    return group_dict

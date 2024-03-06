@@ -19,7 +19,7 @@ class sequenceModels:
         self.sequences_names = list(self.sequences.keys())
 
     def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=False, remove_msas=False, only_models=None):
+                       remove_extras=False, remove_msas=False, only_models=None, gpu_relax=True):
         """
         Set up AlphaFold predictions for the loaded sequneces
         """
@@ -47,7 +47,7 @@ class sequenceModels:
                         continue
 
                 for f in os.listdir(job_folder+'/output_models/'+model):
-                    if f == 'ranked_0.pdb':
+                    if f == 'ranked_0.pdb' or f == 'ranked__0.pdb.bz2':
                         excluded.append(model)
 
         jobs = []
@@ -59,6 +59,7 @@ class sequenceModels:
 
             if exclude_finished and model in excluded:
                 continue
+                
             sequence = {}
             sequence[model] = self.sequences[model]
             alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
@@ -68,6 +69,10 @@ class sequenceModels:
             command += ' --output_dir=$Path/output_models'
             command += ' --model_preset='+model_preset
             command += ' --max_template_date=2022-01-01'
+            if gpu_relax:
+                command += ' --use_gpu_relax=True'
+            else:
+                command += ' --use_gpu_relax=False'
             command += ' --random_seed 1\n'
             if remove_extras:
                 command += f'rm -r $Path/output_models/{model}/msas\n'

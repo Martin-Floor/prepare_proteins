@@ -5,108 +5,47 @@ import os
 import numpy as np
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-p", "--path")
-parser.add_argument("-t", "--triad")
-parser.add_argument("-l", "--lig_atoms",default=None)
+parser.add_argument("--trajectory", help='Path to the trajectory.')
+parser.add_argument("--topology", help='Path to the topology.')
+parser.add_argument("-m", "--metrics",default=None)
+
 args = parser.parse_args()
-path = '../'+args.path
-triad = args.triad.split(',')
-if args.lig_atoms != None:
-    with open(path+'/'+args.lig_atoms,'r') as f:
-        lig_atoms = json.load(f)
+
+trajectory = args.trajectory
+topology = args.topology
+if args.metrics != None:
+    with open(args.metrics,'r') as f:
+        metrics = json.load(f)
 else:
-    lig_atoms = None
+    metrics = None
 
+t = md.load(trajectory, top=topology)
 
-t = md.load(path+'/prot_md_cat_noPBC.xtc', top=path+'/prot_md_1_no_water.gro')
-#t = t[0:100] #Test#
-dist_dic = {}
-dist_dic['ser_his'] = []
-dist_dic['asp_his'] = []
-dist_dic['pep'] = []
-
-print('Calculating distances for model '+path.split('/')[-2]+' replica '+path.split('/')[-1])
+results = {}
 
 for frame in t:
     top = frame.top
+    for m in metrics:
+        if m not in results:
+            results[m] = []
 
-    ser = triad[0][1:]
-    his = triad[1].split('-')[0][1:]
-    his_name = triad[1].split('-')[1]
-    asp = triad[2][1:]
-    asp_res_name = triad[2][0]
+        distances = []
+        for d in metrics[m]:
 
-    ser_atom = top.select('resSeq '+ser+' and name HG')
-    heavy_ser_atom = top.select('resSeq '+ser+' and name OG')
+            atom1 = top.select('resSeq '+str(d[0][0])+' and name '+d[0][1])
+            atom2 = top.select('resSeq '+str(d[1][0])+' and name '+d[1][1])
 
-    if lig_atoms != None:
-        sel_command = ''
-        for atom in lig_atoms:
-            sel_command += '(resname '+atom[0]+' and resid '+atom[1]+' and name '+atom[2]+') or '
+            if len(atom1) < 1 or len(atom2) < 1:
+                raise ValueError('Something wrong with atom definition in metric '+m+'. Atom selection is empty')
 
-        #first_pep_res = top.atom(top.select('resname ACE')[1])
-        #resnum = first_pep_res.residue.index
-        #lig_atom_sel = top.select('resid '+str(int(carbonyl)+resnum)+' and name C')[0]
-        lig_atom_sel = top.select(sel_command[:-3])
+            if len(atom1) > 1 or len(atom2) > 1:
+                raise ValueError('Something wrong with atom definition in metric '+m+'. Atom selection is more than 1 atom')
 
-    '''
-    if his_name == 'NE2':
-        his_asp_atom = top.select('resSeq '+his+' and name HD1')
-        heavy_his_asp_atom = top.select('resSeq '+his+' and name ND1')
-        his_ser_atom = top.select('resSeq '+his+' and name NE2')
+            dist = float(np.linalg.norm(frame.xyz[0][atom1] - frame.xyz[0][atom2]))
 
-    elif his_name == 'ND1':
-        his_asp_atom = top.select('resSeq '+his+' and name HE2')
-        his_ser_atom = top.select('resSeq '+his+' and name ND1')
-    '''
+            distances.append(dist)
 
-    if  len(top.select('resSeq '+his+' and (name HE2 or name HD1)'))>1:
-            raise ValueError('Wrong Protonation')
+        results[m].append(min(distances))
 
-    if len(top.select('resSeq '+his+' and name HE2'))>0:
-        his_asp_atom = top.select('resSeq '+his+' and name HE2')
-        heavy_his_asp_atom = top.select('resSeq '+his+' and name NE2')
-        his_ser_atom = top.select('resSeq '+his+' and name ND1')
-    else:
-        his_asp_atom = top.select('resSeq '+his+' and name HD1')
-        heavy_his_asp_atom = top.select('resSeq '+his+' and name ND1')
-        his_ser_atom = top.select('resSeq '+his+' and name NE2')
-
-    if asp_res_name == 'D':
-        asp_atom1 = top.select('resSeq '+asp+' and name OD1')
-        asp_atom2 = top.select('resSeq '+asp+' and name OD2')
-
-    elif asp_res_name == 'E':
-        asp_atom1 = top.select('resSeq '+asp+' and name OE1')
-        asp_atom2 = top.select('resSeq '+asp+' and name OE2')
-
-    #if len(his_asp_atom) == 0:
-    #    print('WARNING: wrong protonation in model '+path.split('/')[-3])
-    #    break
-
-    dist1 = float(np.linalg.norm(frame.xyz[0][asp_atom1] - frame.xyz[0][his_asp_atom]))
-    dist2 = float(np.linalg.norm(frame.xyz[0][asp_atom2] - frame.xyz[0][his_asp_atom]))
-
-    if dist1 > dist2:
-        asp_atom = asp_atom2
-        asp_dist = dist2
-    else:
-        asp_atom = asp_atom1
-        asp_dist = dist1
-
-    dist_dic['ser_his'].append(float(np.linalg.norm(frame.xyz[0][ser_atom] - frame.xyz[0][his_ser_atom])))
-    dist_dic['asp_his'].append(asp_dist)
-
-    if lig_atoms != None:
-        lig_distances = []
-        for atom in lig_atom_sel:
-            lig_distances.append(float(np.linalg.norm(frame.xyz[0][heavy_ser_atom] - frame.xyz[0][atom])))
-        dist_dic['pep'].append(np.min(lig_distances))
-
-        #dist_dic['pep'].append(float(np.linalg.norm(frame.xyz[0][heavy_ser_atom] - frame.xyz[0][pep_atom])))
-    else:
-        dist_dic['pep'].append(0)
-
-with open(path+'/dist.json', 'w') as f:
-    json.dump(dist_dic,f)
-    print('Saved distances for model '+path.split('/')[-2]+' replica '+path.split('/')[-1])
+with open('dist.json', 'w') as f:
+    json.dump(results,f)
