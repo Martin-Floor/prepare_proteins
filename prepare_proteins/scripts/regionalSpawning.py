@@ -74,8 +74,11 @@ def getTotalEpochs():
     Get the total number of epochs
     """
 
+    total_epochs = 0
     for spawning in getSpawningIndexes():
-        print(spawning)
+        total_epochs += len(getSpawningEpochPaths(spawning))
+
+    return total_epochs
 
 def getReportFiles(epoch_folder):
     """
@@ -399,6 +402,9 @@ def extendOneEpoch(spawning_index, current_epoch):
 # Get spawning folders indexes
 spawning_indexes = getSpawningIndexes()
 
+if not spawning_indexes:
+    raise ValueError("There is not PELE output folders for any spawning folder")
+
 # Check last spawning
 current_spawning = spawning_indexes[-1]
 
@@ -414,7 +420,8 @@ while current_spawning <= max_spawnings:
     # Check if max number of iterations has been reached
     if max_iterations:
         total_iterations = getTotalEpochs()
-        print(total_iterations)
+        if total_iterations >= int(max_iterations):
+            break
 
     # Get last epoch for the current spawning
     epochs_paths = getSpawningEpochPaths(current_spawning)
@@ -537,5 +544,9 @@ while current_spawning <= max_spawnings:
         os.system(command)
 
 if verbose:
-    print(f'Maximum spawnings {max_spawnings} reached.')
-    print('The regional spawning scheme has finished')
+    if current_spawning >= max_spawnings:
+        print(f'Maximum spawnings {max_spawnings} reached.')
+        print('The regional spawning scheme has finished')
+    elif total_iterations >= int(max_iterations):
+        print(f'Maximum iterations {max_iterations} reached.')
+        print('The regional spawning scheme has finished')
