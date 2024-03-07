@@ -2869,7 +2869,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              extend_iterations=False, only_models=None, only_ligands=None, only_combinations=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
-                             ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None):
+                             ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None, max_regional_iterations=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -3551,6 +3551,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'metrics.json '
                         command += 'metrics_thresholds.json '
                         command += '--separator '+separator+' '
+                        if max_regional_iterations:
+                            command += '--max_iterations '+str(max_iterations)+' '
                         if angles:
                             command += '--angles '
                         command += '\n'
@@ -4650,6 +4652,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
                     metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
 
+            print(sorted(metric_acceptance.items()))
             lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
 
             if self.docking_metric_type[lowest_metric] == 'distance':

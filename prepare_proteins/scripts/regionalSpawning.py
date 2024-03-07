@@ -14,6 +14,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('metrics', default=None, help='Path to the JSON file contanining the regional definitions')
 parser.add_argument('metrics_thresholds', default=None, help='Path to the JSON file with the thresholds for defining the regions.')
 parser.add_argument('--separator', default='_', help='Separator used for the protein and ligand for file names')
+parser.add_argument('--max_iterations', default=None, help='Maximum number of iterations allowed.')
 parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawnings allowed.')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
 
@@ -21,7 +22,8 @@ args=parser.parse_args()
 
 ### Define variables
 separator = args.separator
-max_spawnings = args.max_spawnings
+max_iterations = args.max_iterations
+max_spawnings = int(args.max_spawnings)
 angles = args.angles
 
 verbose = True
@@ -66,6 +68,14 @@ def getSpawningEpochPaths(spawning_index):
         except:
             continue
     return {e:spawning_output_dir+'/'+str(e) for e in sorted(spawning_epochs_paths)}
+
+def getTotalEpochs():
+    """
+    Get the total number of epochs
+    """
+
+    for spawning in getSpawningIndexes():
+        print(spawning)
 
 def getReportFiles(epoch_folder):
     """
@@ -400,6 +410,11 @@ while current_spawning <= max_spawnings:
 
     with open(args.metrics_thresholds) as jf:
         metrics_thresholds = json.load(jf)
+
+    # Check if max number of iterations has been reached
+    if max_iterations:
+        total_iterations = getTotalEpochs()
+        print(total_iterations)
 
     # Get last epoch for the current spawning
     epochs_paths = getSpawningEpochPaths(current_spawning)
