@@ -15,7 +15,7 @@ class mafft:
         Execute a multiple sequence alignment of the input sequences
     """
 
-    def multipleSequenceAlignment(sequences, output=None, anysymbol=False, stdout=True, stderr=True, quiet=False):
+    def multipleSequenceAlignment(sequences, output=None, anysymbol=False, stdout=True, stderr=True, quiet=False, method='auto'):
         """
         Use the mafft executable to perform a multiple sequence alignment.
 
@@ -41,6 +41,9 @@ class mafft:
         target_file = '.'+str(uuid.uuid4())+'.fasta.tmp'
         output_file = '.'+str(uuid.uuid4())+'.out.tmp'
 
+        # Possible methods
+        methods = ['auto', 'localpair', 'globalpair', 'genafpair']
+
         # Write input file containing the sequences
         writeFastaFile(sequences, target_file)
 
@@ -56,7 +59,11 @@ class mafft:
             stderr = subprocess.DEVNULL
 
         # Calculate alignment
-        command = 'mafft --auto'
+        command = 'mafft'
+        if method not in methods:
+            raise ValueError(f'Method not in methods list: {methods}')
+        else:
+            command += ' --'+method
         if anysymbol:
             command += ' --anysymbol'
         if quiet:
