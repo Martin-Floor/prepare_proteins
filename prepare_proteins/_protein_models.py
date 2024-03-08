@@ -3032,8 +3032,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                                 v = 'angle_'+v
                                         reg_met[m].append(v)
 
-                            with open(protein_ligand_folder+'/metrics.json', 'w') as jf:
-                                json.dump(reg_met, jf)
+                        with open(protein_ligand_folder+'/metrics.json', 'w') as jf:
+                            json.dump(reg_met, jf)
 
                         # Check regional thresholds format
                         for m in regional_thresholds:
@@ -3049,8 +3049,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             if incorrect:
                                 raise ValueError('The regional thresholds should be floats or two-elements tuples of floats') # Review this check for more complex region definitions
 
-                            with open(protein_ligand_folder+'/metrics_thresholds.json', 'w') as jf:
-                                json.dump(regional_thresholds, jf)
+                        with open(protein_ligand_folder+'/metrics_thresholds.json', 'w') as jf:
+                            json.dump(regional_thresholds, jf)
 
                         protein_ligand_folder = protein_ligand_folder+'/0'
                         if not os.path.exists(protein_ligand_folder):
@@ -3080,7 +3080,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 chain.add(residue)
 
                     _saveStructureToPDB(structure, protein_ligand_folder+'/'+f)
-                    #self._write_conect_lines(protein, protein_ligand_folder+'/'+f, check_file=True)
+                    self._write_conect_lines(protein, protein_ligand_folder+'/'+f, check_file=True)
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
@@ -3371,7 +3371,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             _copyScriptFile(pele_folder, 'addAnglesToPELEConf.py')
                             command += 'python '+rel_path_to_root+'._addAnglesToPELEConf.py output '
                             command += '._angles.json '
-                            command += 'output/input/'+protein_ligand_folder.split("/")[1]+separator+pose+'_processed.pdb\n'
+                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
                         if energy_by_residue:
