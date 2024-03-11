@@ -3080,7 +3080,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 chain.add(residue)
 
                     _saveStructureToPDB(structure, protein_ligand_folder+'/'+f)
-                    self._write_conect_lines(protein, protein_ligand_folder+'/'+f, check_file=True)
+                    self._write_conect_lines(d, protein_ligand_folder+'/'+f, check_file=True)
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
