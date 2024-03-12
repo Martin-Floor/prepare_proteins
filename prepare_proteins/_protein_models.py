@@ -2974,8 +2974,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     fs = f.split(separator)
                     protein = fs[0]
                     ligand = fs[1]
-                    pose = f.replace('.pdb','')
-
+                    pose = fs[2].replace('.pdb','')
 
                     # Skip given protein models
                     if skip_models != None:
@@ -3080,7 +3079,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 residue.add(atom)
                                 chain.add(residue)
 
-                    print(d, f)
                     _saveStructureToPDB(structure, protein_ligand_folder+'/'+f)
                     self._write_conect_lines(protein, protein_ligand_folder+'/'+f, check_file=True)
 
