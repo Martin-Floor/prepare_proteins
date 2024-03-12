@@ -2963,9 +2963,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             rel_path_to_root = '../'*2
             _copyScriptFile(pele_folder, 'regionalSpawning.py')
 
-        if constraint_level > 0:
-            _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
-
         # Read docking poses information from models_folder and create pele input
         # folders.
         jobs = []
@@ -3382,6 +3379,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
+                        if constraint_level:
+                            # Copy script to add angles to pele.conf
+                            _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
+                            command += 'python '+rel_path_to_root+'._correctPositionalConstraints.py output '
+                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+                            continuation = True
+
                         if energy_by_residue:
                             command += 'python '+rel_path_to_root+ebr_script_name+' output --energy_type '+energy_by_residue_type
                             if isinstance(ligand_energy_groups, dict):
@@ -3566,9 +3570,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if angles:
                             command += '--angles '
                         command += '\n'
-
-                    # if constraint_level:
-
 
                     command += 'cd ../../'
                     jobs.append(command)
