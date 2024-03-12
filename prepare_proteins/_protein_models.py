@@ -2869,7 +2869,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                              extend_iterations=False, only_models=None, only_ligands=None, only_combinations=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
-                             ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None, max_regional_iterations=None):
+                             ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None, max_regional_iterations=None,
+                             constraint_level=1):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -2961,6 +2962,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if regional_spawning:
             rel_path_to_root = '../'*2
             _copyScriptFile(pele_folder, 'regionalSpawning.py')
+
+        if constraint_level > 0:
+            _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
 
         # Read docking poses information from models_folder and create pele input
         # folders.
@@ -3120,7 +3124,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
-                                'seed' ,'spawning']
+                                'seed' ,'spawning', 'constraint_level']
 
                     # Generate covalent parameterization setup
                     if not covalent_setup:
@@ -3190,7 +3194,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("equilibration: false\n")
                         if spawning != None:
                             iyf.write("spawning: '"+str(spawning)+"'\n")
-
+                        if constraint_level:
+                            iyf.write("constraint_level: '"+str(constraint_level)+"'\n")
                         if rescoring:
                             iyf.write("rescoring: true\n")
 
@@ -3252,7 +3257,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
                         if any([debug, energy_by_residue, peptide, nonbonded_energy != None,
-                               membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]):
+                               membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst, regional_spawning, constraint_level]):
                             iyf.write("debug: true\n")
 
                         if distances != None:
