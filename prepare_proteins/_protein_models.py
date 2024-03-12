@@ -2970,6 +2970,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 models = {}
                 ligand_pdb_name = {}
                 for f in os.listdir(models_folder+'/'+d):
+
                     fs = f.split(separator)
                     protein = fs[0]
                     ligand = fs[1]
@@ -3017,10 +3018,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                             # Check if distance_ and angle_ prefix were given
                             reg_met[m] = {}
-                            for protein in regional_metrics[m]:
-                                for ligand in regional_metrics[m][protein]:
+                            for p in regional_metrics[m]:
+                                for l in regional_metrics[m][p]:
                                     reg_met[m] = []
-                                    for v in regional_metrics[m][protein][ligand]:
+                                    for v in regional_metrics[m][p][l]:
 
                                         if '-' in v:
                                             v = v.replace('-', '_')
@@ -3079,8 +3080,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 residue.add(atom)
                                 chain.add(residue)
 
+                    print(d, f)
                     _saveStructureToPDB(structure, protein_ligand_folder+'/'+f)
-                    self._write_conect_lines(d, protein_ligand_folder+'/'+f, check_file=True)
+                    self._write_conect_lines(protein, protein_ligand_folder+'/'+f, check_file=True)
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
