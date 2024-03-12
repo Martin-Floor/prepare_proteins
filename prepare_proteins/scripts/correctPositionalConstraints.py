@@ -49,7 +49,7 @@ for c in constraints:
         chain, residue, atom = c['constrainThisAtom'].split(':')
         residue = int(residue)
         atom = atom.replace('_', '')
-        c['toThisPoint'] = list(coordinates[(chain, residue, atom)])
+        c['toThisPoint'] = [float(x) for x in coordinates[(chain, residue, atom)]]
 
 json_conf['commands'][0]['constraints'] = constraints
 
