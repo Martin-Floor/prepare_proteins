@@ -3366,6 +3366,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
 
+                        if regional_spawning:
+                            continuation = True
+
                         if angles:
                             # Copy individual angle definitions to each protein and ligand folder
                             if protein in angles and ligand in angles[protein]:
@@ -3563,6 +3566,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if angles:
                             command += '--angles '
                         command += '\n'
+
+                    # if constraint_level:
+
 
                     command += 'cd ../../'
                     jobs.append(command)
