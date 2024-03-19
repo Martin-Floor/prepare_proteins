@@ -3017,21 +3017,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 raise ValueError(f'Ligand {ligand} was not found in the regional_metrics dictionary for protein {protein} and metric {m}')
 
                             # Check if distance_ and angle_ prefix were given
-                            reg_met[m] = {}
-                            for p in regional_metrics[m]:
-                                for l in regional_metrics[m][p]:
-                                    reg_met[m] = []
-                                    for v in regional_metrics[m][p][l]:
-
-                                        if '-' in v:
-                                            v = v.replace('-', '_')
-
-                                        if not v.startswith('distance_') and not v.startswith('angle_'):
-                                            if len(v.split('_')) == 2:
-                                                v = 'distance_'+v
-                                            elif len(v.split('_')) == 3:
-                                                v = 'angle_'+v
-                                        reg_met[m].append(v)
+                            reg_met[m] = []
+                            for v in regional_metrics[m][protein][ligand]:
+                                if '-' in v:
+                                    v = v.replace('-', '_')
+                                if not v.startswith('distance_') and not v.startswith('angle_'):
+                                    if len(v.split('_')) == 2:
+                                        v = 'distance_'+v
+                                    elif len(v.split('_')) == 3:
+                                        v = 'angle_'+v
+                                reg_met[m].append(v)
 
                         with open(protein_ligand_folder+'/metrics.json', 'w') as jf:
                             json.dump(reg_met, jf)
