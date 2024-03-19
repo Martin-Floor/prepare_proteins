@@ -3508,7 +3508,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if not energy_by_residue:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
 
-                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]) and not continue_all:
+                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst, angles, regional_spawning, constraint_level]) and not continue_all:
                             continuation = False
                             debug = False
 
