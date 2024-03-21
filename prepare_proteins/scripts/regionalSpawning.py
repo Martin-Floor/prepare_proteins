@@ -515,11 +515,11 @@ while current_spawning <= max_spawnings:
                         restart_line = True
                     elif l.startswith('adaptive_restart: true'):
                         restart_adaptive_line = True
+                    restart_yaml.write(l)
                 else:
                     if l.startswith('debug:'):
                         continue
                 new_yaml.write(l)
-                restart_yaml.write(l)
 
             if angles and not restart_line:
                 restart_yaml.write('restart: true\n')
