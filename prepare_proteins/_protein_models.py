@@ -945,6 +945,14 @@ chain to use for each model with the chains option.' % model)
 
         reference = md.load(reference)
         rmsd = {}
+
+        # Check chain indexes input
+        if isinstance(trajectory_chain_indexes, list):
+            tci = {}
+            for model in self.models_names:
+                tci[model] = trajectory_chain_indexes
+            trajectory_chain_indexes = tci
+
         for model in self.models_names:
 
             if verbose:
@@ -952,8 +960,9 @@ chain to use for each model with the chains option.' % model)
 
             traj = md.load(self.models_paths[model])
             rmsd[model] = MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
-                                                         trajectory_chain_indexes=trajectory_chain_indexes,
-                                                         aligment_mode=aligment_mode, reference_residues=reference_residues)
+                                                                trajectory_chain_indexes=trajectory_chain_indexes[model],
+                                                                reference_chain_indexes=reference_chain_indexes,
+                                                                aligment_mode=aligment_mode, reference_residues=reference_residues)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
