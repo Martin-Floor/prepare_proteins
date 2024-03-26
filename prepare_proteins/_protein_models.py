@@ -490,7 +490,14 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Dictionary specifying which chain to use for each model
         """
 
-        for model in self.models_names:
+        # If only a single ID is given use it for all models
+        if isinstance(chains, str):
+            cd = {}
+            for model in self:
+                cd[model] = chains
+            chains = cd
+
+        for model in self:
             if isinstance(self.sequences[model], dict) and chains == None:
                 raise ValueError('There are multiple chains in model %s. Specify which \
 chain to use for each model with the chains option.' % model)
@@ -3045,11 +3052,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             rm = regional_thresholds[m]
 
                             incorrect = False
-                            if not isinstance(rm, float) and not isinstance(rm, tuple):
+                            if not isinstance(rm, (int, float)) and not isinstance(rm, tuple):
                                 incorrect = True
                             elif isinstance(rm, tuple) and len(rm) != 2:
                                 incorrect = True
-                            elif isinstance(rm, tuple) and (not isinstance(rm[0], (int,float)) or not isinstance(rm[1], (int,float))):
+                            elif isinstance(rm, tuple) and (not isinstance(rm[0], (int, float)) or not isinstance(rm[1], (int,float))):
                                 incorrect = True
                             if incorrect:
                                 raise ValueError('The regional thresholds should be floats or two-elements tuples of floats') # Review this check for more complex region definitions
