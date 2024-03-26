@@ -4592,7 +4592,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             metric_label = metric
 
                         # Filter values according to the type of threshold given
-                        if isinstance(filter_values[metric], float):
+                        if isinstance(filter_values[metric], (float, int)):
                             ligand_data = ligand_data[ligand_data[metric_label] <= filter_values[metric]]
                         elif isinstance(filter_values[metric], (tuple,list)):
                             ligand_data = ligand_data[ligand_data[metric_label] >= filter_values[metric][0]]
@@ -4667,7 +4667,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         metric_label = 'metric_'+metric
                     else:
                         metric_label = metric
-                    if isinstance(metrics[metric], float):
+                    if isinstance(metrics[metric], (float, int)):
                         metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
                     elif isinstance(metrics[metric], (tuple, list)):
                         metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
@@ -4680,7 +4680,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if self.docking_metric_type[lowest_metric_doc] == 'angle':
                     step = angle_step
 
-                if isinstance(metrics[lowest_metric], float):
+                if isinstance(metrics[lowest_metric], (float, int)):
                     metrics[lowest_metric] += step
 
                 # Change to list to allow item assignment
