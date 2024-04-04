@@ -478,6 +478,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return self.sequences
 
+    def renumberModels(self):
+        """
+        Renumber every PDB chain residues from 1 onward.
+        """
+
+        for model in self:
+            for c in self.structures[model].get_chains():
+                for i,r in enumerate(c):
+                    r.id = (r.id[0], i+1, r.id[2])
+
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
         Calculate a Multiple Sequence Alignment from the current models' sequences.
@@ -2689,6 +2699,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             other_atoms = _getStructureCoordinates(structure, sidechain=sidechain,
                                                    exclude_residues=residue_selection[model], return_atoms=True)
 
+            if selected_coordinates.size == 0:
+                raise ValueError(f'Problem matching the given residue selection for model {model}')
+
             # Compute the distance matrix between the two set of coordinates
             M = distance_matrix(selected_coordinates, other_coordinates)
             in_contact[model] = np.array(other_atoms)[np.argwhere(M <= distance_threshold)[:,1]]
@@ -4666,6 +4679,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     mask.append(False)
 
             remaining_data = self.docking_data[mask]
+
             # Compute metric acceptance for each metric for all missing pairs
             if not remaining_data.empty:
                 metric_acceptance = {}
