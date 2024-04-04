@@ -379,7 +379,7 @@ def getTopologyFile():
         if f.endswith('_processed.pdb'):
             return cwd+'/0/output/input/'+f
 
-def extractPoses(data, spawning, output_file):
+def extractPoses(data, spawning, output_file, verbose=True):
     """
     Extract poses in the given dataframe
     """
@@ -392,7 +392,10 @@ def extractPoses(data, spawning, output_file):
     structure = parser.get_structure('topology', topology_file)
 
     epochs_paths = getSpawningEpochPaths(spawning)
-    epochs = data.index.levels[0]
+    epochs = sorted(list(set(data.index.get_level_values('Epoch'))))
+
+    if data.shape[0] != 1:
+        print('Code not fully implemented for extracting more than one pose!')
 
     for epoch in epochs:
 
@@ -400,6 +403,8 @@ def extractPoses(data, spawning, output_file):
 
         # Give traj coordinates to PDB structure
         for e, t, s in data.index:
+            if verbose:
+                print(f'Extracting pose from spawning {spawning}, epoch {epoch}, trajectory {t}, and step {s}')
             # output_name = output_file # Redefine when implemented
             traj = md.load(trajectory_files[t], top=topology_file)
             for pdb_atom, xtc_atom in zip(structure.get_atoms(), traj.topology.atoms):
