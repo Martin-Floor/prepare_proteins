@@ -54,7 +54,7 @@ def getSpawningIndexes():
 
 def getSpawningEpochPaths(spawning_index):
     """
-    Get the sorted integers for the integer-named (eochs) folders from the pele output directory.
+    Get the sorted integers for the integer-named (epochs) folders from the pele output directory.
     """
     spawning_epochs_paths = []
     spawning_output_dir = cwd+'/'+str(spawning_index)+'/output/output'
@@ -182,16 +182,10 @@ def clusterTrajectories(trajectory_files, report_data, metric):
 
     print(trajectory_files)
 
-def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
-                   # late_arrival=0.2, conditional=0.1):
+def combineDistancesIntoMetrics(metrics, dataframe):
     """
-    Check iteration acceptance probability for the defined regions.
+    Add to dataframe columns for distance combination into metrics
     """
-
-    # Get iteration data
-    report_files = getReportFiles(epoch_folder)
-    trajectory_files = getTrajectoryFiles(epoch_folder)
-    report_data = readIterationFiles(report_files)
 
     # Add metrics to dataframe
     metric_type = {} # Store metric type
@@ -213,7 +207,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
             metric_type[m] = 'distance'
             # Combine distances into metrics
             distances = [d for d in metrics[m] if d.startswith('distance_')]
-            report_data[m] = report_data[distances].min(axis=1).tolist()
+            dataframe[m] = dataframe[distances].min(axis=1).tolist()
 
         elif angles:
             metric_type[m] = 'angle'
@@ -221,7 +215,22 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
             angles = [d for d in metrics[m] if d.startswith('angle_')]
             if len(angles) > 1:
                 raise ValueError('Combining more than one angle into a metric is not currently supported.')
-            report_data[m] = report_data[angles].min(axis=1).tolist()
+            dataframe[m] = dataframe[angles].min(axis=1).tolist()
+
+    return metric_type
+
+def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
+                   # late_arrival=0.2, conditional=0.1):
+    """
+    Check iteration acceptance probability for the defined regions.
+    """
+
+    # Get iteration data
+    report_files = getReportFiles(epoch_folder)
+    trajectory_files = getTrajectoryFiles(epoch_folder)
+    report_data = readIterationFiles(report_files)
+
+    metric_type = combineDistancesIntoMetrics(metrics, report_data)
 
     # Add region membership information to report dataframe
     region_acceptance = np.ones(report_data.shape[0], dtype=bool)
@@ -261,21 +270,37 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
 
     accepted_iteration = True
     best_pose = None
+
     if P < fraction:
         if verbose:
             print('Continuation was rejected')
-
-        # Cluster trajectories by ligand
-        # clusterTrajectories(trajectory_files, report_data, 'Binding Energy')
 
         # Find best poses iteratively
         best_pose = np.empty(0) # Placeholder
         distance_step = 0.1
         angular_step = 1.0
+
+        epochs_paths = getSpawningEpochPaths(current_spawning)
+        spawning_data = None
+        for i in range(current_epoch+1):
+            # folder_prefix = '/'.join(epoch_folder.split('/')[:-1])
+
+            report_files = getReportFiles(epochs_paths[i])
+            trajectory_files = getTrajectoryFiles(epoch_folder)
+            report_data = readIterationFiles(report_files)
+            report_data['Epoch'] = [i]*report_data.shape[0]
+            report_data = report_data.reset_index().set_index(['Epoch', 'Trajectory', 'Accepted PELE Step'])
+            if isinstance(spawning_data, type(None)):
+                spawning_data = report_data
+            else:
+                spawning_data = pd.concat([spawning_data, report_data])
+
+        metric_type = combineDistancesIntoMetrics(metrics, spawning_data)
+
         while best_pose.shape[0] == 0:
 
             # Filter dataframe by metrics' thresholds
-            filtered = report_data
+            filtered = spawning_data
             metric_acceptance = {}
             for m in metrics:
 
@@ -285,12 +310,12 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
 
                 # Filter by values lower than the given value
                 if isinstance(metrics_thresholds[m], float):
-                    metric_acceptance[m] = report_data[report_data[m] <= metrics_thresholds[m]].shape[0]
+                    metric_acceptance[m] = spawning_data[spawning_data[m] <= metrics_thresholds[m]].shape[0]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m]]
 
                 # Filter by values inside the two values
                 elif isinstance(metrics_thresholds[m], list):
-                    metric_filter = report_data[metrics_thresholds[m][0] <= report_data[m]]
+                    metric_filter = spawning_data[metrics_thresholds[m][0] <= spawning_data[m]]
                     metric_acceptance[m] = metric_filter[metric_filter[m] <= metrics_thresholds[m][1]].shape[0]
                     filtered = filtered[metrics_thresholds[m][0] <= filtered[m]]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
@@ -354,24 +379,31 @@ def getTopologyFile():
         if f.endswith('_processed.pdb'):
             return cwd+'/0/output/input/'+f
 
-def extractPoses(epoch_folder, data, output_file):
+def extractPoses(data, spawning, output_file):
     """
     Extract poses in the given dataframe
     """
 
-    trajectory_files = getTrajectoryFiles(epoch_folder)
+    # Get topology
     topology_file = getTopologyFile()
 
     # Read topology as Bio.PDB.Structure
     parser = PDB.PDBParser()
     structure = parser.get_structure('topology', topology_file)
 
-    # Give traj coordinates to PDB structure
-    for t, s in data.index:
-        # output_name = output_file # Redefine when implemented
-        traj = md.load(trajectory_files[t], top=topology_file)
-        for pdb_atom, xtc_atom in zip(structure.get_atoms(), traj.topology.atoms):
-            pdb_atom.coord = traj.xyz[s][xtc_atom.index]*10.0
+    epochs_paths = getSpawningEpochPaths(spawning)
+    epochs = data.index.levels[0]
+
+    for epoch in epochs:
+
+        trajectory_files = getTrajectoryFiles(epochs_paths[epoch])
+
+        # Give traj coordinates to PDB structure
+        for e, t, s in data.index:
+            # output_name = output_file # Redefine when implemented
+            traj = md.load(trajectory_files[t], top=topology_file)
+            for pdb_atom, xtc_atom in zip(structure.get_atoms(), traj.topology.atoms):
+                pdb_atom.coord = traj.xyz[s][xtc_atom.index]*10.0
 
     io = PDB.PDBIO()
     io.set_structure(structure)
@@ -490,7 +522,7 @@ while current_spawning <= max_spawnings:
 
         # Extract best pose to current spawning folder
         output_pdb = str(current_spawning)+'/'+protein+separator+ligand+separator+pose+'.pdb'
-        extractPoses(epochs_paths[current_epoch], best_pose, output_pdb)
+        extractPoses(best_pose, current_spawning-1, output_pdb)
 
         # Set PELE input files
         new_yaml = open(str(current_spawning)+'/input.yaml', 'w')
