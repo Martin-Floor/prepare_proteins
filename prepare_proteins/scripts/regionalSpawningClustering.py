@@ -7,6 +7,8 @@ import numpy as np
 import mdtraj as md
 from Bio import PDB
 
+import time
+
 import argparse
 
 # ## Define input variables
@@ -54,7 +56,7 @@ def getSpawningIndexes():
 
 def getSpawningEpochPaths(spawning_index):
     """
-    Get the sorted integers for the integer-named (epochs) folders from the pele output directory.
+    Get the sorted integers for the integer-named (eochs) folders from the pele output directory.
     """
     spawning_epochs_paths = []
     spawning_output_dir = cwd+'/'+str(spawning_index)+'/output/output'
@@ -172,20 +174,156 @@ def readIterationFiles(report_files):
 
     return report_data
 
-def clusterTrajectories(trajectory_files, report_data, metric):
+def clusterTrajectories(trajectory_dict, report_data, metric, check_membership=None, verbose=True):
     """
     Cluster trajectories by ligand RMSD and taking as cluster centers the structure
     with the lowest value in the given metric.
     """
 
+    Ti = time.time()
+
     regional_mask = report_data['Regional Acceptance'].to_numpy()
 
-    print(trajectory_files)
+    if np.sum(regional_mask) == 0:
+        print('No poses were found in region. Skipping clustering.')
+        return
 
-def combineDistancesIntoMetrics(metrics, dataframe):
+    if verbose:
+        print(f'Clustering {np.sum(regional_mask)} poses')
+
+    # Define topology file
+    topology_file = getTopologyFile()
+    topology = md.load(topology_file)
+
+    # Load frames within region
+    traj_files = [trajectory_dict[t] for t in trajectory_dict]
+    traj = md.load(traj_files, top=topology_file)
+    traj = traj[regional_mask]
+
+    # Get binding energies
+    energies = report_data['Binding Energy'].to_numpy()
+    energies = energies[regional_mask]
+
+    # Superpose trajectory into protein atoms
+    protein_atoms = traj.topology.select('protein')
+    traj.superpose(topology, atom_indices=protein_atoms)
+
+    # Get ligand indexes
+    ligand_name = getLigandResidueName()
+    ligand_indexes = []
+    for atom in topology.topology.atoms:
+        if atom.residue.name == ligand_name:
+            ligand_indexes.append(atom.index)
+
+    # Cluster trajectories
+    assigned_clusters = {}
+    S = []
+    for threshold in np.arange(1.0, 20.1, 0.5):
+        assigned_clusters[threshold], silhouetteS = clusterByRMSD(traj,  threshold, ligand_indexes, energies)
+        S.append(silhouetteS)
+        n_clusters = np.max(list(assigned_clusters[threshold].values()))
+        if n_clusters == 1:
+            break
+
+    print(assigned_clusters.keys())
+    selected_threshold = list(assigned_clusters.keys())[np.argmax(S)]
+
+    # Get full cluster memberships
+    index = 0
+    cluster_membership = []
+    for i in regional_mask:
+        if i:
+            cluster_membership.append(assigned_clusters[selected_threshold][index])
+            index += 1
+        else:
+            cluster_membership.append(None)
+
+    # Check memberships
+    if check_membership:
+        print(check_membership)
+
+    if verbose:
+        T = time.time() - Ti
+        print(f'Clustered ligand trajectories at {selected_threshold} Å RMSD in %.2f seconds.' % T)
+
+    return cluster_membership
+
+def clusterByRMSD(traj, rmsd_threshold, atom_indices, energies):
     """
-    Add to dataframe columns for distance combination into metrics
+    Cluster trajectories by RMSD. The silhouette score is computed and returned for
+    later estimation of the optimal number of clusters.
     """
+    # Cluster trajectories by RMSD
+    assigned_indexes = {}
+    cluster = 1
+    cluster_center = {}
+    while len(assigned_indexes) < traj.n_frames:
+
+        index_mapping = {}
+        current_indexes = []
+        ni = 0
+        for i in range(traj.n_frames):
+            if i not in assigned_indexes:
+                current_indexes.append(i)
+                index_mapping[ni] = i
+                ni += 1
+
+        # Get not assigned trajectory
+        rmsd_traj = traj[current_indexes]
+        rmsd_energies = energies[current_indexes]
+
+        # Get best model based on best energy
+        best_model = rmsd_traj[rmsd_energies.argmin()]
+
+        # Compute RMSD
+        rmsd = md.rmsd(rmsd_traj, best_model, atom_indices=atom_indices)*10.0
+        cluster_indexes = np.argwhere(rmsd <= rmsd_threshold).flatten()
+
+        # Store index of centroid
+        cluster_center[cluster] = index_mapping[rmsd_energies.argmin()]
+
+        for i in cluster_indexes:
+            assigned_indexes[index_mapping[i]] = cluster
+
+        cluster += 1
+
+    # Compute silhouette score
+
+    # Compute inter cluster distances
+    centers = [cluster_center[cluster] for cluster in cluster_center]
+    traj_centers = traj[centers]
+    B = np.zeros((traj_centers.n_frames, traj_centers.n_frames))
+    for i in range(traj_centers.n_frames):
+        B[i] = md.rmsd(traj_centers, traj_centers[i], atom_indices=atom_indices)*10.0
+    B = np.average(B)
+
+    # Compute inner cluster RMSD
+
+    ### All to all implementation (consider only distance to centers for fastest computation.)
+    A = np.array([])
+    for cluster in sorted(set(assigned_indexes.values())):
+        cluster_indexes = [i for i in assigned_indexes if assigned_indexes[i] == cluster]
+        traj_clusters = traj[cluster_indexes]
+        a = np.zeros((traj_clusters.n_frames, traj_clusters.n_frames))
+        for i in range(traj_clusters.n_frames):
+            a[i] = md.rmsd(traj_clusters, traj_clusters[i], atom_indices=atom_indices)*10.0
+        A = np.concatenate([A, a.flatten()])
+
+    A = np.average(A)
+    S = (B-A)/np.max([A,B])
+
+    return assigned_indexes, S
+
+def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
+                   # late_arrival=0.2, conditional=0.1):
+    """
+    Check iteration acceptance probability for the defined regions.
+    """
+
+    # Get iteration data
+    report_files = getReportFiles(epoch_folder)
+    trajectory_files = getTrajectoryFiles(epoch_folder)
+    report_data = readIterationFiles(report_files)
 
     # Add metrics to dataframe
     metric_type = {} # Store metric type
@@ -207,7 +345,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             metric_type[m] = 'distance'
             # Combine distances into metrics
             distances = [d for d in metrics[m] if d.startswith('distance_')]
-            dataframe[m] = dataframe[distances].min(axis=1).tolist()
+            report_data[m] = report_data[distances].min(axis=1).tolist()
 
         elif angles:
             metric_type[m] = 'angle'
@@ -215,22 +353,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             angles = [d for d in metrics[m] if d.startswith('angle_')]
             if len(angles) > 1:
                 raise ValueError('Combining more than one angle into a metric is not currently supported.')
-            dataframe[m] = dataframe[angles].min(axis=1).tolist()
-
-    return metric_type
-
-def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
-                   # late_arrival=0.2, conditional=0.1):
-    """
-    Check iteration acceptance probability for the defined regions.
-    """
-
-    # Get iteration data
-    report_files = getReportFiles(epoch_folder)
-    trajectory_files = getTrajectoryFiles(epoch_folder)
-    report_data = readIterationFiles(report_files)
-
-    metric_type = combineDistancesIntoMetrics(metrics, report_data)
+            report_data[m] = report_data[angles].min(axis=1).tolist()
 
     # Add region membership information to report dataframe
     region_acceptance = np.ones(report_data.shape[0], dtype=bool)
@@ -266,41 +389,29 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
     P = sum([1.0 for t in probability if probability[t] >= theta])/len(probability)
 
     if verbose:
-        print(f'The fraction of trajectories in the region is {P}')
+        print(f'The fraction of trajectories in the region is %.4f' % P)
 
     accepted_iteration = True
     best_pose = None
-
     if P < fraction:
         if verbose:
             print('Continuation was rejected')
+
+        clusters = None
+        if current_spawning > 0:
+            # Cluster trajectories by ligand
+            if verbose:
+                print('Clustering trajectories by ligand conformation')
+            clusters = clusterTrajectories(trajectory_files, report_data, 'Binding Energy')
 
         # Find best poses iteratively
         best_pose = np.empty(0) # Placeholder
         distance_step = 0.1
         angular_step = 1.0
-
-        epochs_paths = getSpawningEpochPaths(current_spawning)
-        spawning_data = None
-        for i in range(current_epoch+1):
-            # folder_prefix = '/'.join(epoch_folder.split('/')[:-1])
-
-            report_files = getReportFiles(epochs_paths[i])
-            trajectory_files = getTrajectoryFiles(epoch_folder)
-            report_data = readIterationFiles(report_files)
-            report_data['Epoch'] = [i]*report_data.shape[0]
-            report_data = report_data.reset_index().set_index(['Epoch', 'Trajectory', 'Accepted PELE Step'])
-            if isinstance(spawning_data, type(None)):
-                spawning_data = report_data
-            else:
-                spawning_data = pd.concat([spawning_data, report_data])
-
-        metric_type = combineDistancesIntoMetrics(metrics, spawning_data)
-
         while best_pose.shape[0] == 0:
 
             # Filter dataframe by metrics' thresholds
-            filtered = spawning_data
+            filtered = report_data
             metric_acceptance = {}
             for m in metrics:
 
@@ -310,12 +421,12 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
 
                 # Filter by values lower than the given value
                 if isinstance(metrics_thresholds[m], float):
-                    metric_acceptance[m] = spawning_data[spawning_data[m] <= metrics_thresholds[m]].shape[0]
+                    metric_acceptance[m] = report_data[report_data[m] <= metrics_thresholds[m]].shape[0]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m]]
 
                 # Filter by values inside the two values
                 elif isinstance(metrics_thresholds[m], list):
-                    metric_filter = spawning_data[metrics_thresholds[m][0] <= spawning_data[m]]
+                    metric_filter = report_data[metrics_thresholds[m][0] <= report_data[m]]
                     metric_acceptance[m] = metric_filter[metric_filter[m] <= metrics_thresholds[m][1]].shape[0]
                     filtered = filtered[metrics_thresholds[m][0] <= filtered[m]]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
@@ -371,44 +482,48 @@ def getTrajectoryFiles(iteration_folder):
 
     return trajectory_files
 
-def getTopologyFile():
+def getTopologyFile(spawning=None):
     """
     Get the tolopogy file for the PELE run
     """
-    for f in os.listdir(cwd+'/0/output/input/'):
+    if not spawning:
+        spawning = '0'
+    else:
+        spawning = str(spawning)
+
+    for f in os.listdir(cwd+'/'+spawning+'/output/input/'):
         if f.endswith('_processed.pdb'):
+            return cwd+'/'+spawning+'/output/input/'+f
+
+def getLigandFile():
+    for f in os.listdir(cwd+'/0/output/input/'):
+        if f == 'ligand.pdb':
             return cwd+'/0/output/input/'+f
 
-def extractPoses(data, spawning, output_file, verbose=True):
+def getLigandResidueName():
+    ligand_file = getLigandFile()
+    ligand_traj = md.load(ligand_file)
+    ligand_residue = [r for r in ligand_traj.topology.residues][0]
+    return ligand_residue.name
+
+def extractPoses(epoch_folder, data, output_file):
     """
     Extract poses in the given dataframe
     """
 
-    # Get topology
+    trajectory_files = getTrajectoryFiles(epoch_folder)
     topology_file = getTopologyFile()
 
     # Read topology as Bio.PDB.Structure
     parser = PDB.PDBParser()
     structure = parser.get_structure('topology', topology_file)
 
-    epochs_paths = getSpawningEpochPaths(spawning)
-    epochs = sorted(list(set(data.index.get_level_values('Epoch'))))
-
-    if data.shape[0] != 1:
-        print('Code not fully implemented for extracting more than one pose!')
-
-    for epoch in epochs:
-
-        trajectory_files = getTrajectoryFiles(epochs_paths[epoch])
-
-        # Give traj coordinates to PDB structure
-        for e, t, s in data.index:
-            if verbose:
-                print(f'Extracting pose from spawning {spawning}, epoch {epoch}, trajectory {t}, and step {s}')
-            # output_name = output_file # Redefine when implemented
-            traj = md.load(trajectory_files[t], top=topology_file)
-            for pdb_atom, xtc_atom in zip(structure.get_atoms(), traj.topology.atoms):
-                pdb_atom.coord = traj.xyz[s][xtc_atom.index]*10.0
+    # Give traj coordinates to PDB structure
+    for t, s in data.index:
+        # output_name = output_file # Redefine when implemented
+        traj = md.load(trajectory_files[t], top=topology_file)
+        for pdb_atom, xtc_atom in zip(structure.get_atoms(), traj.topology.atoms):
+            pdb_atom.coord = traj.xyz[s][xtc_atom.index]*10.0
 
     io = PDB.PDBIO()
     io.set_structure(structure)
@@ -527,7 +642,7 @@ while current_spawning <= max_spawnings:
 
         # Extract best pose to current spawning folder
         output_pdb = str(current_spawning)+'/'+protein+separator+ligand+separator+pose+'.pdb'
-        extractPoses(best_pose, current_spawning-1, output_pdb)
+        extractPoses(epochs_paths[current_epoch], best_pose, output_pdb)
 
         # Set PELE input files
         new_yaml = open(str(current_spawning)+'/input.yaml', 'w')
@@ -552,11 +667,11 @@ while current_spawning <= max_spawnings:
                         restart_line = True
                     elif l.startswith('adaptive_restart: true'):
                         restart_adaptive_line = True
-                    restart_yaml.write(l)
                 else:
                     if l.startswith('debug:'):
                         continue
                 new_yaml.write(l)
+                restart_yaml.write(l)
 
             if angles and not restart_line:
                 restart_yaml.write('restart: true\n')

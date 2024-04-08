@@ -1,5 +1,5 @@
 from ._protein_models import proteinModels, _readPDB, _saveStructureToPDB
-from ._protein_models import _copyScriptFile
+from ._protein_models import _copyScriptFile, _readRosettaScoreFile
 from ._prepare_sequences import sequenceModels
 from ._md_analysis import md_analysis
 from ._tricks import tricks

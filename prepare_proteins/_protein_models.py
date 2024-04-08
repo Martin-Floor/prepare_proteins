@@ -478,6 +478,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return self.sequences
 
+    def renumberModels(self):
+        """
+        Renumber every PDB chain residues from 1 onward.
+        """
+
+        for model in self:
+            for c in self.structures[model].get_chains():
+                for i,r in enumerate(c):
+                    r.id = (r.id[0], i+1, r.id[2])
+
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
         Calculate a Multiple Sequence Alignment from the current models' sequences.
@@ -490,7 +500,14 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Dictionary specifying which chain to use for each model
         """
 
-        for model in self.models_names:
+        # If only a single ID is given use it for all models
+        if isinstance(chains, str):
+            cd = {}
+            for model in self:
+                cd[model] = chains
+            chains = cd
+
+        for model in self:
             if isinstance(self.sequences[model], dict) and chains == None:
                 raise ValueError('There are multiple chains in model %s. Specify which \
 chain to use for each model with the chains option.' % model)
@@ -945,6 +962,14 @@ chain to use for each model with the chains option.' % model)
 
         reference = md.load(reference)
         rmsd = {}
+
+        # Check chain indexes input
+        if isinstance(trajectory_chain_indexes, list):
+            tci = {}
+            for model in self.models_names:
+                tci[model] = trajectory_chain_indexes
+            trajectory_chain_indexes = tci
+
         for model in self.models_names:
 
             if verbose:
@@ -952,8 +977,9 @@ chain to use for each model with the chains option.' % model)
 
             traj = md.load(self.models_paths[model])
             rmsd[model] = MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
-                                                         trajectory_chain_indexes=trajectory_chain_indexes,
-                                                         aligment_mode=aligment_mode, reference_residues=reference_residues)
+                                                                trajectory_chain_indexes=trajectory_chain_indexes[model],
+                                                                reference_chain_indexes=reference_chain_indexes,
+                                                                aligment_mode=aligment_mode, reference_residues=reference_residues)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
@@ -2673,6 +2699,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             other_atoms = _getStructureCoordinates(structure, sidechain=sidechain,
                                                    exclude_residues=residue_selection[model], return_atoms=True)
 
+            if selected_coordinates.size == 0:
+                raise ValueError(f'Problem matching the given residue selection for model {model}')
+
             # Compute the distance matrix between the two set of coordinates
             M = distance_matrix(selected_coordinates, other_coordinates)
             in_contact[model] = np.array(other_atoms)[np.argwhere(M <= distance_threshold)[:,1]]
@@ -2869,7 +2898,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                              extend_iterations=False, only_models=None, only_ligands=None, only_combinations=None, ligand_templates=None, seed=12345, log_file=False,
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
-                             ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None):
+                             ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None, max_regional_iterations=None,
+                             constraint_level=1):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -2970,11 +3000,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 models = {}
                 ligand_pdb_name = {}
                 for f in os.listdir(models_folder+'/'+d):
+
                     fs = f.split(separator)
                     protein = fs[0]
                     ligand = fs[1]
                     pose = fs[2].replace('.pdb','')
-
 
                     # Skip given protein models
                     if skip_models != None:
@@ -3016,23 +3046,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 raise ValueError(f'Ligand {ligand} was not found in the regional_metrics dictionary for protein {protein} and metric {m}')
 
                             # Check if distance_ and angle_ prefix were given
-                            reg_met[m] = {}
-                            for protein in regional_metrics[m]:
-                                for ligand in regional_metrics[m][protein]:
-                                    reg_met[m] = []
-                                    for v in regional_metrics[m][protein][ligand]:
+                            reg_met[m] = []
+                            for v in regional_metrics[m][protein][ligand]:
+                                if '-' in v:
+                                    v = v.replace('-', '_')
+                                if not v.startswith('distance_') and not v.startswith('angle_'):
+                                    if len(v.split('_')) == 2:
+                                        v = 'distance_'+v
+                                    elif len(v.split('_')) == 3:
+                                        v = 'angle_'+v
+                                reg_met[m].append(v)
 
-                                        if '-' in v:
-                                            v = v.replace('-', '_')
-
-                                        if not v.startswith('distance_') and not v.startswith('angle_'):
-                                            if len(v.split('_')) == 2:
-                                                v = 'distance_'+v
-                                            elif len(v.split('_')) == 3:
-                                                v = 'angle_'+v
-                                        reg_met[m].append(v)
-
-                        with open(pele_folder+'/'+protein+separator+ligand+'/metrics.json', 'w') as jf:
+                        with open(protein_ligand_folder+'/metrics.json', 'w') as jf:
                             json.dump(reg_met, jf)
 
                         # Check regional thresholds format
@@ -3040,16 +3065,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                             rm = regional_thresholds[m]
 
                             incorrect = False
-                            if not isinstance(rm, float) and not isinstance(rm, tuple):
+                            if not isinstance(rm, (int, float)) and not isinstance(rm, tuple):
                                 incorrect = True
                             elif isinstance(rm, tuple) and len(rm) != 2:
                                 incorrect = True
-                            elif isinstance(rm, tuple) and (not isinstance(rm[0], (int,float)) or not isinstance(rm[1], (int,float))):
+                            elif isinstance(rm, tuple) and (not isinstance(rm[0], (int, float)) or not isinstance(rm[1], (int,float))):
                                 incorrect = True
                             if incorrect:
                                 raise ValueError('The regional thresholds should be floats or two-elements tuples of floats') # Review this check for more complex region definitions
 
-                        with open(pele_folder+'/'+protein+separator+ligand+'/metrics_thresholds.json', 'w') as jf:
+                        with open(protein_ligand_folder+'/metrics_thresholds.json', 'w') as jf:
                             json.dump(regional_thresholds, jf)
 
                         protein_ligand_folder = protein_ligand_folder+'/0'
@@ -3116,10 +3141,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
+                    #protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
-                                'seed' ,'spawning']
+                                'seed' ,'spawning', 'constraint_level']
 
                     # Generate covalent parameterization setup
                     if not covalent_setup:
@@ -3189,7 +3215,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             iyf.write("equilibration: false\n")
                         if spawning != None:
                             iyf.write("spawning: '"+str(spawning)+"'\n")
-
+                        if constraint_level:
+                            iyf.write("constraint_level: '"+str(constraint_level)+"'\n")
                         if rescoring:
                             iyf.write("rescoring: true\n")
 
@@ -3251,7 +3278,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # a scond script will modify the PELE.conf file to set up the energy
                         # by residue calculation.
                         if any([debug, energy_by_residue, peptide, nonbonded_energy != None,
-                               membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]):
+                               membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst, regional_spawning, constraint_level]):
                             iyf.write("debug: true\n")
 
                         if distances != None:
@@ -3360,6 +3387,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if not continuation:
                         command += 'python -m pele_platform.main input.yaml\n'
 
+                        if regional_spawning:
+                            continuation = True
+
                         if angles:
                             # Copy individual angle definitions to each protein and ligand folder
                             if protein in angles and ligand in angles[protein]:
@@ -3370,6 +3400,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             _copyScriptFile(pele_folder, 'addAnglesToPELEConf.py')
                             command += 'python '+rel_path_to_root+'._addAnglesToPELEConf.py output '
                             command += '._angles.json '
+                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+                            continuation = True
+
+                        if constraint_level:
+                            # Copy script to add angles to pele.conf
+                            _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
+                            command += 'python '+rel_path_to_root+'._correctPositionalConstraints.py output '
                             command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
@@ -3396,7 +3433,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if protein in bias_to_point:
                             command += 'python '+rel_path_to_root+btp_script+' '
                             command += "output " # I think we should change this for a variable
-                            command += ",".join([str(x) for x in bias_to_point[protein]])+'\n'
+                            command += "point_"+",".join([str(x) for x in bias_to_point[protein]])+" "
+                            command += "--epsilon "+str(epsilon)+"\n"
                             continuation = True
 
                         if protein in com_bias1 and ligand in com_bias1[protein]:
@@ -3495,11 +3533,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if extend_iterations:
                             _copyScriptFile(pele_folder, 'extendAdaptiveIteartions.py')
                             extend_script_name = '._extendAdaptiveIteartions.py'
-                            command += 'python '+rel_path_to_root+extend_script_name+' output\n'
+                            command += 'python '+rel_path_to_root+extend_script_name+' output '+str(iterations)+'\n'
                         if not energy_by_residue:
                             command += 'python -m pele_platform.main input_restart.yaml\n'
 
-                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst]) and not continue_all:
+                        if any([membrane_residues, bias_to_point, com_bias1, ligand_equilibration_cst, angles, regional_spawning, constraint_level]) and not continue_all:
                             continuation = False
                             debug = False
 
@@ -3551,6 +3589,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'metrics.json '
                         command += 'metrics_thresholds.json '
                         command += '--separator '+separator+' '
+                        if max_regional_iterations:
+                            command += '--max_iterations '+str(max_regional_iterations)+' '
                         if angles:
                             command += '--angles '
                         command += '\n'
@@ -4613,12 +4653,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             metric_label = metric
 
                         # Filter values according to the type of threshold given
-                        if isinstance(filter_values[metric], float):
+                        if isinstance(filter_values[metric], (float, int)):
                             ligand_data = ligand_data[ligand_data[metric_label] <= filter_values[metric]]
                         elif isinstance(filter_values[metric], (tuple,list)):
                             ligand_data = ligand_data[ligand_data[metric_label] >= filter_values[metric][0]]
                             ligand_data = ligand_data[ligand_data[metric_label] <= filter_values[metric][1]]
                     else:
+                        metric_label = metric
                         ligand_data = ligand_data[ligand_data[metric_label] < filter_values[metric]]
 
                 if ligand_data.empty:
@@ -4681,33 +4722,36 @@ make sure of reading the target sequences with the function readTargetSequences(
             remaining_data = self.docking_data[mask]
 
             # Compute metric acceptance for each metric for all missing pairs
-            metric_acceptance = {}
-            for metric in metrics:
-                if not metric.startswith('metric_'):
-                    metric_label = 'metric_'+metric
-                if isinstance(metrics[metric], float):
-                    metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
-                elif isinstance(metrics[metric], (tuple, list)):
-                    metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
-                    metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
+            if not remaining_data.empty:
+                metric_acceptance = {}
+                for metric in metrics:
+                    if not metric.startswith('metric_'):
+                        metric_label = 'metric_'+metric
+                    else:
+                        metric_label = metric
+                    if isinstance(metrics[metric], (float, int)):
+                        metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
+                    elif isinstance(metrics[metric], (tuple, list)):
+                        metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
+                        metric_acceptance[metric] = metric_filter[metric_filter[metric_label] <= metrics[metric][1]].shape[0]
 
-            lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric = [m for m,a in sorted(metric_acceptance.items(), key=lambda x:x[1]) if m not in fixed][0]
+                lowest_metric_doc = lowest_metric.replace("metric_", "")
+                if self.docking_metric_type[lowest_metric_doc] == 'distance':
+                    step = distance_step
+                if self.docking_metric_type[lowest_metric_doc] == 'angle':
+                    step = angle_step
 
-            if self.docking_metric_type[lowest_metric] == 'distance':
-                step = distance_step
-            if self.docking_metric_type[lowest_metric] == 'angle':
-                step = angle_step
+                if isinstance(metrics[lowest_metric], (float, int)):
+                    metrics[lowest_metric] += step
 
-            if isinstance(metrics[lowest_metric], float):
-                metrics[lowest_metric] += step
+                # Change to list to allow item assignment
+                if isinstance(metrics[lowest_metric], tuple):
+                    metrics[lowest_metric] = list(metrics[lowest_metric])
 
-            # Change to list to allow item assignment
-            if isinstance(metrics[lowest_metric], tuple):
-                metrics[lowest_metric] = list(metrics[lowest_metric])
-
-            if isinstance(metrics[lowest_metric], list):
-                metrics[lowest_metric][0] -= step
-                metrics[lowest_metric][1] += step
+                if isinstance(metrics[lowest_metric], list):
+                    metrics[lowest_metric][0] -= step
+                    metrics[lowest_metric][1] += step
 
         # Get rows with the selected indexes
         mask = self.docking_data.index.isin(selected_indexes)
