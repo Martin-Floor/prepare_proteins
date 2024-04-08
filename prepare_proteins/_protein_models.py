@@ -1872,7 +1872,7 @@ compareSequences() function before adding missing loops.')
 
         # Save all input models
         self.saveModels(prepare_folder+'/input_models', convert_to_mae=mae_input,
-                        remove_hydrogens=remove_hydrogens, replace_symbol=replace_symbol, **kwargs)
+                        remove_hydrogens=remove_hydrogens, replace_symbol=replace_symbol, models= models )#**kwargs)
 
         # Generate jobs
         jobs = []
@@ -3561,10 +3561,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                                     equilibration_dt=2,production_dt=4,temperature=298.15,frags=5,
-                                     remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
-                                     ligand_chains=None,ion_chains=None,replicas=1,
-                                     charge=None, system_output='System', models = None):
+                                     equilibration_dt=2,production_dt=2,temperature=298.15,frags=5,
+                                     local_command_name=None, remote_command_name='gmx_mpi',
+                                     ff='amber99sb-star-ildn', ligand_chains=None,ion_chains=None,
+                                     replicas=1, charge=None, system_output='System', models = None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
@@ -3621,13 +3621,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(md_folder+'/output_models'):
             os.mkdir(md_folder+'/output_models')
 
-        possible_command_names = ['gmx','gmx_mpi']
-        command_name = None
-        for command in possible_command_names:
-            if shutil.which(command) != None:
-                command_name = command
-        if command_name == None:
-            raise ValueError('Gromacs executable is required for the setup and was not found. The following executable names were tested: '+','.join(possible_command_names))
+
+        if local_command_name == None:
+            possible_command_names = ['gmx','gmx_mpi']
+            command_name = None
+            for command in possible_command_names:
+                if shutil.which(command) != None:
+                    command_name = command
+            if command_name == None:
+                raise ValueError('Gromacs executable is required for the setup and was not found. The following executable names were tested: '+','.join(possible_command_names))
+        else:
+            command_name = local_command_name
 
         if ligand_chains != None:
             if isinstance(ligand_chains, str):
@@ -3748,7 +3752,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 shutil.copyfile(md_folder+'/input_models/'+model+'.pdb',md_folder+'/input_models/'+model+'/protein.pdb')
 
-
             # Generate commands
             for i in range(replicas):
                 command = 'cd '+md_folder+'\n'
@@ -3765,6 +3768,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command_local += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
                 command_local += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
 
+                # Replace name for crystal waters if there are any
+                #command_local += 'sed -i -e \'s/SOL/CWT/g\' topol.top \n'
+
                 if ligand_chains != None:
                     lig_files = ''
                     for ligand_name in ligand_res.values():
@@ -3779,7 +3785,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     for ligand_name in ligand_res.values():
                         line += '#include "'+ligand_name+'.acpype\/posre_'+ligand_name+'.itp"\\n'
                     line += '#endif\''
-
                     command_local += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a '+line+' topol.top'+'\n'
                     for ligand_name in ligand_res.values():
                         command_local += 'sed -i -e \'$a'+ligand_name.ljust(20)+'1'+'\' topol.top'+'\n'
@@ -3793,6 +3798,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 group_dics = {}
                 command_local += ('echo "q"| '+command_name+' make_ndx -f  prot_solv.gro -o index.ndx'+'\n')
 
+                return command_local
+
                 # Run local commands
                 with open('tmp.sh','w') as f:
                     f.write(command_local)
@@ -3802,12 +3809,45 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Read complex index
                 group_dics['complex'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx')
 
+                '''
+                # generate tmp index to check for crystal waters
+                os.system('echo "q"| '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/complex.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/tmp_index.ndx'+'\n')
+                group_dics['tmp_index'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/tmp_index.ndx')
+
+                if 'Water' in group_dics['tmp_index']:
+                    reading = False
+                    crystal_waters_ndx_lines = '[ CrystalWaters ]\n'
+                    for line in open(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/tmp_index.ndx'):
+                        if '[' in line and reading:
+                            reading = False
+                        elif '[ Water ]' in line:
+                            reading = True
+                        elif reading:
+                            crystal_waters_ndx_lines += line
+
+                    with open(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx','a') as f:
+                        f.write(crystal_waters_ndx_lines)
+
+                    os.system('echo \''+group_dics['complex']['Water']+' & !'+str(len(group_dics['complex']))+'\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
+
+                    # Update group_dics
+                    group_dics['complex'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx')
+                    sol_group = 'Water_&_!CrystalWaters'
+
+                else:
+                    sol_group = 'SOL'
+                '''
+                sol_group = 'SOL'
                 # With the index info now add the ions (now we can select the SOL :D)
                 command_local = command
                 command_local += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
+                #command_local += 'sed -i -e \'s/SOL/Water_\&_!CrystalWaters/g\' topol.top \n'
                 command_local += command_name+' grompp -f ../../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
-                command_local += 'echo '+group_dics['complex']['SOL']+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1 -n index.ndx'+'\n'
+                command_local += 'echo '+group_dics['complex'][sol_group]+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1 -n index.ndx'+'\n'
                 command_local += ('echo "q"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n')
+
+                #command_local += 'sed -i -e \'s/CWT/SOL/g\' topol.top \n'
+
 
                 # Run local commands
                 with open('tmp.sh','w') as f:
@@ -3845,17 +3885,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if lig_selector != '' and ion_selector != '':
                         selector_line += group_dics['complex']['Protein']+'|'+ion_selector[:-1]+'|'+lig_selector[:-1]+'\\n'
                         selector_line += group_dics['complex']['Protein']+'|'+ion_selector+'\\n'
-                        selector_line += group_dics['complex']['SOL']+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
+                        selector_line += group_dics['complex'][sol_group]+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
                     # If only ion we dont need prot_ion_lig (we use same for tc group and constraint)
                     elif ion_selector != '':
                         selector_line += group_dics['complex']['Protein']+'|'+ion_selector+'\\n'
-                        selector_line += group_dics['complex']['SOL']+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
+                        selector_line += group_dics['complex'][sol_group]+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
                     # If not ions we only need prot_lig for tc group and can use water_and_not_ions for the other
                     elif lig_selector != '':
                         selector_line += group_dics['complex']['Protein']+'|'+lig_selector+'\\n'
 
                     print(selector_line)
                     command_local += ('echo -e \"'+selector_line+'q\"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n')
+
 
                     # Run local commands
                     with open('tmp.sh','w') as f:
@@ -6475,7 +6516,9 @@ def _getLigandParameters(structure,ligand_chains,struct_path,params_path,charge=
             io.save(struct_path+'/'+ligand_res[chain.get_id()]+'.pdb')
 
     # Get ligand parameters
-    for lig_chain,ligand_name in ligand_res.items():
+    print(ligand_res)
+    for it,lig_chain in enumerate(ligand_res):
+        ligand_name = ligand_res[lig_chain]
         if ligand_name not in os.listdir(params_path):
             os.mkdir(params_path+'/'+ligand_name)
             shutil.copyfile(struct_path+'/'+ligand_name+'.pdb', params_path+'/'+ligand_name+'/'+ligand_name+'.pdb')
@@ -6526,9 +6569,13 @@ def _getLigandParameters(structure,ligand_chains,struct_path,params_path,charge=
                     if lines[i-1].startswith('[ atoms ]'):
                         atoms = True
 
-
-            with open('../atomtypes.itp','a') as f:
-                f.write('[ atomtypes ]\n')
+            if it == 0:
+                write_type = 'w'
+            else:
+                write_type = 'a'
+            with open('../atomtypes.itp', write_type) as f:
+                if it == 0:
+                    f.write('[ atomtypes ]\n')
                 for line in atomtypes_lines:
                     f.write(line+'\n')
 
@@ -6547,7 +6594,7 @@ def _getLigandParameters(structure,ligand_chains,struct_path,params_path,charge=
         io.set_structure(ligand_structure)
         io.save(struct_path+'/'+ligand_name+'.pdb')
 
-        return ligand_res
+    return ligand_res
 
 def _readGromacsIndexFile(file):
 
