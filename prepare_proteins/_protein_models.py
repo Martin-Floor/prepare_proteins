@@ -2717,7 +2717,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return in_contact
 
     def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
-                                    only_ligands=None):
+                                    only_ligands=None, rotamer_resolution=10):
         """
         Run PELE platform for ligand parameterization
         Parameters
@@ -2764,7 +2764,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 # Create command
                 command = 'cd '+job_folder+'/'+ligand_name+'\n'
-                command += 'python  ../._peleffy_ligand.py '+ligand_name+'.'+extension+'\n'
+                command += 'python  ../._peleffy_ligand.py '+ligand_name+'.'+extension+' '
+                command += '--rotamer_resolution '+str(rotamer_resolution)+' '
+                command += '\n'
                 command += 'cd ../..\n'
                 jobs.append(command)
 
