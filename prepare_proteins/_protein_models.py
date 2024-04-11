@@ -2747,7 +2747,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             extension = ligand.split('.')[-1]
 
-            if extension == 'pdb':
+            if extension in ['pdb', 'mae']:
                 ligand_name = ligand.replace('.'+extension, '')
 
                 # Only process ligands given in only_ligands list
