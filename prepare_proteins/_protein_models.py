@@ -478,6 +478,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return self.sequences
 
+    def renumberModels(self):
+        """
+        Renumber every PDB chain residues from 1 onward.
+        """
+
+        for model in self:
+            for c in self.structures[model].get_chains():
+                for i,r in enumerate(c):
+                    r.id = (r.id[0], i+1, r.id[2])
+
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
         Calculate a Multiple Sequence Alignment from the current models' sequences.
@@ -490,7 +500,14 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Dictionary specifying which chain to use for each model
         """
 
-        for model in self.models_names:
+        # If only a single ID is given use it for all models
+        if isinstance(chains, str):
+            cd = {}
+            for model in self:
+                cd[model] = chains
+            chains = cd
+
+        for model in self:
             if isinstance(self.sequences[model], dict) and chains == None:
                 raise ValueError('There are multiple chains in model %s. Specify which \
 chain to use for each model with the chains option.' % model)
@@ -945,6 +962,14 @@ chain to use for each model with the chains option.' % model)
 
         reference = md.load(reference)
         rmsd = {}
+
+        # Check chain indexes input
+        if isinstance(trajectory_chain_indexes, list):
+            tci = {}
+            for model in self.models_names:
+                tci[model] = trajectory_chain_indexes
+            trajectory_chain_indexes = tci
+
         for model in self.models_names:
 
             if verbose:
@@ -952,8 +977,9 @@ chain to use for each model with the chains option.' % model)
 
             traj = md.load(self.models_paths[model])
             rmsd[model] = MD.alignTrajectoryBySequenceAlignment(traj, reference, chain_indexes=chain_indexes,
-                                                         trajectory_chain_indexes=trajectory_chain_indexes,
-                                                         aligment_mode=aligment_mode, reference_residues=reference_residues)
+                                                                trajectory_chain_indexes=trajectory_chain_indexes[model],
+                                                                reference_chain_indexes=reference_chain_indexes,
+                                                                aligment_mode=aligment_mode, reference_residues=reference_residues)
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
@@ -1872,7 +1898,7 @@ compareSequences() function before adding missing loops.')
 
         # Save all input models
         self.saveModels(prepare_folder+'/input_models', convert_to_mae=mae_input,
-                        remove_hydrogens=remove_hydrogens, replace_symbol=replace_symbol, **kwargs)
+                        remove_hydrogens=remove_hydrogens, replace_symbol=replace_symbol, models= models )#**kwargs)
 
         # Generate jobs
         jobs = []
@@ -2673,6 +2699,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             other_atoms = _getStructureCoordinates(structure, sidechain=sidechain,
                                                    exclude_residues=residue_selection[model], return_atoms=True)
 
+            if selected_coordinates.size == 0:
+                raise ValueError(f'Problem matching the given residue selection for model {model}')
+
             # Compute the distance matrix between the two set of coordinates
             M = distance_matrix(selected_coordinates, other_coordinates)
             in_contact[model] = np.array(other_atoms)[np.argwhere(M <= distance_threshold)[:,1]]
@@ -2688,7 +2717,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return in_contact
 
     def setUpLigandParameterization(self, job_folder, ligands_folder, charge_method=None,
-                                    only_ligands=None):
+                                    only_ligands=None, rotamer_resolution=10):
         """
         Run PELE platform for ligand parameterization
         Parameters
@@ -2735,7 +2764,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 # Create command
                 command = 'cd '+job_folder+'/'+ligand_name+'\n'
-                command += 'python  ../._peleffy_ligand.py '+ligand_name+'.'+extension+'\n'
+                command += 'python  ../._peleffy_ligand.py '+ligand_name+'.'+extension+' '
+                command += '--rotamer_resolution '+str(rotamer_resolution)+' '
+                command += '\n'
                 command += 'cd ../..\n'
                 jobs.append(command)
 
@@ -3017,21 +3048,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 raise ValueError(f'Ligand {ligand} was not found in the regional_metrics dictionary for protein {protein} and metric {m}')
 
                             # Check if distance_ and angle_ prefix were given
-                            reg_met[m] = {}
-                            for p in regional_metrics[m]:
-                                for l in regional_metrics[m][p]:
-                                    reg_met[m] = []
-                                    for v in regional_metrics[m][p][l]:
-
-                                        if '-' in v:
-                                            v = v.replace('-', '_')
-
-                                        if not v.startswith('distance_') and not v.startswith('angle_'):
-                                            if len(v.split('_')) == 2:
-                                                v = 'distance_'+v
-                                            elif len(v.split('_')) == 3:
-                                                v = 'angle_'+v
-                                        reg_met[m].append(v)
+                            reg_met[m] = []
+                            for v in regional_metrics[m][protein][ligand]:
+                                if '-' in v:
+                                    v = v.replace('-', '_')
+                                if not v.startswith('distance_') and not v.startswith('angle_'):
+                                    if len(v.split('_')) == 2:
+                                        v = 'distance_'+v
+                                    elif len(v.split('_')) == 3:
+                                        v = 'angle_'+v
+                                reg_met[m].append(v)
 
                         with open(protein_ligand_folder+'/metrics.json', 'w') as jf:
                             json.dump(reg_met, jf)
@@ -3041,11 +3067,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                             rm = regional_thresholds[m]
 
                             incorrect = False
-                            if not isinstance(rm, float) and not isinstance(rm, tuple):
+                            if not isinstance(rm, (int, float)) and not isinstance(rm, tuple):
                                 incorrect = True
                             elif isinstance(rm, tuple) and len(rm) != 2:
                                 incorrect = True
-                            elif isinstance(rm, tuple) and (not isinstance(rm[0], (int,float)) or not isinstance(rm[1], (int,float))):
+                            elif isinstance(rm, tuple) and (not isinstance(rm[0], (int, float)) or not isinstance(rm[1], (int,float))):
                                 incorrect = True
                             if incorrect:
                                 raise ValueError('The regional thresholds should be floats or two-elements tuples of floats') # Review this check for more complex region definitions
@@ -3577,10 +3603,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                                     equilibration_dt=2,production_dt=4,temperature=298.15,frags=5,
-                                     remote_command_name='gmx_mpi',ff='amber99sb-star-ildn',
-                                     ligand_chains=None,ion_chains=None,replicas=1,
-                                     charge=None, system_output='System', models = None):
+                                     equilibration_dt=2,production_dt=2,temperature=298.15,frags=5,
+                                     local_command_name=None, remote_command_name='gmx_mpi',
+                                     ff='amber99sb-star-ildn', ligand_chains=None,ion_chains=None,
+                                     replicas=1, charge=None, system_output='System', models = None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
@@ -3637,13 +3663,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(md_folder+'/output_models'):
             os.mkdir(md_folder+'/output_models')
 
-        possible_command_names = ['gmx','gmx_mpi']
-        command_name = None
-        for command in possible_command_names:
-            if shutil.which(command) != None:
-                command_name = command
-        if command_name == None:
-            raise ValueError('Gromacs executable is required for the setup and was not found. The following executable names were tested: '+','.join(possible_command_names))
+
+        if local_command_name == None:
+            possible_command_names = ['gmx','gmx_mpi']
+            command_name = None
+            for command in possible_command_names:
+                if shutil.which(command) != None:
+                    command_name = command
+            if command_name == None:
+                raise ValueError('Gromacs executable is required for the setup and was not found. The following executable names were tested: '+','.join(possible_command_names))
+        else:
+            command_name = local_command_name
 
         if ligand_chains != None:
             if isinstance(ligand_chains, str):
@@ -3764,7 +3794,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 shutil.copyfile(md_folder+'/input_models/'+model+'.pdb',md_folder+'/input_models/'+model+'/protein.pdb')
 
-
             # Generate commands
             for i in range(replicas):
                 command = 'cd '+md_folder+'\n'
@@ -3781,6 +3810,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command_local += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
                 command_local += 'echo '+his_pro+' | '+command_name+' pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff '+ff+' -water tip3p -vsite hydrogens'+'\n'
 
+                # Replace name for crystal waters if there are any
+                #command_local += 'sed -i -e \'s/SOL/CWT/g\' topol.top \n'
+
                 if ligand_chains != None:
                     lig_files = ''
                     for ligand_name in ligand_res.values():
@@ -3795,7 +3827,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     for ligand_name in ligand_res.values():
                         line += '#include "'+ligand_name+'.acpype\/posre_'+ligand_name+'.itp"\\n'
                     line += '#endif\''
-
                     command_local += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a '+line+' topol.top'+'\n'
                     for ligand_name in ligand_res.values():
                         command_local += 'sed -i -e \'$a'+ligand_name.ljust(20)+'1'+'\' topol.top'+'\n'
@@ -3809,6 +3840,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 group_dics = {}
                 command_local += ('echo "q"| '+command_name+' make_ndx -f  prot_solv.gro -o index.ndx'+'\n')
 
+                return command_local
+
                 # Run local commands
                 with open('tmp.sh','w') as f:
                     f.write(command_local)
@@ -3818,12 +3851,45 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Read complex index
                 group_dics['complex'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx')
 
+                '''
+                # generate tmp index to check for crystal waters
+                os.system('echo "q"| '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/complex.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/tmp_index.ndx'+'\n')
+                group_dics['tmp_index'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/tmp_index.ndx')
+
+                if 'Water' in group_dics['tmp_index']:
+                    reading = False
+                    crystal_waters_ndx_lines = '[ CrystalWaters ]\n'
+                    for line in open(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/tmp_index.ndx'):
+                        if '[' in line and reading:
+                            reading = False
+                        elif '[ Water ]' in line:
+                            reading = True
+                        elif reading:
+                            crystal_waters_ndx_lines += line
+
+                    with open(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx','a') as f:
+                        f.write(crystal_waters_ndx_lines)
+
+                    os.system('echo \''+group_dics['complex']['Water']+' & !'+str(len(group_dics['complex']))+'\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
+
+                    # Update group_dics
+                    group_dics['complex'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx')
+                    sol_group = 'Water_&_!CrystalWaters'
+
+                else:
+                    sol_group = 'SOL'
+                '''
+                sol_group = 'SOL'
                 # With the index info now add the ions (now we can select the SOL :D)
                 command_local = command
                 command_local += 'cd output_models/'+model+'/'+str(i)+'/topol'+'\n'
+                #command_local += 'sed -i -e \'s/SOL/Water_\&_!CrystalWaters/g\' topol.top \n'
                 command_local += command_name+' grompp -f ../../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1'+'\n'
-                command_local += 'echo '+group_dics['complex']['SOL']+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1 -n index.ndx'+'\n'
+                command_local += 'echo '+group_dics['complex'][sol_group]+' | '+command_name+' genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1 -n index.ndx'+'\n'
                 command_local += ('echo "q"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n')
+
+                #command_local += 'sed -i -e \'s/CWT/SOL/g\' topol.top \n'
+
 
                 # Run local commands
                 with open('tmp.sh','w') as f:
@@ -3861,17 +3927,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if lig_selector != '' and ion_selector != '':
                         selector_line += group_dics['complex']['Protein']+'|'+ion_selector[:-1]+'|'+lig_selector[:-1]+'\\n'
                         selector_line += group_dics['complex']['Protein']+'|'+ion_selector+'\\n'
-                        selector_line += group_dics['complex']['SOL']+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
+                        selector_line += group_dics['complex'][sol_group]+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
                     # If only ion we dont need prot_ion_lig (we use same for tc group and constraint)
                     elif ion_selector != '':
                         selector_line += group_dics['complex']['Protein']+'|'+ion_selector+'\\n'
-                        selector_line += group_dics['complex']['SOL']+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
+                        selector_line += group_dics['complex'][sol_group]+' | '+group_dics['complex']['Ion']+' & '+water_and_solventions_selector[:-1]+'\\n'
                     # If not ions we only need prot_lig for tc group and can use water_and_not_ions for the other
                     elif lig_selector != '':
                         selector_line += group_dics['complex']['Protein']+'|'+lig_selector+'\\n'
 
                     print(selector_line)
                     command_local += ('echo -e \"'+selector_line+'q\"| '+command_name+' make_ndx -f  prot_ions.gro -o index.ndx'+'\n')
+
 
                     # Run local commands
                     with open('tmp.sh','w') as f:
@@ -4588,7 +4655,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             metric_label = metric
 
                         # Filter values according to the type of threshold given
-                        if isinstance(filter_values[metric], float):
+                        if isinstance(filter_values[metric], (float, int)):
                             ligand_data = ligand_data[ligand_data[metric_label] <= filter_values[metric]]
                         elif isinstance(filter_values[metric], (tuple,list)):
                             ligand_data = ligand_data[ligand_data[metric_label] >= filter_values[metric][0]]
@@ -4655,6 +4722,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     mask.append(False)
 
             remaining_data = self.docking_data[mask]
+
             # Compute metric acceptance for each metric for all missing pairs
             if not remaining_data.empty:
                 metric_acceptance = {}
@@ -4663,7 +4731,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         metric_label = 'metric_'+metric
                     else:
                         metric_label = metric
-                    if isinstance(metrics[metric], float):
+                    if isinstance(metrics[metric], (float, int)):
                         metric_acceptance[metric] = remaining_data[remaining_data[metric_label] <= metrics[metric]].shape[0]
                     elif isinstance(metrics[metric], (tuple, list)):
                         metric_filter = remaining_data[metrics[metric][0]<= remaining_data[metric_label]]
@@ -4676,7 +4744,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if self.docking_metric_type[lowest_metric_doc] == 'angle':
                     step = angle_step
 
-                if isinstance(metrics[lowest_metric], float):
+                if isinstance(metrics[lowest_metric], (float, int)):
                     metrics[lowest_metric] += step
 
                 # Change to list to allow item assignment
@@ -6494,7 +6562,9 @@ def _getLigandParameters(structure,ligand_chains,struct_path,params_path,charge=
             io.save(struct_path+'/'+ligand_res[chain.get_id()]+'.pdb')
 
     # Get ligand parameters
-    for lig_chain,ligand_name in ligand_res.items():
+    print(ligand_res)
+    for it,lig_chain in enumerate(ligand_res):
+        ligand_name = ligand_res[lig_chain]
         if ligand_name not in os.listdir(params_path):
             os.mkdir(params_path+'/'+ligand_name)
             shutil.copyfile(struct_path+'/'+ligand_name+'.pdb', params_path+'/'+ligand_name+'/'+ligand_name+'.pdb')
@@ -6545,9 +6615,13 @@ def _getLigandParameters(structure,ligand_chains,struct_path,params_path,charge=
                     if lines[i-1].startswith('[ atoms ]'):
                         atoms = True
 
-
-            with open('../atomtypes.itp','a') as f:
-                f.write('[ atomtypes ]\n')
+            if it == 0:
+                write_type = 'w'
+            else:
+                write_type = 'a'
+            with open('../atomtypes.itp', write_type) as f:
+                if it == 0:
+                    f.write('[ atomtypes ]\n')
                 for line in atomtypes_lines:
                     f.write(line+'\n')
 
@@ -6566,7 +6640,7 @@ def _getLigandParameters(structure,ligand_chains,struct_path,params_path,charge=
         io.set_structure(ligand_structure)
         io.save(struct_path+'/'+ligand_name+'.pdb')
 
-        return ligand_res
+    return ligand_res
 
 def _readGromacsIndexFile(file):
 
