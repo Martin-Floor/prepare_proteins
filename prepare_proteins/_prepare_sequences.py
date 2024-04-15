@@ -59,7 +59,7 @@ class sequenceModels:
 
             if exclude_finished and model in excluded:
                 continue
-                
+
             sequence = {}
             sequence[model] = self.sequences[model]
             alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
@@ -358,63 +358,78 @@ class sequenceModels:
         else:
             raise StopIteration
 
-    def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv', cpus=40):
+    def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv', cpus=40,
+                          max_bin_size=10000, executable='/home/bubbles/Programs/interproscan-5.66-98.0/interproscan.sh'):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
         """
 
         if isinstance(not_exclude, str):
-                not_exclude = [not_exclude]
+            not_exclude = [not_exclude]
 
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
         if not os.path.exists(job_folder+'/input_fasta'):
-                os.mkdir(job_folder+'/input_fasta')
+            os.mkdir(job_folder+'/input_fasta')
 
         if not os.path.exists(job_folder+'/output'):
-                os.mkdir(job_folder+'/output')
+            os.mkdir(job_folder+'/output')
 
-        input_file = 'input_fasta/input.fasta'
+        # Define number of bins to execute interproscan
+        n_bins = len(self.sequences) // 10000
+        if len(self.sequences) % 10000 > 0:
+            n_bins += 1
+        zf = len(str(n_bins))
 
-        alignment.writeFastaFile(self.sequences, job_folder+'/'+input_file)
+        # Get all sequences names
+        all_sequences = list(self.sequences.keys())
 
-        appl_list_all = ["Gene3D","PANTHER","Pfam","Coils","SUPERFAMILY","SFLD","Hamap",
-                            "ProSiteProfiles","SMART","CDD","PRINTS","PIRSR","ProSitePatterns","AntiFam",
-                            "MobiDBLite","PIRSF","FunFam","NCBIfam"]
-
-        for appl in not_exclude:
-            if appl not in appl_list_all:
-                raise ValueError('Application not found. Available applications: '+' ,'.join(appl_list_all))
-
-        appl_list = []
-        for appl in appl_list_all:
-            if appl not in not_exclude:
-                appl_list.append(appl)
-
+        # Create commands for each sequence bin
         jobs = []
+        for bin in range(1, n_bins+1):
 
+            bin_index = str(bin).zfill(zf)
 
-        output_file = 'output/interproscan_output.tsv'
+            input_file = 'input_fasta/input_'+bin_index+'.fasta'
 
-        command = "cd "+job_folder+"\n"
-        command += "Path=$(pwd)\n"
-        command += "bash /home/bubbles/Programs/interproscan-5.66-98.0/interproscan.sh" # only in bubbles
-        command += " -i $Path/"+input_file
-        command += " -f "+output_format
-        command += " -o $Path/"+output_file
-        command += " -cpu "+str(cpus)
-        for n,appl in enumerate(appl_list):
-            if n == 0:
-                command += " -exclappl "+appl
-            else:
-                command += ","+appl
-        command += "\n"
+            bin_sequences = {s:self.sequences[s] for s in all_sequences[bin*10000:(bin+1)*10000]}
 
-        command += "cd ..\n"
+            alignment.writeFastaFile(bin_sequences, job_folder+'/'+input_file)
 
-        jobs.append(command)
+            appl_list_all = ["Gene3D","PANTHER","Pfam","Coils","SUPERFAMILY","SFLD","Hamap",
+                             "ProSiteProfiles","SMART","CDD","PRINTS","PIRSR","ProSitePatterns","AntiFam",
+                             "MobiDBLite","PIRSF","FunFam","NCBIfam"]
 
-        print('Remember Interproscan is only installed in bubbles at the moment')
+            for appl in not_exclude:
+                if appl not in appl_list_all:
+                    raise ValueError('Application not found. Available applications: '+' ,'.join(appl_list_all))
+
+            appl_list = []
+            for appl in appl_list_all:
+                if appl not in not_exclude:
+                    appl_list.append(appl)
+
+            output_file = 'output/interproscan_output_'+bin_index+'.tsv'
+
+            command = "cd "+job_folder+"\n"
+            command += "Path=$(pwd)\n"
+            command += "bash "+executable # only in bubbles
+            command += " -i $Path/"+input_file
+            command += " -f "+output_format
+            command += " -o $Path/"+output_file
+            command += " -cpu "+str(cpus)
+            for n,appl in enumerate(appl_list):
+                if n == 0:
+                    command += " -exclappl "+appl
+                else:
+                    command += ","+appl
+            command += "\n"
+
+            command += "cd ..\n"
+
+            jobs.append(command)
+
+        print('Remember, Interproscan is only installed in bubbles at the moment')
 
         return jobs
