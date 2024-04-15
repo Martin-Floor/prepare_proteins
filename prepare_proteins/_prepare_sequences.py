@@ -59,7 +59,7 @@ class sequenceModels:
 
             if exclude_finished and model in excluded:
                 continue
-                
+
             sequence = {}
             sequence[model] = self.sequences[model]
             alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
@@ -358,9 +358,16 @@ class sequenceModels:
         else:
             raise StopIteration
 
-    def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv', cpus=40):
+    def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv', cpus=40, version="5.67-99.0"):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
+
+        not_exclude: list
+            refers to programs that will used to find the domains, and that will retrieve results. This has an
+            impact on the time.
+
+        If an update is needed, download in bubbles the new version (replace XX-XX with the version number):
+            wget -O interproscan-5.XX-XX.0-64-bit.tar.gz http://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/5.XX-XX.0/interproscan-5.67-99.0-64-bit.tar.gz
         """
 
         if isinstance(not_exclude, str):
@@ -399,7 +406,7 @@ class sequenceModels:
 
         command = "cd "+job_folder+"\n"
         command += "Path=$(pwd)\n"
-        command += "bash /home/bubbles/Programs/interproscan-5.66-98.0/interproscan.sh" # only in bubbles
+        command += "bash /home/bubbles/Programs/interproscan-"+version+"/interproscan.sh" # only in bubbles
         command += " -i $Path/"+input_file
         command += " -f "+output_format
         command += " -o $Path/"+output_file
