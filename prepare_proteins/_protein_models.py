@@ -3841,8 +3841,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 group_dics = {}
                 command_local += ('echo "q"| '+command_name+' make_ndx -f  prot_solv.gro -o index.ndx'+'\n')
 
-                return command_local
-
                 # Run local commands
                 with open('tmp.sh','w') as f:
                     f.write(command_local)
