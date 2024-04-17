@@ -3143,7 +3143,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
-                    #protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
+
+                    protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
@@ -5994,7 +5995,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Check if hetero-residue is found between two non-hetero residues
             for i,r in enumerate(residues):
-                if r.id[1] in hetero:
+                if r.id[1] in hetero and r.resname not in ['HIP', 'HID', 'HIE']:
                     if i+1  == len(residues):
                         continue
                     chain = r.get_parent()
