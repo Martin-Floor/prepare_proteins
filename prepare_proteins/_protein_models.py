@@ -3374,7 +3374,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     # Add commands to write template folder absolute paths
                     if ligand in templates:
                         command += "export CWD=$(pwd)\n"
-                        command += 'cd ../templates\n'
+                        command += 'cd ../templates/'+ligand+'\n'
                         command += 'export TMPLT_DIR=$(pwd)\n'
                         command += 'cd $CWD\n'
                         for tf in templates[ligand]:
