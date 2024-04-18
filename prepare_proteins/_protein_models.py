@@ -3146,7 +3146,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
-                    #protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
+
+                    protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
@@ -3376,7 +3377,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     # Add commands to write template folder absolute paths
                     if ligand in templates:
                         command += "export CWD=$(pwd)\n"
-                        command += 'cd ../templates\n'
+                        command += 'cd ../templates/'+ligand+'\n'
                         command += 'export TMPLT_DIR=$(pwd)\n'
                         command += 'cd $CWD\n'
                         for tf in templates[ligand]:
@@ -3843,8 +3844,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 group_dics = {}
                 command_local += ('echo "q"| '+command_name+' make_ndx -f  prot_solv.gro -o index.ndx'+'\n')
-
-                return command_local
 
                 # Run local commands
                 with open('tmp.sh','w') as f:
@@ -5998,7 +5997,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Check if hetero-residue is found between two non-hetero residues
             for i,r in enumerate(residues):
-                if r.id[1] in hetero:
+                if r.id[1] in hetero and r.resname not in ['HIP', 'HID', 'HIE']:
                     if i+1  == len(residues):
                         continue
                     chain = r.get_parent()
