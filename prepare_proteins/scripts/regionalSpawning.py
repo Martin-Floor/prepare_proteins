@@ -16,6 +16,7 @@ parser.add_argument('metrics_thresholds', default=None, help='Path to the JSON f
 parser.add_argument('--separator', default='_', help='Separator used for the protein and ligand for file names')
 parser.add_argument('--max_iterations', default=None, help='Maximum number of iterations allowed.')
 parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawnings allowed.')
+parser.add_argument('--energy_bias', default='Binding Energy', help='Which energy term to use for bias the simulation.')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
 
 args=parser.parse_args()
@@ -24,7 +25,11 @@ args=parser.parse_args()
 separator = args.separator
 max_iterations = args.max_iterations
 max_spawnings = int(args.max_spawnings)
+energy_bias = args.energy_bias
 angles = args.angles
+
+if energy_bias not in ['Total Energy', 'Binding Energy']:
+    raise ValueError('You must give "Total Energy" or "Binding Energy" to bias the simulation!')
 
 verbose = True
 cwd = os.getcwd()
@@ -153,6 +158,8 @@ def readIterationFiles(report_files):
                 if l.startswith('#Task'):
                     l = l.replace('Binding Energy', 'Binding_Energy')
                     l = l.replace('BindingEnergy', 'Binding_Energy')
+                    l = l.replace('Total Energy', 'Total_Energy')
+                    l = l.replace('TotalEnergy', 'Total_Energy')
                     terms = l.split()
                     continue
                 for t,v in zip(terms, l.split()):
@@ -161,6 +168,8 @@ def readIterationFiles(report_files):
                         continue
                     if t == 'Binding_Energy':
                         t = 'Binding Energy'
+                    if t == 'Total_Energy':
+                        t = 'Total Energy'
                     if t == 'numberOfAcceptedPeleSteps':
                         t = 'Accepted PELE Step'
                     report_data.setdefault(t, [])
@@ -320,7 +329,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
                     filtered = filtered[metrics_thresholds[m][0] <= filtered[m]]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
 
-            best_pose = filtered.nsmallest(1, 'Binding Energy')
+            best_pose = filtered.nsmallest(1, energy_bias)
 
             # If the pose was not found, update the metric with lowest acceptance
             if best_pose.shape[0] == 0:

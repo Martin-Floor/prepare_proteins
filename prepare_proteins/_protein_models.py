@@ -2901,7 +2901,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
                              ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None, max_regional_iterations=None,
-                             constraint_level=1):
+                             regional_energy_bias='Binding Energy', constraint_level=1):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -2954,6 +2954,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 raise ValueError('For the regional spawning you must define the regional_metrics dictionary.')
             if not isinstance(regional_thresholds, dict):
                 raise ValueError('For the regional spawning you must define the regional_thresholds dictionary.')
+
+            if regional_energy_bias not in ['Total Energy', 'Binding Energy']:
+                raise ValueError('You must give either "Total Energy" or "Binding Energy" to bias the regional spawning simulation!')
 
             regional_spawning = True
             spawning = 'independent'
@@ -3591,6 +3594,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'metrics.json '
                         command += 'metrics_thresholds.json '
                         command += '--separator '+separator+' '
+                        command += '--energy_bias "'+regional_energy_bias+'" '
                         if max_regional_iterations:
                             command += '--max_iterations '+str(max_regional_iterations)+' '
                         if angles:
