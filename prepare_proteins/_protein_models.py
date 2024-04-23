@@ -3035,7 +3035,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         continue
 
                     # Create PELE job folder for each docking
-                    protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
+                    protein_ligand = protein+separator+ligand
+                    protein_ligand_folder = pele_folder+'/'+protein_ligand
                     if not os.path.exists(protein_ligand_folder):
                         os.mkdir(protein_ligand_folder)
 
@@ -3086,7 +3087,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if not os.path.exists(protein_ligand_folder):
                             os.mkdir(protein_ligand_folder)
 
-                    structure = _readPDB(protein+separator+ligand, models_folder+'/'+d+'/'+f)
+                    structure = _readPDB(protein_ligand, models_folder+'/'+d+'/'+f)
 
                     # Change water names if any
                     for residue in structure.get_residues():
@@ -3146,8 +3147,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
+                    protein_ligand = protein+separator+ligand
+                    protein_ligand_folder = pele_folder+'/'+protein_ligand
+                    if regional_spawning:
+                        protein_ligand_folder += '/0'
 
-                    protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
@@ -3406,14 +3410,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                             _copyScriptFile(pele_folder, 'addAnglesToPELEConf.py')
                             command += 'python '+rel_path_to_root+'._addAnglesToPELEConf.py output '
                             command += '._angles.json '
-                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+                            command += 'output/input/'+protein_ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
                         if constraint_level:
                             # Copy script to add angles to pele.conf
                             _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
                             command += 'python '+rel_path_to_root+'._correctPositionalConstraints.py output '
-                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+                            command += 'output/input/'+protein_ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
                         if energy_by_residue:
@@ -3608,10 +3612,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                                     equilibration_dt=2,production_dt=2,temperature=298.15,frags=5,
-                                     local_command_name=None, remote_command_name='gmx_mpi',
-                                     ff='amber99sb-star-ildn', ligand_chains=None,ion_chains=None,
-                                     replicas=1, charge=None, system_output='System', models = None):
+                           equilibration_dt=2,production_dt=2,temperature=298.15,frags=5,
+                           local_command_name=None, remote_command_name='gmx_mpi',
+                           ff='amber99sb-star-ildn', ligand_chains=None,ion_chains=None,
+                           replicas=1, charge=None, system_output='System', models = None):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
