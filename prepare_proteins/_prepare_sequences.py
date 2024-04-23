@@ -479,7 +479,8 @@ class sequenceModels:
                     lr = int(l.split('\t')[6])
                     ur = int(l.split('\t')[7])
                     folds.setdefault(code, {})
-                    folds[code][fold] = (lr, ur)
+                    folds[code].setdefault(fold, [])
+                    folds[code][fold].append((lr, ur))
                     batch_folds[batch].add(code)
 
         diff = len(input_codes) - len(folds)
