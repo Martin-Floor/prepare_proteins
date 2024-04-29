@@ -3418,7 +3418,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
                             command += 'python '+rel_path_to_root+'._correctPositionalConstraints.py output '
                             command += 'output/input/'+protein_ligand+separator+pose+'_processed.pdb\n'
-                            command += f'{csv} {separator}\n'
+                            if csv:
+                                command = command.strip("\n")
+                                command += f' {csv} {separator}\n'
                             continuation = True
 
                         if energy_by_residue:

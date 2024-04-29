@@ -50,8 +50,10 @@ for r in res:
     if r.id[1] == resids[11]:
         if motif[11] == "I":
             cd1 = r["CD1"].get_coord()
+            cd1_atom = "CD1"
         elif motif[11] == "V":
             cd1 = r["CG2"].get_coord()
+            cd1_atom = "CG2"
         b_cd1 = True
     if r.id[1] == resids[-1]:
         if motif[-1] == "F":
@@ -102,7 +104,7 @@ with open(pele_output+'/pele.conf.tmp') as tmp:
 
 constraints = json_conf['commands'][0]['constraints']
 
-constraints[0:0] = [{'type': 'constrainAtomsDistance', 'springConstant': 50.0, 'equilibriumDistance': dist_cd1_cu, 'constrainThisAtom':  f'A:{resids[11]}:_CD1', 'toThisOtherAtom': 'M:1:CU__'},
+constraints[0:0] = [{'type': 'constrainAtomsDistance', 'springConstant': 50.0, 'equilibriumDistance': dist_cd1_cu, 'constrainThisAtom':  f'A:{resids[11]}:_{cd1_atom}', 'toThisOtherAtom': 'M:1:CU__'},
                     {'type': 'constrainAtomsDistance', 'springConstant': 50.0, 'equilibriumDistance': dist_cd2_cu, 'constrainThisAtom':  f'A:{resids[-1]}:_{at1}', 'toThisOtherAtom': 'M:1:CU__'},
                     {'type': 'constrainAtomsDistance', 'springConstant': 50.0, 'equilibriumDistance': distance_ne2_5_cu, 'constrainThisAtom':  f'A:{resids[5]}:_NE2', 'toThisOtherAtom': 'M:1:CU__'},
                     {'type': 'constrainAtomsDistance', 'springConstant': 50.0, 'equilibriumDistance': distance_ne2_12_cu, 'constrainThisAtom':  f'A:{resids[12]}:_NE2', 'toThisOtherAtom': 'M:1:CU__'},
