@@ -2901,7 +2901,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
                              ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None, max_regional_iterations=None,
-                             regional_energy_bias='Binding Energy', constraint_level=1):
+                             regional_energy_bias='Binding Energy', constraint_level=1, csv=None):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -3110,7 +3110,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 chain.add(residue)
 
                     _saveStructureToPDB(structure, protein_ligand_folder+'/'+f)
-                    self._write_conect_lines(protein, protein_ligand_folder+'/'+f, check_file=True)
+                    #self._write_conect_lines(protein, protein_ligand_folder+'/'+f, check_file=True)
 
                     if (protein, ligand) not in models:
                         models[(protein,ligand)] = []
@@ -3413,7 +3413,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             # Copy script to add angles to pele.conf
                             _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
                             command += 'python '+rel_path_to_root+'._correctPositionalConstraints.py output '
-                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb '
+                            command += f'{csv} {separator}\n'
                             continuation = True
 
                         if energy_by_residue:
