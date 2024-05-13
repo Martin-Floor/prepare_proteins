@@ -2901,7 +2901,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                              nonbonded_energy=None, nonbonded_energy_type='all', nonbonded_new_flag=False, covalent_setup=False, covalent_base_aa=None,
                              membrane_residues=None, bias_to_point=None, com_bias1=None, com_bias2=None, epsilon=0.5, rescoring=False,
                              ligand_equilibration_cst=True, regional_metrics=None, regional_thresholds=None, max_regional_iterations=None,
-                             constraint_level=1):
+                             regional_energy_bias='Binding Energy', constraint_level=1):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
         protein ligand poses and creates input for a PELE platform set up run.
@@ -2954,6 +2954,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 raise ValueError('For the regional spawning you must define the regional_metrics dictionary.')
             if not isinstance(regional_thresholds, dict):
                 raise ValueError('For the regional spawning you must define the regional_thresholds dictionary.')
+
+            if regional_energy_bias not in ['Total Energy', 'Binding Energy']:
+                raise ValueError('You must give either "Total Energy" or "Binding Energy" to bias the regional spawning simulation!')
 
             regional_spawning = True
             spawning = 'independent'
@@ -3032,7 +3035,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         continue
 
                     # Create PELE job folder for each docking
-                    protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
+                    protein_ligand = protein+separator+ligand
+                    protein_ligand_folder = pele_folder+'/'+protein_ligand
                     if not os.path.exists(protein_ligand_folder):
                         os.mkdir(protein_ligand_folder)
 
@@ -3083,7 +3087,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if not os.path.exists(protein_ligand_folder):
                             os.mkdir(protein_ligand_folder)
 
-                    structure = _readPDB(protein+separator+ligand, models_folder+'/'+d+'/'+f)
+                    structure = _readPDB(protein_ligand, models_folder+'/'+d+'/'+f)
 
                     # Change water names if any
                     for residue in structure.get_residues():
@@ -3143,7 +3147,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Create YAML file
                 for model in models:
                     protein, ligand = model
-                    #protein_ligand_folder = pele_folder+'/'+protein+separator+ligand
+                    protein_ligand = protein+separator+ligand
+                    protein_ligand_folder = pele_folder+'/'+protein_ligand
+                    if regional_spawning:
+                        protein_ligand_folder += '/0'
+
                     keywords = ['system', 'chain', 'resname', 'steps', 'iterations', 'atom_dist', 'analyse',
                                 'cpus', 'equilibration', 'equilibration_steps', 'traj', 'working_folder',
                                 'usesrun', 'use_peleffy', 'debug', 'box_radius', 'box_center', 'equilibration_mode',
@@ -3373,7 +3381,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     # Add commands to write template folder absolute paths
                     if ligand in templates:
                         command += "export CWD=$(pwd)\n"
-                        command += 'cd ../templates\n'
+                        command += 'cd ../templates/'+ligand+'\n'
                         command += 'export TMPLT_DIR=$(pwd)\n'
                         command += 'cd $CWD\n'
                         for tf in templates[ligand]:
@@ -3402,14 +3410,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                             _copyScriptFile(pele_folder, 'addAnglesToPELEConf.py')
                             command += 'python '+rel_path_to_root+'._addAnglesToPELEConf.py output '
                             command += '._angles.json '
-                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+                            command += 'output/input/'+protein_ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
                         if constraint_level:
                             # Copy script to add angles to pele.conf
                             _copyScriptFile(pele_folder, 'correctPositionalConstraints.py')
                             command += 'python '+rel_path_to_root+'._correctPositionalConstraints.py output '
-                            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+                            command += 'output/input/'+protein_ligand+separator+pose+'_processed.pdb\n'
                             continuation = True
 
                         if energy_by_residue:
@@ -3591,6 +3599,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += 'metrics.json '
                         command += 'metrics_thresholds.json '
                         command += '--separator '+separator+' '
+                        command += '--energy_bias "'+regional_energy_bias+'" '
                         if max_regional_iterations:
                             command += '--max_iterations '+str(max_regional_iterations)+' '
                         if angles:
@@ -6031,7 +6040,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Check if hetero-residue is found between two non-hetero residues
             for i,r in enumerate(residues):
-                if r.id[1] in hetero:
+                if r.id[1] in hetero and r.resname not in ['HIP', 'HID', 'HIE']:
                     if i+1  == len(residues):
                         continue
                     chain = r.get_parent()
