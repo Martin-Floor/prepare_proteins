@@ -3603,8 +3603,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpMDSimulations(self,md_folder,sim_time,nvt_time=2,npt_time=0.2,
-                                     equilibration_dt=2,production_dt=2,temperature=298.15,frags=5,
-                                     local_command_name=None, remote_command_name='gmx_mpi',
+                                     equilibration_dt=2,production_dt=2,temperature=298.15,frags=1,
+                                     local_command_name=None, remote_command_name='${GMXBIN}',
                                      ff='amber99sb-star-ildn', ligand_chains=None,ion_chains=None,
                                      replicas=1, charge=None, system_output='System', models = None):
         """
@@ -3645,6 +3645,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         ff : str
             Force field to use for simulation.
         """
+        # This should not be a variable i leave to avoid errors with earlier versions
+        remote_command_name='${GMXBIN}'
 
         if isinstance(models, str):
             models = [models]
@@ -3703,6 +3705,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         for line in fileinput.input(md_folder+'/scripts/md.mdp', inplace=True):
             if 'TIME_INTEGRATOR' in line:
                 line = line.replace('TIME_INTEGRATOR',str(production_dt/1000))
+                if equilibration_dt > 2:
+                    print('WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation.')
+                    cst = 'all-bonds'
+                else:
+                    cst = 'h-bonds'
+
+            if 'BOND_CONSTRAINTS' in line:
+                line = line.replace('BOND_CONSTRAINTS',cst)
             if 'NUMBER_OF_STEPS' in line:
                 line = line.replace('NUMBER_OF_STEPS',str(int((sim_time*(1e6/production_dt))/frags)))
             if 'TEMPERATURE' in line:
@@ -3715,6 +3725,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         for line in fileinput.input(md_folder+'/scripts/nvt.mdp', inplace=True):
             if 'TIME_INTEGRATOR' in line:
                 line = line.replace('TIME_INTEGRATOR',str(equilibration_dt/1000))
+                if equilibration_dt > 2:
+                    print('WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation.')
+                    cst = 'all-bonds'
+                else:
+                    cst = 'h-bonds'
+
+            if 'BOND_CONSTRAINTS' in line:
+                line = line.replace('BOND_CONSTRAINTS',cst)
             if 'NUMBER_OF_STEPS' in line:
                 line = line.replace('NUMBER_OF_STEPS',str(int(nvt_time*(1e6/equilibration_dt))))
             if 'TEMPERATURE' in line:
@@ -3727,6 +3745,15 @@ make sure of reading the target sequences with the function readTargetSequences(
         for line in fileinput.input(md_folder+'/scripts/npt.mdp', inplace=True):
             if 'TIME_INTEGRATOR' in line:
                 line = line.replace('TIME_INTEGRATOR',str(equilibration_dt/1000))
+                if equilibration_dt > 2:
+                    print('WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation.')
+                    cst = 'all-bonds'
+                else:
+                    cst = 'h-bonds'
+
+            if 'BOND_CONSTRAINTS' in line:
+                line = line.replace('BOND_CONSTRAINTS',cst)
+
             if 'NUMBER_OF_STEPS' in line:
                 line = line.replace('NUMBER_OF_STEPS',str(int(npt_time*(1e6/equilibration_dt))))
             if 'TEMPERATURE' in line:
@@ -3827,7 +3854,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     for ligand_name in ligand_res.values():
                         line += '#include "'+ligand_name+'.acpype\/posre_'+ligand_name+'.itp"\\n'
                     line += '#endif\''
-                    command_local += 'sed -i \'/^#include "'+ff+'.ff\/forcefield.itp"*/a '+line+' topol.top'+'\n'
+                    local_path = (os.getcwd()+'/'+md_folder+'/FF').replace('/','\/')
+                    command_local += 'sed -i \'/^#include "'+local_path+'\/'+ff+'.ff\/forcefield.itp"*/a '+line+' topol.top'+'\n'
+                    print(command_local)
                     for ligand_name in ligand_res.values():
                         command_local += 'sed -i -e \'$a'+ligand_name.ljust(20)+'1'+'\' topol.top'+'\n'
 
@@ -3951,7 +3980,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                         for ligand_name in ligand_res.values():
                             group_dics[ligand_name] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/'+ligand_name+'_index.ndx')
 
+
+
+
+
+                #sed -i  "s#/home/miguel/Nextprot/casein_design/KAP/svn_muts/test_mds_delet/FF#$path/FF#g" output_models/KAP_ALAR_17_S47_H111-ND1_D115_0012_0012_0276/0/topol/topol.top
                 command += 'cd output_models/'+model+'/'+str(i)+'\n'
+
+                # CHANGE PATH NAMES OF FF IN TOPOL FILE
+                local_path = os.getcwd()+'/'+md_folder+'/FF'
+                command += 'sed -i  \"s#'+local_path+'#$GMXLIB#g\" topol/topol.top'+'\n'
+
 
                 # Energy minimization
                 if not os.path.exists(md_folder+'/output_models/'+model+'/'+str(i)+"/em/prot_em.tpr"):
