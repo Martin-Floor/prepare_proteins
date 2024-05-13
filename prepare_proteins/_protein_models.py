@@ -1,31 +1,28 @@
-from . import alignment
-from . import _atom_selectors
-from . import rosettaScripts
-from . import MD
-import time
-import os
-import sys
-import shutil
-import uuid
-import itertools
+import fileinput
 import io
-import subprocess
+import itertools
 import json
-from pkg_resources import resource_stream, Requirement, resource_listdir
+import os
+import shutil
+import subprocess
+import sys
+import time
+import uuid
 
-import numpy as np
-from Bio import PDB
-from Bio.PDB.Polypeptide import aa3
-from Bio.PDB.DSSP import DSSP
-
-import pandas as pd
 import matplotlib.pyplot as plt
 import mdtraj as md
-import fileinput
-
+import numpy as np
+import pandas as pd
+from Bio import PDB
+from Bio.PDB.DSSP import DSSP
+from Bio.PDB.Polypeptide import aa3
+from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
 
 import prepare_proteins
+
+from . import MD, _atom_selectors, alignment, rosettaScripts
+
 
 class proteinModels:
     """
@@ -3194,9 +3191,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     with open(protein_ligand_folder+'/'+'input.yaml', 'w') as iyf:
                         if energy_by_residue or nonbonded_energy != None:
                             # Use new PELE version with implemented energy_by_residue
-                            iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/bin/PELE-1.7.2_mpi"\n')
-                            iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Data"\n')
-                            iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
+                            # iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/bin/PELE-1.7.2_mpi"\n')
+                            # iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Data"\n')
+                            # iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
+                            pass
                         elif ninety_degrees_version:
                             # Use new PELE version with implemented 90 degrees fix
                             iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n')
