@@ -1197,13 +1197,16 @@ chain to use for each model with the chains option."
                 )
                 command += ligand_folder + "/" + l + " "
                 if isinstance(coordinate, dict):
-                    command += '"' + ",".join([str(x) for x in coordinate[model]]) + '"'
+                    coordinate_string = '"' + ",".join([str(x) for x in coordinate[model]]) + '"'
                 elif isinstance(coordinate, tuple) and len(coordinate) == 3:
-                    command += '"' + ",".join([str(x) for x in coordinate]) + '"'
+                    coordinate_string = '"' + ",".join([str(x) for x in coordinate]) + '"'
                 else:
                     raise ValueError(
                         "coordinate needs to be a 3-element tuple of integers or dict."
                     )
+                if '-' in coordinate_string:
+                    coordinate_string = coordinate_string.replace('-','\-')
+                command += coordinate_string
                 command += ' --separator "' + separator + '" '
                 command += " --pele_poses\n"
                 os.system(command)
