@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import uuid
+import warnings
 
 import matplotlib.pyplot as plt
 import mdtraj as md
@@ -16,6 +17,8 @@ import pandas as pd
 from Bio import PDB
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3
+from Bio import BiopythonWarning
+
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
 
@@ -73,6 +76,7 @@ class proteinModels:
         verbose=False,
         only_models=None,
         exclude_models=None,
+        ignore_biopython_warnings=False
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -91,6 +95,9 @@ class proteinModels:
             single-chain structures at startup, othewise look for the calculateMSA()
             method.
         """
+
+        if ignore_biopython_warnings:
+            warnings.simplefilter('ignore', BiopythonWarning)
 
         if only_models == None:
             only_models = []
@@ -115,7 +122,10 @@ class proteinModels:
             )
 
         self.models_folder = models_folder
-        self.models_paths = self._getModelsPaths(
+        if isinstance(self.models_folder, dict):
+            self.models_paths = self.models_folder
+        elif isinstance(self.models_folder, str):
+            self.models_paths = self._getModelsPaths(
             only_models=only_models, exclude_models=exclude_models
         )
         self.models_names = []  # Store model names
@@ -2229,6 +2239,7 @@ compareSequences() function before adding missing loops."
         replace_symbol=None,
         captermini=False,
         keepfarwat=False,
+        skip_finished=False,
         **kwargs,
     ):
         """
@@ -2268,6 +2279,10 @@ compareSequences() function before adding missing loops."
                 model_name = model.replace(replace_symbol[0], replace_symbol[1])
             else:
                 model_name = model
+
+            output_path = prepare_folder+'/output_models/'+model_name+'/'+model_name+'.pdb'
+            if skip_finished and os.path.exists(output_path):
+                continue
 
             if fill_loops:
                 if model not in self.target_sequences:
