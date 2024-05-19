@@ -9,6 +9,7 @@ import sys
 import time
 import uuid
 import warnings
+import gc
 
 import matplotlib.pyplot as plt
 import mdtraj as md
@@ -76,7 +77,8 @@ class proteinModels:
         verbose=False,
         only_models=None,
         exclude_models=None,
-        ignore_biopython_warnings=False
+        ignore_biopython_warnings=False,
+        collect_memory_every=None,
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -149,13 +151,20 @@ class proteinModels:
         self.models_data = {}
 
         # Read PDB structures into Biopython
-        for model in sorted(self.models_paths):
+        collect_memory = False
+        for i, model in enumerate(sorted(self.models_paths)):
 
             if verbose:
                 print("Reading model: %s" % model)
 
-            # self.models_names.append(model)
-            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True)
+            if collect_memory_every and i % collect_memory_every == 0:
+                collect_memory = True
+            else:
+                collect_memory = False
+
+            self.models_names.append(model)
+            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True,
+                                  collect_memory=collect_memory)
 
         if get_sequences:
             # Get sequence information based on stored structure objects
@@ -488,6 +497,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         atom_mapping=None,
         add_to_path=False,
         conect_update=True,
+        collect_memory=False,
     ):
         """
         Adds a model from a PDB file.
@@ -532,6 +542,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         if add_to_path:
             self.models_paths[model] = pdb_file
+
+        if collect_memory:
+            gc.collect() # Collect memory
 
         return self.structures[model]
 
@@ -6643,6 +6656,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         atom_mapping=None,
         conect_update=False,
         replace_symbol=None,
+        collect_memory_every=None,
     ):
         """
         Read structures from a Schrodinger calculation.
@@ -6662,6 +6676,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         all_models = []
         failed_models = []
+        load_count = 0 # For collect memory
+        collect_memory = False
         for d in os.listdir(prepwizard_folder + "/output_models"):
             if os.path.isdir(prepwizard_folder + "/output_models/" + d):
                 for f in os.listdir(prepwizard_folder + "/output_models/" + d):
@@ -6699,6 +6715,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if models != None and model not in models:
                             continue
 
+                        if collect_memory_every and load_count % collect_memory_every == 0:
+                            collect_memory = True
+                        else:
+                            collect_memory = False
+
                         all_models.append(model)
                         self.readModelFromPDB(
                             model,
@@ -6706,7 +6727,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             covalent_check=covalent_check,
                             atom_mapping=atom_mapping,
                             conect_update=conect_update,
+                            collect_memory=collect_memory
                         )
+                        load_count += 1
 
         self.getModelsSequences()
         missing_models = set(self.models_names) - set(all_models)
@@ -7567,13 +7590,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                     hydrogens=hydrogens,
                 )
 
-            if convert_to_mae:
-                cwd = os.getcwd()
-                os.chdir(output_folder)
-                command = "run ._PDBtoMAE.py"
-                os.system(command)
-                os.chdir(cwd)
-                os.remove(output_folder + "/" + model_name + ".pdb")
+        if convert_to_mae:
+            command = 'cd '+output_folder+'\n'
+            command += "run ._PDBtoMAE.py\n"
+            command += "cd ../\n"
+            os.system(command)
 
     def removeModel(self, model):
         """
