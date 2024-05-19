@@ -384,9 +384,9 @@ class sequenceModels:
             os.mkdir(job_folder+'/output')
 
         # Define number of bins to execute interproscan
-        n_bins = len(self.sequences) // 10000
-        # if len(self.sequences) % 10000 > 0:
-        #     n_bins += 1
+        n_bins = len(self.sequences) // max_bin_size
+        if len(self.sequences) % 10000 > 0:
+            n_bins += 1
         zf = len(str(n_bins))
 
         # Get all sequences names
@@ -394,13 +394,13 @@ class sequenceModels:
 
         # Create commands for each sequence bin
         jobs = []
-        for bin in range(1, n_bins+1):
+        for i in range(n_bins):
 
-            bin_index = str(bin).zfill(zf)
+            bin_index = str(i).zfill(zf)
 
             input_file = 'input_fasta/input_'+bin_index+'.fasta'
 
-            bin_sequences = {s:self.sequences[s] for s in all_sequences[bin*10000:(bin+1)*10000]}
+            bin_sequences = {s:self.sequences[s] for s in all_sequences[i*max_bin_size:(i+1)*max_bin_size]}
 
             alignment.writeFastaFile(bin_sequences, job_folder+'/'+input_file)
 
