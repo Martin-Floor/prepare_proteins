@@ -301,6 +301,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
             report_data = readIterationFiles(report_files)
             report_data['Epoch'] = [i]*report_data.shape[0]
             report_data = report_data.reset_index().set_index(['Epoch', 'Trajectory', 'Accepted PELE Step'])
+            report_data = report_data.rename(columns={'currentEnergy' : 'Total Energy'})
             if isinstance(spawning_data, type(None)):
                 spawning_data = report_data
             else:
