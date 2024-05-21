@@ -2381,6 +2381,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         mae_input=True,
         cst_positions=None,
         models=None,
+        skip_finished=False
     ):
         """
         Setup grid calculation for each model.
@@ -2429,6 +2430,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             if models != None:
                 if model not in models:
                     continue
+
+            # Check if output grid exists
+            output_path = grid_folder+"/output_models/"+model+".zip"
+            if skip_finished and os.path.exists(output_path):
+                continue
 
             if all([isinstance(x, (float, int)) for x in center_atoms[model]]):
                 x = float(center_atoms[model][0])
@@ -2520,12 +2526,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     gif.write("USEFLEXMAE YES\n")
 
             command = "cd " + grid_folder + "/output_models\n"
-
-            # Add convert PDB into mae format command
-            # command += '"$SCHRODINGER/utilities/structconvert" '
-            # if mae_input:
-            #     command += '-ipdb ../input_models/'+model+'.pdb'+' '
-            #     command += '-omae '+model+'.mae\n'
 
             # Add grid generation command
             command += '"${SCHRODINGER}/glide" '
