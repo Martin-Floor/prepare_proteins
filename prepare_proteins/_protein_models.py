@@ -3592,6 +3592,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_thresholds=None,
         max_regional_iterations=None,
         regional_energy_bias="Binding Energy",
+        regional_best_fraction=0.2,
         constraint_level=1,
     ):
         """
@@ -4658,6 +4659,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += "metrics_thresholds.json "
                         command += "--separator " + separator + " "
                         command += '--energy_bias "' + regional_energy_bias + '" '
+                        command += '--regional_best_fraction '+str(regional_best_fraction)+" "
                         if max_regional_iterations:
                             command += (
                                 "--max_iterations " + str(max_regional_iterations) + " "
