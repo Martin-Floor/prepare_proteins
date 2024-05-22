@@ -17,7 +17,7 @@ parser.add_argument('--separator', default='_', help='Separator used for the pro
 parser.add_argument('--max_iterations', default=None, help='Maximum number of iterations allowed.')
 parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawnings allowed.')
 parser.add_argument('--energy_bias', default='Binding Energy', help='Which energy term to use for bias the simulation.')
-parser.add_argument('--best_fraction', default=0.2, help='Fraction of best total energy poses when using energy_bias="Binding Energy"')
+parser.add_argument('--regional_best_fraction', default=0.2, help='Fraction of best total energy poses when using energy_bias="Binding Energy"')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
 
 args=parser.parse_args()
@@ -27,7 +27,7 @@ separator = args.separator
 max_iterations = args.max_iterations
 max_spawnings = int(args.max_spawnings)
 energy_bias = args.energy_bias
-best_fraction = float(args.best_fraction)
+regional_best_fraction = float(args.regional_best_fraction)
 angles = args.angles
 
 if energy_bias not in ['Total Energy', 'Binding Energy']:
@@ -333,7 +333,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
                     filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
 
             if energy_bias == 'Binding Energy':
-                n_poses = int(filtered.shape[0]*best_fraction)
+                n_poses = int(filtered.shape[0]*regional_best_fraction)
                 filtered = filtered.nsmallest(n_poses, 'Total Energy')
 
             best_pose = filtered.nsmallest(1, energy_bias)
