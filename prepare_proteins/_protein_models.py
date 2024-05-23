@@ -97,7 +97,7 @@ class proteinModels:
         """
 
         if ignore_biopython_warnings:
-            warnings.simplefilter('ignore', BiopythonWarning)
+            warnings.simplefilter("ignore", BiopythonWarning)
 
         if only_models == None:
             only_models = []
@@ -126,8 +126,8 @@ class proteinModels:
             self.models_paths = self.models_folder
         elif isinstance(self.models_folder, str):
             self.models_paths = self._getModelsPaths(
-            only_models=only_models, exclude_models=exclude_models
-        )
+                only_models=only_models, exclude_models=exclude_models
+            )
         self.models_names = []  # Store model names
         self.structures = {}  # structures are stored here
         self.sequences = {}  # sequences are stored here
@@ -161,8 +161,12 @@ class proteinModels:
                 collect_memory = False
 
             self.models_names.append(model)
-            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True,
-                                  collect_memory=collect_memory)
+            self.readModelFromPDB(
+                model,
+                self.models_paths[model],
+                add_to_path=True,
+                collect_memory=collect_memory,
+            )
 
         if get_sequences:
             # Get sequence information based on stored structure objects
@@ -542,7 +546,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             self.models_paths[model] = pdb_file
 
         if collect_memory:
-            gc.collect() # Collect memory
+            gc.collect()  # Collect memory
 
         return self.structures[model]
 
@@ -1218,15 +1222,19 @@ chain to use for each model with the chains option."
                 )
                 command += ligand_folder + "/" + l + " "
                 if isinstance(coordinate, dict):
-                    coordinate_string = '"' + ",".join([str(x) for x in coordinate[model]]) + '"'
+                    coordinate_string = (
+                        '"' + ",".join([str(x) for x in coordinate[model]]) + '"'
+                    )
                 elif isinstance(coordinate, tuple) and len(coordinate) == 3:
-                    coordinate_string = '"' + ",".join([str(x) for x in coordinate]) + '"'
+                    coordinate_string = (
+                        '"' + ",".join([str(x) for x in coordinate]) + '"'
+                    )
                 else:
                     raise ValueError(
                         "coordinate needs to be a 3-element tuple of integers or dict."
                     )
-                if '-' in coordinate_string:
-                    coordinate_string = coordinate_string.replace('-','\-')
+                if "-" in coordinate_string:
+                    coordinate_string = coordinate_string.replace("-", "\-")
                 command += coordinate_string
                 command += ' --separator "' + separator + '" '
                 command += " --pele_poses\n"
@@ -2291,7 +2299,14 @@ compareSequences() function before adding missing loops."
             else:
                 model_name = model
 
-            output_path = prepare_folder+'/output_models/'+model_name+'/'+model_name+'.pdb'
+            output_path = (
+                prepare_folder
+                + "/output_models/"
+                + model_name
+                + "/"
+                + model_name
+                + ".pdb"
+            )
             if skip_finished and os.path.exists(output_path):
                 continue
 
@@ -2379,7 +2394,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         mae_input=True,
         cst_positions=None,
         models=None,
-        skip_finished=False
+        skip_finished=False,
     ):
         """
         Setup grid calculation for each model.
@@ -2430,7 +2445,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
 
             # Check if output grid exists
-            output_path = grid_folder+"/output_models/"+model+".zip"
+            output_path = grid_folder + "/output_models/" + model + ".zip"
             if skip_finished and os.path.exists(output_path):
                 continue
 
@@ -4657,7 +4672,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += "metrics_thresholds.json "
                         command += "--separator " + separator + " "
                         command += '--energy_bias "' + regional_energy_bias + '" '
-                        command += '--regional_best_fraction '+str(regional_best_fraction)+" "
+                        command += (
+                            "--regional_best_fraction "
+                            + str(regional_best_fraction)
+                            + " "
+                        )
                         if max_regional_iterations:
                             command += (
                                 "--max_iterations " + str(max_regional_iterations) + " "
@@ -6409,7 +6428,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     mask.append(False)
 
-            remaining_data = self.docking_data[mask]
+            remaining_data = self.docking_data[np.array(mask)]
 
             # Compute metric acceptance for each metric for all missing pairs
             if not remaining_data.empty:
@@ -6680,7 +6699,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         all_models = []
         failed_models = []
-        load_count = 0 # For collect memory
+        load_count = 0  # For collect memory
         collect_memory = False
         for d in os.listdir(prepwizard_folder + "/output_models"):
             if os.path.isdir(prepwizard_folder + "/output_models/" + d):
@@ -6719,7 +6738,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if models != None and model not in models:
                             continue
 
-                        if collect_memory_every and load_count % collect_memory_every == 0:
+                        if (
+                            collect_memory_every
+                            and load_count % collect_memory_every == 0
+                        ):
                             collect_memory = True
                         else:
                             collect_memory = False
@@ -6731,7 +6753,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             covalent_check=covalent_check,
                             atom_mapping=atom_mapping,
                             conect_update=conect_update,
-                            collect_memory=collect_memory
+                            collect_memory=collect_memory,
                         )
                         load_count += 1
 
@@ -7595,7 +7617,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 )
 
         if convert_to_mae:
-            command = 'cd '+output_folder+'\n'
+            command = "cd " + output_folder + "\n"
             command += "run ._PDBtoMAE.py\n"
             command += "cd ../\n"
             os.system(command)
