@@ -1,4 +1,5 @@
 import fileinput
+import gc
 import io
 import itertools
 import json
@@ -9,17 +10,14 @@ import sys
 import time
 import uuid
 import warnings
-import gc
 
 import matplotlib.pyplot as plt
 import mdtraj as md
 import numpy as np
 import pandas as pd
-from Bio import PDB
+from Bio import PDB, BiopythonWarning
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3
-from Bio import BiopythonWarning
-
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
 
@@ -5844,6 +5842,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.docking_data = pd.read_csv(docking_folder + "/.analysis/docking_data.csv")
         # Create multiindex dataframe
         self.docking_data.set_index(["Protein", "Ligand", "Pose"], inplace=True)
+        # Force de definition of the MultiIndex
+        self.docking_data.index = pd.MultiIndex.from_tuples(
+            self.docking_data.index, names=["Protein", "Ligand", "Pose"]
+        )
 
         for f in os.listdir(docking_folder + "/.analysis/atom_pairs"):
             model = f.split(separator)[0]
