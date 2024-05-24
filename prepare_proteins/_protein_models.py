@@ -6428,10 +6428,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     mask.append(False)
 
-            # remaining_data = self.docking_data[mask]
-            remaining_data = self.docking_data[
-                self.docking_data.index.isin(remaining_index)
-            ]
+            remaining_data = self.docking_data[np.array(mask)]
+
 
             # Compute metric acceptance for each metric for all missing pairs
             if not remaining_data.empty:
@@ -6568,7 +6566,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.chdir(output_folder)
 
         # Save given docking data to csv
-        dd = docking_data.reset_index()
+        dd = docking_data.reset_index(inplace=True)
         dd.to_csv("._docking_data.csv", index=False)
 
         # Execute docking analysis
@@ -7232,7 +7230,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 mask.append(False)
 
-        filtered_data = self.rosetta_data[mask]
+        filtered_data = self.rosetta_data[np.array(mask)]
         if inplace:
             self.rosetta_data = filtered_data
 
