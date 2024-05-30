@@ -3607,6 +3607,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_energy_bias="Binding Energy",
         regional_best_fraction=0.2,
         constraint_level=1,
+        new_version= True,
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -4393,6 +4394,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 + ebr_script_name
                                 + " output --energy_type "
                                 + energy_by_residue_type
+                                + "--new_version "
+                                + new_version
                             )
                             if isinstance(ligand_energy_groups, dict):
                                 command += (
