@@ -35,7 +35,7 @@ def getCoordinates(structure):
     return coordinates
 
 # Define aliases for atoms typically modified
-aliases = {'H'  : 'H1',
+aliases = {'H'  : ('H1', '1H'),
            'OW' : 'O',
            '1HW' : 'H1',
            '2HW' : 'H2'}
@@ -58,7 +58,15 @@ for atom in m_coordinates:
             message = f'Atom {atom[2]} has not been defined in the aliases dictionary. '
             message += 'Please do it or contact the developer!'
             raise ValueError(message)
-        alias_atom = (*atom[:2], aliases[atom[2]])
+        if isinstance(aliases[atom[2]], tuple):
+            i = 0
+            while i < len(aliases[atom[2]]):
+                alias_atom = (*atom[:2], aliases[atom[2]][i])
+                if alias_atom in o_coordinates:
+                    break
+                i += 1
+        else:
+            alias_atom = (*atom[:2], aliases[atom[2]])
         if alias_atom not in o_coordinates:
             message = f'Atom {atom} was not found in PDB {original_pdb}, please check your aliases definitions.'
             raise ValueError(message)
