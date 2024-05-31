@@ -2552,6 +2552,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         energy_by_residue=False,
         use_new_version=False,
         cst_fragments=None,
+        skip_finished=None,
     ):
         """
         Set docking calculations for all the proteins and set of ligands located
@@ -2618,6 +2619,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 os.mkdir(docking_folder + "/output_models/" + grid)
 
             for substrate in substrates_paths:
+
+                output_path = docking_folder+"/output_models/"+grid+'/'+grid+"_"+ substrate+'_pv.maegz'
+                if skip_finished and os.path.exists(output_path):
+                    continue
 
                 # Create glide dock input
                 with open(
@@ -3594,6 +3599,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_energy_bias="Binding Energy",
         regional_best_fraction=0.2,
         constraint_level=1,
+        restore_input_coordinates=True
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -4292,6 +4298,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                         _copyScriptFile(pele_folder, "changeAdaptiveIterations.py")
                         adaptive_script_name = "._changeAdaptiveIterations.py"
 
+                    if restore_input_coordinates:
+                        _copyScriptFile(
+                            pele_folder, 'restoreChangedCoordinates.py'
+                        )
+                        restore_coordinates_script_name = "._restoreChangedCoordinates.py"
+
                     # Create command
                     command = "cd " + protein_ligand_folder + "\n"
 
@@ -4520,6 +4532,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                             continuation = True
 
+                        if restore_input_coordinates:
+                            command += "python "+ rel_path_to_root+restore_coordinates_script_name+" "
+                            command += f+' '
+                            command += "output/input/"+f.replace('.pdb', '_processed.pdb')+'\n'
+
                     if continuation:
                         debug_line = False
                         restart_line = False
@@ -4666,6 +4683,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             )
                         if angles:
                             command += "--angles "
+                        if restore_input_coordinates:
+                            command += '--restore_coordinates '
                         command += "\n"
 
                     command += "cd ../../"
@@ -5734,6 +5753,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         ignore_hydrogens=False,
         separator="-",
         overwrite=True,
+        output_folder='.analysis',
     ):
         """
         Analyse a Glide Docking simulation. The function allows to calculate ligand
@@ -5774,55 +5794,55 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         # Create analysis folder
-        if not os.path.exists(docking_folder + "/.analysis"):
-            os.mkdir(docking_folder + "/.analysis")
+        if not os.path.exists(docking_folder + '/'+output_folder):
+            os.mkdir(docking_folder + '/'+output_folder)
 
         # Create analysis folder
-        if not os.path.exists(docking_folder + "/.analysis/atom_pairs"):
-            os.mkdir(docking_folder + "/.analysis/atom_pairs")
+        if not os.path.exists(docking_folder + '/'+output_folder+"/atom_pairs"):
+            os.mkdir(docking_folder + '/'+output_folder+"/atom_pairs")
 
         # Create analysis folder
         if angles:
-            if not os.path.exists(docking_folder + "/.analysis/angles"):
-                os.mkdir(docking_folder + "/.analysis/angles")
+            if not os.path.exists(docking_folder + '/'+output_folder+"/angles"):
+                os.mkdir(docking_folder + '/'+output_folder+"/angles")
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         prepare_proteins._copyScriptFile(
-            docking_folder + "/.analysis", "analyse_docking.py"
+            docking_folder + '/'+output_folder, "analyse_docking.py"
         )
-        script_path = docking_folder + "/.analysis/._analyse_docking.py"
+        script_path = docking_folder + '/'+output_folder+"/._analyse_docking.py"
 
         # Write protein_atoms dictionary to json file
         if protein_atoms:
-            with open(docking_folder + "/.analysis/._protein_atoms.json", "w") as jf:
+            with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
                 json.dump(protein_atoms, jf)
 
         # Write atom_pairs dictionary to json file
         if atom_pairs:
-            with open(docking_folder + "/.analysis/._atom_pairs.json", "w") as jf:
+            with open(docking_folder + '/'+output_folder+"/._atom_pairs.json", "w") as jf:
                 json.dump(atom_pairs, jf)
 
         # Write angles dictionary to json file
         if angles:
-            with open(docking_folder + "/.analysis/._angles.json", "w") as jf:
+            with open(docking_folder + '/'+output_folder+"/._angles.json", "w") as jf:
                 json.dump(angles, jf)
 
         command = (
             "run "
             + docking_folder
-            + "/.analysis/._analyse_docking.py "
+            + '/'+output_folder+"/._analyse_docking.py "
             + docking_folder
         )
         if atom_pairs:
             command += (
-                " --atom_pairs " + docking_folder + "/.analysis/._atom_pairs.json"
+                " --atom_pairs " + docking_folder + '/'+output_folder+"/._atom_pairs.json"
             )
         elif protein_atoms:
             command += (
-                " --protein_atoms " + docking_folder + "/.analysis/._protein_atoms.json"
+                " --protein_atoms " + docking_folder + '/'+output_folder+"/._protein_atoms.json"
             )
         if angles:
-            command += " --angles " + docking_folder + "/.analysis/._angles.json"
+            command += " --angles " + docking_folder + '/'+output_folder+"/._angles.json"
         if skip_chains:
             command += " --skip_chains"
         if return_failed:
@@ -5833,26 +5853,27 @@ make sure of reading the target sequences with the function readTargetSequences(
         command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
+
         os.system(command)
 
         # Read the CSV file into pandas
-        if not os.path.exists(docking_folder + "/.analysis/docking_data.csv"):
+        if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
             raise ValueError(
                 "Docking analysis failed. Check the ouput of the analyse_docking.py script."
             )
 
-        self.docking_data = pd.read_csv(docking_folder + "/.analysis/docking_data.csv")
+        self.docking_data = pd.read_csv(docking_folder + '/'+output_folder+"/docking_data.csv")
         # Create multiindex dataframe
         self.docking_data.set_index(["Protein", "Ligand", "Pose"], inplace=True)
 
-        for f in os.listdir(docking_folder + "/.analysis/atom_pairs"):
+        for f in os.listdir(docking_folder + '/'+output_folder+"/atom_pairs"):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split(".")[0]
 
             # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
             self.docking_distances[model][ligand] = pd.read_csv(
-                docking_folder + "/.analysis/atom_pairs/" + f
+                docking_folder + '/'+output_folder+"/atom_pairs/" + f
             )
             self.docking_distances[model][ligand].set_index(
                 ["Protein", "Ligand", "Pose"], inplace=True
@@ -5863,21 +5884,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.docking_ligands[model].append(ligand)
 
         if angles:
-            for f in os.listdir(docking_folder + "/.analysis/atom_pairs"):
+            for f in os.listdir(docking_folder + '/'+output_folder+"/atom_pairs"):
                 model = f.split(separator)[0]
                 ligand = f.split(separator)[1].split(".")[0]
 
                 # Read the CSV file into pandas
                 self.docking_angles.setdefault(model, {})
                 self.docking_angles[model][ligand] = pd.read_csv(
-                    docking_folder + "/.analysis/angles/" + f
+                    docking_folder + '/'+output_folder+"/angles/" + f
                 )
                 self.docking_angles[model][ligand].set_index(
                     ["Protein", "Ligand", "Pose"], inplace=True
                 )
 
         if return_failed:
-            with open(docking_folder + "/.analysis/._failed_dockings.json") as jifd:
+            with open(docking_folder + '/'+output_folder+"/._failed_dockings.json") as jifd:
                 failed_dockings = json.load(jifd)
             return failed_dockings
 
@@ -6877,7 +6898,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.rosetta_protonation = []
         binding_energy_df = []
 
-        analysis_folder = rosetta_folder + "/.analysis"
+        analysis_folder = rosetta_folder + '/'+output_folder
         for model in self:
 
             # Read scores
@@ -8178,7 +8199,6 @@ def _saveStructureToPDB(
         io.save(output_file, selector)
     else:
         io.save(output_file)
-
 
 def _copyScriptFile(
     output_folder, script_name, no_py=False, subfolder=None, hidden=True

@@ -19,7 +19,7 @@ parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawni
 parser.add_argument('--energy_bias', default='Binding Energy', help='Which energy term to use for bias the simulation.')
 parser.add_argument('--best_fraction', default=0.2, help='Fraction of best total energy poses when using energy_bias="Binding Energy"')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
-
+parser.add_argument('--restore_coordinates', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
 args=parser.parse_args()
 
 ### Define variables
@@ -29,6 +29,7 @@ max_spawnings = int(args.max_spawnings)
 energy_bias = args.energy_bias
 best_fraction = float(args.best_fraction)
 angles = args.angles
+restore_coordinates = args.restore_coordinates
 
 if energy_bias not in ['Total Energy', 'Binding Energy']:
     raise ValueError('You must give "Total Energy" or "Binding Energy" to bias the simulation!')
@@ -592,7 +593,12 @@ while current_spawning <= max_spawnings:
             command += 'python ../../._addAnglesToPELEConf.py output '
             command += '../0/._angles.json '
             command += '../0/output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
-            command += 'python -m pele_platform.main input_restart.yaml\n'
+
+        if restore_coordinates:
+            command += 'python ../../._restoreChangedCoordinates.py '
+            command += protein+separator+ligand+separator+pose+'.pdb '
+            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+        command += 'python -m pele_platform.main input_restart.yaml\n'
         command += 'cd ..\n'
         os.system(command)
 
