@@ -7995,7 +7995,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             structure = self.structures[model]
 
         # Iterate chains from old model
-        for chain in structure[0]:
+        model = [m for m in structure][0]
+        for chain in model:
             n_chain = PDB.Chain.Chain(chain.id)
 
             # Gather residues
