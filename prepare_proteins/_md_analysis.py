@@ -290,7 +290,8 @@ class md_analysis:
                                 group_mask = [x and y for x, y in zip(masks[metric], group_mask)]
 
                         data[(protein,replica)].append(group_mask.count(True)/n_frames)
-                        column_names.append(group)
+                        if group not in column_names:
+                            column_names.append(group)
 
         df = pd.DataFrame(data).transpose()
 
