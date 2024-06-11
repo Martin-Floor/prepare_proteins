@@ -68,7 +68,7 @@ class proteinModels:
     """
 
     def __init__(self, models_folder, get_sequences=True, get_ss=False, msa=False,
-                 verbose=False, only_models=None, exclude_models=None):
+                 verbose=False, only_models=None, exclude_models=None, read_conects=True):
         """
         Read PDB models as Bio.PDB structure objects.
 
@@ -135,7 +135,7 @@ class proteinModels:
                 print('Reading model: %s' % model)
 
             # self.models_names.append(model)
-            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True)
+            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True, read_conect=read_conects)
 
         if get_sequences:
             # Get sequence information based on stored structure objects
@@ -405,7 +405,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     residues[-1].add(oxt)
 
     def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
-                         atom_mapping=None, add_to_path=False, conect_update=True):
+                         atom_mapping=None, add_to_path=False, conect_update=True, read_conect=True):
         """
         Adds a model from a PDB file.
 
@@ -435,7 +435,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == 'WAT':
                     residue.resname = 'HOH'
 
-        if model not in self.conects or self.conects[model] == []:
+        if read_conect and (model not in self.conects or self.conects[model] == []):
             # Read conect lines
             self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
@@ -444,7 +444,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             self._checkCovalentLigands(model, pdb_file, atom_mapping=atom_mapping)
 
         # Update conect lines
-        if conect_update:
+        if read_conect and conect_update:
             self.conects[model] = self._readPDBConectLines(pdb_file, model)
 
         if add_to_path:
