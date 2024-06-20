@@ -1,4 +1,5 @@
 import fileinput
+import gc
 import io
 import itertools
 import json
@@ -8,12 +9,13 @@ import subprocess
 import sys
 import time
 import uuid
+import warnings
 
 import matplotlib.pyplot as plt
 import mdtraj as md
 import numpy as np
 import pandas as pd
-from Bio import PDB
+from Bio import PDB, BiopythonWarning
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3
 from pkg_resources import Requirement, resource_listdir, resource_stream
@@ -73,6 +75,8 @@ class proteinModels:
         verbose=False,
         only_models=None,
         exclude_models=None,
+        ignore_biopython_warnings=False,
+        collect_memory_every=None,
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -91,6 +95,9 @@ class proteinModels:
             single-chain structures at startup, othewise look for the calculateMSA()
             method.
         """
+
+        if ignore_biopython_warnings:
+            warnings.simplefilter("ignore", BiopythonWarning)
 
         if only_models == None:
             only_models = []
@@ -115,9 +122,12 @@ class proteinModels:
             )
 
         self.models_folder = models_folder
-        self.models_paths = self._getModelsPaths(
-            only_models=only_models, exclude_models=exclude_models
-        )
+        if isinstance(self.models_folder, dict):
+            self.models_paths = self.models_folder
+        elif isinstance(self.models_folder, str):
+            self.models_paths = self._getModelsPaths(
+                only_models=only_models, exclude_models=exclude_models
+            )
         self.models_names = []  # Store model names
         self.structures = {}  # structures are stored here
         self.sequences = {}  # sequences are stored here
@@ -139,13 +149,24 @@ class proteinModels:
         self.models_data = {}
 
         # Read PDB structures into Biopython
-        for model in sorted(self.models_paths):
+        collect_memory = False
+        for i, model in enumerate(sorted(self.models_paths)):
 
             if verbose:
                 print("Reading model: %s" % model)
 
-            # self.models_names.append(model)
-            self.readModelFromPDB(model, self.models_paths[model], add_to_path=True)
+            if collect_memory_every and i % collect_memory_every == 0:
+                collect_memory = True
+            else:
+                collect_memory = False
+
+            self.models_names.append(model)
+            self.readModelFromPDB(
+                model,
+                self.models_paths[model],
+                add_to_path=True,
+                collect_memory=collect_memory,
+            )
 
         if get_sequences:
             # Get sequence information based on stored structure objects
@@ -478,6 +499,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         atom_mapping=None,
         add_to_path=False,
         conect_update=True,
+        collect_memory=False,
     ):
         """
         Adds a model from a PDB file.
@@ -522,6 +544,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         if add_to_path:
             self.models_paths[model] = pdb_file
+
+        if collect_memory:
+            gc.collect()  # Collect memory
 
         return self.structures[model]
 
@@ -1197,13 +1222,20 @@ chain to use for each model with the chains option."
                 )
                 command += ligand_folder + "/" + l + " "
                 if isinstance(coordinate, dict):
-                    command += '"' + ",".join([str(x) for x in coordinate[model]]) + '"'
+                    coordinate_string = (
+                        '"' + ",".join([str(x) for x in coordinate[model]]) + '"'
+                    )
                 elif isinstance(coordinate, tuple) and len(coordinate) == 3:
-                    command += '"' + ",".join([str(x) for x in coordinate]) + '"'
+                    coordinate_string = (
+                        '"' + ",".join([str(x) for x in coordinate]) + '"'
+                    )
                 else:
                     raise ValueError(
                         "coordinate needs to be a 3-element tuple of integers or dict."
                     )
+                if "-" in coordinate_string:
+                    coordinate_string = coordinate_string.replace("-", "\-")
+                command += coordinate_string
                 command += ' --separator "' + separator + '" '
                 command += " --pele_poses\n"
                 os.system(command)
@@ -2226,6 +2258,7 @@ compareSequences() function before adding missing loops."
         replace_symbol=None,
         captermini=False,
         keepfarwat=False,
+        skip_finished=False,
         **kwargs,
     ):
         """
@@ -2265,6 +2298,17 @@ compareSequences() function before adding missing loops."
                 model_name = model.replace(replace_symbol[0], replace_symbol[1])
             else:
                 model_name = model
+
+            output_path = (
+                prepare_folder
+                + "/output_models/"
+                + model_name
+                + "/"
+                + model_name
+                + ".pdb"
+            )
+            if skip_finished and os.path.exists(output_path):
+                continue
 
             if fill_loops:
                 if model not in self.target_sequences:
@@ -2350,6 +2394,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         mae_input=True,
         cst_positions=None,
         models=None,
+        skip_finished=False,
     ):
         """
         Setup grid calculation for each model.
@@ -2398,6 +2443,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             if models != None:
                 if model not in models:
                     continue
+
+            # Check if output grid exists
+            output_path = grid_folder + "/output_models/" + model + ".zip"
+            if skip_finished and os.path.exists(output_path):
+                continue
 
             if all([isinstance(x, (float, int)) for x in center_atoms[model]]):
                 x = float(center_atoms[model][0])
@@ -2490,12 +2540,6 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             command = "cd " + grid_folder + "/output_models\n"
 
-            # Add convert PDB into mae format command
-            # command += '"$SCHRODINGER/utilities/structconvert" '
-            # if mae_input:
-            #     command += '-ipdb ../input_models/'+model+'.pdb'+' '
-            #     command += '-omae '+model+'.mae\n'
-
             # Add grid generation command
             command += '"${SCHRODINGER}/glide" '
             command += "../grid_inputs/" + model + ".in" + " "
@@ -2521,6 +2565,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         energy_by_residue=False,
         use_new_version=False,
         cst_fragments=None,
+        skip_finished=None,
     ):
         """
         Set docking calculations for all the proteins and set of ligands located
@@ -2587,6 +2632,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 os.mkdir(docking_folder + "/output_models/" + grid)
 
             for substrate in substrates_paths:
+
+                output_path = docking_folder+"/output_models/"+grid+'/'+grid+"_"+ substrate+'_pv.maegz'
+                if skip_finished and os.path.exists(output_path):
+                    continue
 
                 # Create glide dock input
                 with open(
@@ -3561,7 +3610,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_thresholds=None,
         max_regional_iterations=None,
         regional_energy_bias="Binding Energy",
+        regional_best_fraction=0.2,
         constraint_level=1,
+        restore_input_coordinates=True
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -3965,12 +4016,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                     with open(protein_ligand_folder + "/" + "input.yaml", "w") as iyf:
                         if energy_by_residue or nonbonded_energy != None:
                             # Use new PELE version with implemented energy_by_residue
-                            # iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/bin/PELE-1.7.2_mpi"\n')
-                            # iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Data"\n')
-                            # iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.7.2-b6/Documents/"\n')
-                            pass
+                            iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/bin/PELE_mpi"\n')
+                            iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Data"\n')
+                            iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Documents/"\n')
                         elif ninety_degrees_version:
                             # Use new PELE version with implemented 90 degrees fix
+                            print('paths of PELE version should be changed')
                             iyf.write(
                                 'pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n'
                             )
@@ -4260,6 +4311,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                         _copyScriptFile(pele_folder, "changeAdaptiveIterations.py")
                         adaptive_script_name = "._changeAdaptiveIterations.py"
 
+                    if restore_input_coordinates:
+                        _copyScriptFile(
+                            pele_folder, 'restoreChangedCoordinates.py'
+                        )
+                        restore_coordinates_script_name = "._restoreChangedCoordinates.py"
+
                     # Create command
                     command = "cd " + protein_ligand_folder + "\n"
 
@@ -4348,6 +4405,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 + ebr_script_name
                                 + " output --energy_type "
                                 + energy_by_residue_type
+                                + "--new_version "
+                                + new_version
                             )
                             if isinstance(ligand_energy_groups, dict):
                                 command += (
@@ -4488,6 +4547,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                             continuation = True
 
+                        if restore_input_coordinates:
+                            command += "python "+ rel_path_to_root+restore_coordinates_script_name+" "
+                            command += f+' '
+                            command += "output/input/"+f.replace('.pdb', '_processed.pdb')+'\n'
+
                     if continuation:
                         debug_line = False
                         restart_line = False
@@ -4627,12 +4691,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += "metrics_thresholds.json "
                         command += "--separator " + separator + " "
                         command += '--energy_bias "' + regional_energy_bias + '" '
+                        command += (
+                            "--regional_best_fraction "
+                            + str(regional_best_fraction)
+                            + " "
+                        )
                         if max_regional_iterations:
                             command += (
                                 "--max_iterations " + str(max_regional_iterations) + " "
                             )
                         if angles:
                             command += "--angles "
+                        if restore_input_coordinates:
+                            command += '--restore_coordinates '
                         command += "\n"
 
                     command += "cd ../../"
@@ -5698,6 +5769,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         ignore_hydrogens=False,
         separator="-",
         overwrite=True,
+        output_folder='.analysis',
     ):
         """
         Analyse a Glide Docking simulation. The function allows to calculate ligand
@@ -5738,55 +5810,55 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         # Create analysis folder
-        if not os.path.exists(docking_folder + "/.analysis"):
-            os.mkdir(docking_folder + "/.analysis")
+        if not os.path.exists(docking_folder + '/'+output_folder):
+            os.mkdir(docking_folder + '/'+output_folder)
 
         # Create analysis folder
-        if not os.path.exists(docking_folder + "/.analysis/atom_pairs"):
-            os.mkdir(docking_folder + "/.analysis/atom_pairs")
+        if not os.path.exists(docking_folder + '/'+output_folder+"/atom_pairs"):
+            os.mkdir(docking_folder + '/'+output_folder+"/atom_pairs")
 
         # Create analysis folder
         if angles:
-            if not os.path.exists(docking_folder + "/.analysis/angles"):
-                os.mkdir(docking_folder + "/.analysis/angles")
+            if not os.path.exists(docking_folder + '/'+output_folder+"/angles"):
+                os.mkdir(docking_folder + '/'+output_folder+"/angles")
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         prepare_proteins._copyScriptFile(
-            docking_folder + "/.analysis", "analyse_docking.py"
+            docking_folder + '/'+output_folder, "analyse_docking.py"
         )
-        script_path = docking_folder + "/.analysis/._analyse_docking.py"
+        script_path = docking_folder + '/'+output_folder+"/._analyse_docking.py"
 
         # Write protein_atoms dictionary to json file
         if protein_atoms:
-            with open(docking_folder + "/.analysis/._protein_atoms.json", "w") as jf:
+            with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
                 json.dump(protein_atoms, jf)
 
         # Write atom_pairs dictionary to json file
         if atom_pairs:
-            with open(docking_folder + "/.analysis/._atom_pairs.json", "w") as jf:
+            with open(docking_folder + '/'+output_folder+"/._atom_pairs.json", "w") as jf:
                 json.dump(atom_pairs, jf)
 
         # Write angles dictionary to json file
         if angles:
-            with open(docking_folder + "/.analysis/._angles.json", "w") as jf:
+            with open(docking_folder + '/'+output_folder+"/._angles.json", "w") as jf:
                 json.dump(angles, jf)
 
         command = (
             "run "
             + docking_folder
-            + "/.analysis/._analyse_docking.py "
+            + '/'+output_folder+"/._analyse_docking.py "
             + docking_folder
         )
         if atom_pairs:
             command += (
-                " --atom_pairs " + docking_folder + "/.analysis/._atom_pairs.json"
+                " --atom_pairs " + docking_folder + '/'+output_folder+"/._atom_pairs.json"
             )
         elif protein_atoms:
             command += (
-                " --protein_atoms " + docking_folder + "/.analysis/._protein_atoms.json"
+                " --protein_atoms " + docking_folder + '/'+output_folder+"/._protein_atoms.json"
             )
         if angles:
-            command += " --angles " + docking_folder + "/.analysis/._angles.json"
+            command += " --angles " + docking_folder + '/'+output_folder+"/._angles.json"
         if skip_chains:
             command += " --skip_chains"
         if return_failed:
@@ -5797,26 +5869,31 @@ make sure of reading the target sequences with the function readTargetSequences(
         command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
+
         os.system(command)
 
         # Read the CSV file into pandas
-        if not os.path.exists(docking_folder + "/.analysis/docking_data.csv"):
+        if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
             raise ValueError(
                 "Docking analysis failed. Check the ouput of the analyse_docking.py script."
             )
 
-        self.docking_data = pd.read_csv(docking_folder + "/.analysis/docking_data.csv")
+        self.docking_data = pd.read_csv(docking_folder + '/'+output_folder+"/docking_data.csv")
         # Create multiindex dataframe
         self.docking_data.set_index(["Protein", "Ligand", "Pose"], inplace=True)
+        # Force de definition of the MultiIndex
+        self.docking_data.index = pd.MultiIndex.from_tuples(
+            self.docking_data.index, names=["Protein", "Ligand", "Pose"]
+        )
 
-        for f in os.listdir(docking_folder + "/.analysis/atom_pairs"):
+        for f in os.listdir(docking_folder + '/'+output_folder+"/atom_pairs"):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split(".")[0]
 
             # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
             self.docking_distances[model][ligand] = pd.read_csv(
-                docking_folder + "/.analysis/atom_pairs/" + f
+                docking_folder + '/'+output_folder+"/atom_pairs/" + f
             )
             self.docking_distances[model][ligand].set_index(
                 ["Protein", "Ligand", "Pose"], inplace=True
@@ -5827,21 +5904,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.docking_ligands[model].append(ligand)
 
         if angles:
-            for f in os.listdir(docking_folder + "/.analysis/atom_pairs"):
+            for f in os.listdir(docking_folder + '/'+output_folder+"/atom_pairs"):
                 model = f.split(separator)[0]
                 ligand = f.split(separator)[1].split(".")[0]
 
                 # Read the CSV file into pandas
                 self.docking_angles.setdefault(model, {})
                 self.docking_angles[model][ligand] = pd.read_csv(
-                    docking_folder + "/.analysis/angles/" + f
+                    docking_folder + '/'+output_folder+"/angles/" + f
                 )
                 self.docking_angles[model][ligand].set_index(
                     ["Protein", "Ligand", "Pose"], inplace=True
                 )
 
         if return_failed:
-            with open(docking_folder + "/.analysis/._failed_dockings.json") as jifd:
+            with open(docking_folder + '/'+output_folder+"/._failed_dockings.json") as jifd:
                 failed_dockings = json.load(jifd)
             return failed_dockings
 
@@ -6371,7 +6448,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     mask.append(False)
 
-            remaining_data = self.docking_data[mask]
+            remaining_data = self.docking_data[np.array(mask)]
 
             # Compute metric acceptance for each metric for all missing pairs
             if not remaining_data.empty:
@@ -6622,6 +6699,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         atom_mapping=None,
         conect_update=False,
         replace_symbol=None,
+        collect_memory_every=None,
     ):
         """
         Read structures from a Schrodinger calculation.
@@ -6641,6 +6719,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         all_models = []
         failed_models = []
+        load_count = 0  # For collect memory
+        collect_memory = False
         for d in os.listdir(prepwizard_folder + "/output_models"):
             if os.path.isdir(prepwizard_folder + "/output_models/" + d):
                 for f in os.listdir(prepwizard_folder + "/output_models/" + d):
@@ -6678,6 +6758,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if models != None and model not in models:
                             continue
 
+                        if (
+                            collect_memory_every
+                            and load_count % collect_memory_every == 0
+                        ):
+                            collect_memory = True
+                        else:
+                            collect_memory = False
+
                         all_models.append(model)
                         self.readModelFromPDB(
                             model,
@@ -6685,7 +6773,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             covalent_check=covalent_check,
                             atom_mapping=atom_mapping,
                             conect_update=conect_update,
+                            collect_memory=collect_memory,
                         )
+                        load_count += 1
 
         self.getModelsSequences()
         missing_models = set(self.models_names) - set(all_models)
@@ -6831,7 +6921,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.rosetta_protonation = []
         binding_energy_df = []
 
-        analysis_folder = rosetta_folder + "/.analysis"
+        analysis_folder = rosetta_folder + '/'+output_folder
         for model in self:
 
             # Read scores
@@ -7546,13 +7636,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                     hydrogens=hydrogens,
                 )
 
-            if convert_to_mae:
-                cwd = os.getcwd()
-                os.chdir(output_folder)
-                command = "run ._PDBtoMAE.py"
-                os.system(command)
-                os.chdir(cwd)
-                os.remove(output_folder + "/" + model_name + ".pdb")
+        if convert_to_mae:
+            command = "cd " + output_folder + "\n"
+            command += "run ._PDBtoMAE.py\n"
+            command += "cd ../\n"
+            os.system(command)
 
     def removeModel(self, model):
         """
@@ -7904,7 +7992,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             structure = self.structures[model]
 
         # Iterate chains from old model
-        for chain in structure[0]:
+        model = [m for m in structure][0]
+        for chain in model:
             n_chain = PDB.Chain.Chain(chain.id)
 
             # Gather residues
@@ -8134,7 +8223,6 @@ def _saveStructureToPDB(
         io.save(output_file, selector)
     else:
         io.save(output_file)
-
 
 def _copyScriptFile(
     output_folder, script_name, no_py=False, subfolder=None, hidden=True

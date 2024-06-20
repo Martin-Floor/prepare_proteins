@@ -17,8 +17,9 @@ parser.add_argument('--separator', default='_', help='Separator used for the pro
 parser.add_argument('--max_iterations', default=None, help='Maximum number of iterations allowed.')
 parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawnings allowed.')
 parser.add_argument('--energy_bias', default='Binding Energy', help='Which energy term to use for bias the simulation.')
+parser.add_argument('--regional_best_fraction', default=0.2, help='Fraction of best total energy poses when using energy_bias="Binding Energy"')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
-
+parser.add_argument('--restore_coordinates', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
 args=parser.parse_args()
 
 ### Define variables
@@ -26,7 +27,9 @@ separator = args.separator
 max_iterations = args.max_iterations
 max_spawnings = int(args.max_spawnings)
 energy_bias = args.energy_bias
+regional_best_fraction = float(args.regional_best_fraction)
 angles = args.angles
+restore_coordinates = args.restore_coordinates
 
 if energy_bias not in ['Total Energy', 'Binding Energy']:
     raise ValueError('You must give "Total Energy" or "Binding Energy" to bias the simulation!')
@@ -299,6 +302,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
             report_data = readIterationFiles(report_files)
             report_data['Epoch'] = [i]*report_data.shape[0]
             report_data = report_data.reset_index().set_index(['Epoch', 'Trajectory', 'Accepted PELE Step'])
+            report_data = report_data.rename(columns={'currentEnergy' : 'Total Energy'})
             if isinstance(spawning_data, type(None)):
                 spawning_data = report_data
             else:
@@ -328,6 +332,10 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
                     metric_acceptance[m] = metric_filter[metric_filter[m] <= metrics_thresholds[m][1]].shape[0]
                     filtered = filtered[metrics_thresholds[m][0] <= filtered[m]]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
+
+            if energy_bias == 'Binding Energy':
+                n_poses = int(filtered.shape[0]*regional_best_fraction)
+                filtered = filtered.nsmallest(n_poses, 'Total Energy')
 
             best_pose = filtered.nsmallest(1, energy_bias)
 
@@ -585,7 +593,12 @@ while current_spawning <= max_spawnings:
             command += 'python ../../._addAnglesToPELEConf.py output '
             command += '../0/._angles.json '
             command += '../0/output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
-            command += 'python -m pele_platform.main input_restart.yaml\n'
+
+        if restore_coordinates:
+            command += 'python ../../._restoreChangedCoordinates.py '
+            command += protein+separator+ligand+separator+pose+'.pdb '
+            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+        command += 'python -m pele_platform.main input_restart.yaml\n'
         command += 'cd ..\n'
         os.system(command)
 
