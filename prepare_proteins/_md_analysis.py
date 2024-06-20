@@ -79,7 +79,7 @@ class md_analysis:
 
                 # TOP
                 if not os.path.exists(top_path.replace('.gro','_noPBC.gro')) or overwrite:
-                    os.system('echo -e '+centering_selector+' '+group_dics[output_group]+' | '+command+'  trjconv -s '+top_path.replace('.gro','.tpr')+' -f '+top_path+' -o '+top_path.replace('.gro','_noPBC.gro')+' -center -pbc res -ur compact'+' -n '+index_path)
+                    os.system('echo '+centering_selector+' '+group_dics[output_group]+' | '+command+'  trjconv -s '+top_path.replace('.gro','.tpr')+' -f '+top_path+' -o '+top_path.replace('.gro','_noPBC.gro')+' -center -pbc res -ur compact'+' -n '+index_path)
                     if remove_redundant_files:
                         os.remove(top_path)
 
