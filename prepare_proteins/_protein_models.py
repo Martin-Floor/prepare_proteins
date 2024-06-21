@@ -5074,8 +5074,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             + ligand_name
                             + '_GMX.itp"\\n'
                         )
-                    line += "#ifdef POSRES\\n"
-                    for ligand_name in ligand_res.values():
+
+                        line += "#ifdef POSRES\\n"
+                        
                         line += (
                             '#include "'
                             + ligand_name
@@ -5083,10 +5084,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                             + ligand_name
                             + '.itp"\\n'
                         )
-                    line += "#endif'"
+                        line += "#endif\\n"
+
+                    line += "'"
+
                     local_path = (os.getcwd() + "/" + md_folder + "/FF").replace(
                         "/", "\/"
                     )
+                    print(line)
                     command_local += (
                         "sed -i '/^#include \""
                         + local_path
@@ -5529,9 +5534,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         + ligand_name
                                         + "_index.ndx -o ../topol/"
                                         + ligand_name
-                                        + ".acpype/"
+                                        + ".acpype/posre_"
                                         + ligand_name
-                                        + "_ligand.itp  -fc "
+                                        + ".itp  -fc "
                                         + FClist[i - 1]
                                         + " "
                                         + FClist[i - 1]
