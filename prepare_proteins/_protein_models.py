@@ -1111,15 +1111,26 @@ chain to use for each model with the chains option."
                 print("Saving model: %s" % model)
 
             traj = md.load(self.models_paths[model])
-            rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
-                traj,
-                reference,
-                chain_indexes=chain_indexes,
-                trajectory_chain_indexes=trajectory_chain_indexes[model],
-                reference_chain_indexes=reference_chain_indexes,
-                aligment_mode=aligment_mode,
-                reference_residues=reference_residues,
-            )
+            if trajectory_chain_indexes is None:
+                rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
+                    traj,
+                    reference,
+                    chain_indexes=chain_indexes,
+                    trajectory_chain_indexes=trajectory_chain_indexes,
+                    reference_chain_indexes=reference_chain_indexes,
+                    aligment_mode=aligment_mode,
+                    reference_residues=reference_residues,
+                )
+            else:
+                rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
+                    traj,
+                    reference,
+                    chain_indexes=chain_indexes,
+                    trajectory_chain_indexes=trajectory_chain_indexes[model],
+                    reference_chain_indexes=reference_chain_indexes,
+                    aligment_mode=aligment_mode,
+                    reference_residues=reference_residues,
+                )
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
