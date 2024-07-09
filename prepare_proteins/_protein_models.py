@@ -1116,15 +1116,26 @@ chain to use for each model with the chains option."
                 print("Saving model: %s" % model)
 
             traj = md.load(self.models_paths[model])
-            rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
-                traj,
-                reference,
-                chain_indexes=chain_indexes,
-                trajectory_chain_indexes=trajectory_chain_indexes[model],
-                reference_chain_indexes=reference_chain_indexes,
-                aligment_mode=aligment_mode,
-                reference_residues=reference_residues,
-            )
+            if trajectory_chain_indexes is None:
+                rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
+                    traj,
+                    reference,
+                    chain_indexes=chain_indexes,
+                    trajectory_chain_indexes=trajectory_chain_indexes,
+                    reference_chain_indexes=reference_chain_indexes,
+                    aligment_mode=aligment_mode,
+                    reference_residues=reference_residues,
+                )
+            else:
+                rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
+                    traj,
+                    reference,
+                    chain_indexes=chain_indexes,
+                    trajectory_chain_indexes=trajectory_chain_indexes[model],
+                    reference_chain_indexes=reference_chain_indexes,
+                    aligment_mode=aligment_mode,
+                    reference_residues=reference_residues,
+                )
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
@@ -5691,8 +5702,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             + ligand_name
                             + '_GMX.itp"\\n'
                         )
-                    line += "#ifdef POSRES\\n"
-                    for ligand_name in ligand_res.values():
+
+                        line += "#ifdef POSRES\\n"
+                        
                         line += (
                             '#include "'
                             + ligand_name
@@ -5700,10 +5712,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                             + ligand_name
                             + '.itp"\\n'
                         )
-                    line += "#endif'"
+                        line += "#endif\\n"
+
+                    line += "'"
+
                     local_path = (os.getcwd() + "/" + md_folder + "/FF").replace(
                         "/", "\/"
                     )
+                    print(line)
                     command_local += (
                         "sed -i '/^#include \""
                         + local_path
@@ -5766,7 +5782,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     + "/index.ndx"
                 )
 
-                """
                 # generate tmp index to check for crystal waters
                 os.system('echo "q"| '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/complex.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/tmp_index.ndx'+'\n')
                 group_dics['tmp_index'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/tmp_index.ndx')
@@ -5786,15 +5801,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         f.write(crystal_waters_ndx_lines)
 
                     os.system('echo \''+group_dics['complex']['Water']+' & !'+str(len(group_dics['complex']))+'\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
+                    os.system('echo \'del '+group_dics['complex']['SOL']+'\n name '+str(len(group_dics['complex']))+' SOL\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
 
                     # Update group_dics
                     group_dics['complex'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx')
-                    sol_group = 'Water_&_!CrystalWaters'
 
-                else:
-                    sol_group = 'SOL'
-                """
-                sol_group = "SOL"
+                sol_group = 'SOL'
+
                 # With the index info now add the ions (now we can select the SOL :D)
                 command_local = command
                 command_local += (
@@ -6149,9 +6162,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         + ligand_name
                                         + "_index.ndx -o ../topol/"
                                         + ligand_name
-                                        + ".acpype/"
+                                        + ".acpype/posre_"
                                         + ligand_name
-                                        + "_ligand.itp  -fc "
+                                        + ".itp  -fc "
                                         + FClist[i - 1]
                                         + " "
                                         + FClist[i - 1]
