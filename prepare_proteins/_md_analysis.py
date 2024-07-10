@@ -68,14 +68,12 @@ class md_analysis:
                 if output_group not in group_dics:
                     raise ValueError('The selected output group is not available in the topol/index.ndx file. The following groups are available: '+','.join(group_dics.keys()))
 
-
                 # Remove PBC
                 # In case of ligand PBC center is between protein ligand interface
                 if ligand:
                     centering_selector = group_dics['Protein']
                 else:
                     centering_selector = group_dics['Protein']
-
 
                 # TOP
                 if not os.path.exists(top_path.replace('.gro','_noPBC.gro')) or overwrite:

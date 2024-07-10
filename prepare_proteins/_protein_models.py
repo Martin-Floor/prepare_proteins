@@ -5066,25 +5066,28 @@ make sure of reading the target sequences with the function readTargetSequences(
                     )
                     line = ""
                     line += '#include "atomtypes.itp"\\n'
+                    included_ligands = []
                     for ligand_name in ligand_res.values():
-                        line += (
-                            '#include "'
-                            + ligand_name
-                            + ".acpype\/"
-                            + ligand_name
-                            + '_GMX.itp"\\n'
-                        )
+                        if ligand_name not in included_ligands:
+                            included_ligands.append(ligand_name)
+                            line += (
+                                '#include "'
+                                + ligand_name
+                                + ".acpype\/"
+                                + ligand_name
+                                + '_GMX.itp"\\n'
+                            )
 
-                        line += "#ifdef POSRES\\n"
-                        
-                        line += (
-                            '#include "'
-                            + ligand_name
-                            + ".acpype\/posre_"
-                            + ligand_name
-                            + '.itp"\\n'
-                        )
-                        line += "#endif\\n"
+                            line += "#ifdef POSRES\\n"
+
+                            line += (
+                                '#include "'
+                                + ligand_name
+                                + ".acpype\/posre_"
+                                + ligand_name
+                                + '.itp"\\n'
+                            )
+                            line += "#endif\\n"
 
                     line += "'"
 
@@ -8586,9 +8589,7 @@ def _getLigandParameters(
 
     if num_chains < 2:
         raise ValueError(
-            "Input pdb "
-            + model
-            + " has only one chain. Protein and ligand should be separated in individual chains."
+            "Input pdb has only one chain. Protein and ligand should be separated in individual chains."
         )
 
     io.set_structure(structure)
