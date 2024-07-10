@@ -6,7 +6,10 @@ from . import scorefunctions as rs_scorefunctions
 from . import movers as rs_movers
 
 import Bio.PDB as PDB
-from Bio.PDB.Polypeptide import one_to_three
+try:
+    from Bio.PDB.Polypeptide import one_to_three
+except ImportError:
+    from Bio.PDB.Polypeptide import protein_letters_3to1
 
 def bb_only_score_function(membrane=False):
 

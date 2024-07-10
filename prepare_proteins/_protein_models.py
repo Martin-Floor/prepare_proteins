@@ -5761,7 +5761,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 group_dics = {}
                 command_local += (
-                    'echo "q"| '
+                    'echo -e q | '
                     + command_name
                     + " make_ndx -f  prot_solv.gro -o index.ndx"
                     + "\n"
@@ -5772,6 +5772,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     f.write(command_local)
                 subprocess.run("bash tmp.sh", shell=True)
                 os.remove("tmp.sh")
+
 
                 # Read complex index
                 group_dics["complex"] = _readGromacsIndexFile(
@@ -5803,8 +5804,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     with open(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx','a') as f:
                         f.write(crystal_waters_ndx_lines)
 
-                    os.system('echo \''+group_dics['complex']['Water']+' & !'+str(len(group_dics['complex']))+'\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
-                    os.system('echo \'del '+group_dics['complex']['SOL']+'\n name '+str(len(group_dics['complex']))+' SOL\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
+                    os.system('echo -e \''+group_dics['complex']['Water']+' & !'+str(len(group_dics['complex']))+'\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
+                    os.system('echo -e \'del '+group_dics['complex']['SOL']+'\n name '+str(len(group_dics['complex']))+' SOL\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
 
                     # Update group_dics
                     group_dics['complex'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx')

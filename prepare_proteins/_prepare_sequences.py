@@ -231,7 +231,7 @@ class sequenceModels:
             for f in os.listdir(mdir):
                 if f.startswith('relaxed_model_1_ptm'):
                     models_paths[d] = mdir+'/'+f
-                elif f.startswith('ranked__0'):
+                elif f.startswith('ranked_0'):
                     models_paths[d] = mdir+'/'+f
 
         # Create output folder
