@@ -90,6 +90,7 @@ class openmm_md:
 
         residue_names = []
         for residue in self.modeller.topology.residues():
+
             if residue.name == 'HIS':
                 atoms = []
                 for atom in residue.atoms():

@@ -1501,6 +1501,233 @@ class movers:
             self.root.set('name', self.name)
             self.root.set('residue_selector', self.residue_selector)
 
+    # Add docking ligand movers
+
+    class startFrom:
+
+        def __init__(self, name='startFrom', chain='X', use_nbr=False):
+            self.type = 'mover'
+            self.name = name
+            self.chain = chain
+            self.use_nbr = use_nbr
+            self.coordinates = []
+            self.files = []
+
+        def addCoordinate(self, xyz, pdb_tag=None):
+            x, y, z = xyz
+            self.coordinates.append(((x, y, z), pdb_tag))
+
+        def addFile(self, file_path):
+            self.files.append(file_path)
+
+        def generateXml(self):
+            self.root = ElementTree.Element('StartFrom')
+            self.root.set('name', self.name)
+            self.root.set('chain', self.chain)
+            self.root.set('use_nbr', str(self.use_nbr).lower())
+
+            for coordinate in self.coordinates:
+                x, y, z = coordinate[0]
+                pdb_tag = coordinate[1]
+                coordinate_element = ElementTree.SubElement(self.root, 'Coordinates')
+                coordinate_element.set('x', str(x))
+                coordinate_element.set('y', str(y))
+                coordinate_element.set('z', str(z))
+                if pdb_tag:
+                    coordinate_element.set('pdb_tag', pdb_tag)
+
+            for file in self.files:
+                file_tag = ElementTree.SubElement(self.root, 'File')
+                file_tag.set('filename', file)
+
+#         <StartFrom name="(&string)" chain="(&string)" use_nbr="(0 &bool)" >
+#    <Coordinates x="(&float)" y="(&float)" z="(&float)" pdb_tag="('' &string)"/>
+#    <File filename="(&string)" />
+#    <PDB filename="(&string)" atom_name="('' &string)" pdb_tag="('' &string)" />
+# </StartFrom>
+
+    class transform:
+
+        def __init__(self, name='transform', chain='X', box_size=5.0, move_distance=0.1, angle=5.0,
+                     cycles=500, repeats=1, temperature=5.0, initial_perturb=5.0,
+                     initial_angle_pertub=None, rmsd=None, optimize_until_score_is_negative=False,
+                     use_constraints=False, cst_fa_file=None, cst_fa_weight=None, ensemble_proteins=None,
+                     use_main_model=False, grid_set=None):
+
+            self.type = 'mover'
+            self.name = name
+            self.chain = chain
+            self.box_size = box_size
+            self.move_distance =move_distance
+            self.angle = angle
+            self.cycles = cycles
+            self.repeats = repeats
+            self.temperature = temperature
+            self.initial_perturb = initial_perturb
+            self.initial_angle_pertub = initial_angle_pertub
+            self.rmsd = rmsd
+            self.optimize_until_score_is_negative = optimize_until_score_is_negative
+            self.use_constraints = use_constraints
+            self.cst_fa_file = cst_fa_file
+            self.cst_fa_weight = cst_fa_weight
+            self.ensemble_proteins = ensemble_proteins
+            self.use_main_model = use_main_model
+            self.grid_set = grid_set
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('Transform')
+            self.root.set('name', self.name)
+            self.root.set('chain', self.chain)
+            self.root.set('box_size', str(self.box_size))
+            self.root.set('move_distance', str(self.move_distance))
+            self.root.set('angle', str(self.angle))
+            self.root.set('cycles', str(self.cycles))
+            self.root.set('repeats', str(self.repeats))
+            self.root.set('temperature', str(self.temperature))
+            self.root.set('initial_perturb', str(self.initial_perturb))
+            if self.initial_angle_pertub:
+                self.root.set('initial_angle_pertub', str(self.initial_angle_pertub))
+            if self.rmsd:
+                self.root.set('rmsd', str(self.rmsd))
+            if self.optimize_until_score_is_negative:
+                self.root.set('optimize_until_score_is_negative', str(self.optimize_until_score_is_negative).lower())
+            if self.use_constraints:
+                self.root.set('use_constraints', str(self.use_constraints).lower())
+            if self.cst_fa_file:
+                self.root.set('cst_fa_file', self.cst_fa_file)
+            if self.cst_fa_weight:
+                self.root.set('cst_fa_weight', str(self.cst_fa_weight))
+            if self.ensemble_proteins:
+                self.root.set('ensemble_proteins', self.ensemble_proteins)
+            if self.use_main_model:
+                self.root.set('use_main_model', str(self.use_main_model).lower())
+            if self.grid_set:
+                self.root.set('grid_set', self.grid_set)
+
+    class highResDocker:
+
+        def __init__(self, name='highResDocker', cycles=1, repack_every_Nth=1, scorefxn=None, movemap_builder=None):
+
+            self.type = 'mover'
+            self.name = name
+            self.cycles = cycles
+            self.repack_every_Nth = repack_every_Nth
+            self.scorefxn = scorefxn
+            self.movemap_builder = movemap_builder
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('HighResDocker')
+            self.root.set('name', self.name)
+            self.root.set('cycles', str(self.cycles))
+            self.root.set('repack_every_Nth', str(self.repack_every_Nth))
+            if self.scorefxn:
+                if isinstance(self.scorefxn, str):
+                    self.root.set('scorefxn', self.scorefxn)
+                else:
+                    self.root.set('scorefxn', self.scorefxn.name)
+            if self.movemap_builder:
+                if isinstance(self.movemap_builder, str):
+                    self.root.set('movemap_builder', self.movemap_builder)
+                else:
+                    self.root.set('movemap_builder', self.movemap_builder.name)
+
+    class finalMinimizer:
+
+        def __init__(self, name='finalMinimizer', scorefxn=None, movemap_builder=None,
+                     remove_constraints=False):
+
+            self.type = 'mover'
+            self.name = name
+            self.scorefxn = scorefxn
+            self.movemap_builder = movemap_builder
+            self.remove_constraints = remove_constraints
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('FinalMinimizer')
+            self.root.set('name', self.name)
+            if self.scorefxn:
+                if isinstance(self.scorefxn, str):
+                    self.root.set('scorefxn', self.scorefxn)
+                else:
+                    self.root.set('scorefxn', self.scorefxn.name)
+            if self.movemap_builder:
+                if isinstance(self.movemap_builder, str):
+                    self.root.set('movemap_builder', self.movemap_builder)
+                else:
+                    self.root.set('movemap_builder', self.movemap_builder.name)
+
+            if self.remove_constraints:
+                self.root.set('remove_constraints', str(self.remove_constraints).lower())
+
+    class interfaceScoreCalculator:
+
+        def __init__(self, name='interfaceScoreCalculator', chains=None, scorefxn=None,
+                     native=None, native_ensemble_best=False, normalize=None,
+                     compute_grid_scores=False, score_in_membrane=False, grid_set=None):
+
+            self.type = 'mover'
+            self.name = name
+            self.chains = chains
+            self.scorefxn = scorefxn
+            self.native = native
+            self.native_ensemble_best = native_ensemble_best
+            self.normalize = normalize
+            self.compute_grid_scores = compute_grid_scores
+            self.score_in_membrane = score_in_membrane
+            self.grid_set = grid_set
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('InterfaceScoreCalculator')
+            self.root.set('name', self.name)
+            if self.chains:
+                self.root.set('chains', self.chains)
+            if self.scorefxn:
+                if isinstance(self.scorefxn, str):
+                    self.root.set('scorefxn', self.scorefxn)
+                else:
+                    self.root.set('scorefxn', self.scorefxn.name)
+            if self.native:
+                self.root.set('native', self.native)
+            if self.native_ensemble_best:
+                self.root.set('native_ensemble_best', str(self.native_ensemble_best).lower())
+            if self.normalize:
+                self.root.set('normalize', self.normalize)
+            self.root.set('compute_grid_scores', str(self.compute_grid_scores).lower())
+            if self.score_in_membrane:
+                self.root.set('score_in_membrane', str(self.score_in_membrane).lower())
+            if self.grid_set:
+                self.root.set('grid_set', self.grid_set)
+
+    ### Add reporting movers
+
+    class addJobPairData:
+
+        def __init__(self, name, value_type=None, key=None, value=None,
+                     value_from_ligand_chain=None):
+
+            self.type = 'mover'
+            self.name = name
+            self.value_type = value_type
+            self.key = key
+            self.value = value
+            self.value_from_ligand_chain = value_from_ligand_chain
+
+        def generateXml(self):
+            self.xml = ElementTree
+            self.root = self.xml.Element('AddJobPairData')
+            self.root.set('name', self.name)
+            if self.value_type:
+                self.root.set('value_type', self.value_type)
+            if self.key:
+                self.root.set('key', self.key)
+            if self.value:
+                self.root.set('value', self.value)
+            if self.value_from_ligand_chain:
+                self.root.set('value_from_ligand_chain', self.value_from_ligand_chain)
 
 class rosetta_MP:
 
