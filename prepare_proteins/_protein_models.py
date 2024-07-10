@@ -140,6 +140,11 @@ class proteinModels:
         self.docking_angles = {}
         self.docking_metric_type = {}
         self.docking_ligands = {}
+        self.rosetta_docking_data = None  # secondary structure strings are stored here
+        self.rosetta_docking_distances = {}
+        self.rosetta_docking_angles = {}
+        self.rosetta_docking_metric_type = {}
+        self.rosetta_docking_ligands = {}
         self.rosetta_data = None  # Rosetta data is stored here
         self.sequence_differences = {}  # Store missing/changed sequence information
         self.conects = {}  # Store the conection inforamtion for each model
@@ -1111,15 +1116,26 @@ chain to use for each model with the chains option."
                 print("Saving model: %s" % model)
 
             traj = md.load(self.models_paths[model])
-            rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
-                traj,
-                reference,
-                chain_indexes=chain_indexes,
-                trajectory_chain_indexes=trajectory_chain_indexes[model],
-                reference_chain_indexes=reference_chain_indexes,
-                aligment_mode=aligment_mode,
-                reference_residues=reference_residues,
-            )
+            if trajectory_chain_indexes is None:
+                rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
+                    traj,
+                    reference,
+                    chain_indexes=chain_indexes,
+                    trajectory_chain_indexes=trajectory_chain_indexes,
+                    reference_chain_indexes=reference_chain_indexes,
+                    aligment_mode=aligment_mode,
+                    reference_residues=reference_residues,
+                )
+            else:
+                rmsd[model] = MD.alignTrajectoryBySequenceAlignment(
+                    traj,
+                    reference,
+                    chain_indexes=chain_indexes,
+                    trajectory_chain_indexes=trajectory_chain_indexes[model],
+                    reference_chain_indexes=reference_chain_indexes,
+                    aligment_mode=aligment_mode,
+                    reference_residues=reference_residues,
+                )
 
             # Get bfactors
             bfactors = np.array([a.bfactor for a in self.structures[model].get_atoms()])
@@ -2700,6 +2716,618 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += "-TMPLAUNCHDIR "
                 command += "-WAIT\n"
                 command += "cd ../../..\n"
+                jobs.append(command)
+
+        return jobs
+
+    def setUpRosettaDocking(self, docking_folder, ligands_pdb_folder=None, ligands_sdf_folder=None,
+                            coordinates=None, smiles_file=None, sdf_file=None, docking_protocol='repack',
+                            high_res_cycles=None, high_res_repack_every_Nth=None, num_conformers=50,
+                            prune_rms_threshold=0.5, max_attempts=1000, rosetta_home=None, separator='-',
+                            use_exp_torsion_angle_prefs=True, use_basic_knowledge=True, only_scorefile=False,
+                            enforce_chirality=True, skip_conformers_if_found=False, grid_width=10.0,
+                            n_jobs=1, python2_executable='python2.7', store_initial_placement=False,
+                            pdb_output=False, distances=None, angles=None,
+                            executable='rosetta_scripts.mpi.linuxgccrelease', ligand_chain='B', nstruct=100):
+
+        """
+        Set up docking calculations using Rosetta.
+
+        Parameters:
+        -----------
+        docking_folder : str
+            Path to the folder where docking results will be stored.
+        ligands_pdb_folder : str, optional
+            Path to the folder containing ligand PDB files. Mutually exclusive with `ligands_sdf_folder`, `smiles_file`, and `sdf_file`.
+        ligands_sdf_folder : str, optional
+            Path to the folder containing ligand SDF files. Mutually exclusive with `ligands_pdb_folder`, `smiles_file`, and `sdf_file`.
+        smiles_file : str, optional
+            Path to a file containing ligand SMILES strings. Mutually exclusive with `ligands_pdb_folder`, `ligands_sdf_folder`, and `sdf_file`.
+        sdf_file : str, optional
+            Path to an SDF file containing ligands. Mutually exclusive with `ligands_pdb_folder`, `ligands_sdf_folder`, and `smiles_file`.
+        coordinates : (list, tuple, dict), optional
+            The per-model coordinates dictionary to position the ligand (it can be multiple coordinates).
+            If a list or tuples of coordinates is given, then they will be used for all the models.
+        docking_protocol : str, optional
+            Docking protocol to use. Available options are 'repack', 'mcm', and 'custom'. Default is 'repack'.
+        high_res_cycles : int, optional
+            Number of cycles for high-resolution docking when using the 'custom' protocol.
+            Must be provided if 'custom' protocol is selected.
+        high_res_repack_every_Nth : int, optional
+            Repack frequency for high-resolution docking when using the 'custom' protocol.
+            Must be provided if 'custom' protocol is selected.
+        num_conformers : int, optional
+            Number of conformers to generate for each ligand. Default is 50.
+        prune_rms_threshold : float, optional
+            RMSD threshold for pruning similar conformers. Default is 0.5 Å.
+        max_attempts : int, optional
+            Maximum number of attempts for embedding conformers. Default is 1000.
+        rosetta_home : str, optional
+            Path to the Rosetta home directory.
+        separator : str, optional
+            Separator character to use in file names. Default is '-'.
+        use_exp_torsion_angle_prefs : bool, optional
+            Use experimental torsion angle preferences in embedding. Default is True.
+        use_basic_knowledge : bool, optional
+            Use basic knowledge such as planarity of aromatic rings. Default is True.
+        enforce_chirality : bool, optional
+            Enforce correct chiral centers during embedding. Default is True.
+        skip_conformers_if_found : bool, optional
+            Skip generating conformers if they are already found. Default is False.
+        grid_width : float, optional
+            Width of the scoring grid. Default is 10.0.
+        n_jobs : int, optional
+            Number of parallel jobs to run. Default is 1.
+        python2_executable : str, optional
+            Path to the Python 2 executable. Default is 'python2.7'.
+        executable : str, optional
+            Path to the Rosetta scripts executable. Default is 'rosetta_scripts.mpi.linuxgccrelease'.
+        ligand_chain : str, optional
+            Chain identifier for the ligand. Default is 'B'.
+        nstruct : int, optional
+            Number of output structures to generate. Default is 100.
+
+        Raises:
+        -------
+        ValueError
+            If an invalid docking protocol is specified or if required parameters for the
+            'custom' protocol are not provided, or if mutually exclusive inputs are given.
+
+        Notes:
+        ------
+        This function prepares the necessary folders and XML script for running Rosetta docking
+        simulations. It sets up score functions, ligand areas, interface builders, movemap builders,
+        scoring grids, and movers based on the specified protocol. It also generates conformers for
+        each ligand using RDKit and writes them to an SDF file with the PDB file name included if
+        input is from PDB files, SMILES, or an SDF file.
+
+        The generated XML script is saved in the specified docking folder.
+        """
+
+        def generate_conformers(mol, num_conformers=50, prune_rms_threshold=0.5, max_attempts=1000,
+                                use_exp_torsion_angle_prefs=True, use_basic_knowledge=True,
+                                enforce_chirality=True):
+            """
+            Generate and optimize conformers for a molecule.
+
+            Parameters:
+            -----------
+            mol : rdkit.Chem.Mol
+                The RDKit molecule for which to generate conformers.
+            num_conformers : int, optional
+                Number of conformers to generate. Default is 50.
+            prune_rms_threshold : float, optional
+                RMSD threshold for pruning similar conformers. Default is 0.5 Å.
+            max_attempts : int, optional
+                Maximum number of attempts for embedding conformers. Default is 1000.
+            use_exp_torsion_angle_prefs : bool, optional
+                Use experimental torsion angle preferences in embedding. Default is True.
+            use_basic_knowledge : bool, optional
+                Use basic knowledge such as planarity of aromatic rings. Default is True.
+            enforce_chirality : bool, optional
+                Enforce correct chiral centers during embedding. Default is True.
+
+            Returns:
+            --------
+            rdkit.Chem.Mol
+                RDKit molecule with embedded conformers.
+            """
+            # Add hydrogens
+            mol = Chem.AddHs(mol)
+
+            # Ensure aromaticity is detected
+            Chem.SanitizeMol(mol, sanitizeOps=Chem.SanitizeFlags.SANITIZE_ALL)
+
+            # Embed multiple conformers
+            params = AllChem.ETKDGv3()
+            params.numThreads = 0  # Use all available threads
+            params.pruneRmsThresh = prune_rms_threshold
+            params.maxAttempts = max_attempts
+            params.useExpTorsionAnglePrefs = use_exp_torsion_angle_prefs
+            params.useBasicKnowledge = use_basic_knowledge
+            params.enforceChirality = enforce_chirality
+
+            conformers = AllChem.EmbedMultipleConfs(mol, numConfs=num_conformers, params=params)
+
+            # Optimize each conformer using UFF
+            for conf_id in conformers:
+                AllChem.UFFOptimizeMolecule(mol, confId=conf_id)
+
+            return mol
+
+        def write_molecule_to_sdf(mol, output_sdf_path):
+            """
+            Write the molecule with conformers to an SDF file with explicit aromatic bonds.
+
+            Parameters:
+            -----------
+            mol : rdkit.Chem.Mol
+                The RDKit molecule with conformers.
+            output_sdf_path : str
+                Path to the output SDF file.
+            """
+            sdf_writer = Chem.SDWriter(output_sdf_path)
+            sdf_writer.SetKekulize(False)  # Ensure aromatic bonds are not Kekulized
+            for conf_id in range(mol.GetNumConformers()):
+                sdf_writer.write(mol, confId=conf_id)
+            sdf_writer.close()
+
+        def process_ligand_file(ligand_file_path, base_name, conformers_input_folder):
+            """
+            Process a single ligand file (PDB, SDF, or SMILES) to generate conformers and write to SDF.
+
+            Parameters:
+            -----------
+            ligand_file_path : str
+                Path to the ligand file.
+            base_name : str
+                Base name of the ligand.
+            conformers_input_folder : str
+                Folder to store the output SDF file.
+            """
+            output_sdf_path = os.path.join(conformers_input_folder, f"{base_name}.sdf")
+
+            # Determine file type and load molecule
+            if ligand_file_path.endswith('.pdb'):
+                mol = Chem.MolFromPDBFile(ligand_file_path, removeHs=False)
+            elif ligand_file_path.endswith('.sdf'):
+                mol_supplier = Chem.SDMolSupplier(ligand_file_path, removeHs=False)
+                mol = mol_supplier[0]
+            else:
+                raise ValueError(f"Unsupported file type: {ligand_file_path}")
+
+            if mol is None:
+                raise ValueError(f"Could not read file: {ligand_file_path}")
+
+            # Generate conformers
+            mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
+                                                      prune_rms_threshold=prune_rms_threshold,
+                                                      max_attempts=max_attempts,
+                                                      use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
+                                                      use_basic_knowledge=use_basic_knowledge,
+                                                      enforce_chirality=enforce_chirality)
+
+            # Set the molecule name
+            mol_with_conformers.SetProp("_Name", base_name)
+
+            # Write to SDF file
+            write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
+            return base_name
+
+        def make_param_file(input_sdf_path, ligand_name, output_dir):
+            """
+            Generate a parameter file for a ligand.
+
+            Parameters:
+            -----------
+            input_sdf_path : str
+                Path to the input SDF file containing conformers.
+            ligand_name : str
+                Name of the ligand.
+            output_dir : str
+                Directory to save the generated parameter file.
+
+            Returns:
+            --------
+            str
+                Path to the generated parameter file.
+            """
+            full_dir = os.path.join(output_dir, ligand_name)
+            os.makedirs(full_dir, exist_ok=True)
+
+            param_file_command = (
+                f"{rosetta_home}/main/source/scripts/python/public/molfile_to_params.py -n {ligand_name} "
+                f"--long-names --clobber --conformers-in-one-file --mm-as-virt {input_sdf_path}"
+            )
+
+            output_param_path = f"{ligand_name}.params"
+            output_pdb_path = f"{ligand_name}.pdb"
+            output_conformer_path = f"{ligand_name}_conformers.pdb"
+
+            subprocess.call(param_file_command, shell=True)
+
+            try:
+                shutil.move(os.path.join(os.getcwd(), output_param_path), os.path.join(full_dir, output_param_path))
+            except IOError:
+                print(f"Something went wrong with {ligand_name}")
+                return None
+            shutil.move(os.path.join(os.getcwd(), output_pdb_path), os.path.join(full_dir, output_pdb_path))
+            try:
+                shutil.move(os.path.join(os.getcwd(), output_conformer_path), os.path.join(full_dir, output_conformer_path))
+            except IOError:
+                print(f"No conformers for {ligand_name}")
+            return os.path.join(full_dir, output_param_path)
+
+        try:
+            import rdkit
+            from rdkit import Chem
+            from rdkit.Chem import AllChem
+        except ImportError as e:
+            raise ImportError("RDKit is not installed. Please install it to use the setUpRosettaDocking function.")
+
+        if angles:
+            raise ValueError('Angles has not being implemented. Rosetta scripts do not have an easy function to compute angles. Perhaps with CreateAngleConstraint mover?')
+
+        # Check for mutually exclusive inputs
+        if sum([bool(ligands_pdb_folder), bool(ligands_sdf_folder), bool(smiles_file), bool(sdf_file)]) != 1:
+            raise ValueError('Specify exactly one of ligands_pdb_folder, ligands_sdf_folder, smiles_file, or sdf_file.')
+
+        # Check given separator compatibility
+        for model in self:
+            if separator in model:
+                raise ValueError(f'The given separator {separator} was found in model {model}. Please use a different one.')
+
+        # Uniform coordinates format
+        if isinstance(coordinates, (list, tuple)):
+            if isinstance(coordinates[0], (list, tuple)) and len(coordinates[0]) == 3:
+                tmp = {model: coordinates for model in self}
+                coordinates = tmp
+            elif len(coordinates) == 3 and isinstance(coordinates[0], (int, float)):
+                tmp = {model: [coordinates] for model in self}
+                coordinates = tmp
+            else:
+                raise ValueError('Check your given coordinates format')
+        elif not isinstance(coordinates, dict):
+            raise ValueError('Check your given coordinates format')
+
+        # Check given protocol
+        available_protocols = ['repack', 'mcm', 'custom']
+        if docking_protocol not in available_protocols:
+            raise ValueError(f'Invalid protocol. Available protocols are: {available_protocols}')
+
+        if docking_protocol == 'custom' and (not high_res_cycles or not high_res_repack_every_Nth):
+            raise ValueError('You must provide high_res_cycles and high_res_repack_every_Nth for the custom protocol.')
+
+        # Create docking job folders
+        os.makedirs(docking_folder, exist_ok=True)
+        xml_folder = os.path.join(docking_folder, 'xml')
+        conformers_input_folder = os.path.join(docking_folder, 'conformers')
+        ligand_params_folder = os.path.join(docking_folder, 'ligand_params')
+        input_models_folder = os.path.join(docking_folder, 'input_models')
+        flags_folder = os.path.join(docking_folder, 'flags')
+        output_folder = os.path.join(docking_folder, 'output_models')
+
+        for folder in [xml_folder, conformers_input_folder, ligand_params_folder, input_models_folder,
+                       flags_folder, output_folder]:
+            os.makedirs(folder, exist_ok=True)
+
+        # Write model structures
+        self.saveModels(input_models_folder)
+
+        # Create score functions
+        ligand_soft_rep = rosettaScripts.scorefunctions.new_scorefunction('ligand_soft_rep',
+                                                                          weights_file='ligand_soft_rep')
+        ligand_soft_rep.addReweight('fa_elec', weight=0.42)
+        ligand_soft_rep.addReweight('hbond_bb_sc', weight=1.3)
+        ligand_soft_rep.addReweight('hbond_sc', weight=1.3)
+        ligand_soft_rep.addReweight('rama', weight=0.2)
+
+        ligand_hard_rep = rosettaScripts.scorefunctions.new_scorefunction('ligand_hard_rep',
+                                                                          weights_file='ligand')
+        ligand_hard_rep.addReweight('fa_intra_rep', weight=0.004)
+        ligand_hard_rep.addReweight('fa_elec', weight=0.42)
+        ligand_hard_rep.addReweight('hbond_bb_sc', weight=1.3)
+        ligand_hard_rep.addReweight('hbond_sc', weight=1.3)
+        ligand_hard_rep.addReweight('rama', weight=0.2)
+
+        # Create ligand areas
+        docking_sidechain = rosettaScripts.ligandArea('docking_sidechain',
+                                                       chain=ligand_chain,
+                                                       cutoff=6.0,
+                                                       add_nbr_radius=True,
+                                                       all_atom_mode=True,
+                                                       minimize_ligand=10)
+
+        final_sidechain = rosettaScripts.ligandArea('final_sidechain',
+                                                     chain=ligand_chain,
+                                                     cutoff=6.0,
+                                                     add_nbr_radius=True,
+                                                     all_atom_mode=True)
+
+        final_backbone = rosettaScripts.ligandArea('final_backbone',
+                                                    chain=ligand_chain,
+                                                    cutoff=7.0,
+                                                    add_nbr_radius=True,
+                                                    all_atom_mode=True,
+                                                    calpha_restraints=0.3)
+
+        # Set interface builders
+        side_chain_for_docking = rosettaScripts.interfaceBuilder('side_chain_for_docking',
+                                                                 ligand_areas=docking_sidechain)
+        side_chain_for_final = rosettaScripts.interfaceBuilder('side_chain_for_final',
+                                                               ligand_areas=final_sidechain)
+        backbone = rosettaScripts.interfaceBuilder('final_backbone',
+                                                   ligand_areas=final_backbone,
+                                                   extension_window=3)
+
+        # Set movemap builders
+        docking = rosettaScripts.movemapBuilder('docking', sc_interface=side_chain_for_docking)
+        final = rosettaScripts.movemapBuilder('final', sc_interface=side_chain_for_final,
+                                              bb_interface=backbone, minimize_water=True)
+
+        # Set up scoring grid
+        vdw = rosettaScripts.scoringGrid.classicGrid('vdw', weight=1.0)
+
+        ### Create docking movers
+
+        # Write coordinates
+        xyz = []
+        for model in coordinates:
+            for coordinate in coordinates[model]:
+                model_xyz = {}
+                model_xyz['file_name'] = '../../input_models/'+model+'.pdb'
+                model_xyz['x'] = coordinate[0]
+                model_xyz['y'] = coordinate[1]
+                model_xyz['z'] = coordinate[2]
+                xyz.append(model_xyz)
+        with open(docking_folder+'/coordinates.json', 'w') as jf:
+            json.dump(xyz, jf)
+
+        # Create start from mover for initial ligand positioning
+        startFrom = rosettaScripts.movers.startFrom(chain=ligand_chain)
+        startFrom.addFile('../../coordinates.json')
+
+        if store_initial_placement:
+            store_initial_placement = rosettaScripts.movers.dumpPdb(name='store_initial_placement', file_name='initial_placement.pdb')
+
+        # Create transform mover
+        transform = rosettaScripts.movers.transform(chain=ligand_chain, box_size=5.0, move_distance=0.1, angle=5,
+                                                    cycles=500, repeats=1, temperature=5, initial_perturb=5.0)
+
+        # Create high-resolution docking mover according to the employed docking protocol
+        if docking_protocol == 'repack':
+            cycles = 1
+            repack_every_Nth = 1
+        elif docking_protocol == 'mcm':
+            cycles = 6
+            repack_every_Nth = 3
+        elif docking_protocol == 'custom':
+            cycles = high_res_cycles
+            repack_every_Nth = high_res_repack_every_Nth
+
+        highResDocker = rosettaScripts.movers.highResDocker(cycles=cycles,
+                                                            repack_every_Nth=repack_every_Nth,
+                                                            scorefxn=ligand_soft_rep,
+                                                            movemap_builder=docking)
+
+        # Create final minimization mover
+        finalMinimizer = rosettaScripts.movers.finalMinimizer(scorefxn=ligand_hard_rep, movemap_builder=final)
+
+        # Add mover for reporting metrics
+        interfaceScoreCalculator = rosettaScripts.movers.interfaceScoreCalculator(chains=ligand_chain,
+                                                                                  scorefxn=ligand_hard_rep,
+                                                                                  compute_grid_scores=False)
+
+        ### Create combined protocols
+
+        # Create low-resolution mover
+        low_res_dock_movers = [transform]
+        low_res_dock = rosettaScripts.movers.parsedProtocol('low_res_dock', low_res_dock_movers)
+
+        # Create high-resolution mover
+        high_res_dock_movers = [highResDocker, finalMinimizer]
+        high_res_dock = rosettaScripts.movers.parsedProtocol('high_res_dock', high_res_dock_movers)
+
+        # Create reporting combined mover
+        reporting_movers = [interfaceScoreCalculator]
+        reporting = rosettaScripts.movers.parsedProtocol('reporting', reporting_movers)
+
+        # Convert ligand input to conformers
+        ligands = []
+
+        # Handle PDB ligand files
+        if ligands_pdb_folder:
+            for ligand_file in os.listdir(ligands_pdb_folder):
+                if not ligand_file.endswith('.pdb'):
+                    continue
+                ligand_file_path = os.path.join(ligands_pdb_folder, ligand_file)
+                base_name = os.path.splitext(ligand_file)[0]
+                ligands.append(process_ligand_file(ligand_file_path, base_name, conformers_input_folder))
+
+        # Handle SDF ligand files
+        elif ligands_sdf_folder:
+            for ligand_file in os.listdir(ligands_sdf_folder):
+                if not ligand_file.endswith('.sdf'):
+                    continue
+                ligand_file_path = os.path.join(ligands_sdf_folder, ligand_file)
+                base_name = os.path.splitext(ligand_file)[0]
+                ligands.append(process_ligand_file(ligand_file_path, base_name, conformers_input_folder))
+
+        # Handle SMILES input
+        elif smiles_file:
+            with open(smiles_file, 'r') as f:
+                for line in f:
+                    smi, name = line.strip().split()
+                    mol = Chem.MolFromSmiles(smi)
+                    if mol is None:
+                        raise ValueError(f"Could not parse SMILES: {smi}")
+                    mol = Chem.AddHs(mol)
+                    mol.SetProp("_Name", name)
+                    output_sdf_path = os.path.join(conformers_input_folder, f"{name}.sdf")
+                    ligands.append(name)
+                    mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
+                                                              prune_rms_threshold=prune_rms_threshold,
+                                                              max_attempts=max_attempts,
+                                                              use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
+                                                              use_basic_knowledge=use_basic_knowledge,
+                                                              enforce_chirality=enforce_chirality)
+                    write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
+
+        # Handle SDF input
+        elif sdf_file:
+            suppl = Chem.SDMolSupplier(sdf_file)
+            for mol in suppl:
+                if mol is None:
+                    continue
+                name = mol.GetProp("_Name")
+                output_sdf_path = os.path.join(conformers_input_folder, f"{name}.sdf")
+                ligands.append(name)
+                mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
+                                                          prune_rms_threshold=prune_rms_threshold,
+                                                          max_attempts=max_attempts,
+                                                          use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
+                                                          use_basic_knowledge=use_basic_knowledge,
+                                                          enforce_chirality=enforce_chirality)
+                write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
+
+        # Process each ligand
+        jobs = []
+        for ligand in ligands:
+
+            # Add chain mover
+            ligand_pdb = '../../ligand_params/'+ligand+'/'+ligand+'.pdb'
+            addLigand = rosettaScripts.movers.addChain(name='addLigand', update_PDBInfo=True, file_name=ligand_pdb)
+
+            # make params
+            input_sdf_path = os.path.join(conformers_input_folder, f"{ligand}.sdf")
+            output_dir = ligand_params_folder
+            make_param_file(input_sdf_path, ligand, output_dir)
+
+            # Process each model
+            for model in self:
+
+                # Create xml ligand docking
+                xml = rosettaScripts.xmlScript()
+
+                # Add score functions
+                xml.addScorefunction(ligand_soft_rep)
+                xml.addScorefunction(ligand_hard_rep)
+
+                # Add ligand areas
+                xml.addLigandArea(docking_sidechain)
+                xml.addLigandArea(final_sidechain)
+                xml.addLigandArea(final_backbone)
+
+                # Add interface builders
+                xml.addInterfaceBuilder(side_chain_for_docking)
+                xml.addInterfaceBuilder(side_chain_for_final)
+                xml.addInterfaceBuilder(backbone)
+
+                # Add movemap builders
+                xml.addMovemapBuilder(docking)
+                xml.addMovemapBuilder(final)
+
+                # Add scoring grid
+                xml.addScoringGrid(vdw, ligand_chain=ligand_chain, width=grid_width)
+
+                # Add doking movers
+                xml.addMover(addLigand)
+                xml.addMover(startFrom)
+                if store_initial_placement:
+                    xml.addMover(store_initial_placement)
+                xml.addMover(transform)
+                xml.addMover(highResDocker)
+                xml.addMover(finalMinimizer)
+
+                # Add scoring movers
+                xml.addMover(interfaceScoreCalculator)
+
+                # Add compund movers
+                xml.addMover(low_res_dock)
+                xml.addMover(high_res_dock)
+                xml.addMover(reporting)
+
+                # Set up protocol
+                protocol = []
+                protocol.append(addLigand)
+                protocol.append(startFrom)
+                if store_initial_placement:
+                    protocol.append(store_initial_placement)
+                protocol.append(low_res_dock)
+                protocol.append(high_res_dock)
+                protocol.append(reporting)
+
+                # Add distance filters
+                if distances:
+
+                    # Define ligand residue as the consecutive from the last residue
+                    for r in self.structures[model].get_residues():
+                        r
+                    ligand_residue = r.id[1]+1
+
+                    for atoms in distances[model][ligand]:
+
+                        if isinstance(atoms[0], str):
+                            atoms = ((ligand_chain, ligand_residue, atoms[0]), atoms[1])
+                        if isinstance(atoms[1], str):
+                            atoms = (atoms[0], (ligand_chain, ligand_residue, atoms[1]))
+
+                        label = "distance_"
+                        label += "_".join([str(x) for x in atoms[0]]) + "-"
+                        label += "_".join([str(x) for x in atoms[1]])
+
+                        d = rosettaScripts.filters.atomicDistance(name=label,
+                            residue1=str(atoms[0][1])+atoms[0][0], atomname1=atoms[0][2],
+                            residue2=str(atoms[1][1])+atoms[1][0], atomname2=atoms[1][2],
+                            distance=5.0, confidence=0.0)
+                        xml.addFilter(d)
+                        protocol.append(d)
+
+    #             # Add angle filters
+    #             if angles:
+    #                 for atoms in angles[model][ligand]:
+    #                     label = "angle_"
+    #                     label += "_".join([str(x) for x in atoms[0]]) + "-"
+    #                     label += "_".join([str(x) for x in atoms[1]]) + "-"
+    #                     label += "_".join([str(x) for x in atoms[2]])
+    #                     a = rosettaScripts.filters.atomicAngle(name=label, # There is no atomicAngle function in rosetta scripts
+    #                         residue1=atoms[0][0]+str(atoms[0][1]), atomname1=atoms[0][2],
+    #                         residue2=atoms[1][0]+str(atoms[1][1]), atomname2=atoms[1][2],
+    #                         residue3=atoms[2][0]+str(atoms[2][1]), atomname3=atoms[2][2],
+    #                         angle=120.0, confidence=0.0)
+    #                     xml.addFilter(a)
+    #                     protocol.append(a)
+
+                # Set protocol
+                xml.setProtocol(protocol)
+
+                # Write XML protocol file
+                xml_output = os.path.join(xml_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.xml')
+                xml.write_xml(xml_output)
+
+                # Create flags files
+                flags = rosettaScripts.options.flags(f'../../xml/{docking_protocol}{separator}{ligand}{separator}{model}.xml',
+                                                     nstruct=nstruct, s='../../input_models/'+model+'.pdb')
+
+                if only_scorefile:
+                    flags.addOption('out:file:score_only')
+                elif not pdb_output:
+                    flags.output_silent_file = f'{model}{separator}{ligand}.out'
+                flags.output_scorefile = f'{model}{separator}{ligand}.sc'
+                ligand_params = '../../ligand_params/'+ligand+'/'+ligand+'.params'
+                flags.addOption('extra_res_fa', ligand_params)
+                flags.add_ligand_docking_options()
+                flags_output = os.path.join(flags_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.flags')
+                flags.write_flags(flags_output)
+
+                # Create output folder and execute commands
+                model_output_folder = os.path.join(output_folder, model+separator+ligand)
+                os.makedirs(model_output_folder, exist_ok=True)
+                command =  'cd '+model_output_folder+'\n'
+                command += executable+' '
+                command += '@ ../../flags/'+f'{docking_protocol}{separator}{ligand}{separator}{model}.flags '
+                command += '\n'
+                command += 'cd ../../..'
                 jobs.append(command)
 
         return jobs
@@ -5930,6 +6558,134 @@ make sure of reading the target sequences with the function readTargetSequences(
                 failed_dockings = json.load(jifd)
             return failed_dockings
 
+    def analiseRosettaDocking(self, docking_folder, separator='_'):
+
+        # Initialize an empty DataFrame for all scores
+        self.rosetta_docking = pd.DataFrame()
+
+        # Initialize an empty dictionary for distances
+        self.rosetta_docking_distances = {}
+
+        output_models_path = os.path.join(docking_folder, 'output_models')
+
+        # Loop through models
+        for model_ligand in os.listdir(output_models_path):
+            if model_ligand.count(separator) != 1:
+                raise ValueError(f"The separator '{separator}' was not found or found more than once in '{model_ligand}'")
+
+            model, ligand = model_ligand.split(separator)
+
+            scorefile = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.sc')
+            if os.path.exists(scorefile):
+                scores = _readRosettaScoreFile(scorefile)
+                scores['Ligand'] = ligand  # Add ligand column to scores
+                scores = scores.set_index(['Model', 'Ligand', 'Pose'])
+
+                # Extract distance columns
+                distance_columns = [col for col in scores.columns if col.startswith('distance_')]
+                distance_df = scores[distance_columns]
+
+                # Add to the distances dictionary
+                if model not in self.rosetta_docking_distances:
+                    self.rosetta_docking_distances[model] = {}
+                self.rosetta_docking_distances[model][ligand] = distance_df
+
+                # Remove distance columns from scores
+                scores = scores.drop(columns=distance_columns)
+
+                # Append the remaining scores to the global DataFrame
+                self.rosetta_docking = pd.concat([self.rosetta_docking, scores])
+
+    def combineRosettaDockingDistancesIntoMetrics(self, catalytic_labels, overwrite=False):
+        """
+        Combine different equivalent distances into specific named metrics. The function
+        takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
+
+            catalytic_labels = {
+                metric_name = {
+                    protein = {
+                        ligand = distances_list}}}
+
+        The innermost distances_list object contains all equivalent distance names for
+        a specific protein and ligand pair to be combined under the same metric_name column.
+
+        The combination is done by taking the minimum value of all equivalent distances.
+
+        Parameters
+        ==========
+        catalytic_labels : dict
+            Dictionary defining which distances will be combined under a common name.
+            (for details see above).
+        """
+
+        for name in catalytic_labels:
+            if "metric_" + name in self.rosetta_docking.columns and not overwrite:
+                print(
+                    f"Combined metric {name} already added. Give overwrite=True to recombine"
+                )
+            else:
+                values = []
+                for model in self.rosetta_docking.index.get_level_values('Model').unique():
+
+                    # Check whether model is found in docking distances
+                    if model not in self.rosetta_docking_distances:
+                        continue
+
+                    model_series = self.rosetta_docking[
+                        self.rosetta_docking.index.get_level_values("Model") == model
+                    ]
+
+                    for ligand in self.rosetta_docking.index.get_level_values('Ligand').unique():
+
+                        # Check whether ligand is found in model's docking distances
+                        if ligand not in self.rosetta_docking_distances[model]:
+                            continue
+
+                        ligand_series = model_series[
+                            model_series.index.get_level_values("Ligand") == ligand
+                        ]
+
+                        # Check input metric
+                        distance_metric = False
+                        angle_metric = False
+                        for x in catalytic_labels[name][model][ligand]:
+                            if len(x.split("-")) == 2:
+                                distance_metric = True
+                            elif len(x.split("-")) == 3:
+                                angle_metric = True
+
+                        if distance_metric and angle_metric:
+                            raise ValueError(
+                                f"Metric {name} combines distances and angles which is not supported."
+                            )
+
+                        if distance_metric:
+                            distances = catalytic_labels[name][model][ligand]
+                            distance_values = (
+                                self.rosetta_docking_distances[model][ligand][distances]
+                                .min(axis=1)
+                                .tolist()
+                            )
+                            assert ligand_series.shape[0] == len(distance_values)
+                            values += distance_values
+                            self.rosetta_docking_metric_type[name] = "distance"
+                        elif angle_metric:
+                            angles = catalytic_labels[name][model][ligand]
+                            if len(angles) > 1:
+                                raise ValueError(
+                                    "Combining more than one angle into a metric is not currently supported."
+                                )
+                            angle_values = (
+                                self.rosetta_docking_angles[model][ligand][angles]
+                                .min(axis=1)
+                                .tolist()
+                            )
+                            assert ligand_series.shape[0] == len(angle_values)
+                            values += angle_values
+                            self.rosetta_docking_metric_type[name] = "angle"
+
+                self.rosetta_docking["metric_" + name] = values
+
     def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
         """
         Convert ligand PDBs into MAE files.
@@ -6174,11 +6930,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Set input dictionary to store protonation states
         self.protonation_states = {}
-        self.protonation_states["model"] = []
-        self.protonation_states["chain"] = []
-        self.protonation_states["residue"] = []
-        self.protonation_states["name"] = []
-        self.protonation_states["state"] = []
+        self.protonation_states["Model"] = []
+        self.protonation_states["Chain"] = []
+        self.protonation_states["Residue"] = []
+        self.protonation_states["Name"] = []
+        self.protonation_states["State"] = []
 
         # Iterate all models' structures
         for model in self.models_names:
@@ -6193,20 +6949,34 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Get Histidine protonation states
                 if r.resname == "HIS":
                     atoms = [a.name for a in r]
-                    self.protonation_states["model"].append(model)
-                    self.protonation_states["chain"].append(r.get_parent().id)
-                    self.protonation_states["residue"].append(r.id[1])
-                    self.protonation_states["name"].append(r.resname)
+
+                    # Check for hydrogens
+                    hydrogens = [a for a in atoms if a.startswith('H')]
+
+                    if not hydrogens:
+                        print(f'The model {model} have not been protonated.')
+                        continue
+
                     if "HE2" in atoms and "HD1" in atoms:
-                        self.protonation_states["state"].append("HIP")
+                        self.protonation_states["State"].append("HIP")
                     elif "HD1" in atoms:
-                        self.protonation_states["state"].append("HID")
+                        self.protonation_states["State"].append("HID")
                     elif "HE2" in atoms:
-                        self.protonation_states["state"].append("HIE")
+                        self.protonation_states["State"].append("HIE")
+                    else:
+                        print(f'HIS {r.id[1]} could not be assigned for model {model}')
+                        continue
+                    self.protonation_states["Model"].append(model)
+                    self.protonation_states["Chain"].append(r.get_parent().id)
+                    self.protonation_states["Residue"].append(r.id[1])
+                    self.protonation_states["Name"].append(r.resname)
+
+        if self.protonation_states['Model'] == []:
+            raise ValueError("No protonation states were found. Did you run prepwizard?")
 
         # Convert dictionary to Pandas
         self.protonation_states = pd.DataFrame(self.protonation_states)
-        self.protonation_states.set_index(["model", "chain", "residue"], inplace=True)
+        self.protonation_states.set_index(["Model", "Chain", "Residue"], inplace=True)
 
         return self.protonation_states
 

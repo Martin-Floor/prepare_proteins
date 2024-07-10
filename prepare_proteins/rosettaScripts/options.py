@@ -32,12 +32,16 @@ class flags:
         #Protocol specific
         self.relax_cst = False
         self.relax = False
+        self.ligand_docking = False
 
     def addOption(self, option, value=None):
         self.others[option] = value
 
     def add_relax_options(self):
         self.relax = True
+
+    def add_ligand_docking_options(self):
+        self.ligand_docking = True
 
     def add_relax_cst_options(self):
         self.relax = True
@@ -75,7 +79,7 @@ class flags:
                 else:
                     ff.write('-out:file:scorefile '+self.output_score_file+'\n')
             elif self.output_score_file != None:
-                    ff.write('-out:file:scorefile '+self.output_score_file+'\n')
+                ff.write('-out:file:scorefile '+self.output_score_file+'\n')
             if self.output_path != None:
                 ff.write('-out:path:pdb '+self.output_path+'\n')
             if self.out_prefix != None:
@@ -99,6 +103,19 @@ class flags:
                 ff.write('-use_input_sc\n')
                 ff.write('-flip_HNQ\n')
                 ff.write('-no_optH false\n')
+
+            if self.ligand_docking:
+                #the packing options allow Rosetta to sample additional rotamers for
+                 #protein sidechain angles chi 1 (ex1) and chi 2 (ex2)
+                ff.write('-ex1\n')
+                ff.write('-ex2\n')
+                ff.write('-ex1aro\n')
+                ff.write('-ex2aro\n')
+                ff.write('-no_optH false\n')
+                #flip_HNQ tells Rosetta to consider HIS,ASN,GLN hydrogen flips
+                ff.write('-flip_HNQ true\n')
+                #ignore_ligand_chi prevents Roseta from adding additional ligand rotamer
+                ff.write('-ignore_ligand_chi true\n')
 
             if self.ignore_zero_occupancy == False:
                 ff.write('-ignore_zero_occupancy false\n')
