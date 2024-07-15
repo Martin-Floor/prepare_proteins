@@ -5696,14 +5696,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                     )
                     line = ""
                     line += '#include "atomtypes.itp"\\n'
+                    included_ligands = []
                     for ligand_name in ligand_res.values():
-                        line += (
-                            '#include "'
-                            + ligand_name
-                            + ".acpype\/"
-                            + ligand_name
-                            + '_GMX.itp"\\n'
-                        )
+                        if ligand_name not in included_ligands:
+                            included_ligands.append(ligand_name)
+                            line += (
+                                '#include "'
+                                + ligand_name
+                                + ".acpype\/"
+                                + ligand_name
+                                + '_GMX.itp"\\n'
+                            )
 
                         line += "#ifdef POSRES\\n"
 
@@ -5760,7 +5763,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 group_dics = {}
                 command_local += (
-                    'echo "q"| '
+                    'echo -e q | '
                     + command_name
                     + " make_ndx -f  prot_solv.gro -o index.ndx"
                     + "\n"
@@ -5771,6 +5774,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     f.write(command_local)
                 subprocess.run("bash tmp.sh", shell=True)
                 os.remove("tmp.sh")
+
 
                 # Read complex index
                 group_dics["complex"] = _readGromacsIndexFile(
@@ -5802,8 +5806,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     with open(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx','a') as f:
                         f.write(crystal_waters_ndx_lines)
 
-                    os.system('echo \''+group_dics['complex']['Water']+' & !'+str(len(group_dics['complex']))+'\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
-                    os.system('echo \'del '+group_dics['complex']['SOL']+'\n name '+str(len(group_dics['complex']))+' SOL\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
+                    os.system('echo -e \''+group_dics['complex']['Water']+' & !'+str(len(group_dics['complex']))+'\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
+                    os.system('echo -e \'del '+group_dics['complex']['SOL']+'\n name '+str(len(group_dics['complex']))+' SOL\\nq\' | '+command_name+' make_ndx -f  '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/prot_solv.gro -o '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+' -n '+md_folder+'/output_models/'+model+'/'+str(i)+'/topol/index.ndx'+'\n')
 
                     # Update group_dics
                     group_dics['complex'] = _readGromacsIndexFile(md_folder+'/'+'output_models/'+model+'/'+str(i)+'/topol'+'/index.ndx')
@@ -9973,9 +9977,7 @@ def _getLigandParameters(
 
     if num_chains < 2:
         raise ValueError(
-            "Input pdb "
-            + model
-            + " has only one chain. Protein and ligand should be separated in individual chains."
+            "Input pdb has only one chain. Protein and ligand should be separated in individual chains."
         )
 
     io.set_structure(structure)
