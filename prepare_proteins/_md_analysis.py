@@ -51,11 +51,15 @@ class md_analysis:
             self.top_paths[model] = {}
 
             for replica in os.listdir(md_folder + '/output_models/' + model):
+                replica_path = md_folder + '/output_models/' + model + '/' + replica
+                if not os.path.isdir(replica_path):
+                    continue
+
                 # Define paths
-                top_path = md_folder + '/output_models/' + model + '/' + replica + '/em/prot_em.gro'
-                nvt_path = md_folder + '/output_models/' + model + '/' + replica + '/nvt/prot_nvt.xtc'
-                npt_path = md_folder + '/output_models/' + model + '/' + replica + '/npt'
-                md_path = md_folder + '/output_models/' + model + '/' + replica + '/md'
+                top_path = replica_path + '/em/prot_em.gro'
+                nvt_path = replica_path + '/nvt/prot_nvt.xtc'
+                npt_path = replica_path + '/npt'
+                md_path = replica_path + '/md'
 
                 # Print warnings for missing files
                 if not os.path.exists(top_path):
@@ -74,8 +78,11 @@ class md_analysis:
                     self.traj_paths['md'][model][replica] = ''
                     print(f'WARNING: MD trajectory for model {model} and replica {replica} could not be found. Folder does not exist or is empty')
 
+                if not os.path.exists(top_path) or not os.path.exists(nvt_path) or not os.path.exists(npt_path) or not os.path.exists(md_path):
+                    continue
+
                 # Get groups from topol index
-                index_path = md_folder + '/' + 'output_models/' + model + '/' + replica + '/topol/index.ndx'
+                index_path = replica_path + '/topol/index.ndx'
                 group_dics = _readGromacsIndexFile(index_path)
                 if output_group not in group_dics:
                     raise ValueError(f'The selected output group is not available in the topol/index.ndx file. The following groups are available: {",".join(group_dics.keys())}')
@@ -258,7 +265,7 @@ class md_analysis:
                             json.dump(metrics[model], f)
                         command += '--metrics metrics.json '
                     command += '\n'
-                    command += 'cd ..\n'
+                    command += 'cd ../../..\n'
                     jobs.append(command)
         return jobs
 
@@ -274,13 +281,20 @@ class md_analysis:
             os.mkdir(folder)
 
         for model in self.top_paths:
-            self.distances[model] = {}
+            if model not in self.distances:
+                self.distances[model] = {}
             for replica in self.top_paths[model]:
-                if os.path.exists(folder + '/' + model + '/' + replica + '/dist.json'):
-                    with open(folder + '/' + model + '/' + replica + '/dist.json', 'r') as f:
-                        self.distances[model][replica] = json.load(f)
-                    print(f'Reading distance for {model}')
-                    continue
+                dist_file = os.path.join(folder, model, str(replica), 'dist.json')
+                if os.path.exists(dist_file):
+                    with open(dist_file, 'r') as f:
+                        distance_data = json.load(f)
+                        # Convert list of lists to a single numpy array
+                        for metric, values in distance_data.items():
+                            distance_data[metric] = np.array(values).flatten()
+                        self.distances[model][int(replica)] = distance_data
+                    print(f'Reading distance for {model} - {replica}')
+                else:
+                    print(f'Warning: Distance file not found for {model} - {replica}')
 
     def plot_distances(self, threshold=0.45, lim=True):
         """
@@ -341,25 +355,24 @@ class md_analysis:
                     if (protein, replica) not in data:
                         data[(protein, replica)] = []
 
-                    n_frames = len(self.distances[protein][replica][metric])
-                    metric_mask = [x < threshold for x in self.distances[protein][replica][metric]]
+                    distances = self.distances[protein][replica][metric]
+                    n_frames = len(distances)
+                    metric_mask = distances < threshold
 
-                    masks[metric] = (metric_mask)
+                    masks[metric] = metric_mask
 
-                    # data[(protein,replica)].append(np.mean(self.distances[protein][replica][metric])
-                    # data[(protein,replica)].append(np.std(self.distances[protein][replica][metric])
-                    data[(protein, replica)].append(metric_mask.count(True) / n_frames)
+                    data[(protein, replica)].append(np.mean(metric_mask))
                     if metric not in column_names:
                         column_names.append(metric)
 
                 if group_metrics:
                     for group in group_metrics:
-                        group_mask = [True] * n_frames
+                        group_mask = np.ones(n_frames, dtype=bool)
                         for metric in masks:
                             if metric in group_metrics[group]:
-                                group_mask = [x and y for x, y in zip(masks[metric], group_mask)]
+                                group_mask &= masks[metric]
 
-                        data[(protein, replica)].append(group_mask.count(True) / n_frames)
+                        data[(protein, replica)].append(np.mean(group_mask))
                         if group not in column_names:
                             column_names.append(group)
 
@@ -367,6 +380,46 @@ class md_analysis:
         df.columns = column_names
 
         return df
+
+    def plot_distance_prob(self, threshold=0.45, group_metrics=None, sort_by=None, filter_thresholds=None):
+        """
+        Plots the probability of distances being below a threshold for different models and replicas.
+
+        Parameters:
+        threshold (float): Distance threshold for calculating probabilities (default: 0.45).
+        group_metrics (dict): Dictionary defining groups of metrics for combined probability calculations (default: None).
+        sort_by (str): Metric to sort the values by before plotting (default: None).
+        filter_thresholds (dict): Dictionary specifying the minimum thresholds for metrics to filter models (default: None).
+        """
+        df_prob = self.get_distance_prob(threshold, group_metrics)
+
+        if filter_thresholds:
+            for metric, value in filter_thresholds.items():
+                if metric in df_prob.columns:
+                    df_prob = df_prob[df_prob[metric] >= value]
+
+        if sort_by and sort_by in df_prob.columns:
+            df_prob = df_prob.sort_values(by=sort_by, ascending=False)
+
+        num_metrics = len(df_prob.columns)
+        colors = ['skyblue', 'orange', 'green', 'red', 'purple', 'brown']  # Extend this list if you have more metrics
+        fig, axes = plt.subplots(num_metrics, 1, figsize=(15, 4 * num_metrics), sharex=True)
+
+        if num_metrics == 1:
+            axes = [axes]  # Ensure axes is iterable even for a single subplot
+
+        for ax, (metric, color) in zip(axes, zip(df_prob.columns, colors)):
+            df_prob[metric].plot(kind='bar', ax=ax, width=0.8, color=color)
+            ax.set_title(f'Probability of Distances Below Threshold for {metric}', fontsize=16)
+            ax.set_ylabel('Probability', fontsize=14)
+            ax.legend([metric], title='Metrics', fontsize=12)
+            ax.grid(axis='y')
+
+        axes[-1].set_xlabel('Model - Replica', fontsize=14)
+        axes[-1].set_xticklabels(df_prob.index, rotation=45, ha='right', fontsize=10)
+
+        plt.tight_layout(pad=2.0)
+        plt.show()
 
     def plot_rmsd(self, step='md', reference=None, align=True, lim=True, order_by_protein_rmsd_slope=False, order_by_protein_rmsd_avg=False, order_by_protein_rmsd_std=False, overwrite=False):
         """
