@@ -5438,7 +5438,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command = f"acpype -i {ligand_name}.pdb"
                     if ligand_name in charge:
                         command += f" -n {charge[ligand_name]}"
-                    os.system(command)
+                    subprocess.run(command, shell=True)
 
                     with open(f"{ligand_name}.acpype/{ligand_name}_GMX.itp") as f:
                         lines = f.readlines()
@@ -5706,6 +5706,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             ligand_res = _getLigandParameters(structure, ligand_chains, f"{md_folder}/input_models/{model}", f"{md_folder}/ligand_params", charge=charge) if ligand_chains else None
 
             for i in range(replicas):
+
                 skip_local = os.path.exists(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx") and not overwrite
                 if not skip_local:
                     command_local = _generateLocalCommand(command_name, model, i, ligand_chains, ligand_res, ion_residues, ion_chains, md_folder, ff, his_pro)
@@ -5745,7 +5746,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command_local = f"cd {md_folder}/output_models/{model}/{i}/topol\n"
                     command_local += f"{command_name} grompp -f ../../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1\n"
                     command_local += f"echo {group_dics['complex'][sol_group]} | {command_name} genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1 -n index.ndx\n"
-                    command_local += f'echo "q"| {command_name} make_ndx -f  prot_ions.gro -o index.ndx\n'
+                    command_local += f'echo "q"| {command_name} make_ndx -f prot_ions.gro -o index.ndx\n'
 
                     with open("tmp.sh", "w") as f:
                         f.write(command_local)
@@ -5781,7 +5782,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         elif lig_selector:
                             selector_line += f"{group_dics['complex']['Protein']}|{lig_selector}\\n"
 
-                        command_local += f'echo -e "{selector_line}q"| {command_name} make_ndx -f  prot_ions.gro -o index.ndx\n'
+                        command_local += f'echo -e "{selector_line}q"| {command_name} make_ndx -f prot_ions.gro -o index.ndx\n'
 
                         with open("tmp.sh", "w") as f:
                             f.write(command_local)
@@ -5794,7 +5795,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             for ligand_name in ligand_res.values():
                                 group_dics[ligand_name] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/{ligand_name}_index.ndx")
 
-                command = f"cd output_models/{model}/{i}\n"
+                command = f"export GMXLIB=$(pwd)/{md_folder}/FF" + "\n"
+                command += f"cd {md_folder}/output_models/{model}/{i}\n"
                 local_path = os.getcwd() + f"/{md_folder}/FF"
                 command += f'sed -i  "s#{local_path}#$GMXLIB#g" topol/topol.top\n'
 
@@ -5805,8 +5807,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += f"{remote_command_name} grompp -f ../../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr\n"
                     command += f"{remote_command_name} mdrun -v -deffnm prot_em\n"
                     command += "cd ..\n"
-                else:
-                    command = ""
 
                 skip_nvt = os.path.exists(f"{md_folder}/output_models/{model}/{i}/nvt/prot_nvt.tpr") and not overwrite
                 if not skip_nvt:
@@ -5829,8 +5829,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += f"{remote_command_name} grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx\n"
                     command += f"{remote_command_name} mdrun -v -deffnm prot_nvt\n"
                     command += "cd ..\n"
-                else:
-                    command = ""
 
                 FClist = ("550", "300", "170", "90", "50", "30", "15", "10", "5")
                 skip_npt = os.path.exists(f"{md_folder}/output_models/{model}/{i}/npt/prot_npt_{len(FClist)}.tpr") and not overwrite
@@ -5859,11 +5857,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += f"echo {sel} | {remote_command_name} genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc {FClist[j - 1]} {FClist[j - 1]} {FClist[j - 1]} -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} grompp -f npt.mdp -c prot_npt_{j}.gro -t prot_npt_{j}.cpt -p ../topol/topol.top -o prot_npt_{j + 1}.tpr -r prot_npt_{j}.gro -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_npt_{j + 1}\n"
-                        else:
-                            command = ""
-                    command += "cd ..\n"
-                else:
-                    command = ""
+                        command += "cd ..\n"
 
                 skip_md = os.path.exists(f"{md_folder}/output_models/{model}/{i}/md/prot_md_{frags}.xtc") and not overwrite
                 if not skip_md:
@@ -5886,11 +5880,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             else:
                                 command += f"{remote_command_name} grompp -f md.mdp -c prot_md_{j - 1}.gro -t prot_md_{j - 1}.cpt -p ../topol/topol.top -o prot_md_{j}.tpr -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_md_{j}\n"
-                        else:
-                            command = ""
-                    command += "cd ..\n"
+                        command += "cd ../../../..\n"
                 else:
-                    command = ""
+                    command = ''
 
                 if command.strip():
                     jobs.append(command)
