@@ -11,6 +11,8 @@ import time
 import uuid
 import warnings
 
+import ipywidgets as widgets
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import mdtraj as md
 import numpy as np
@@ -18,11 +20,11 @@ import pandas as pd
 from Bio import PDB, BiopythonWarning
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3
+from ipywidgets import interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
 
 import prepare_proteins
-
 from . import MD, _atom_selectors, alignment, rosettaScripts
 
 
@@ -5704,7 +5706,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         )
 
                         line += "#ifdef POSRES\\n"
-                        
+
                         line += (
                             '#include "'
                             + ligand_name
@@ -6555,7 +6557,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 failed_dockings = json.load(jifd)
             return failed_dockings
 
-    def analiseRosettaDocking(self, docking_folder, separator='_'):
+    def analyseRosettaDocking(self, docking_folder, separator='_'):
 
         # Initialize an empty DataFrame for all scores
         self.rosetta_docking = pd.DataFrame()
@@ -6572,7 +6574,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             model, ligand = model_ligand.split(separator)
 
-            scorefile = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.sc')
+            scorefile = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.out')
             if os.path.exists(scorefile):
                 scores = _readRosettaScoreFile(scorefile)
                 scores['Ligand'] = ligand  # Add ligand column to scores
@@ -6600,11 +6602,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             catalytic_labels = {
                 metric_name = {
-                    protein = {
+                    model = {
                         ligand = distances_list}}}
 
         The innermost distances_list object contains all equivalent distance names for
-        a specific protein and ligand pair to be combined under the same metric_name column.
+        a specific model and ligand pair to be combined under the same metric_name column.
 
         The combination is done by taking the minimum value of all equivalent distances.
 
@@ -6614,6 +6616,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Dictionary defining which distances will be combined under a common name.
             (for details see above).
         """
+
+        # Initialize the metric type dictionary if it doesn't exist
+        if not hasattr(self, 'rosetta_docking_metric_type'):
+            self.rosetta_docking_metric_type = {}
 
         for name in catalytic_labels:
             if "metric_" + name in self.rosetta_docking.columns and not overwrite:
@@ -6665,7 +6671,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             )
                             assert ligand_series.shape[0] == len(distance_values)
                             values += distance_values
-                            self.rosetta_docking_metric_type[name] = "distance"
+                            self.rosetta_docking_metric_type["metric_" + name] = "distance"
                         elif angle_metric:
                             angles = catalytic_labels[name][model][ligand]
                             if len(angles) > 1:
@@ -6679,9 +6685,620 @@ make sure of reading the target sequences with the function readTargetSequences(
                             )
                             assert ligand_series.shape[0] == len(angle_values)
                             values += angle_values
-                            self.rosetta_docking_metric_type[name] = "angle"
+                            self.rosetta_docking_metric_type["metric_" + name] = "angle"
 
                 self.rosetta_docking["metric_" + name] = values
+
+    def rosettaDockingBindingEnergyLandscape(self, initial_threshold=3.5, vertical_line=None, xlim=None, ylim=None, clim=None, color=None,
+                                             size=1.0, alpha=0.05, vertical_line_width=0.5, vertical_line_color='k', dataframe=None,
+                                             title=None, no_xticks=False, no_yticks=False, no_xlabel=False, no_ylabel=False,
+                                             no_cbar=False, xlabel=None, ylabel=None, clabel=None, relative_total_energy=False):
+        """
+        Plot binding energy as an interactive plot.
+
+        Parameters
+        ==========
+        initial_threshold : float, optional
+            Initial threshold value for metrics sliders. Default is 3.5.
+        vertical_line : float, optional
+            Position to plot a vertical line.
+        xlim : tuple, optional
+            The limits for the x-axis range.
+        ylim : tuple, optional
+            The limits for the y-axis range.
+        clim : tuple, optional
+            The limits for the color range.
+        color : str, optional
+            Column name to use for coloring the plot. Can also be a fixed color.
+        size : float, optional
+            Scale factor for the plot size. Default is 1.0.
+        alpha : float, optional
+            Alpha value for the scatter plot markers. Default is 0.05.
+        vertical_line_width : float, optional
+            Width of the vertical line. Default is 0.5.
+        vertical_line_color : str, optional
+            Color of the vertical line. Default is 'k' (black).
+        dataframe : pandas.DataFrame, optional
+            Dataframe containing the data. If not provided, self.rosetta_docking is used.
+        title : str, optional
+            Title of the plot.
+        no_xticks : bool, optional
+            If True, x-axis ticks are not shown. Default is False.
+        no_yticks : bool, optional
+            If True, y-axis ticks are not shown. Default is False.
+        no_xlabel : bool, optional
+            If True, the x-axis label is not shown. Default is False.
+        no_ylabel : bool, optional
+            If True, the y-axis label is not shown. Default is False.
+        no_cbar : bool, optional
+            If True, the color bar is not shown. Default is False.
+        xlabel : str, optional
+            Label for the x-axis. If not provided, defaults to the x parameter.
+        ylabel : str, optional
+            Label for the y-axis. If not provided, defaults to the y parameter.
+        clabel : str, optional
+            Label for the color bar. If not provided, defaults to color_column.
+        relative_total_energy : bool, optional
+            If True, color values are shown relative to their minimum value. Default is False.
+        """
+
+        if not self.rosetta_docking_distances:
+            raise ValueError('There are no distances in the docking data. Use calculateDistances to show plot.')
+
+        def getLigands(model, dataframe=None):
+            if dataframe is not None:
+                model_series = dataframe[dataframe.index.get_level_values('Model') == model]
+            else:
+                model_series = self.rosetta_docking[self.rosetta_docking.index.get_level_values('Model') == model]
+
+            ligands = list(set(model_series.index.get_level_values('Ligand').tolist()))
+            ligands_ddm = Dropdown(options=ligands, description='Ligand', style={'description_width': 'initial'})
+
+            interact(getDistance, model_series=fixed(model_series), model=fixed(model), ligand=ligands_ddm)
+
+        def getDistance(model_series, model, ligand, by_metric=False):
+            ligand_series = model_series[model_series.index.get_level_values('Ligand') == ligand]
+
+            distances = []
+            distance_label = 'Distance'
+            if by_metric:
+                distances = [d for d in ligand_series if d.startswith('metric_') and not ligand_series[d].dropna().empty]
+                distance_label = 'Metric'
+
+            if not distances:
+                if model in self.rosetta_docking_distances and ligand in self.rosetta_docking_distances[model]:
+                    distances = [d for d in self.rosetta_docking_distances[model][ligand] if 'distance' in d or '_coordinate' in d]
+                if model in self.rosetta_docking_angles and ligand in self.rosetta_docking_angles[model]:
+                    distances += [d for d in self.rosetta_docking_angles[model][ligand] if 'angle' in d]
+                if 'Ligand RMSD' in self.rosetta_docking:
+                    distances.append('Ligand RMSD')
+
+            if not distances:
+                raise ValueError('No distances or metrics found for this ligand. Consider calculating some distances.')
+
+            distances_ddm = Dropdown(options=distances, description=distance_label, style={'description_width': 'initial'})
+
+            interact(getMetrics, distances=fixed(distances_ddm), ligand_series=fixed(ligand_series),
+                     model=fixed(model), ligand=fixed(ligand))
+
+        def getMetrics(ligand_series, distances, model, ligand, filter_by_metric=False, filter_by_label=False,
+                       color_by_metric=False, color_by_labels=False):
+
+            if color_by_metric or filter_by_metric:
+                metrics = [k for k in ligand_series.keys() if 'metric_' in k]
+                metrics_sliders = {}
+                for m in metrics:
+                    if self.rosetta_docking_metric_type[m] == 'distance':
+                        m_slider = FloatSlider(value=initial_threshold, min=0, max=max(30, max(ligand_series[m])), step=0.1,
+                                               description=f"{m}:", disabled=False, continuous_update=False,
+                                               orientation='horizontal', readout=True, readout_format='.2f')
+                    elif self.rosetta_docking_metric_type[m] in ['angle', 'torsion']:
+                        m_slider = FloatRangeSlider(value=[110, 130], min=-180, max=180, step=0.1,
+                                                    description=f"{m}:", disabled=False, continuous_update=False,
+                                                    orientation='horizontal', readout=True, readout_format='.2f')
+
+                    metrics_sliders[m] = m_slider
+            else:
+                metrics_sliders = {}
+
+            if filter_by_label:
+                labels_ddms = {}
+                labels = [l for l in ligand_series.keys() if 'label_' in l]
+                for l in labels:
+                    label_options = [None] + sorted(list(set(ligand_series[l])))
+                    labels_ddms[l] = Dropdown(options=label_options, description=l, style={'description_width': 'initial'})
+            else:
+                labels_ddms = {}
+
+            interact(getColor, distance=distances, model=fixed(model), ligand=fixed(ligand),
+                     metrics=fixed(metrics_sliders), ligand_series=fixed(ligand_series),
+                     color_by_metric=fixed(color_by_metric), color_by_labels=fixed(color_by_labels), **labels_ddms)
+
+        def getColor(distance, ligand_series, metrics, model, ligand, color_by_metric=False,
+                     color_by_labels=False, **labels):
+
+            if color is None:
+                color_columns = [k for k in ligand_series.keys() if ':' not in k and 'distance' not in k and not k.startswith('metric_') and not k.startswith('label_')]
+                color_columns = [None, 'Epoch'] + color_columns
+
+                if 'interface_delta_B' in ligand_series:
+                    be_column = 'interface_delta_B'
+                else:
+                    raise ValueError('No binding energy column (interface_delta_B) found in the data.')
+
+                color_columns.remove(be_column)
+
+                color_ddm = Dropdown(options=color_columns, description='Color', style={'description_width': 'initial'})
+                if color_by_metric:
+                    color_ddm.options = ['Color by metrics']
+                    alpha_value = 0.10
+                elif color_by_labels:
+                    color_ddm.options = ['Color by labels']
+                    alpha_value = 1.00
+                else:
+                    alpha_value = fixed(0.10)
+
+                color_object = color_ddm
+            else:
+                color_object = fixed(color)
+
+            interact(_bindingEnergyLandscape, color=color_object, ligand_series=fixed(ligand_series),
+                     distance=fixed(distance), color_by_metric=fixed(color_by_metric), color_by_labels=fixed(color_by_labels),
+                     Alpha=alpha_value, labels=fixed(labels), model=fixed(model), ligand=fixed(ligand), title=fixed(title),
+                     no_xticks=fixed(no_xticks), no_yticks=fixed(no_yticks), no_cbar=fixed(no_cbar), clabel=fixed(clabel),
+                     no_xlabel=fixed(no_xlabel), no_ylabel=fixed(no_ylabel), xlabel=fixed(xlabel), ylabel=fixed(ylabel),
+                     relative_total_energy=fixed(relative_total_energy), clim=fixed(clim), **metrics)
+
+        def _bindingEnergyLandscape(color, ligand_series, distance, model, ligand,
+                                    color_by_metric=False, color_by_labels=False,
+                                    Alpha=0.10, labels=None, title=None, no_xticks=False,
+                                    no_yticks=False, no_cbar=False, no_xlabel=True, no_ylabel=False,
+                                    xlabel=None, ylabel=None, clabel=None, relative_total_energy=False,
+                                    clim=None, **metrics):
+
+            skip_fp = False
+            show_plot = True
+
+            return_axis = False
+            if color_by_metric:
+                color = 'k'
+                color_metrics = metrics
+                metrics = {}
+                return_axis = True
+                show_plot = False
+
+            elif color_by_labels:
+                skip_fp = True
+                return_axis = True
+                show_plot = False
+
+            if color == 'Total Energy' and relative_total_energy:
+                relative_color_values = True
+                if clim is None:
+                    clim = (0, 27.631021116)
+            else:
+                relative_color_values = None
+
+            if 'interface_delta_B' in ligand_series:
+                be_column = 'interface_delta_B'
+            else:
+                raise ValueError('No binding energy column (interface_delta_B) found in the data.')
+
+            if not skip_fp:
+                axis = self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim,
+                                                            vertical_line=vertical_line, color_column=color, clim=clim, size=size,
+                                                            vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
+                                                            metrics=metrics, labels=labels, return_axis=return_axis, show=show_plot,
+                                                            title=title, no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar,
+                                                            no_xlabel=no_xlabel, no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel,
+                                                            clabel=clabel, relative_color_values=relative_color_values, dataframe=ligand_series)
+
+            if color_by_metric:
+                self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim,
+                                                     vertical_line=vertical_line, color_column='r', clim=clim, size=size,
+                                                     vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
+                                                     metrics=color_metrics, labels=labels, axis=axis, show=True, alpha=Alpha,
+                                                     no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar, no_xlabel=no_xlabel,
+                                                     no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel, clabel=clabel, dataframe=ligand_series)
+            elif color_by_labels:
+                all_labels = {l: sorted(list(set(ligand_series[l].to_list()))) for l in ligand_series.keys() if 'label_' in l}
+
+                for l in all_labels:
+                    colors = iter([plt.cm.Set2(i) for i in range(len(all_labels[l]))])
+                    for i, v in enumerate(all_labels[l]):
+                        if i == 0:
+                            axis = self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim, plot_label=v,
+                                                                        vertical_line=vertical_line, color_column=[next(colors)], clim=clim, size=size,
+                                                                        vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
+                                                                        metrics=metrics, labels=labels, return_axis=return_axis, alpha=Alpha, show=show_plot,
+                                                                        no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar, no_xlabel=no_xlabel,
+                                                                        no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel, clabel=clabel, dataframe=ligand_series)
+                            continue
+                        elif i == len(all_labels[l]) - 1:
+                            show_plot = True
+                        axis = self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim, plot_label=v,
+                                                                    vertical_line=vertical_line, color_column=[next(colors)], clim=clim, size=size,
+                                                                    vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
+                                                                    metrics=metrics, labels={l: v}, return_axis=return_axis, axis=axis, alpha=Alpha, show=show_plot,
+                                                                    show_legend=True, title=title, no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar,
+                                                                    no_xlabel=no_xlabel, no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel, clabel=clabel,
+                                                                    dataframe=ligand_series)
+
+        models = self.rosetta_docking.index.get_level_values('Model').unique()
+        models_ddm = Dropdown(options=models, description='Model', style={'description_width': 'initial'})
+
+        interact(getLigands, model=models_ddm, dataframe=fixed(dataframe))
+
+    def scatterPlotIndividualSimulation(self, model, ligand, x, y, vertical_line=None, color_column=None, size=1.0, labels_size=10.0, plot_label=None,
+                                        xlim=None, ylim=None, metrics=None, labels=None, title=None, title_size=14.0, return_axis=False, dpi=300, show_legend=False,
+                                        axis=None, xlabel=None, ylabel=None, vertical_line_color='k', vertical_line_width=0.5, marker_size=0.8, clim=None, show=False,
+                                        clabel=None, legend_font_size=6, no_xticks=False, no_yticks=False, no_cbar=False, no_xlabel=False, no_ylabel=False,
+                                        relative_color_values=False, dataframe=None, separator='_', **kwargs):
+        """
+        Creates a scatter plot for the selected model and ligand using the x and y
+        columns. Data series can be filtered by specific metrics.
+
+        Parameters
+        ==========
+        model : str
+            The target model.
+        ligand : str
+            The target ligand.
+        x : str
+            The column name of the data to plot on the x-axis.
+        y : str
+            The column name of the data to plot on the y-axis.
+        vertical_line : float, optional
+            Position to plot a vertical line.
+        color_column : str, optional
+            The column name to use for coloring the plot. Also, a color can be given
+            to use uniformly for the points.
+        size : float, optional
+            Scale factor for the plot size. Default is 1.0.
+        labels_size : float, optional
+            Font size for the labels. Default is 10.0.
+        plot_label : str, optional
+            Label for the plot. If not provided, it defaults to 'model_separator_ligand'.
+        xlim : tuple, optional
+            The limits for the x-axis range.
+        ylim : tuple, optional
+            The limits for the y-axis range.
+        clim : tuple, optional
+            The limits for the color range.
+        metrics : dict, optional
+            A set of metrics for filtering the data points.
+        labels : dict, optional
+            Use the label column values to filter the data.
+        title : str, optional
+            The title of the plot.
+        title_size : float, optional
+            Font size for the title. Default is 14.0.
+        return_axis : bool, optional
+            Whether to return the axis of this plot. Default is False.
+        dpi : int, optional
+            Dots per inch for the figure. Default is 300.
+        show_legend : bool, optional
+            Whether to show the legend. Default is False.
+        axis : matplotlib.pyplot.axis, optional
+            The axis to use for plotting the data. If None, a new axis is created.
+        xlabel : str, optional
+            Label for the x-axis. If not provided, it defaults to the x parameter.
+        ylabel : str, optional
+            Label for the y-axis. If not provided, it defaults to the y parameter.
+        vertical_line_color : str, optional
+            Color of the vertical line. Default is 'k' (black).
+        vertical_line_width : float, optional
+            Width of the vertical line. Default is 0.5.
+        marker_size : float, optional
+            Size of the markers. Default is 0.8.
+        clabel : str, optional
+            Label for the color bar. If not provided, it defaults to color_column.
+        legend_font_size : float, optional
+            Font size for the legend. Default is 6.
+        no_xticks : bool, optional
+            If True, x-axis ticks are not shown. Default is False.
+        no_yticks : bool, optional
+            If True, y-axis ticks are not shown. Default is False.
+        no_cbar : bool, optional
+            If True, the color bar is not shown. Default is False.
+        no_xlabel : bool, optional
+            If True, the x-axis label is not shown. Default is False.
+        no_ylabel : bool, optional
+            If True, the y-axis label is not shown. Default is False.
+        relative_color_values : bool, optional
+            If True, color values are shown relative to their minimum value. Default is False.
+        dataframe : pandas.DataFrame, optional
+            Dataframe containing the data. If not provided, self.rosetta_docking is used.
+        separator : str, optional
+            Separator used in the plot label. Default is '_'.
+        **kwargs : additional keyword arguments
+            Additional arguments to pass to the scatter function.
+
+        Returns
+        =======
+        axis : matplotlib.pyplot.axis
+            The axis object of the plot, if return_axis is True.
+
+        Raises
+        ======
+        ValueError
+            If the specified model or ligand is not found in the data.
+        """
+
+        def _addDistanceAndAngleData(ligand_series, model, ligand, dataframe):
+            if model in self.rosetta_docking_distances:
+                if ligand in self.rosetta_docking_distances[model]:
+                    if self.rosetta_docking_distances[model][ligand] is not None:
+                        for distance in self.rosetta_docking_distances[model][ligand]:
+                            if dataframe is not None:
+                                index_columns = ['Model', 'Ligand', 'Pose']
+                                indexes = dataframe.reset_index().set_index(index_columns).index
+                                ligand_series[distance] = self.rosetta_docking_distances[model][ligand][self.rosetta_docking_distances[model][ligand].index.isin(indexes)][distance].tolist()
+                            else:
+                                ligand_series[distance] = self.rosetta_docking_distances[model][ligand][distance].tolist()
+
+            if model in self.rosetta_docking_angles:
+                if ligand in self.rosetta_docking_angles[model]:
+                    if self.rosetta_docking_angles[model][ligand] is not None:
+                        for angle in self.rosetta_docking_angles[model][ligand]:
+                            if dataframe is not None:
+                                index_columns = ['Model', 'Ligand', 'Pose']
+                                indexes = dataframe.reset_index().set_index(index_columns).index
+                                ligand_series[angle] = self.rosetta_docking_angles[model][ligand][self.rosetta_docking_angles[model][ligand].index.isin(indexes)][angle].tolist()
+                            else:
+                                ligand_series[angle] = self.rosetta_docking_angles[model][ligand][angle].tolist()
+
+            return ligand_series
+
+        def _filterByMetrics(ligand_series, metrics):
+            for metric, value in metrics.items():
+                if isinstance(value, float):
+                    mask = ligand_series[metric] <= value
+                elif isinstance(value, tuple):
+                    mask = (ligand_series[metric] >= value[0]) & (ligand_series[metric] <= value[1])
+                ligand_series = ligand_series[mask]
+            return ligand_series
+
+        def _filterByLabels(ligand_series, labels):
+            for label, value in labels.items():
+                if value is not None:
+                    mask = ligand_series[label] == value
+                    ligand_series = ligand_series[mask]
+            return ligand_series
+
+        def _defineColorColumns(ligand_series):
+            color_columns = [col for col in ligand_series.columns if ':' not in col and 'distance' not in col and 'angle' not in col and not col.startswith('metric_')]
+            return color_columns
+
+        def _plotScatter(axis, ligand_series, x, y, color_column, color_columns, plot_label, clim, marker_size, size, **kwargs):
+            if color_column is not None:
+                if clim is not None:
+                    vmin, vmax = clim
+                else:
+                    vmin, vmax = None, None
+
+                ascending = False
+                colormap = 'Blues_r'
+
+                if color_column == 'Step':
+                    ascending = True
+                    colormap = 'Blues'
+
+                elif color_column in ['Epoch', 'Cluster']:
+                    ascending = True
+                    color_values = ligand_series.reset_index()[color_column]
+                    cmap = plt.cm.jet
+                    cmaplist = [cmap(i) for i in range(cmap.N)]
+                    cmaplist[0] = (.5, .5, .5, 1.0)
+                    max_value = max(color_values.tolist())
+                    bounds = np.linspace(0, max_value + 1, max_value + 2)
+                    norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
+                    colormap = mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmaplist, cmap.N)
+                    color_values = color_values + 0.01
+                    sc = axis.scatter(ligand_series[x], ligand_series[y], c=color_values, cmap=colormap, norm=norm, vmin=vmin, vmax=vmax, label=plot_label, s=marker_size*size, **kwargs)
+                    if not no_cbar:
+                        cbar = plt.colorbar(sc, ax=axis)
+                        cbar.set_label(label=color_column, size=labels_size * size)
+                        cbar.ax.tick_params(labelsize=labels_size * size)
+
+                elif color_column in color_columns:
+                    ligand_series = ligand_series.sort_values(color_column, ascending=ascending)
+                    color_values = ligand_series[color_column]
+
+                    if relative_color_values:
+                        color_values = color_values - np.min(color_values)
+
+                    sc = axis.scatter(ligand_series[x], ligand_series[y], c=color_values, cmap=colormap, vmin=vmin, vmax=vmax, label=plot_label, s=marker_size * size, **kwargs)
+                    if not no_cbar:
+                        cbar = plt.colorbar(sc, ax=axis)
+                        if clabel is None:
+                            clabel = color_column
+                        cbar.set_label(label=clabel, size=labels_size * size)
+                        cbar.ax.tick_params(labelsize=labels_size * size)
+                else:
+                    sc = axis.scatter(ligand_series[x], ligand_series[y], c=color_column, vmin=vmin, vmax=vmax, label=plot_label, s=marker_size * size, **kwargs)
+            else:
+                sc = axis.scatter(ligand_series[x], ligand_series[y], label=plot_label, s=marker_size * size, **kwargs)
+            return sc
+
+        # Extract model series from dataframe or self.rosetta_docking
+        if dataframe is not None:
+            model_series = dataframe[dataframe.index.get_level_values('Model') == model]
+        else:
+            model_series = self.rosetta_docking[self.rosetta_docking.index.get_level_values('Model') == model]
+
+        if model_series.empty:
+            raise ValueError(f'Model name {model} not found in data!')
+
+        ligand_series = model_series[model_series.index.get_level_values('Ligand') == ligand]
+        if ligand_series.empty:
+            raise ValueError(f"Ligand name {ligand} not found in model's {model} data!")
+
+        # Add distance and angle data to ligand_series
+        if len(ligand_series) != 0:
+            ligand_series = _addDistanceAndAngleData(ligand_series, model, ligand, dataframe)
+
+        # Filter points by metrics
+        if metrics is not None:
+            ligand_series = _filterByMetrics(ligand_series, metrics)
+
+        # Filter points by labels
+        if labels is not None:
+            ligand_series = _filterByLabels(ligand_series, labels)
+
+        # Check if an axis has been given
+        new_axis = False
+        if axis is None:
+            plt.figure(figsize=(4*size, 3.3*size), dpi=dpi)
+            axis = plt.gca()
+            new_axis = True
+
+        # Define plot label
+        if plot_label is None:
+            plot_label = f"{model}{separator}{ligand}"
+
+        # Define color columns
+        color_columns = _defineColorColumns(ligand_series)
+
+        # Plot scatter
+        sc = _plotScatter(axis, ligand_series, x, y, color_column, color_columns, plot_label, clim, marker_size, size, **kwargs)
+
+        # Plot vertical line if specified
+        if vertical_line is not None:
+            axis.axvline(vertical_line, c=vertical_line_color, lw=vertical_line_width, ls='--')
+
+        # Set labels and title
+        if xlabel is None and not no_xlabel:
+            xlabel = x
+        if ylabel is None and not no_ylabel:
+            ylabel = y
+
+        axis.set_xlabel(xlabel, fontsize=labels_size*size)
+        axis.set_ylabel(ylabel, fontsize=labels_size*size)
+        axis.tick_params(axis='both', labelsize=labels_size*size)
+
+        # Set ticks visibility
+        if no_xticks:
+            axis.set_xticks([])
+        if no_yticks:
+            axis.set_yticks([])
+
+        if title is not None:
+            axis.set_title(title, fontsize=title_size*size)
+        if xlim is not None:
+            axis.set_xlim(xlim)
+        if ylim is not None:
+            axis.set_ylim(ylim)
+
+        if show_legend:
+            axis.legend(prop={'size': legend_font_size*size})
+
+        if show:
+            plt.show()
+
+        if return_axis:
+            return axis
+
+    def getBestRosettaDockingPoses(
+            self,
+            filter_values,
+            return_failed=False,
+            exclude_models=None,
+            exclude_ligands=None,
+            exclude_pairs=None,
+            score_column='interface_delta_B'
+        ):
+        """
+        Get best docking poses based on the best SCORE and a set of metrics with specified thresholds.
+        The filter thresholds must be provided with a dictionary using the metric names as keys
+        and the thresholds as the values.
+
+        Parameters
+        ==========
+        filter_values : dict
+            Thresholds for the filter.
+        return_failed : bool
+            Whether to return a list of the dockings without any models fulfilling
+            the selection criteria. It is returned as a tuple (index 0) alongside
+            the filtered data frame (index 1).
+        exclude_models : list, optional
+            List of models to be excluded from the selection.
+        exclude_ligands : list, optional
+            List of ligands to be excluded from the selection.
+        exclude_pairs : list, optional
+            List of pair tuples (model, ligand) to be excluded from the selection.
+        score_column : str, optional
+            Column name to use for scoring. Default is 'interface_delta_B'.
+
+        Returns
+        =======
+        pandas.DataFrame
+            Dataframe containing the best poses based on the given criteria.
+        """
+
+        if exclude_models is None:
+            exclude_models = []
+        if exclude_ligands is None:
+            exclude_ligands = []
+        if exclude_pairs is None:
+            exclude_pairs = []
+
+        best_poses = []
+        failed = []
+
+        for model in self.rosetta_docking.index.get_level_values('Model').unique():
+
+            if model in exclude_models:
+                continue
+
+            model_series = self.rosetta_docking[
+                self.rosetta_docking.index.get_level_values("Model") == model
+            ]
+
+            for ligand in model_series.index.get_level_values('Ligand').unique():
+
+                if ligand in exclude_ligands:
+                    continue
+
+                if (model, ligand) in exclude_pairs:
+                    continue
+
+                ligand_data = model_series[
+                    model_series.index.get_level_values("Ligand") == ligand
+                ]
+
+                for metric, threshold in filter_values.items():
+
+                    if metric not in [score_column, "RMSD"]:
+                        if not metric.startswith("metric_"):
+                            metric_label = "metric_" + metric
+                        else:
+                            metric_label = metric
+
+                        if isinstance(threshold, (float, int)):
+                            ligand_data = ligand_data[ligand_data[metric_label] <= threshold]
+                        elif isinstance(threshold, (tuple, list)):
+                            ligand_data = ligand_data[
+                                (ligand_data[metric_label] >= threshold[0]) &
+                                (ligand_data[metric_label] <= threshold[1])
+                            ]
+                    else:
+                        metric_label = metric
+                        ligand_data = ligand_data[ligand_data[metric_label] < threshold]
+
+                if ligand_data.empty:
+                    failed.append((model, ligand))
+                    continue
+
+                best_pose_idx = ligand_data[score_column].idxmin()
+                best_poses.append(best_pose_idx)
+
+        best_poses_df = self.rosetta_docking.loc[best_poses]
+
+        if return_failed:
+            return failed, best_poses_df
+
+        return best_poses_df
 
     def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
         """
