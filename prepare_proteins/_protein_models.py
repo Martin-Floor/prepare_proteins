@@ -5857,7 +5857,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += f"echo {sel} | {remote_command_name} genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc {FClist[j - 1]} {FClist[j - 1]} {FClist[j - 1]} -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} grompp -f npt.mdp -c prot_npt_{j}.gro -t prot_npt_{j}.cpt -p ../topol/topol.top -o prot_npt_{j + 1}.tpr -r prot_npt_{j}.gro -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_npt_{j + 1}\n"
-                        command += "cd ..\n"
+                    command += "cd ..\n"
 
                 skip_md = os.path.exists(f"{md_folder}/output_models/{model}/{i}/md/prot_md_{frags}.xtc") and not overwrite
                 if not skip_md:
