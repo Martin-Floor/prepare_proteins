@@ -88,15 +88,11 @@ class md_analysis:
                     raise ValueError(f'The selected output group is not available in the topol/index.ndx file. The following groups are available: {",".join(group_dics.keys())}')
 
                 # Remove PBC
-                # In case of ligand PBC center is between protein ligand interface
-                if ligand:
-                    centering_selector = group_dics['Protein']
-                else:
-                    centering_selector = group_dics['Protein']
+                centering_selector = group_dics['Protein']
 
                 # Process topology file
                 if not os.path.exists(top_path.replace('.gro', '_noPBC.gro')) or overwrite:
-                    os.system(f'echo {centering_selector} {group_dics[output_group]} | {command}  trjconv -s {top_path.replace(".gro", ".tpr")} -f {top_path} -o {top_path.replace(".gro", "_noPBC.gro")} -center -pbc res -ur compact -n {index_path}')
+                    os.system(f'echo {centering_selector} {group_dics[output_group]} | {command} trjconv -s {top_path.replace(".gro", ".tpr")} -f {top_path} -o {top_path.replace(".gro", "_noPBC.gro")} -center -pbc res -ur compact -n {index_path}')
                     if remove_redundant_files:
                         os.remove(top_path)
 
@@ -104,7 +100,7 @@ class md_analysis:
 
                 # Process NVT trajectory
                 if not os.path.exists(nvt_path.replace('.xtc', '_noPBC.xtc')) or overwrite:
-                    os.system(f'echo {centering_selector} {group_dics[output_group]} | {command}  trjconv -s {nvt_path.replace(".xtc", ".tpr")} -f {nvt_path} -o {nvt_path.replace(".xtc", "_noPBC.xtc")} -center -pbc res -ur compact -n {index_path}')
+                    os.system(f'echo {centering_selector} {group_dics[output_group]} | {command} trjconv -s {nvt_path.replace(".xtc", ".tpr")} -f {nvt_path} -o {nvt_path.replace(".xtc", "_noPBC.xtc")} -center -pbc res -ur compact -n {index_path}')
                     if remove_redundant_files:
                         os.remove(nvt_path)
 
@@ -116,7 +112,7 @@ class md_analysis:
                     for file in os.listdir(npt_path):
                         if file.endswith('.xtc') and 'noPBC' not in file:
                             path = npt_path + '/' + file
-                            os.system(f'echo {centering_selector} {group_dics[output_group]} | {command}  trjconv -s {path.replace(".xtc", ".tpr")} -f {path} -o {path.replace(".xtc", "_noPBC.xtc")} -center -pbc res -ur compact -n {index_path}')
+                            os.system(f'echo {centering_selector} {group_dics[output_group]} | {command} trjconv -s {path.replace(".xtc", ".tpr")} -f {path} -o {path.replace(".xtc", "_noPBC.xtc")} -center -pbc res -ur compact -n {index_path}')
                             remove_paths.append(path)
                     os.system(f'{command} trjcat -f {npt_path}/*_noPBC.xtc -o {npt_path}/prot_npt_cat_noPBC.xtc -cat')
                     if remove_redundant_files:
@@ -130,7 +126,7 @@ class md_analysis:
                     for file in os.listdir(md_path):
                         if file.endswith('.xtc') and 'noPBC' not in file:
                             path = md_path + '/' + file
-                            os.system(f'echo {centering_selector} {group_dics[output_group]} | {command}  trjconv -s {path.replace(".xtc", ".tpr")} -f {path} -o {path.replace(".xtc", "_noPBC.xtc")} -center -pbc res -ur compact -n {index_path}')
+                            os.system(f'echo {centering_selector} {group_dics[output_group]} | {command} trjconv -s {path.replace(".xtc", ".tpr")} -f {path} -o {path.replace(".xtc", "_noPBC.xtc")} -center -pbc res -ur compact -n {index_path}')
                             remove_paths.append(path)
                     os.system(f'{command} trjcat -f {md_path}/*_noPBC.xtc -o {md_path}/prot_md_cat_noPBC.xtc -cat')
                     if remove_redundant_files:
@@ -165,7 +161,6 @@ class md_analysis:
 
             for replica in self.traj_paths[step][model]:
                 if replica not in self.distances[model] or overwrite:
-                    # Check if trajectory and topology files were generated correctly
                     if not os.path.exists(self.traj_paths[step][model][replica]):
                         print(f'WARNING: trajectory file for model {model} and replica {replica} does not exist.')
                         continue
@@ -327,13 +322,14 @@ class md_analysis:
 
         interact(options1, model=sorted(self.distances.keys()))
 
-    def get_distance_prob(self, threshold=0.45, group_metrics=None):
+    def get_distance_prob(self, threshold=0.45, group_metrics=None, combine_replicas=False):
         """
         Computes the probability of distances being below a threshold and groups metrics if provided.
 
         Parameters:
         threshold (float): Distance threshold for calculating probabilities (default: 0.45).
         group_metrics (dict): Dictionary defining groups of metrics for combined probability calculations (default: None).
+        combine_replicas (bool): Whether to combine all replicas for each model (default: False).
 
         Returns:
         pd.DataFrame: DataFrame containing probabilities for each model and replica.
@@ -345,70 +341,166 @@ class md_analysis:
         }
         This function calculates the probability that the distance for each metric (and group of metrics) is below the threshold.
         """
+        data = {}  # Dictionary to store computed probabilities
+        column_names = set()  # Set to store unique metric names
 
-        data = {}
-        column_names = []
-        for protein in self.distances:
-            for replica in self.distances[protein]:
-                masks = {}
-                for metric in self.distances[protein][replica]:
-                    if (protein, replica) not in data:
-                        data[(protein, replica)] = []
+        if combine_replicas:
+            # Iterate over each protein model
+            for protein in self.distances:
+                if not self.distances[protein]:
+                    continue
 
-                    distances = self.distances[protein][replica][metric]
-                    n_frames = len(distances)
-                    metric_mask = distances < threshold
+                # Initialize combined_masks to accumulate data across replicas
+                combined_masks = {metric: [] for metric in self.distances[protein][next(iter(self.distances[protein]))]}
 
-                    masks[metric] = metric_mask
+                # Iterate over each replica
+                for replica in self.distances[protein]:
+                    # Iterate over each metric within the replica
+                    for metric in self.distances[protein][replica]:
+                        distances = self.distances[protein][replica][metric]
+                        metric_mask = distances < threshold  # Boolean mask where distances are below threshold
+                        combined_masks[metric].extend(metric_mask)  # Accumulate masks for combined analysis
 
-                    data[(protein, replica)].append(np.mean(metric_mask))
-                    if metric not in column_names:
-                        column_names.append(metric)
+                # Calculate probabilities for each metric
+                for metric in combined_masks:
+                    combined_mask = np.array(combined_masks[metric])
+                    data[(protein, metric)] = np.mean(combined_mask)  # Mean probability of distances below threshold
+                    column_names.add(metric)
 
+                # Calculate probabilities for grouped metrics, if provided
                 if group_metrics:
                     for group in group_metrics:
-                        group_mask = np.ones(n_frames, dtype=bool)
-                        for metric in masks:
+                        group_mask = np.ones(len(combined_masks[next(iter(combined_masks))]), dtype=bool)
+                        for metric in combined_masks:
                             if metric in group_metrics[group]:
-                                group_mask &= masks[metric]
+                                group_mask &= combined_masks[metric]  # Combine masks for the group
 
-                        data[(protein, replica)].append(np.mean(group_mask))
-                        if group not in column_names:
-                            column_names.append(group)
+                        data[(protein, group)] = np.mean(group_mask)  # Mean probability for the group
+                        column_names.add(group)
+        else:
+            # Iterate over each protein model
+            for protein in self.distances:
+                # Iterate over each replica
+                for replica in self.distances[protein]:
+                    # Iterate over each metric within the replica
+                    for metric in self.distances[protein][replica]:
+                        distances = self.distances[protein][replica][metric]
+                        n_frames = len(distances)
+                        metric_mask = distances < threshold  # Boolean mask where distances are below threshold
 
-        df = pd.DataFrame(data).transpose()
-        df.columns = column_names
+                        data[(protein, replica, metric)] = np.mean(metric_mask)  # Mean probability of distances below threshold
+                        column_names.add(metric)
 
-        return df
+                    # Calculate probabilities for grouped metrics, if provided
+                    if group_metrics:
+                        for group in group_metrics:
+                            group_mask = np.ones(n_frames, dtype=bool)
+                            for metric in self.distances[protein][replica]:
+                                if metric in group_metrics[group]:
+                                    group_mask &= self.distances[protein][replica][metric] < threshold  # Combine masks for the group
 
-    def plot_distance_prob(self, threshold=0.45, group_metrics=None, sort_by=None, filter_thresholds=None):
+                            data[(protein, replica, group)] = np.mean(group_mask)  # Mean probability for the group
+                            column_names.add(group)
+
+        # Prepare the DataFrame
+        if combine_replicas:
+            index = pd.MultiIndex.from_tuples([(protein, metric) for (protein, metric) in data.keys()], names=["Model", "Metric"])
+        else:
+            index = pd.MultiIndex.from_tuples([(protein, replica, metric) for (protein, replica, metric) in data.keys()], names=["Model", "Replica", "Metric"])
+
+        # Create the DataFrame with probabilities
+        self.df_prob = pd.DataFrame(list(data.values()), index=index, columns=["Probability"])
+
+        # Unstack the DataFrame to have metrics as columns, filling missing values with 0
+        self.df_prob = self.df_prob.unstack().fillna(0)
+
+    def sort_prob_by_linear_combination(self, weights=None, keep_combined_score=False, filter_thresholds=None):
+        """
+        Calculates a combined score for each row based on the given weights, filters the DataFrame,
+        stores the combined score in the DataFrame, and sorts the DataFrame by this score.
+
+        Parameters:
+        weights (dict): Dictionary specifying the weights for each metric. If None, equal weights are used.
+        keep_combined_score (bool): Whether to keep the combined score column in the DataFrame after sorting (default: False).
+        filter_thresholds (dict): Dictionary specifying the minimum thresholds for metrics to filter models (default: None).
+        """
+        probabilities = self.df_prob.copy()
+
+        if filter_thresholds:
+            probabilities = self.filter_by_thresholds(filter_thresholds, in_place=False)
+
+        # If weights is None, assign equal weights to all metrics
+        if weights is None:
+            weights = {metric: 1/len(probabilities.columns) for metric in probabilities.columns}
+
+        combined_score = sum(probabilities[metric] * weight for metric, weight in weights.items())
+        probabilities['Combined_Score'] = combined_score
+        probabilities = probabilities.sort_values(by='Combined_Score', ascending=False)
+
+        if not keep_combined_score:
+            probabilities = probabilities.drop(columns=['Combined_Score'])
+
+        self.df_prob = probabilities
+
+    def filter_by_thresholds(self, filter_thresholds, in_place=False):
+        """
+        Filters the DataFrame based on the specified thresholds.
+
+        Parameters:
+        filter_thresholds (dict): Dictionary specifying the minimum thresholds for metrics.
+        in_place (bool): Whether to modify the DataFrame in place or return a new DataFrame (default: False).
+
+        Returns:
+        pd.DataFrame: The filtered DataFrame if in_place is False.
+        """
+        df = self.df_prob if in_place else self.df_prob.copy()
+
+        if filter_thresholds:
+            for metric, value in filter_thresholds.items():
+                if ('Probability', metric) in df.columns:
+                    df = df[df[('Probability', metric)] >= value]
+
+        if not in_place:
+            return df
+        else:
+            self.df_prob = df
+
+    def plot_distance_prob(self, sort_by=None, filter_thresholds=None):
         """
         Plots the probability of distances being below a threshold for different models and replicas.
 
         Parameters:
-        threshold (float): Distance threshold for calculating probabilities (default: 0.45).
-        group_metrics (dict): Dictionary defining groups of metrics for combined probability calculations (default: None).
         sort_by (str): Metric to sort the values by before plotting (default: None).
         filter_thresholds (dict): Dictionary specifying the minimum thresholds for metrics to filter models (default: None).
         """
-        df_prob = self.get_distance_prob(threshold, group_metrics)
+        df_prob = self.df_prob.copy()
 
+        # Apply filtering if specified
         if filter_thresholds:
-            for metric, value in filter_thresholds.items():
-                if metric in df_prob.columns:
-                    df_prob = df_prob[df_prob[metric] >= value]
+            df_prob = self.filter_by_thresholds(filter_thresholds, in_place=False)
 
-        if sort_by and sort_by in df_prob.columns:
-            df_prob = df_prob.sort_values(by=sort_by, ascending=False)
+        # Check if the filtered DataFrame is empty
+        if df_prob.empty:
+            print("No data available for the specified filter thresholds.")
+            return
 
-        num_metrics = len(df_prob.columns)
+        # Apply sorting if specified
+        if sort_by and ('Probability', sort_by) in df_prob.columns:
+            df_prob = df_prob.sort_values(by=('Probability', sort_by), ascending=False)
+
+        # Ensure the sorted metric is always plotted first
+        column_order = list(df_prob.columns)
+        if sort_by and ('Probability', sort_by) in column_order:
+            column_order.insert(0, column_order.pop(column_order.index(('Probability', sort_by))))
+
+        num_metrics = len(column_order)
         colors = ['skyblue', 'orange', 'green', 'red', 'purple', 'brown']  # Extend this list if you have more metrics
         fig, axes = plt.subplots(num_metrics, 1, figsize=(15, 4 * num_metrics), sharex=True)
 
         if num_metrics == 1:
             axes = [axes]  # Ensure axes is iterable even for a single subplot
 
-        for ax, (metric, color) in zip(axes, zip(df_prob.columns, colors)):
+        for ax, (metric, color) in zip(axes, zip(column_order, colors)):
             df_prob[metric].plot(kind='bar', ax=ax, width=0.8, color=color)
             ax.set_title(f'Probability of Distances Below Threshold for {metric}', fontsize=16)
             ax.set_ylabel('Probability', fontsize=14)
@@ -419,6 +511,40 @@ class md_analysis:
         axes[-1].set_xticklabels(df_prob.index, rotation=45, ha='right', fontsize=10)
 
         plt.tight_layout(pad=2.0)
+        plt.show()
+
+    def plot_distance_prob_scatter(self, x_col, y_col, color_col, filter_thresholds=None, weights=None, keep_combined_score=False):
+        """
+        Plots a scatter plot of probabilities with specified x, y, and color columns.
+
+        Parameters:
+        x_col (str): Column name for x-axis values.
+        y_col (str): Column name for y-axis values.
+        color_col (str): Column name for color values.
+        filter_thresholds (dict): Dictionary specifying the minimum thresholds for metrics to filter models (default: None).
+        weights (dict): Dictionary specifying the weights for each metric to calculate a combined score (default: None).
+        keep_combined_score (bool): Whether to keep the combined score column in the DataFrame after sorting (default: False).
+        """
+        probabilities = self.df_prob['Probability'].copy()
+
+        if filter_thresholds:
+            filtered_df = self.filter_by_thresholds(filter_thresholds, in_place=False)
+            probabilities = filtered_df['Probability']
+
+        if weights:
+            self.sort_prob_by_linear_combination(weights, keep_combined_score)
+            probabilities = self.df_prob['Probability']
+
+        plt.figure(figsize=(10, 8))
+        scatter = plt.scatter(probabilities[x_col], probabilities[y_col], c=probabilities[color_col], cmap='viridis', s=100, alpha=0.7, vmin=0, vmax=1)
+        plt.colorbar(scatter, label='Probability of forming the ' + color_col + ' contact')
+        plt.xlabel('Probability of forming the ' + x_col + ' contact', fontsize=14)
+        plt.ylabel('Probability of forming the ' + y_col + ' contact', fontsize=14)
+        plt.axvline(0.5, c='k', ls='--')
+        plt.axhline(0.5, c='k', ls='--')
+        plt.xlim(-0.02, 1.02)
+        plt.ylim(-0.02, 1.02)
+        plt.grid(True)
         plt.show()
 
     def plot_rmsd(self, step='md', reference=None, align=True, lim=True, order_by_protein_rmsd_slope=False, order_by_protein_rmsd_avg=False, order_by_protein_rmsd_std=False, overwrite=False):
