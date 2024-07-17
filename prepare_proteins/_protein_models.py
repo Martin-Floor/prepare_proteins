@@ -5431,7 +5431,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 io.set_structure([chain for chain in pdb_chains if chain.get_id() == chain_id][0])
                 io.save(f"{struct_path}/{ligand_res[chain_id]}.pdb")
 
+            lig_counter = 0
             for lig_chain, ligand_name in ligand_res.items():
+                lig_counter += 1
                 if ligand_name not in os.listdir(params_path) or overwrite:
                     os.makedirs(f"{params_path}/{ligand_name}", exist_ok=True)
                     shutil.copyfile(f"{struct_path}/{ligand_name}.pdb", f"{params_path}/{ligand_name}/{ligand_name}.pdb")
@@ -5478,9 +5480,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                             if lines[i - 1].startswith("[ atoms ]"):
                                 atoms = True
 
-                    write_type = "w" if i == 0 else "a"
+                    print(lig_counter)
+                    write_type = "w" if lig_counter == 1 else "a"
                     with open("../atomtypes.itp", write_type) as f:
-                        if i == 0:
+                        if lig_counter == 1:
                             f.write("[ atomtypes ]\n")
                         for line in atomtypes_lines:
                             f.write(line + "\n")
@@ -5566,7 +5569,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     line += "#endif\\n"
                 line += "'"
                 local_path = (os.getcwd() + "/" + md_folder + "/FF").replace("/", "\/")
-                command_local += f"sed -i '/^#include \"{local_path}/{ff}.ff/forcefield.itp\"*/a {line} topol.top\n"
+                command_local += f"sed -i '/#include \"{local_path}\/{ff}.ff\/forcefield.itp\"/a {line} topol.top\n"
                 for ligand_name in ligand_res.values():
                     command_local += f"sed -i -e '$a{ligand_name.ljust(20)}1' topol.top\n"
             else:
@@ -5574,7 +5577,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             command_local += f"{command_name} editconf -f complex.gro -o prot_box.gro -c -d 1.0 -bt octahedron\n"
             command_local += f"{command_name} solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top\n"
-            command_local += f'echo -e q | {command_name} make_ndx -f prot_solv.gro -o index.ndx\n'
+            command_local += f'echo q | {command_name} make_ndx -f prot_solv.gro -o index.ndx\n'
 
             return command_local
 
@@ -5705,13 +5708,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             structure = parser.get_structure("protein", f"{md_folder}/input_models/{model}.pdb")
 
             his_pro, ion_residues = _setupModelStructure(structure, ligand_chains, ion_chains)
-            ligand_res = _getLigandParameters(structure, ligand_chains, f"{md_folder}/input_models/{model}", f"{md_folder}/ligand_params", charge=charge) if ligand_chains else None
+            ligand_res = _getLigandParameters(structure, ligand_chains, f"{md_folder}/input_models/{model}", f"{md_folder}/ligand_params", charge=charge) if ligand_chains else shutil.copyfile(f"{md_folder}/input_models/{model}.pdb",f"{md_folder}/input_models/{model}/protein.pdb")
 
             for i in range(replicas):
 
                 skip_local = os.path.exists(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx") and not overwrite
                 if not skip_local:
                     command_local = _generateLocalCommand(command_name, model, i, ligand_chains, ligand_res, ion_residues, ion_chains, md_folder, ff, his_pro)
+                    print(command_local)
+                    #adfasdf
                     with open("tmp.sh", "w") as f:
                         f.write(command_local)
                     subprocess.run("bash tmp.sh", shell=True)
@@ -5736,9 +5741,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         with open(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx", 'a') as f:
                             f.write(crystal_waters_ndx_lines)
-
-                        os.system(f'echo -e \'{group_dics["complex"]["Water"]} & !{len(group_dics["complex"])}\\nq\' | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx')
-                        os.system(f'echo -e \'del {group_dics["complex"]["SOL"]}\\n name {len(group_dics["complex"])} SOL\\nq\' | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx')
+                        os.system(f'echo \"{group_dics["complex"]["Water"]} & !{len(group_dics["complex"])}\nq\" | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx')
+                        os.system(f'echo \"del {group_dics["complex"]["SOL"]}\n name {len(group_dics["complex"])} SOL\nq\" | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx')
 
                         group_dics['complex'] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx")
 
@@ -5760,11 +5764,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if ligand_chains or ion_residues:
                     skip_ndx = os.path.exists(f"{md_folder}/output_models/{model}/{i}/topol/posre.itp") and not overwrite
                     if not skip_ndx:
-                        command_local = f"cd output_models/{model}/{i}/topol\n"
+                        command_local = f"cd {md_folder}/output_models/{model}/{i}/topol\n"
                         lig_selector = ""
                         if ligand_chains:
                             for ligand_name in ligand_res.values():
-                                command_local += f'echo -e "0 & ! a H*\\nq"| {command_name} make_ndx -f {ligand_name}.acpype/{ligand_name}_GMX.gro -o {ligand_name}_index.ndx\n'
+                                command_local += f'echo -e "0 & ! a H*\nq"| {command_name} make_ndx -f {ligand_name}.acpype/{ligand_name}_GMX.gro -o {ligand_name}_index.ndx\n'
                                 lig_selector += f"{group_dics['complex'][ligand_name]}|"
 
                         ion_selector, water_and_solventions_selector = "", ""
@@ -5775,16 +5779,17 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         selector_line = ""
                         if lig_selector and ion_selector:
-                            selector_line += f"{group_dics['complex']['Protein']}|{ion_selector[:-1]}|{lig_selector[:-1]}\\n"
-                            selector_line += f"{group_dics['complex']['Protein']}|{ion_selector}\\n"
-                            selector_line += f"{group_dics['complex'][sol_group]} | {group_dics['complex']['Ion']} & {water_and_solventions_selector[:-1]}\\n"
+                            selector_line += f"{group_dics['complex']['Protein']}|{ion_selector[:-1]}|{lig_selector[:-1]}\n"
+                            selector_line += f"{group_dics['complex']['Protein']}|{ion_selector[:-1]}\n"
+                            selector_line += f"{group_dics['complex'][sol_group]} | {group_dics['complex']['Ion']} & {water_and_solventions_selector[:-1]}\n"
                         elif ion_selector:
-                            selector_line += f"{group_dics['complex']['Protein']}|{ion_selector}\\n"
-                            selector_line += f"{group_dics['complex'][sol_group]} | {group_dics['complex']['Ion']} & {water_and_solventions_selector[:-1]}\\n"
+                            selector_line += f"{group_dics['complex']['Protein']}|{ion_selector[:-1]}\n"
+                            selector_line += f"{group_dics['complex'][sol_group]} | {group_dics['complex']['Ion']} & {water_and_solventions_selector[:-1]}\n"
                         elif lig_selector:
-                            selector_line += f"{group_dics['complex']['Protein']}|{lig_selector}\\n"
+                            selector_line += f"{group_dics['complex']['Protein']}|{lig_selector[:-1]}\n"
 
                         command_local += f'echo -e "{selector_line}q"| {command_name} make_ndx -f prot_ions.gro -o index.ndx\n'
+
 
                         with open("tmp.sh", "w") as f:
                             f.write(command_local)
