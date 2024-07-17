@@ -2729,7 +2729,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             use_exp_torsion_angle_prefs=True, use_basic_knowledge=True, only_scorefile=False,
                             enforce_chirality=True, skip_conformers_if_found=False, grid_width=10.0,
                             n_jobs=1, python2_executable='python2.7', store_initial_placement=False,
-                            pdb_output=False, distances=None, angles=None,
+                            pdb_output=False, distances=None, angles=None, parallelisation="srun",
                             executable='rosetta_scripts.mpi.linuxgccrelease', ligand_chain='B', nstruct=100):
 
         """
@@ -3326,6 +3326,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 model_output_folder = os.path.join(output_folder, model+separator+ligand)
                 os.makedirs(model_output_folder, exist_ok=True)
                 command =  'cd '+model_output_folder+'\n'
+                if parallelisation:
+                    command += parallelisation+' '
                 command += executable+' '
                 command += '@ ../../flags/'+f'{docking_protocol}{separator}{ligand}{separator}{model}.flags '
                 command += '\n'
