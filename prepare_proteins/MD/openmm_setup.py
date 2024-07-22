@@ -17,7 +17,7 @@ import os
 from multiprocessing import cpu_count
 
 aa3 = aa3+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX']
-ions = ['MG', 'NA', 'CL']
+ions = ['MG', 'NA', 'CL', 'CU']
 aa3 += ions
 
 
