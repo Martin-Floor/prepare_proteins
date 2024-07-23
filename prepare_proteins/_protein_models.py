@@ -2723,6 +2723,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return jobs
 
     def setUpRosettaDocking(self, docking_folder, ligands_pdb_folder=None, ligands_sdf_folder=None,
+                            param_files=None,
                             coordinates=None, smiles_file=None, sdf_file=None, docking_protocol='repack',
                             high_res_cycles=None, high_res_repack_every_Nth=None, num_conformers=50,
                             prune_rms_threshold=0.5, max_attempts=1000, rosetta_home=None, separator='-',
@@ -3192,6 +3193,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                                                           enforce_chirality=enforce_chirality)
                 write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
 
+        # Add path to params files
+        if param_files != None:
+
+            if not os.path.exists(docking_folder + "/params"):
+                os.mkdir(docking_folder + "/params")
+
+            if isinstance(param_files, str):
+                param_files = [param_files]
+
+            for param in param_files:
+                param_name = param.split("/")[-1]
+                shutil.copyfile(param, docking_folder + "/params/" + param_name)
+
         # Process each ligand
         jobs = []
         for ligand in ligands:
@@ -3319,6 +3333,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 ligand_params = '../../ligand_params/'+ligand+'/'+ligand+'.params'
                 flags.addOption('extra_res_fa', ligand_params)
                 flags.add_ligand_docking_options()
+                if param_files:
+                    flags.addOption("in:file:extra_res_path", "../../params")
                 flags_output = os.path.join(flags_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.flags')
                 flags.write_flags(flags_output)
 
