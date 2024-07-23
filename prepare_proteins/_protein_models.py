@@ -20,7 +20,7 @@ import pandas as pd
 from Bio import PDB, BiopythonWarning
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3
-from ipywidgets import interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
+from ipywidgets import interactive_output, VBox, IntSlider, Checkbox, interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
 
@@ -6146,7 +6146,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 failed_dockings = json.load(jifd)
             return failed_dockings
 
-    def analyseRosettaDocking(self, docking_folder, separator='_'):
+    def analyseRosettaDocking(self, docking_folder, separator='_', only_models=None):
 
         # Initialize an empty DataFrame for all scores
         self.rosetta_docking = pd.DataFrame()
@@ -6155,16 +6155,36 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.rosetta_docking_distances = {}
 
         output_models_path = os.path.join(docking_folder, 'output_models')
+        model_ligands = os.listdir(output_models_path)
+
+        # Filter models to process if only_models is provided
+        if only_models is not None:
+            if isinstance(only_models, str):
+                only_models = [only_models]
+            model_ligands = [ml for ml in model_ligands if ml.split(separator)[0] in only_models]
+
+        total_files = len(model_ligands)
+        processed_files = 0
 
         # Loop through models
-        for model_ligand in os.listdir(output_models_path):
+        for model_ligand in model_ligands:
             if model_ligand.count(separator) != 1:
                 raise ValueError(f"The separator '{separator}' was not found or found more than once in '{model_ligand}'")
 
             model, ligand = model_ligand.split(separator)
 
-            scorefile = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.out')
-            if os.path.exists(scorefile):
+            try:
+                # Check for .out file first
+                scorefile_out = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.out')
+                scorefile_sc = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.sc')
+
+                if os.path.exists(scorefile_out):
+                    scorefile = scorefile_out
+                elif os.path.exists(scorefile_sc):
+                    scorefile = scorefile_sc
+                else:
+                    raise FileNotFoundError(f"Neither '{model}{separator}{ligand}.out' nor '{model}{separator}{ligand}.sc' found for '{model_ligand}'")
+
                 scores = _readRosettaScoreFile(scorefile)
                 scores['Ligand'] = ligand  # Add ligand column to scores
                 scores = scores.set_index(['Model', 'Ligand', 'Pose'])
@@ -6181,8 +6201,28 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Remove distance columns from scores
                 scores = scores.drop(columns=distance_columns)
 
+                # Reorder columns to put 'interface_delta_*' after 'total_score'
+                interface_delta_col = next((col for col in scores.columns if col.startswith('interface_delta_')), None)
+                if interface_delta_col and 'total_score' in scores.columns:
+                    cols = list(scores.columns)
+                    cols.insert(cols.index('total_score') + 1, cols.pop(cols.index(interface_delta_col)))
+                    scores = scores[cols]
+
                 # Append the remaining scores to the global DataFrame
                 self.rosetta_docking = pd.concat([self.rosetta_docking, scores])
+
+            except FileNotFoundError as e:
+                print(f"\nSkipping {model_ligand} due to missing file: {e}")
+                continue
+
+            # Update and print progress
+            processed_files += 1
+            progress = f"Processing: {processed_files}/{total_files} files"
+            sys.stdout.write('\r' + progress)
+            sys.stdout.flush()
+
+        # Print a final newline character to move to the next line after the loop is done
+        print()
 
     def combineRosettaDockingDistancesIntoMetrics(self, catalytic_labels, overwrite=False):
         """
@@ -6481,6 +6521,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                                                             title=title, no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar,
                                                             no_xlabel=no_xlabel, no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel,
                                                             clabel=clabel, relative_color_values=relative_color_values, dataframe=ligand_series)
+
+                # Set reasonable ticks
+                if axis is not None:
+                    if not no_xticks:
+                        axis.set_xticks(axis.get_xticks()[::max(1, len(axis.get_xticks()) // 10 + 1)])
+                    if not no_yticks:
+                        axis.set_yticks(axis.get_yticks()[::max(1, len(axis.get_yticks()) // 10 + 1)])
 
             if color_by_metric:
                 self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim,
@@ -6788,6 +6835,276 @@ make sure of reading the target sequences with the function readTargetSequences(
         if return_axis:
             return axis
 
+    def rosettaDockingCatalyticBindingFreeEnergyMatrix(self, initial_threshold=3.5, initial_threshold_filter=3.5, measured_metrics=None,
+                                                       store_values=False, lig_label_rot=90, observable='interface_delta_B',
+                                                       matrix_file='catalytic_matrix.npy', models_file='catalytic_models.json',
+                                                       max_metric_threshold=30, pele_data=None, KT=5.93, to_csv=None,
+                                                       only_proteins=None, only_ligands=None, average_binding_energy=False,
+                                                       nan_to_zero=False):
+
+        def _bindingFreeEnergyMatrix(KT=KT, sort_by_ligand=None, models_file='catalytic_models.json',
+                                     lig_label_rot=90, pele_data=None, only_proteins=None, only_ligands=None,
+                                     abc=False, avg_ebc=False, n_poses=10, **metrics):
+
+            metrics_filter = {m: metrics[m] for m in metrics if m.startswith('metric_')}
+            labels_filter = {l: metrics[l] for l in metrics if l.startswith('label_')}
+
+            if pele_data is None:
+                pele_data = self.rosetta_docking
+
+            if only_proteins is not None:
+                proteins = [p for p in pele_data.index.get_level_values('Model').unique() if p in only_proteins]
+            else:
+                proteins = pele_data.index.get_level_values('Model').unique()
+
+            if only_ligands is not None:
+                ligands = [l for l in pele_data.index.get_level_values('Ligand').unique() if l in only_ligands]
+            else:
+                ligands = pele_data.index.get_level_values('Ligand').unique()
+
+            if len(proteins) == 0:
+                raise ValueError('No proteins were found!')
+            if len(ligands) == 0:
+                raise ValueError('No ligands were found!')
+
+            # Create a matrix of length proteins times ligands
+            M = np.zeros((len(proteins), len(ligands)))
+
+            # Calculate the probability of each state
+            for i, protein in enumerate(proteins):
+                protein_series = pele_data[pele_data.index.get_level_values('Model') == protein]
+
+                for j, ligand in enumerate(ligands):
+                    ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+
+                    if not ligand_series.empty:
+
+                        if abc:
+                            # Calculate partition function
+                            total_energy = ligand_series['total_score']
+                            energy_minimum = total_energy.min()
+                            relative_energy = total_energy - energy_minimum
+                            Z = np.sum(np.exp(-relative_energy / KT))
+
+                        # Calculate catalytic binding energy
+                        catalytic_series = ligand_series
+
+                        for metric in metrics_filter:
+                            if isinstance(metrics_filter[metric], float):
+                                mask = catalytic_series[metric] <= metrics_filter[metric]
+                            elif isinstance(metrics_filter[metric], tuple):
+                                mask = (catalytic_series[metric] >= metrics_filter[metric][0]).to_numpy()
+                                mask = mask & ((catalytic_series[metric] <= metrics_filter[metric][1]).to_numpy())
+                            catalytic_series = catalytic_series[mask]
+
+                        for l in labels_filter:
+                            # Filter by labels
+                            if labels_filter[l] is not None:
+                                catalytic_series = catalytic_series[catalytic_series[l] == labels_filter[l]]
+
+                        if abc:
+                            total_energy = catalytic_series['total_score']
+                            relative_energy = total_energy - energy_minimum
+                            probability = np.exp(-relative_energy / KT) / Z
+                            M[i][j] = np.sum(probability * catalytic_series[observable])
+                        elif avg_ebc:
+                            M[i][j] = catalytic_series.nsmallest(n_poses, observable)[observable].mean()
+                    else:
+                        M[i][j] = np.nan
+
+            if nan_to_zero:
+                M[np.isnan(M)] = 0.0
+
+            if abc:
+                binding_metric_label = '$A_{B}^{C}$'
+            elif avg_ebc:
+                binding_metric_label = '$\overline{E}_{B}^{C}$'
+            else:
+                raise ValueError('You should mark at least one option: $A_{B}^{C}$ or $\overline{E}_{B}^{C}$!')
+
+            if store_values:
+                np.save(matrix_file, M)
+                if not models_file.endswith('.json'):
+                    models_file = models_file + '.json'
+                with open(models_file, 'w') as of:
+                    json.dump(list(proteins), of)
+
+            if to_csv is not None:
+                catalytic_values = {
+                    'Model': [],
+                    'Ligand': [],
+                    binding_metric_label: []
+                }
+
+                for i, m in zip(M, proteins):
+                    for v, l in zip(i, ligands):
+                        catalytic_values['Model'].append(m)
+                        catalytic_values['Ligand'].append(l)
+                        catalytic_values[binding_metric_label].append(v)
+                catalytic_values = pd.DataFrame(catalytic_values)
+                catalytic_values.set_index(['Model', 'Ligand'])
+                catalytic_values.to_csv(to_csv)
+
+            # Sort matrix by ligand or protein
+            if sort_by_ligand == 'by_protein':
+                protein_labels = proteins
+            else:
+                ligand_index = list(ligands).index(sort_by_ligand)
+                sort_indexes = M[:, ligand_index].argsort()
+                M = M[sort_indexes]
+                protein_labels = [proteins[x] for x in sort_indexes]
+
+            plt.figure(dpi=100, figsize=(0.28 * len(ligands), 0.2 * len(proteins)))
+            plt.imshow(M, cmap='autumn')
+            plt.colorbar(label=binding_metric_label)
+
+            plt.xlabel('Ligands', fontsize=12)
+            ax = plt.gca()
+            ax.set_xticks(np.arange(len(ligands)))  # Set tick positions
+            ax.set_xticklabels(ligands, rotation=lig_label_rot)
+            plt.xticks(np.arange(len(ligands)), ligands, rotation=lig_label_rot)
+            plt.ylabel('Proteins', fontsize=12)
+            ax.set_yticks(np.arange(len(proteins)))  # Set tick positions
+            plt.yticks(np.arange(len(proteins)), protein_labels)
+
+            display(plt.show())
+
+        # Check to_csv input
+        if to_csv is not None and not isinstance(to_csv, str):
+            raise ValueError('to_csv must be a path to the output csv file.')
+        if to_csv is not None and not to_csv.endswith('.csv'):
+            to_csv = to_csv + '.csv'
+
+        # Define if PELE data is given
+        if pele_data is None:
+            pele_data = self.rosetta_docking
+
+        # Add checks for the given pele data pandas df
+        metrics = [k for k in pele_data.keys() if 'metric_' in k]
+        labels = {}
+        for m in metrics:
+            for l in pele_data.keys():
+                if 'label_' in l and l.replace('label_', '') == m.replace('metric_', ''):
+                    labels[m] = sorted(list(set(pele_data[l])))
+
+        metrics_sliders = {}
+        labels_ddms = {}
+        for m in metrics:
+            if measured_metrics is not None:
+                if m in measured_metrics:
+                    threshold = initial_threshold
+                else:
+                    threshold = initial_threshold_filter
+            else:
+                threshold = initial_threshold_filter  # Ensure threshold is always defined
+
+            if self.rosetta_docking_metric_type[m] == 'distance':
+                m_slider = FloatSlider(
+                    value=threshold,
+                    min=0,
+                    max=max_metric_threshold,
+                    step=0.1,
+                    description=m + ':',
+                    disabled=False,
+                    continuous_update=False,
+                    orientation='horizontal',
+                    readout=True,
+                    readout_format='.2f',
+                    style={'description_width': 'initial'})
+
+            elif self.rosetta_docking_metric_type[m] == 'angle':
+                m_slider = FloatRangeSlider(
+                    value=[110, 130],
+                    min=-180,
+                    max=180,
+                    step=0.1,
+                    description=m + ':',
+                    disabled=False,
+                    continuous_update=False,
+                    orientation='horizontal',
+                    readout=True,
+                    readout_format='.2f',
+                )
+
+            metrics_sliders[m] = m_slider
+
+            if m in labels and labels[m] != []:
+                label_options = [None] + labels[m]
+                label_ddm = Dropdown(options=label_options, description=m.replace('metric_', 'label_'), style={'description_width': 'initial'})
+                metrics_sliders[m.replace('metric_', 'label_')] = label_ddm
+
+        if only_proteins is not None:
+            if isinstance(only_proteins, str):
+                only_proteins = [only_proteins]
+
+        # Get only ligands if given
+        if only_ligands is not None:
+            if isinstance(only_ligands, str):
+                only_ligands = [only_ligands]
+
+            ligands = [l for l in self.rosetta_docking.index.get_level_values('Ligand').unique() if l in only_ligands]
+        else:
+            ligands = self.rosetta_docking.index.get_level_values('Ligand').unique()
+
+        VB = []
+        ligand_ddm = Dropdown(options=list(ligands) + ['by_protein'], description='Sort by ligand',
+                              style={'description_width': 'initial'})
+        VB.append(ligand_ddm)
+
+        abc = Checkbox(value=True, description='$A_{B}^{C}$')
+        VB.append(abc)
+
+        if average_binding_energy:
+            avg_ebc = Checkbox(value=False, description='$\overline{E}_{B}^{C}$')
+            VB.append(avg_ebc)
+
+            Ebc_slider = IntSlider(
+                value=10,
+                min=1,
+                max=1000,
+                step=1,
+                description='N poses (only $\overline{E}_{B}^{C}$):',
+                disabled=False,
+                continuous_update=False,
+                orientation='horizontal',
+                readout=True)
+            VB.append(Ebc_slider)
+
+        KT_slider = FloatSlider(
+            value=KT,
+            min=0.593,
+            max=1000.0,
+            step=0.1,
+            description='KT:',
+            disabled=False,
+            continuous_update=False,
+            orientation='horizontal',
+            readout=True,
+            readout_format='.1f')
+
+        for m in metrics_sliders:
+            VB.append(metrics_sliders[m])
+        for m in labels_ddms:
+            VB.append(labels_ddms[m])
+        VB.append(KT_slider)
+
+        if average_binding_energy:
+            plot = interactive_output(_bindingFreeEnergyMatrix, {'KT': KT_slider, 'sort_by_ligand': ligand_ddm,
+                                      'pele_data': fixed(pele_data), 'models_file': fixed(models_file),
+                                      'lig_label_rot': fixed(lig_label_rot), 'only_proteins': fixed(only_proteins),
+                                      'only_ligands': fixed(only_ligands), 'abc': abc, 'avg_ebc': avg_ebc,
+                                      'n_poses': Ebc_slider, **metrics_sliders})
+        else:
+            plot = interactive_output(_bindingFreeEnergyMatrix, {'KT': KT_slider, 'sort_by_ligand': ligand_ddm,
+                                      'pele_data': fixed(pele_data), 'models_file': fixed(models_file),
+                                      'lig_label_rot': fixed(lig_label_rot), 'only_proteins': fixed(only_proteins),
+                                      'only_ligands': fixed(only_ligands), 'abc': abc, **metrics_sliders})
+
+        VB.append(plot)
+        VB = VBox(VB)
+
+        display(VB)
+
     def getBestRosettaDockingPoses(
             self,
             filter_values,
@@ -6888,6 +7205,71 @@ make sure of reading the target sequences with the function readTargetSequences(
             return failed, best_poses_df
 
         return best_poses_df
+
+    def extractRosettaDockingModels(self, docking_folder, input_df, output_folder, separator='_'):
+        """
+        Extract models based on an input DataFrame with index ['Model', 'Ligand', 'Pose'].
+
+        Parameters
+        ==========
+        docking_folder : str
+            Path to folder where the Rosetta docking files are contained.
+        input_df : pd.DataFrame
+            DataFrame containing the models to be extracted with index ['Model', 'Ligand', 'Pose'].
+        separator : str
+            Separator character used in file names. Default is '-'.
+
+        Returns
+        =======
+        list
+            List of models extracted.
+        """
+
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        executable = "extract_pdbs.linuxgccrelease"
+        models = []
+        missing_models = []
+
+        # Check if params were given
+        params = {}
+        for ligand in self.rosetta_docking.index.levels[1]:
+            ligand_folder = os.path.join(docking_folder, "ligand_params", ligand)
+            if os.path.exists(ligand_folder):
+                params[ligand] = os.path.join(ligand_folder, ligand+'.params')
+
+        for index, row in input_df.iterrows():
+            model, ligand, pose = index
+
+            output_model_dir = os.path.join(docking_folder, "output_models", f"{model}{separator}{ligand}")
+            if not os.path.exists(output_model_dir):
+                missing_models.append(model)
+                continue
+
+            silent_file = os.path.join(output_model_dir, f"{model}{separator}{ligand}.out")
+            if not os.path.exists(silent_file):
+                missing_models.append(model)
+                continue
+
+            best_model_tag =  row['description']
+
+            command = f"{executable} -silent {silent_file} -tags {best_model_tag}"
+            if params is not None:
+                command += f" -extra_res_fa {params[ligand]} "
+            os.system(command)
+
+            pdb_filename = f"{best_model_tag}.pdb"
+
+            shutil.move(pdb_filename, output_folder+'/'+pdb_filename)
+
+        self.getModelsSequences()
+
+        if missing_models:
+            print("Missing models in Rosetta Docking folder:")
+            print("\t" + ", ".join(missing_models))
+
+        return models
 
     def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
         """
@@ -7769,225 +8151,225 @@ make sure of reading the target sequences with the function readTargetSequences(
         if return_failed:
             return failed_models
 
-    def analyseRosettaCalculation(
-        self,
-        rosetta_folder,
-        atom_pairs=None,
-        energy_by_residue=False,
-        interacting_residues=False,
-        query_residues=None,
-        overwrite=False,
-        protonation_states=False,
-        decompose_bb_hb_into_pair_energies=False,
-        binding_energy=False,
-        cpus=None,
-        return_jobs=False,
-        verbose=False,
-    ):
-        """
-        Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
-        between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
-        Additionally, it can analyse the interaction between specific residues (query_residues option)and
-        their neighbouring sidechains by mutating the neighbour residues to glycines.
+        def analyseRosettaCalculation(
+            self,
+            rosetta_folder,
+            atom_pairs=None,
+            energy_by_residue=False,
+            interacting_residues=False,
+            query_residues=None,
+            overwrite=False,
+            protonation_states=False,
+            decompose_bb_hb_into_pair_energies=False,
+            binding_energy=False,
+            cpus=None,
+            return_jobs=False,
+            verbose=False,
+        ):
+            """
+            Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
+            between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
+            Additionally, it can analyse the interaction between specific residues (query_residues option)and
+            their neighbouring sidechains by mutating the neighbour residues to glycines.
 
-        The atom pairs must be given in a dicionary with each key representing the name
-        of a model and each value a list of the atom pairs to calculate in the format:
-            {model_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], ...}
+            The atom pairs must be given in a dicionary with each key representing the name
+            of a model and each value a list of the atom pairs to calculate in the format:
+                {model_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], ...}
 
-        The main analysis is stored at self.rosetta_data
-        The energy by residue analysis is soterd at self.rosetta_ebr_data
-        Sidechain interaction analysis is stored at self.rosetta_interacting_residues
+            The main analysis is stored at self.rosetta_data
+            The energy by residue analysis is soterd at self.rosetta_ebr_data
+            Sidechain interaction analysis is stored at self.rosetta_interacting_residues
 
-        Data is also stored in csv files inside the Rosetta folder for easy retrieving the data if found:
+            Data is also stored in csv files inside the Rosetta folder for easy retrieving the data if found:
 
-        The main analysis is stored at ._rosetta_data.csv
-        The energy by residue analysis is soterd at ._rosetta_energy_residue_data.csv
-        Sidechain interaction analysis is stored at ._rosetta_interacting_residues_data.csv
+            The main analysis is stored at ._rosetta_data.csv
+            The energy by residue analysis is soterd at ._rosetta_energy_residue_data.csv
+            Sidechain interaction analysis is stored at ._rosetta_interacting_residues_data.csv
 
 
-        The overwrite option forces recalcualtion of the data.
+            The overwrite option forces recalcualtion of the data.
 
-        Parameters
-        ==========
-        rosetta_folder : str
-            Path to the Rosetta Calculation Folder.
-        atom_pairs : dict
-            Pairs of atom to calculate for each model.
-        energy_by_residue : bool
-            Calculate energy by residue data?
-        overwrite : bool
-            Force the data calculation from the files.
-        interacting_residues : str
-            Calculate interacting energies between residues
-        query_residues : list
-            Residues to query neoghbour atoms. Leave None for all residues (not recommended, too slow!)
-        decompose_bb_hb_into_pair_energies : bool
-            Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
-            number of calculations, so is off by default).
-        binding_energy : str
-            Comma-separated list of chains for which calculate the binding energy.
-        """
+            Parameters
+            ==========
+            rosetta_folder : str
+                Path to the Rosetta Calculation Folder.
+            atom_pairs : dict
+                Pairs of atom to calculate for each model.
+            energy_by_residue : bool
+                Calculate energy by residue data?
+            overwrite : bool
+                Force the data calculation from the files.
+            interacting_residues : str
+                Calculate interacting energies between residues
+            query_residues : list
+                Residues to query neoghbour atoms. Leave None for all residues (not recommended, too slow!)
+            decompose_bb_hb_into_pair_energies : bool
+                Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
+                number of calculations, so is off by default).
+            binding_energy : str
+                Comma-separated list of chains for which calculate the binding energy.
+            """
 
-        if not os.path.exists(rosetta_folder):
-            raise ValueError(
-                'The Rosetta calculation folder: "%s" does not exists!' % rosetta_folder
-            )
-
-        # Write atom_pairs dictionary to json file
-        if atom_pairs != None:
-            with open(rosetta_folder + "/._atom_pairs.json", "w") as jf:
-                json.dump(atom_pairs, jf)
-
-        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
-        _copyScriptFile(rosetta_folder, "analyse_calculation.py", subfolder="pyrosetta")
-
-        # Execute docking analysis
-        command = (
-            "python "
-            + rosetta_folder
-            + "/._analyse_calculation.py "
-            + rosetta_folder
-            + " "
-        )
-
-        if binding_energy:
-            command += "--binding_energy " + binding_energy + " "
-        if atom_pairs != None:
-            command += "--atom_pairs " + rosetta_folder + "/._atom_pairs.json "
-        if return_jobs:
-            command += "--models MODEL "
-        if energy_by_residue:
-            command += "--energy_by_residue "
-        if interacting_residues:
-            command += "--interacting_residues "
-            if query_residues != None:
-                command += "--query_residues "
-                command += ",".join([str(r) for r in query_residues]) + " "
-        if protonation_states:
-            command += "--protonation_states "
-        if decompose_bb_hb_into_pair_energies:
-            command += "--decompose_bb_hb_into_pair_energies "
-        if cpus != None:
-            command += "--cpus " + str(cpus) + " "
-        if verbose:
-            command += "--verbose "
-        command += "\n"
-
-        # Compile individual models for each job
-        if return_jobs:
-            commands = []
-            for m in self:
-                commands.append(command.replace("MODEL", m))
-
-            print("Returning jobs for running the analysis in parallel.")
-            print(
-                "After jobs have finished, rerun this function removing return_jobs=True!"
-            )
-            return commands
-
-        else:
-            try:
-                os.system(command)
-            except:
-                os.chdir("..")
+            if not os.path.exists(rosetta_folder):
                 raise ValueError(
-                    "Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script."
+                    'The Rosetta calculation folder: "%s" does not exists!' % rosetta_folder
                 )
 
-        # Compile dataframes into rosetta_data attributes
-        self.rosetta_data = []
-        self.rosetta_distances = {}
-        self.rosetta_ebr = []
-        self.rosetta_neighbours = []
-        self.rosetta_protonation = []
-        binding_energy_df = []
+            # Write atom_pairs dictionary to json file
+            if atom_pairs != None:
+                with open(rosetta_folder + "/._atom_pairs.json", "w") as jf:
+                    json.dump(atom_pairs, jf)
 
-        analysis_folder = rosetta_folder + '/'+output_folder
-        for model in self:
+            # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
+            _copyScriptFile(rosetta_folder, "analyse_calculation.py", subfolder="pyrosetta")
 
-            # Read scores
-            scores_folder = analysis_folder + "/scores"
-            scores_csv = scores_folder + "/" + model + ".csv"
-            if os.path.exists(scores_csv):
-                self.rosetta_data.append(pd.read_csv(scores_csv))
-
-            # Read binding energies
-            be_folder = analysis_folder + "/binding_energy"
-            be_csv = be_folder + "/" + model + ".csv"
-            if os.path.exists(be_csv):
-                binding_energy_df.append(pd.read_csv(be_csv))
-
-            # Read distances
-            distances_folder = analysis_folder + "/distances"
-            distances_csv = distances_folder + "/" + model + ".csv"
-            if os.path.exists(distances_csv):
-                self.rosetta_distances[model] = pd.read_csv(distances_csv)
-                self.rosetta_distances[model].set_index(["Model", "Pose"], inplace=True)
-
-            # Read energy-by-residue data
-            ebr_folder = analysis_folder + "/ebr"
-            erb_csv = ebr_folder + "/" + model + ".csv"
-            if os.path.exists(erb_csv):
-                self.rosetta_ebr.append(pd.read_csv(erb_csv))
-
-            # Read interacting neighbours data
-            neighbours_folder = analysis_folder + "/neighbours"
-            neighbours_csv = neighbours_folder + "/" + model + ".csv"
-            if os.path.exists(neighbours_csv):
-                self.rosetta_neighbours.append(pd.read_csv(neighbours_csv))
-
-            # Read protonation data
-            protonation_folder = analysis_folder + "/protonation"
-            protonation_csv = protonation_folder + "/" + model + ".csv"
-            if os.path.exists(protonation_csv):
-                self.rosetta_protonation.append(pd.read_csv(protonation_csv))
-
-        if self.rosetta_data == []:
-            raise ValueError("No rosetta output was found in %s" % rosetta_folder)
-
-        self.rosetta_data = pd.concat(self.rosetta_data)
-        self.rosetta_data.set_index(["Model", "Pose"], inplace=True)
-
-        if binding_energy:
-
-            binding_energy_df = pd.concat(binding_energy_df)
-            binding_energy_df.set_index(["Model", "Pose"], inplace=True)
-
-            # Add interface scores to rosetta_data
-            for score in binding_energy_df:
-                index_value_map = {}
-                for i, v in binding_energy_df.iterrows():
-                    index_value_map[i] = v[score]
-
-                values = []
-                for i in self.rosetta_data.index:
-                    values.append(index_value_map[i])
-
-                self.rosetta_data[score] = values
-
-        if energy_by_residue and self.rosetta_ebr != []:
-            self.rosetta_ebr = pd.concat(self.rosetta_ebr)
-            self.rosetta_ebr.set_index(
-                ["Model", "Pose", "Chain", "Residue"], inplace=True
+            # Execute docking analysis
+            command = (
+                "python "
+                + rosetta_folder
+                + "/._analyse_calculation.py "
+                + rosetta_folder
+                + " "
             )
-        else:
-            self.rosetta_ebr = None
 
-        if interacting_residues and self.rosetta_neighbours != []:
-            self.rosetta_neighbours = pd.concat(self.rosetta_neighbours)
-            self.rosetta_neighbours.set_index(
-                ["Model", "Pose", "Chain", "Residue"], inplace=True
-            )
-        else:
-            self.rosetta_neighbours = None
+            if binding_energy:
+                command += "--binding_energy " + binding_energy + " "
+            if atom_pairs != None:
+                command += "--atom_pairs " + rosetta_folder + "/._atom_pairs.json "
+            if return_jobs:
+                command += "--models MODEL "
+            if energy_by_residue:
+                command += "--energy_by_residue "
+            if interacting_residues:
+                command += "--interacting_residues "
+                if query_residues != None:
+                    command += "--query_residues "
+                    command += ",".join([str(r) for r in query_residues]) + " "
+            if protonation_states:
+                command += "--protonation_states "
+            if decompose_bb_hb_into_pair_energies:
+                command += "--decompose_bb_hb_into_pair_energies "
+            if cpus != None:
+                command += "--cpus " + str(cpus) + " "
+            if verbose:
+                command += "--verbose "
+            command += "\n"
 
-        if protonation_states and self.rosetta_protonation != []:
-            self.rosetta_protonation = pd.concat(self.rosetta_protonation)
-            self.rosetta_protonation.set_index(
-                ["Model", "Pose", "Chain", "Residue"], inplace=True
-            )
-        else:
-            self.rosetta_protonation = None
+            # Compile individual models for each job
+            if return_jobs:
+                commands = []
+                for m in self:
+                    commands.append(command.replace("MODEL", m))
+
+                print("Returning jobs for running the analysis in parallel.")
+                print(
+                    "After jobs have finished, rerun this function removing return_jobs=True!"
+                )
+                return commands
+
+            else:
+                try:
+                    os.system(command)
+                except:
+                    os.chdir("..")
+                    raise ValueError(
+                        "Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script."
+                    )
+
+            # Compile dataframes into rosetta_data attributes
+            self.rosetta_data = []
+            self.rosetta_distances = {}
+            self.rosetta_ebr = []
+            self.rosetta_neighbours = []
+            self.rosetta_protonation = []
+            binding_energy_df = []
+
+            analysis_folder = rosetta_folder + '/'+output_folder
+            for model in self:
+
+                # Read scores
+                scores_folder = analysis_folder + "/scores"
+                scores_csv = scores_folder + "/" + model + ".csv"
+                if os.path.exists(scores_csv):
+                    self.rosetta_data.append(pd.read_csv(scores_csv))
+
+                # Read binding energies
+                be_folder = analysis_folder + "/binding_energy"
+                be_csv = be_folder + "/" + model + ".csv"
+                if os.path.exists(be_csv):
+                    binding_energy_df.append(pd.read_csv(be_csv))
+
+                # Read distances
+                distances_folder = analysis_folder + "/distances"
+                distances_csv = distances_folder + "/" + model + ".csv"
+                if os.path.exists(distances_csv):
+                    self.rosetta_distances[model] = pd.read_csv(distances_csv)
+                    self.rosetta_distances[model].set_index(["Model", "Pose"], inplace=True)
+
+                # Read energy-by-residue data
+                ebr_folder = analysis_folder + "/ebr"
+                erb_csv = ebr_folder + "/" + model + ".csv"
+                if os.path.exists(erb_csv):
+                    self.rosetta_ebr.append(pd.read_csv(erb_csv))
+
+                # Read interacting neighbours data
+                neighbours_folder = analysis_folder + "/neighbours"
+                neighbours_csv = neighbours_folder + "/" + model + ".csv"
+                if os.path.exists(neighbours_csv):
+                    self.rosetta_neighbours.append(pd.read_csv(neighbours_csv))
+
+                # Read protonation data
+                protonation_folder = analysis_folder + "/protonation"
+                protonation_csv = protonation_folder + "/" + model + ".csv"
+                if os.path.exists(protonation_csv):
+                    self.rosetta_protonation.append(pd.read_csv(protonation_csv))
+
+            if self.rosetta_data == []:
+                raise ValueError("No rosetta output was found in %s" % rosetta_folder)
+
+            self.rosetta_data = pd.concat(self.rosetta_data)
+            self.rosetta_data.set_index(["Model", "Pose"], inplace=True)
+
+            if binding_energy:
+
+                binding_energy_df = pd.concat(binding_energy_df)
+                binding_energy_df.set_index(["Model", "Pose"], inplace=True)
+
+                # Add interface scores to rosetta_data
+                for score in binding_energy_df:
+                    index_value_map = {}
+                    for i, v in binding_energy_df.iterrows():
+                        index_value_map[i] = v[score]
+
+                    values = []
+                    for i in self.rosetta_data.index:
+                        values.append(index_value_map[i])
+
+                    self.rosetta_data[score] = values
+
+            if energy_by_residue and self.rosetta_ebr != []:
+                self.rosetta_ebr = pd.concat(self.rosetta_ebr)
+                self.rosetta_ebr.set_index(
+                    ["Model", "Pose", "Chain", "Residue"], inplace=True
+                )
+            else:
+                self.rosetta_ebr = None
+
+            if interacting_residues and self.rosetta_neighbours != []:
+                self.rosetta_neighbours = pd.concat(self.rosetta_neighbours)
+                self.rosetta_neighbours.set_index(
+                    ["Model", "Pose", "Chain", "Residue"], inplace=True
+                )
+            else:
+                self.rosetta_neighbours = None
+
+            if protonation_states and self.rosetta_protonation != []:
+                self.rosetta_protonation = pd.concat(self.rosetta_protonation)
+                self.rosetta_protonation.set_index(
+                    ["Model", "Pose", "Chain", "Residue"], inplace=True
+                )
+            else:
+                self.rosetta_protonation = None
 
     def getRosettaModelDistances(self, model):
         """
@@ -9354,61 +9736,66 @@ def _getStructureCoordinates(
 
     return coordinates
 
-
 def _readRosettaScoreFile(score_file, indexing=False):
     """
-    Generates an iterator from the poses in the silent file
+    Reads a Rosetta score file and returns a DataFrame of the scores.
 
     Arguments:
     ==========
-    silent_file : (str)
-        Path to the input silent file.
+    score_file : str
+        Path to the input score file.
+    indexing : bool, optional
+        If True, sets the DataFrame index to ['Model', 'Pose'].
 
     Returns:
     ========
-        Generator object for the poses in the silen file.
+    DataFrame
+        A DataFrame containing the scores from the score file.
     """
     with open(score_file) as sf:
-        lines = [x for x in sf.readlines() if x.startswith("SCORE:")]
-        score_terms = lines[0].split()
-        scores = {}
-        for line in lines[1:]:
-            for i, score in enumerate(score_terms):
-                if score not in scores:
-                    scores[score] = []
-                try:
-                    scores[score].append(float(line.split()[i]))
-                except:
-                    scores[score].append(line.split()[i])
+        lines = [x.strip() for x in sf if x.startswith("SCORE:")]
 
-    scores.pop("SCORE:")
-    for s in scores:
-        if s == "description":
-            models = []
-            poses = []
-            for x in scores[s]:
-                if x == "description":
-                    continue
-                model, pose = "_".join(x.split("_")[:-1]), x.split("_")[-1]
-                models.append(model)
-                poses.append(int(pose))
+    if len(lines) < 2:
+        raise ValueError("The score file does not contain enough data.")
+
+    score_terms = lines[0].split()[1:]  # Get the terms excluding the initial "SCORE:"
+    scores = {term: [] for term in score_terms}
+    models = []
+    poses = []
+    descriptions = []
+
+    for line in lines[1:]:
+        parts = line.split()[1:]  # Get the parts excluding the initial "SCORE:"
+        if len(parts) != len(score_terms):
+            continue  # Skip lines that are headers or do not match the number of score terms
+        if parts[0] == score_terms[0]:  # Check if this is a repeated header
             continue
-        scores[s] = np.array(scores[s])
+
+        for i, score in enumerate(score_terms):
+            try:
+                scores[score].append(float(parts[i]))
+            except ValueError:
+                scores[score].append(parts[i])
+
+        # Extract model and pose from the 'description' field
+        description_index = score_terms.index("description")
+        description = parts[description_index]
+        model, pose = "_".join(description.split("_")[:-1]), description.split("_")[-1]
+        models.append(model)
+        poses.append(int(pose))
+        descriptions.append(description)
+
     scores.pop("description")
     scores["Model"] = np.array(models)
     scores["Pose"] = np.array(poses)
+    scores["description"] = np.array(descriptions)
 
-    # Sort all values based on pose number
-    for s in scores:
-        scores[s] = [x for _, x in sorted(zip(scores["Pose"], scores[s]))]
-
-    scores = pd.DataFrame(scores)
+    scores_df = pd.DataFrame(scores)
 
     if indexing:
-        scores = scores.set_index(["Model", "Pose"])
+        scores_df = scores_df.set_index(["Model", "Pose"])
 
-    return scores
-
+    return scores_df
 
 def _getAlignedResiduesBasedOnStructuralAlignment(
     ref_struct, target_struct, max_ca_ca=5.0
