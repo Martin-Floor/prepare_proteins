@@ -23,6 +23,7 @@ from Bio.PDB.Polypeptide import aa3
 from ipywidgets import interactive_output, VBox, IntSlider, Checkbox, interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
+from scipy.spatial.distance import cdist
 
 import prepare_proteins
 from . import MD, _atom_selectors, alignment, rosettaScripts
@@ -3321,15 +3322,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                 xml_output = os.path.join(xml_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.xml')
                 xml.write_xml(xml_output)
 
+                if not only_scorefile and not pdb_output:
+                    output_silent_file = f'{model}{separator}{ligand}.out'
+                else:
+                    output_silent_file = None
+
                 # Create flags files
                 flags = rosettaScripts.options.flags(f'../../xml/{docking_protocol}{separator}{ligand}{separator}{model}.xml',
-                                                     nstruct=nstruct, s='../../input_models/'+model+'.pdb')
-
+                                                     nstruct=nstruct, s='../../input_models/'+model+'.pdb',
+                                                     output_silent_file=output_silent_file,
+                                                     output_score_file=f'{model}{separator}{ligand}.sc')
                 if only_scorefile:
                     flags.addOption('out:file:score_only')
-                elif not pdb_output:
-                    flags.output_silent_file = f'{model}{separator}{ligand}.out'
-                flags.output_scorefile = f'{model}{separator}{ligand}.sc'
+
                 ligand_params = '../../ligand_params/'+ligand+'/'+ligand+'.params'
                 flags.addOption('extra_res_fa', ligand_params)
                 flags.add_ligand_docking_options()
@@ -3351,6 +3356,145 @@ make sure of reading the target sequences with the function readTargetSequences(
                 jobs.append(command)
 
         return jobs
+
+    def generatePointsAroundAtoms(self, atom_tuples, radii, num_points_per_radius, threshold_distance, verbose=False):
+        """
+        Generates equidistant points around atoms on the surfaces of spheres with different radii using the Fibonacci lattice method.
+        Only stores points that are farther than a threshold distance from any heavy atom.
+
+        :param atom_tuples: Dictionary with model names as keys and atom tuples (chain_id, residue_id, atom_name) as values
+        :param radii: List of radii of the spheres
+        :param num_points_per_radius: Number of points to generate on each sphere
+        :param threshold_distance: Minimum distance from any heavy atom to store a point
+        :param verbose: If True, print detailed debug information
+        :return: Dictionary of accumulated points around atoms by model
+        """
+        all_model_points = {}
+
+        for model, atom_tuple in atom_tuples.items():
+            structure = self.structures[model]
+            chain_id, residue_id, atom_name = atom_tuple
+            target_atom = None
+            heavy_atom_coords = []
+
+            # Find the target atom and collect all heavy atom coordinates
+            for chain in structure.get_chains():
+                if chain.id == chain_id:
+                    for residue in chain.get_residues():
+                        for atom in residue.get_atoms():
+                            if atom.element != 'H':  # Exclude hydrogen atoms
+                                heavy_atom_coords.append(atom.coord)
+                            if residue.id[1] == residue_id and atom.name == atom_name:
+                                target_atom = atom
+
+            if not target_atom:
+                raise ValueError(f"Target atom not found in the structure for model {model}")
+
+            target_atom_coord = target_atom.coord
+            all_points = []
+
+            # Convert heavy atom coordinates to numpy array for distance calculations
+            heavy_atom_coords = np.array(heavy_atom_coords)
+            if verbose:
+                print(f"Model: {model}, Heavy atom coordinates shape: {heavy_atom_coords.shape}")
+
+            for radius in radii:
+                points = []
+                # Generate equidistant points on the surface of the sphere using Fibonacci lattice
+                indices = np.arange(0, num_points_per_radius, dtype=float) + 0.5
+                phi = np.arccos(1 - 2 * indices / num_points_per_radius)
+                theta = np.pi * (1 + 5**0.5) * indices
+
+                if verbose:
+                    print(f"Model: {model}, Generated points before filtering for radius {radius}:")
+                for i in range(num_points_per_radius):
+                    x = radius * np.sin(phi[i]) * np.cos(theta[i])
+                    y = radius * np.sin(phi[i]) * np.sin(theta[i])
+                    z = radius * np.cos(phi[i])
+                    point = target_atom_coord + np.array([x, y, z])
+                    if verbose:
+                        print(point)
+
+                    # Check distance to all heavy atom points
+                    if heavy_atom_coords.size > 0:
+                        distances = cdist([point], heavy_atom_coords)
+                        if verbose:
+                            print(f"Model: {model}, Distances for point {i} at radius {radius}: {distances}")
+                        if np.all(distances > threshold_distance):
+                            points.append(point)
+                    else:
+                        points.append(point)
+
+                if verbose:
+                    print(f"Model: {model}, Points after filtering for radius {radius}: {points}")
+                all_points.extend(points)
+
+            if verbose:
+                print(f"Model: {model}, Accumulated points: {all_points}")
+            all_model_points[model] = all_points
+
+        return all_model_points
+
+    def visualizePointsOnStructure(self, points_by_model, output_folder, chain_id='A', residue_name="SPH", verbose=False):
+        def addResidueToStructure(structure, chain_id, resname, atom_names, coordinates, new_resid=None, elements=None, hetatom=True, water=False):
+            """
+            Add a new residue with given atoms to the structure.
+            """
+            model = structure[0]
+            chain = next((chain for chain in model.get_chains() if chain_id == chain.id), None)
+            if not chain:
+                if verbose:
+                    print(f"Chain ID {chain_id} not found. Creating a new chain.")
+                chain = Chain.Chain(chain_id)
+                model.add(chain)
+
+            if coordinates.ndim == 1:
+                coordinates = np.array([coordinates])
+
+            if coordinates.shape[1] != 3 or len(coordinates) != len(atom_names):
+                if verbose:
+                    print(f"Atom names: {atom_names}")
+                    print(f"Coordinates: {coordinates}")
+                raise ValueError("Mismatch between atom names and coordinates.")
+
+            new_resid = new_resid or max((r.id[1] for r in chain.get_residues()), default=0) + 1
+            rt_flag = 'H' if hetatom else 'W' if water else ' '
+            residue = PDB.Residue.Residue((rt_flag, new_resid, ' '), resname, ' ')
+
+            serial_number = max((a.serial_number for a in chain.get_atoms()), default=0) + 1
+            for i, atnm in enumerate(atom_names):
+                atom = PDB.Atom.Atom(atnm, coordinates[i], 0, 1.0, " ", f"{atnm: <4}", serial_number + i, elements[i] if elements else "H")
+                residue.add(atom)
+            chain.add(residue)
+            return new_resid
+
+        def addPointsToStructure(structure, points, chain_id, residue_name="SPH"):
+            """
+            Add points as a new residue to the structure.
+            """
+            atom_names = [f"SP{i+1}" for i in range(len(points))]
+            coordinates = np.array(points)
+            elements = ['H'] * len(points)
+            if verbose:
+                print(f"Number of points: {len(points)}")
+                print(f"Number of atom names: {len(atom_names)}")
+            addResidueToStructure(structure, chain_id, residue_name, atom_names, coordinates, elements=elements, hetatom=True)
+            return structure
+
+        if not os.path.exists(output_folder):
+            os.mkdir(output_folder)
+
+        for model, points in points_by_model.items():
+            structure = self.structures[model]
+
+            # Add points to structure
+            structure = addPointsToStructure(structure, points, chain_id, residue_name)
+
+            # Define output file path
+            output_file = f"{output_folder}/{model}.pdb"
+
+            # Save the modified structure to a PDB file
+            _saveStructureToPDB(structure, output_file)
 
     def setUpSiteMapForModels(
         self,
