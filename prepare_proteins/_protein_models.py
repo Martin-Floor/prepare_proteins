@@ -10,6 +10,7 @@ import sys
 import time
 import uuid
 import warnings
+import copy
 
 import ipywidgets as widgets
 import matplotlib as mpl
@@ -3485,7 +3486,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(output_folder)
 
         for model, points in points_by_model.items():
-            structure = self.structures[model]
+            structure = copy.deepcopy(self.structures[model])  # Make a copy of the structure
 
             # Add points to structure
             structure = addPointsToStructure(structure, points, chain_id, residue_name)
