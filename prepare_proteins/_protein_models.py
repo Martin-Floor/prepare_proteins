@@ -12,6 +12,8 @@ import uuid
 import warnings
 import copy
 
+import concurrent.futures
+
 import ipywidgets as widgets
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -81,6 +83,7 @@ class proteinModels:
         exclude_models=None,
         ignore_biopython_warnings=False,
         collect_memory_every=None,
+        num_cpus=None
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -157,25 +160,29 @@ class proteinModels:
         self.distance_data = {}
         self.models_data = {}
 
+        self.num_cpus = num_cpus
+
         # Read PDB structures into Biopython
-        collect_memory = False
-        for i, model in enumerate(sorted(self.models_paths)):
-
-            if verbose:
-                print("Reading model: %s" % model)
-
-            if collect_memory_every and i % collect_memory_every == 0:
-                collect_memory = True
-            else:
-                collect_memory = False
-
-            self.models_names.append(model)
-            self.readModelFromPDB(
-                model,
-                self.models_paths[model],
-                add_to_path=True,
-                collect_memory=collect_memory,
-            )
+        self._parallel_read_models(verbose=verbose, collect_memory_every=collect_memory_every,
+                                   num_cpus=self.num_cpus)
+        # collect_memory = False
+        # for i, model in enumerate(sorted(self.models_paths)):
+        #
+        #     if verbose:
+        #         print("Reading model: %s" % model)
+        #
+        #     if collect_memory_every and i % collect_memory_every == 0:
+        #         collect_memory = True
+        #     else:
+        #         collect_memory = False
+        #
+        #     self.models_names.append(model)
+        #     self.readModelFromPDB(
+        #         model,
+        #         self.models_paths[model],
+        #         add_to_path=True,
+        #         collect_memory=collect_memory,
+        #     )
 
         if get_sequences:
             # Get sequence information based on stored structure objects
@@ -194,6 +201,25 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 )
             else:
                 self.calculateMSA()
+
+    def _parallel_read_models(self, verbose=False, collect_memory_every=None, num_cpus=None):
+        loaded_models = []  # To keep track of loaded models
+
+        # Prepare arguments for parallel processing
+        tasks = [(self, model, verbose) for model in sorted(self.models_paths)]
+
+        # Determine the number of CPUs (processes) to use
+        if num_cpus is None:
+            num_cpus = os.cpu_count()  # Use all available CPUs by default
+
+        # Use ProcessPoolExecutor to parallelize the reading process
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_cpus) as executor:
+            for _ in executor.map(_process_model, tasks):  # No need to collect results
+                loaded_models.append(None)  # Just to maintain the count
+
+                # Check if it's time to collect memory
+                if collect_memory_every and len(loaded_models) % collect_memory_every == 0:
+                    _collect_memory(loaded_models, verbose)
 
     def addResidueToModel(
         self,
@@ -499,17 +525,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     )
                     residues[-1].add(oxt)
 
-    def readModelFromPDB(
-        self,
-        model,
-        pdb_file,
-        wat_to_hoh=False,
-        covalent_check=True,
-        atom_mapping=None,
-        add_to_path=False,
-        conect_update=True,
-        collect_memory=False,
-    ):
+    def readModelFromPDB(self, model, pdb_file, wat_to_hoh=False, covalent_check=True,
+                         atom_mapping=None, add_to_path=False, conect_update=True):
         """
         Adds a model from a PDB file.
 
@@ -553,9 +570,6 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         if add_to_path:
             self.models_paths[model] = pdb_file
-
-        if collect_memory:
-            gc.collect()  # Collect memory
 
         return self.structures[model]
 
@@ -9659,6 +9673,22 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             raise StopIteration
 
+def _process_model(args):
+    self, model, verbose = args
+    if verbose:
+        print("Reading model: %s" % model)
+
+    self.models_names.append(model)
+    self.readModelFromPDB(
+        model,
+        self.models_paths[model],
+        add_to_path=True,
+    )
+
+def _collect_memory(loaded_models, verbose=False):
+    gc.collect()  # Perform garbage collection
+    if verbose:
+        print(f"Memory collected after loading {len(loaded_models)} models.")
 
 def readSilentScores(silent_file):
     """
@@ -9698,7 +9728,6 @@ def readSilentScores(silent_file):
 
     return scores
 
-
 def _readPDB(name, pdb_file):
     """
     Read PDB file to a structure object
@@ -9706,7 +9735,6 @@ def _readPDB(name, pdb_file):
     parser = PDB.PDBParser()
     structure = parser.get_structure(name, pdb_file)
     return structure
-
 
 def _saveStructureToPDB(
     structure,
@@ -9835,10 +9863,8 @@ def _computeCartesianFromInternal(coord2, coord3, coord4, distance, angle, torsi
 
     return coord1
 
-
 def _get_atom_tuple(atom):
     return (atom.get_parent().get_parent().id, atom.get_parent().id[1], atom.name)
-
 
 def _getStructureCoordinates(
     structure,
