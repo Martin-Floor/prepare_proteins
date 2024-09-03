@@ -138,7 +138,8 @@ class md_analysis:
                     def num_sort(test_string):
                         return list(map(int,test_string.split('_')[2]))[0]
                     # calling function
-                    file_list = ' '.join([md_path+'/'+f for f in file_list.sort(key=num_sort)])
+                    file_list.sort(key=num_sort)
+                    file_list = ' '.join([md_path+'/'+f for f in file_list])
 
                     os.system(f'{command} trjcat -f {file_list} -o {md_path}/prot_md_cat_noPBC.xtc -cat')
                     if remove_redundant_files:
