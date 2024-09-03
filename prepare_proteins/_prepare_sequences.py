@@ -359,7 +359,7 @@ class sequenceModels:
             raise StopIteration
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
-                          cpus=40, version="5.67-99.0", max_bin_size=10000):
+                          cpus=40, version="5.69-101.0", max_bin_size=10000):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
 
@@ -368,7 +368,10 @@ class sequenceModels:
             impact on the time.
 
         If an update is needed, download in bubbles the new version (replace XX-XX with the version number):
-            wget -O interproscan-5.XX-XX.0-64-bit.tar.gz http://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/5.XX-XX.0/interproscan-5.67-99.0-64-bit.tar.gz
+            wget -O interproscan-5.XX-XX.0-64-bit.tar.gz http://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/5.XX-XX.0/interproscan-5.XX-XX.0-64-bit.tar.gz
+
+        To get the link you can also visit:
+            https://www.ebi.ac.uk/interpro/about/interproscan/
         """
 
         if isinstance(not_exclude, str):
