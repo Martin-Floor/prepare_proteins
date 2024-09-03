@@ -24,9 +24,10 @@ class md_analysis:
     ligand (bool): Whether to include ligand in the PBC removal centering (default: False).
     remove_redundant_files (bool): Whether to remove original files after processing (default: False).
     overwrite (bool): Whether to overwrite existing processed files (default: False).
+
     """
 
-    def __init__(self, md_folder, command='gmx', output_group='System', ligand=False, remove_redundant_files=False, overwrite=False):
+    def __init__(self, md_folder, command='gmx', output_group='System', timestep=2, ligand=False, remove_redundant_files=False, overwrite=False):
         """
         Initializes the md_analysis class.
 
@@ -39,6 +40,8 @@ class md_analysis:
         overwrite (bool): Whether to overwrite existing processed files.
         """
         self.models = [folder for folder in os.listdir(md_folder + '/output_models/') if os.path.isdir(md_folder + '/output_models/' + folder)]
+
+        self.timestep = timestep
 
         self.traj_paths = {'nvt': {}, 'npt': {}, 'md': {}}
         self.top_paths = {}
@@ -132,7 +135,16 @@ class md_analysis:
                             path = md_path + '/' + file
                             os.system(f'echo {centering_selector} {group_dics[output_group]} | {command}  trjconv -s {path.replace(".xtc", ".tpr")} -f {path} -o {path.replace(".xtc", "_noPBC.xtc")} -center -pbc res -ur compact -n {index_path}')
                             remove_paths.append(path)
-                    os.system(f'{command} trjcat -f {md_path}/*_noPBC.xtc -o {md_path}/prot_md_cat_noPBC.xtc -cat')
+
+
+                    # sort files in case they are higher than 10
+                    file_list = [f for f in os.listdir(md_path) if f.endswith('_noPBC.xtc')]
+                    def num_sort(test_string):
+                        return list(map(int,test_string.split('_')[2]))[0]
+                    # calling function
+                    file_list = ' '.join([md_path+'/'+f for f in file_list.sort(key=num_sort)])
+
+                    os.system(f'{command} trjcat -f {file_list} -o {md_path}/prot_md_cat_noPBC.xtc -cat')
                     if remove_redundant_files:
                         [os.remove(path) for path in remove_paths]
 
@@ -190,7 +202,7 @@ class md_analysis:
 
                         distance[m] = [min(values) for values in zip(*joined_distances)]
 
-                    self.distances[model][replica] = distance
+                    self.distances[model][replica] = np.array(distance)
 
     def setupCalculateDistances(self, metrics, step='md', job_folder='MD_analysis_data', overwrite=False):
         """
@@ -303,6 +315,7 @@ class md_analysis:
         Parameters:
         threshold (float): Threshold to highlight in the plot (default: 0.45).
         lim (bool): Whether to limit the y-axis (default: True).
+
         """
 
         def options1(model):
