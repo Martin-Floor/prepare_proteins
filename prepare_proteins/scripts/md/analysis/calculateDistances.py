@@ -1,60 +1,51 @@
 import argparse
 import json
 import mdtraj as md
+import os
 import numpy as np
 
-def compute_distances(trajectory, topology, metrics_file):
-    """
-    Computes distances between specified atom pairs over the trajectory.
+parser = argparse.ArgumentParser()
+parser.add_argument("--trajectory", help='Path to the trajectory.')
+parser.add_argument("--topology", help='Path to the topology.')
+parser.add_argument("-m", "--metrics",default=None)
 
-    Parameters:
-    trajectory (str): Path to the trajectory file.
-    topology (str): Path to the topology file.
-    metrics_file (str): Path to the JSON file containing distance metrics.
+args = parser.parse_args()
 
-    Returns:
-    dict: Dictionary with computed distances.
-    """
-    # Load trajectory and topology
-    t = md.load(trajectory, top=topology)
-
-    # Load metrics
-    with open(metrics_file, 'r') as f:
+trajectory = args.trajectory
+topology = args.topology
+if args.metrics != None:
+    with open(args.metrics,'r') as f:
         metrics = json.load(f)
+else:
+    metrics = None
 
-    results = {m: [] for m in metrics}
+t = md.load(trajectory, top=topology)
 
+results = {}
+
+for frame in t:
+    top = frame.top
     for m in metrics:
+        if m not in results:
+            results[m] = []
+
         distances = []
         for d in metrics[m]:
-            atom1 = t.top.select(f'resSeq {d[0][0]} and name {d[0][1]}')
-            atom2 = t.top.select(f'resSeq {d[1][0]} and name {d[1][1]}')
 
-            if len(atom1) != 1 or len(atom2) != 1:
-                raise ValueError(f'Something wrong with atom definition in metric {m}. Expected single atom selection, got {len(atom1)} and {len(atom2)}.')
+            atom1 = top.select('resSeq '+str(d[0][0])+' and name '+d[0][1])
+            atom2 = top.select('resSeq '+str(d[1][0])+' and name '+d[1][1])
 
-            # Compute distances for all frames at once
-            pair_distances = md.compute_distances(t, np.array([[atom1[0], atom2[0]]]))
-            distances.append(pair_distances)
+            if len(atom1) < 1 or len(atom2) < 1:
+                raise ValueError('Something wrong with atom definition in metric '+m+'. Atom selection is empty')
 
-        # Aggregate minimum distances across all pairs for each frame
-        min_distances = np.min(distances, axis=0)
-        results[m] = min_distances.tolist()
+            if len(atom1) > 1 or len(atom2) > 1:
+                raise ValueError('Something wrong with atom definition in metric '+m+'. Atom selection is more than 1 atom')
 
-    return results
+            dist = float(np.linalg.norm(frame.xyz[0][atom1] - frame.xyz[0][atom2]))
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--trajectory", help='Path to the trajectory.', required=True)
-    parser.add_argument("--topology", help='Path to the topology.', required=True)
-    parser.add_argument("-m", "--metrics", help='Path to the metrics JSON file.', required=True)
+            distances.append(dist)
 
-    args = parser.parse_args()
+        results[m].append(min(distances))
 
-    results = compute_distances(args.trajectory, args.topology, args.metrics)
-
-    with open('dist.json', 'w') as f:
-        json.dump(results, f)
-
-if __name__ == "__main__":
-    main()
+with open('dist.json', 'w') as f:
+    json.dump(results,f)
