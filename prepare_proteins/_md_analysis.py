@@ -115,7 +115,17 @@ class md_analysis:
                             path = md_path+'/'+file
                             os.system('echo '+centering_selector+' '+group_dics[output_group]+' | '+command+'  trjconv -s '+path.replace('.xtc','.tpr')+' -f '+path+' -o '+path.replace('.xtc','_noPBC.xtc')+' -center -pbc res -ur compact'+' -n '+index_path)
                             remove_paths.append(path)
-                    os.system(command+' trjcat -f '+md_path+'/*_noPBC.xtc -o '+md_path+'/prot_md_cat_noPBC.xtc -cat')
+
+
+                    # sort files in case they are higher than 10
+                    file_list = [f for f in os.listdir(md_path) if f.endswith('_noPBC.xtc')]
+                    def num_sort(test_string):
+                        return list(map(int,test_string.split('_')[2]))[0]
+                    # calling function
+                    file_list.sort(key=num_sort)
+                    file_list = ' '.join([md_path+'/'+f for f in file_list])
+
+                    os.system(f'{command} trjcat -f {file_list} -o {md_path}/prot_md_cat_noPBC.xtc -cat')
                     if remove_redundant_files:
                         [os.remove(path) for path in remove_paths]
 
