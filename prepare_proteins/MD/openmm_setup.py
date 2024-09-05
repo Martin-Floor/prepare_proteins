@@ -17,7 +17,7 @@ import os
 from multiprocessing import cpu_count
 
 aa3 = aa3+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX']
-ions = ['MG', 'NA', 'CL']
+ions = ['MG', 'NA', 'CL', 'CU']
 aa3 += ions
 
 
@@ -90,6 +90,7 @@ class openmm_md:
 
         residue_names = []
         for residue in self.modeller.topology.residues():
+
             if residue.name == 'HIS':
                 atoms = []
                 for atom in residue.atoms():
