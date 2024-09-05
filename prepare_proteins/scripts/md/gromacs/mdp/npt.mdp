@@ -14,7 +14,7 @@ nstxout-compressed     		= 2500	    	; write coordinates every 10 ps to .xtc fil
 ; Bond parameters
 continuation	    		= yes		; Restarting after NVT
 constraint_algorithm    	= lincs	    	; holonomic constraints
-constraints	        	= all-bonds	; all bonds (even heavy atom-H bonds) constrained
+constraints	        	= BOND_CONSTRAINTS	; all bonds (even heavy atom-H bonds) constrained
 lincs_iter	        	= 1		; accuracy of LINCS
 lincs_order	        	= 6		; normally 4, but 6 is needed for 4 fs timestep
 ; Neighborsearching
@@ -34,7 +34,7 @@ tc-grps				= Protein Non-Protein	; two coupling groups - more accurate
 tau_t				= 0.1	  0.1	; time constant, in ps
 ref_t				= TEMPERATURE 	  TEMPERATURE	; reference temperature, one for each group, in K
 ; Pressure coupling is on
-pcoupl		        	= berendsen	; Pressure coupling on in NPT
+pcoupl		        	= C-rescale	; Pressure coupling on in NPT
 pcoupltype	        	= isotropic	; uniform scaling of box vectors
 tau_p		        	= 1.0		; time constant, in ps
 ref_p		        	= 1.0		; reference pressure, in bar
