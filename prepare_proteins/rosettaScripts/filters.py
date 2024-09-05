@@ -33,7 +33,7 @@ class filters:
             self.root.set('jump', str(self.jump))
             if self.confidence != 1.0:
                 self.root.set('confidence', str(self.confidence))
-
+    
     class DisulfideEntropy:
 
         def __init__(self, name="entropy", tightness=0,lower_bound=0):
@@ -42,7 +42,7 @@ class filters:
             self.name = name
             self.tightness = tightness
             self.lower_bound = lower_bound
-
+     
             self.filter = filter
 
 
@@ -197,49 +197,3 @@ class filters:
                 self.root.set('torsion', self.torsion)
             if self.task_operations != None:
                 self.root.set('task_operations', self.task_operations)
-
-    class atomicDistance:
-
-        def __init__(self, name='atomicDistance', residue1=None, atomname1=None,
-                     atomtype1=None, residue2=None, atomname2=None,
-                     atomtype2=None, distance=4.0, confidence=1.0):
-
-            self.type = 'filter'
-            self.name = name
-            self.residue1 = residue1
-            self.atomname1 = atomname1
-            self.atomtype1 = atomtype1
-            self.residue2 = residue2
-            self.atomname2 = atomname2
-            self.atomtype2 = atomtype2
-            self.distance = distance
-            self.confidence = confidence
-
-            if not residue1:
-                raise ValueError('You need to specify the residue1 parameter!')
-            if not residue2:
-                raise ValueError('You need to specify the residue2 parameter!')
-
-            if atomtype1 != None and atomname1 != None:
-                raise ValueError('Only atomname1 or atomtype1 should be given not both!')
-
-            if atomtype2 != None and atomname2 != None:
-                raise ValueError('Only atomname2 or atomtype2 should be given not both!')
-
-        def generateXml(self):
-            self.xml = ElementTree
-            self.root = self.xml.Element('AtomicDistance')
-            self.root.set('name', str(self.name))
-            self.root.set('residue1', self.residue1)
-            if self.atomname1:
-                self.root.set('atomname1', str(self.atomname1))
-            elif self.atomtype1:
-                self.root.set('atomtype1', str(self.atomtype1))
-            self.root.set('residue2', self.residue2)
-            if self.atomname2:
-                self.root.set('atomname2', str(self.atomname2))
-            if self.atomtype2:
-                self.root.set('atomtype2', str(self.atomtype2))
-            self.root.set('confidence', str(self.confidence))
-            if self.distance != None:
-                self.root.set('distance', str(self.distance))

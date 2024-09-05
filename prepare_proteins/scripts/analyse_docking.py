@@ -121,7 +121,7 @@ failed_count = 0
 total = 0
 failed_dockings = []
 
-failed_lines = ['SKIP LIG', 'No poses met the energy criterion for evaluating GlideScore','GLIDE WARNING: No Ligand Poses were written to external file']
+failed_lines = ['SKIP LIG', 'No poses met the energy criterion for evaluating GlideScore']
 for model in subjobs:
     for ligand in subjobs[model]:
         total += 1

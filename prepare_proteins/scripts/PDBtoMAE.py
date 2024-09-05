@@ -9,12 +9,9 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--residue_names', default=None, help='Dictionary json file containing the residue names of each ligand.')
 parser.add_argument('--change_ligand_name', default=False, action='store_true', help='Change the name of the ligand residue?')
-parser.add_argument('--keep_pdbs', action='store_true', help='Do not remove the PDB files')
-
 args=parser.parse_args()
 residue_names = args.residue_names
 change_ligand_name = args.change_ligand_name
-keep_pdbs = args.keep_pdbs
 
 if residue_names != None:
     with open(residue_names) as rnf:
@@ -44,6 +41,3 @@ for pdb in os.listdir():
 
                 # Write the MAE file
                 st.write(pdb.replace('.pdb', '.mae'))
-
-                if not keep_pdbs:
-                    os.remove(pdb)

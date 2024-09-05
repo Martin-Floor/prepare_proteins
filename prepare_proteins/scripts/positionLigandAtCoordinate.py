@@ -15,9 +15,6 @@ args=parser.parse_args()
 
 protein_file = args.protein_file
 ligand_file = args.ligand_file
-
-if '\\' in args.coordinate:
-    args.coordinate = args.coordinate.replace('\\', '')
 x,y,z = [float(x) for x in args.coordinate.split(',')]
 coordinate = np.array([x,y,z])
 separator = args.separator

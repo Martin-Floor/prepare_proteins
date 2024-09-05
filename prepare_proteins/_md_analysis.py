@@ -122,47 +122,6 @@ class md_analysis:
                 self.traj_paths['md'][model][replica] = md_path+'/prot_md_cat_noPBC.xtc'
 
 
-    def calculateDistances(self,metrics,step='md',overwrite=False):
-
-        def euclidean(XA, XB, *, out=None):
-            return np.sqrt(np.add.reduce(np.square(XA - XB), 1), out=out)
-
-        for model in self.traj_paths[step]:
-
-            if model not in self.distances:
-                self.distances[model] = {}
-
-            for replica in self.traj_paths[step][model]:
-
-                if replica not in self.distances[model] or overwrite:
-                    # Check if trajectory and topology files were generated correctly
-                    if not os.path.exists(self.traj_paths[step][model][replica]):
-                        print('WARNING: trajectory file for model '+model+' and replica '+replica+' does not exist.')
-                        continue
-                    if not os.path.exists(self.top_paths[model][replica]):
-                        print('WARNING: topology file for model '+model+' and replica '+replica+' does not exist.')
-                        continue
-
-                    traj = md.load(self.traj_paths[step][model][replica],top=self.top_paths[model][replica])
-                    top = traj.topology
-
-                    distance = {}
-                    for m in metrics[model]:
-                        joined_distances = []
-                        for d in metrics[model][m]:
-                            atom1 = top.select('resSeq '+str(d[0][0])+' and name '+d[0][1])
-                            atom2 = top.select('resSeq '+str(d[1][0])+' and name '+d[1][1])
-
-                            atom1_xyz = traj.xyz[:,atom1[0]]
-                            atom2_xyz = traj.xyz[:,atom2[0]]
-
-                            joined_distances.append(euclidean(atom1_xyz,atom2_xyz))
-
-                        distance[m] = [min(values) for values in zip(*joined_distances)]
-
-                    self.distances[model][replica] = distance
-
-
     def setupCalculateDistances(self,metrics,step='md',job_folder='MD_analysis_data',overwrite=False):
 
 

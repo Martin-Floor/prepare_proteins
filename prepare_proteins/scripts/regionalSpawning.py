@@ -16,23 +16,15 @@ parser.add_argument('metrics_thresholds', default=None, help='Path to the JSON f
 parser.add_argument('--separator', default='_', help='Separator used for the protein and ligand for file names')
 parser.add_argument('--max_iterations', default=None, help='Maximum number of iterations allowed.')
 parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawnings allowed.')
-parser.add_argument('--energy_bias', default='Binding Energy', help='Which energy term to use for bias the simulation.')
-parser.add_argument('--regional_best_fraction', default=0.2, help='Fraction of best total energy poses when using energy_bias="Binding Energy"')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
-parser.add_argument('--restore_coordinates', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
+
 args=parser.parse_args()
 
 ### Define variables
 separator = args.separator
 max_iterations = args.max_iterations
 max_spawnings = int(args.max_spawnings)
-energy_bias = args.energy_bias
-regional_best_fraction = float(args.regional_best_fraction)
 angles = args.angles
-restore_coordinates = args.restore_coordinates
-
-if energy_bias not in ['Total Energy', 'Binding Energy']:
-    raise ValueError('You must give "Total Energy" or "Binding Energy" to bias the simulation!')
 
 verbose = True
 cwd = os.getcwd()
@@ -62,7 +54,7 @@ def getSpawningIndexes():
 
 def getSpawningEpochPaths(spawning_index):
     """
-    Get the sorted integers for the integer-named (epochs) folders from the pele output directory.
+    Get the sorted integers for the integer-named (eochs) folders from the pele output directory.
     """
     spawning_epochs_paths = []
     spawning_output_dir = cwd+'/'+str(spawning_index)+'/output/output'
@@ -161,8 +153,6 @@ def readIterationFiles(report_files):
                 if l.startswith('#Task'):
                     l = l.replace('Binding Energy', 'Binding_Energy')
                     l = l.replace('BindingEnergy', 'Binding_Energy')
-                    l = l.replace('Total Energy', 'Total_Energy')
-                    l = l.replace('TotalEnergy', 'Total_Energy')
                     terms = l.split()
                     continue
                 for t,v in zip(terms, l.split()):
@@ -171,8 +161,6 @@ def readIterationFiles(report_files):
                         continue
                     if t == 'Binding_Energy':
                         t = 'Binding Energy'
-                    if t == 'Total_Energy':
-                        t = 'Total Energy'
                     if t == 'numberOfAcceptedPeleSteps':
                         t = 'Accepted PELE Step'
                     report_data.setdefault(t, [])
@@ -194,10 +182,16 @@ def clusterTrajectories(trajectory_files, report_data, metric):
 
     print(trajectory_files)
 
-def combineDistancesIntoMetrics(metrics, dataframe):
+def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
+                   # late_arrival=0.2, conditional=0.1):
     """
-    Add to dataframe columns for distance combination into metrics
+    Check iteration acceptance probability for the defined regions.
     """
+
+    # Get iteration data
+    report_files = getReportFiles(epoch_folder)
+    trajectory_files = getTrajectoryFiles(epoch_folder)
+    report_data = readIterationFiles(report_files)
 
     # Add metrics to dataframe
     metric_type = {} # Store metric type
@@ -219,7 +213,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             metric_type[m] = 'distance'
             # Combine distances into metrics
             distances = [d for d in metrics[m] if d.startswith('distance_')]
-            dataframe[m] = dataframe[distances].min(axis=1).tolist()
+            report_data[m] = report_data[distances].min(axis=1).tolist()
 
         elif angles:
             metric_type[m] = 'angle'
@@ -227,22 +221,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             angles = [d for d in metrics[m] if d.startswith('angle_')]
             if len(angles) > 1:
                 raise ValueError('Combining more than one angle into a metric is not currently supported.')
-            dataframe[m] = dataframe[angles].min(axis=1).tolist()
-
-    return metric_type
-
-def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
-                   # late_arrival=0.2, conditional=0.1):
-    """
-    Check iteration acceptance probability for the defined regions.
-    """
-
-    # Get iteration data
-    report_files = getReportFiles(epoch_folder)
-    trajectory_files = getTrajectoryFiles(epoch_folder)
-    report_data = readIterationFiles(report_files)
-
-    metric_type = combineDistancesIntoMetrics(metrics, report_data)
+            report_data[m] = report_data[angles].min(axis=1).tolist()
 
     # Add region membership information to report dataframe
     region_acceptance = np.ones(report_data.shape[0], dtype=bool)
@@ -282,38 +261,21 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
 
     accepted_iteration = True
     best_pose = None
-
     if P < fraction:
         if verbose:
             print('Continuation was rejected')
+
+        # Cluster trajectories by ligand
+        # clusterTrajectories(trajectory_files, report_data, 'Binding Energy')
 
         # Find best poses iteratively
         best_pose = np.empty(0) # Placeholder
         distance_step = 0.1
         angular_step = 1.0
-
-        epochs_paths = getSpawningEpochPaths(current_spawning)
-        spawning_data = None
-        for i in range(current_epoch+1):
-            # folder_prefix = '/'.join(epoch_folder.split('/')[:-1])
-
-            report_files = getReportFiles(epochs_paths[i])
-            trajectory_files = getTrajectoryFiles(epoch_folder)
-            report_data = readIterationFiles(report_files)
-            report_data['Epoch'] = [i]*report_data.shape[0]
-            report_data = report_data.reset_index().set_index(['Epoch', 'Trajectory', 'Accepted PELE Step'])
-            report_data = report_data.rename(columns={'currentEnergy' : 'Total Energy'})
-            if isinstance(spawning_data, type(None)):
-                spawning_data = report_data
-            else:
-                spawning_data = pd.concat([spawning_data, report_data])
-
-        metric_type = combineDistancesIntoMetrics(metrics, spawning_data)
-
         while best_pose.shape[0] == 0:
 
             # Filter dataframe by metrics' thresholds
-            filtered = spawning_data
+            filtered = report_data
             metric_acceptance = {}
             for m in metrics:
 
@@ -323,21 +285,17 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
 
                 # Filter by values lower than the given value
                 if isinstance(metrics_thresholds[m], float):
-                    metric_acceptance[m] = spawning_data[spawning_data[m] <= metrics_thresholds[m]].shape[0]
+                    metric_acceptance[m] = report_data[report_data[m] <= metrics_thresholds[m]].shape[0]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m]]
 
                 # Filter by values inside the two values
                 elif isinstance(metrics_thresholds[m], list):
-                    metric_filter = spawning_data[metrics_thresholds[m][0] <= spawning_data[m]]
+                    metric_filter = report_data[metrics_thresholds[m][0] <= report_data[m]]
                     metric_acceptance[m] = metric_filter[metric_filter[m] <= metrics_thresholds[m][1]].shape[0]
                     filtered = filtered[metrics_thresholds[m][0] <= filtered[m]]
                     filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
 
-            if energy_bias == 'Binding Energy':
-                n_poses = int(filtered.shape[0]*regional_best_fraction)
-                filtered = filtered.nsmallest(n_poses, 'Total Energy')
-
-            best_pose = filtered.nsmallest(1, energy_bias)
+            best_pose = filtered.nsmallest(1, 'Binding Energy')
 
             # If the pose was not found, update the metric with lowest acceptance
             if best_pose.shape[0] == 0:
@@ -396,36 +354,24 @@ def getTopologyFile():
         if f.endswith('_processed.pdb'):
             return cwd+'/0/output/input/'+f
 
-def extractPoses(data, spawning, output_file, verbose=True):
+def extractPoses(epoch_folder, data, output_file):
     """
     Extract poses in the given dataframe
     """
 
-    # Get topology
+    trajectory_files = getTrajectoryFiles(epoch_folder)
     topology_file = getTopologyFile()
 
     # Read topology as Bio.PDB.Structure
     parser = PDB.PDBParser()
     structure = parser.get_structure('topology', topology_file)
 
-    epochs_paths = getSpawningEpochPaths(spawning)
-    epochs = sorted(list(set(data.index.get_level_values('Epoch'))))
-
-    if data.shape[0] != 1:
-        print('Code not fully implemented for extracting more than one pose!')
-
-    for epoch in epochs:
-
-        trajectory_files = getTrajectoryFiles(epochs_paths[epoch])
-
-        # Give traj coordinates to PDB structure
-        for e, t, s in data.index:
-            if verbose:
-                print(f'Extracting pose from spawning {spawning}, epoch {epoch}, trajectory {t}, and step {s}')
-            # output_name = output_file # Redefine when implemented
-            traj = md.load(trajectory_files[t], top=topology_file)
-            for pdb_atom, xtc_atom in zip(structure.get_atoms(), traj.topology.atoms):
-                pdb_atom.coord = traj.xyz[s][xtc_atom.index]*10.0
+    # Give traj coordinates to PDB structure
+    for t, s in data.index:
+        # output_name = output_file # Redefine when implemented
+        traj = md.load(trajectory_files[t], top=topology_file)
+        for pdb_atom, xtc_atom in zip(structure.get_atoms(), traj.topology.atoms):
+            pdb_atom.coord = traj.xyz[s][xtc_atom.index]*10.0
 
     io = PDB.PDBIO()
     io.set_structure(structure)
@@ -544,7 +490,7 @@ while current_spawning <= max_spawnings:
 
         # Extract best pose to current spawning folder
         output_pdb = str(current_spawning)+'/'+protein+separator+ligand+separator+pose+'.pdb'
-        extractPoses(best_pose, current_spawning-1, output_pdb)
+        extractPoses(epochs_paths[current_epoch], best_pose, output_pdb)
 
         # Set PELE input files
         new_yaml = open(str(current_spawning)+'/input.yaml', 'w')
@@ -593,12 +539,7 @@ while current_spawning <= max_spawnings:
             command += 'python ../../._addAnglesToPELEConf.py output '
             command += '../0/._angles.json '
             command += '../0/output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
-
-        if restore_coordinates:
-            command += 'python ../../._restoreChangedCoordinates.py '
-            command += protein+separator+ligand+separator+pose+'.pdb '
-            command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
-        command += 'python -m pele_platform.main input_restart.yaml\n'
+            command += 'python -m pele_platform.main input_restart.yaml\n'
         command += 'cd ..\n'
         os.system(command)
 
