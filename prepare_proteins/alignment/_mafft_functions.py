@@ -15,7 +15,7 @@ class mafft:
         Execute a multiple sequence alignment of the input sequences
     """
 
-    def multipleSequenceAlignment(sequences, output=None, anysymbol=False, stdout=True, stderr=True, quiet=False, method='auto'):
+    def multipleSequenceAlignment(sequences, output=None, anysymbol=False, stdout=True, stderr=True, quiet=False, method='auto', gap_open=None, gap_extension=None):
         """
         Use the mafft executable to perform a multiple sequence alignment.
 
@@ -30,6 +30,10 @@ class mafft:
             Use unusual symbols in the alignment.
         quiet : bool
             Do not display progress messages.
+        gap_open : float
+            Penalty for opening a gap.
+        gap_extension : float
+            Penalty for extending a gap.
 
         Returns
         -------
@@ -64,10 +68,19 @@ class mafft:
             raise ValueError(f'Method not in methods list: {methods}')
         else:
             command += ' --'+method
+
         if anysymbol:
             command += ' --anysymbol'
+
+        # Add gap penalties if specified
+        if gap_open is not None:
+            command += f' --op {gap_open}'
+        if gap_extension is not None:
+            command += f' --ep {gap_extension}'
+
         if quiet:
             command += ' --quiet'
+
         command += ' '+target_file+' > '+output_file
         subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
 
@@ -76,14 +89,14 @@ class mafft:
 
         # Remove temporary file
         os.remove(target_file)
-        if output != None:
+        if output is not None:
             shutil.copyfile(output_file, output)
         os.remove(output_file)
 
         return alignment
 
     def addSequenceToMSA(sequences, msa, output=None, anysymbol=False, keeplength=False,
-                         reorder=True):
+                         reorder=True, gap_open=None, gap_extension=None):
         """
         Use the mafft executable to add sequences to an already existing multiple
         sequence alignment.
@@ -94,17 +107,21 @@ class mafft:
             Dictionary containing as values the strings representing the sequences
             of the proteins to add and their identifiers as keys.
         msa : Bio.AlignIO
-            Multiple sequence aligment in Biopython format.
+            Multiple sequence alignment in Biopython format.
         output : str
             File name to write the fasta formatted alignment output.
         anysymbol : bool
-            Use unusual symbols in the alignment
+            Use unusual symbols in the alignment.
         reorder : bool
             Gaps in existing_alignment are preserved, but the alignment length may
             be changed. All sequences are conserved.
         keeplength : bool
             If keeplength option is True, then the alignment length is unchanged.
             Insertions at the new sequences are deleted.
+        gap_open : float
+            Penalty for opening a gap.
+        gap_extension : float
+            Penalty for extending a gap.
 
         Returns
         -------
@@ -127,25 +144,33 @@ class mafft:
                 iff.write('>'+name.id+'\n')
                 iff.write(str(name.seq)+'\n')
 
-        # Calculate alignment
-        command = 'mafft '
+        # Build the MAFFT command
+        command = 'mafft'
         if anysymbol:
             command += ' --anysymbol'
         command += ' --add sequences.fasta.tmp'
+
         if reorder:
-            command += ' --reorder sequences.msa.fasta.tmp'
+            command += ' --reorder'
         if keeplength:
-            command += ' --keeplength sequences.msa.fasta.tmp'
-        command += '  > sequences.aligned.fasta.tmp'
+            command += ' --keeplength'
+
+        # Add gap penalties if specified
+        if gap_open is not None:
+            command += f' --op {gap_open}'
+        if gap_extension is not None:
+            command += f' --ep {gap_extension}'
+
+        command += ' sequences.msa.fasta.tmp > sequences.aligned.fasta.tmp'
         os.system(command)
 
         # Read aligned file
         alignment = AlignIO.read("sequences.aligned.fasta.tmp", "fasta")
 
-        # Remove temporary file
+        # Remove temporary files
         os.remove('sequences.fasta.tmp')
         os.remove('sequences.msa.fasta.tmp')
-        if output != None:
+        if output is not None:
             shutil.copyfile('sequences.aligned.fasta.tmp', output)
         os.remove('sequences.aligned.fasta.tmp')
 
