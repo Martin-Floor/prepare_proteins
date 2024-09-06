@@ -260,6 +260,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
             acceptance = acceptance & ((report_data[m] <= metrics_thresholds[m][1]).to_numpy())
         report_data[m+' Acceptance'] = acceptance
         region_acceptance = region_acceptance & acceptance
+
     report_data['Regional Acceptance'] = region_acceptance
 
     # Compute target region probability by trajectory
@@ -464,18 +465,18 @@ current_spawning = spawning_indexes[-1]
 
 while current_spawning <= max_spawnings:
 
+    # Check if max number of iterations has been reached
+    if max_iterations:
+        total_iterations = getTotalEpochs()
+        if total_iterations >= int(max_iterations):
+            break
+
     # Restart reading of metrics
     with open(args.metrics) as jf:
         metrics = json.load(jf)
 
     with open(args.metrics_thresholds) as jf:
         metrics_thresholds = json.load(jf)
-
-    # Check if max number of iterations has been reached
-    if max_iterations:
-        total_iterations = getTotalEpochs()
-        if total_iterations >= int(max_iterations):
-            break
 
     # Get last epoch for the current spawning
     epochs_paths = getSpawningEpochPaths(current_spawning)

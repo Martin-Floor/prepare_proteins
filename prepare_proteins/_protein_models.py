@@ -1805,11 +1805,11 @@ has been carried out. Please run compareSequences() function before setting muta
             if skip_finished:
                 # Check if model has already been calculated and finished
                 score_file = (
-                    relax_folder + "/output_models/" + model + "/" + model + "_relax.sc"
+                    relax_folder + "/output_models/" + model + "/" + model + "_relax.out"
                 )
                 if os.path.exists(score_file):
-                    scores = _readRosettaScoreFile(score_file)
-                    if scores.shape[0] >= nstruct:
+                    scores = _readRosettaScoreFile(score_file, skip_empty=True)
+                    if not isinstance(scores, type(None)) and scores.shape[0] >= nstruct:
                         continue
 
             if ca_constraint:
@@ -4409,25 +4409,164 @@ make sure of reading the target sequences with the function readTargetSequences(
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
-        protein ligand poses and creates input for a PELE platform set up run.
-
-        Constraints must be given for positional constraints as:
-        {(model1_name,ligand_name):[(springConstant,(chain_id, residue_id, atom_name)), ...], (model1_name,ligand_name):...}
-        And for distance constraints as:
-        {(model1_name,ligand_name):[(springConstant,distance,(chain1_id, residue1_id, atom_name1),(chain2_id, residue2_id, atom_name2)) ...], (model1_name,ligand_name):...}
-
+        protein-ligand poses and creates input files for a PELE simulation setup.
 
         Parameters
-        ==========
+        ----------
         pele_folder : str
-            Path to the folder where PELE calcualtions will be located
+            Path to the folder where PELE calculations will be located.
         models_folder : str
-            Path to input docking poses folder.
+            Path to the folder containing input docking poses.
         input_yaml : str
-            Path to the input YAML file to be used as template for all the runs.
-        ligand_energy_groups : dict
-            Additional groups to consider when doing energy by residue reports.
-        Missing!
+            Path to the input YAML file used as a template for all runs.
+        box_centers : dict, optional
+            Dictionary specifying the centers of the simulation box for each model.
+        distances : dict, optional
+            Distance constraints for the simulation. Format:
+            {model_name: [(chain1, residue1, atom1), (chain2, residue2, atom2)]}.
+        angles : dict, optional
+            Angular constraints for the simulation.
+        constraints : dict, optional
+            Positional and distance constraints for each model and ligand.
+        ligand_index : int, optional, default=1
+            Index of the ligand in the structure file.
+        box_radius : float, optional, default=10
+            Radius of the simulation box.
+        steps : int, optional, default=100
+            Number of simulation steps per iteration.
+        debug : bool, optional, default=False
+            If True, enables debug mode for the simulation.
+        iterations : int, optional, default=5
+            Number of iterations for the simulation.
+        cpus : int, optional, default=96
+            Number of CPUs to use for parallelization.
+        equilibration_steps : int, optional, default=100
+            Number of equilibration steps before the production run.
+        ligand_energy_groups : dict, optional
+            Additional groups to consider for energy by residue reports.
+        separator : str, optional, default="-"
+            Separator used in filenames between protein and ligand identifiers.
+        use_peleffy : bool, optional, default=True
+            If True, PELEffy will be used for ligand parameterization.
+        usesrun : bool, optional, default=True
+            If True, the PELE simulation will use srun for job submission.
+        energy_by_residue : bool, optional, default=False
+            If True, energy by residue will be calculated.
+        ebr_new_flag : bool, optional, default=False
+            If True, uses the new version of the energy by residue calculation.
+        ninety_degrees_version : bool, optional, default=False
+            If True, uses the 90 degrees version of PELE.
+        analysis : bool, optional, default=False
+            If True, enables analysis mode after the simulation.
+        energy_by_residue_type : str, optional, default="all"
+            Type of energy to be calculated per residue. Options: 'all', 'lennard_jones', 'sgb', 'electrostatic'.
+        peptide : bool, optional, default=False
+            If True, treats the system as a peptide for specific setup steps.
+        equilibration_mode : str, optional, default="equilibrationLastSnapshot"
+            Mode used for equilibration: "equilibrationLastSnapshot" or "equilibrationCluster".
+        spawning : str, optional, default="independent"
+            Spawning method used for adaptive sampling. Options include 'independent', 'epsilon', 'variableEpsilon', etc.
+        continuation : bool, optional, default=False
+            If True, continues from the previous run instead of starting fresh.
+        equilibration : bool, optional, default=True
+            If True, performs equilibration before the production run.
+        skip_models : list, optional
+            List of protein models to skip from the simulation.
+        skip_ligands : list, optional
+            List of ligands to skip from the simulation.
+        extend_iterations : bool, optional, default=False
+            If True, extends the number of iterations beyond the default.
+        only_models : list, optional
+            List of protein models to include in the simulation.
+        only_ligands : list, optional
+            List of ligands to include in the simulation.
+        only_combinations : list, optional
+            List of protein-ligand combinations to include.
+        ligand_templates : str, optional
+            Path to custom ligand templates for parameterization.
+        seed : int, optional, default=12345
+            Random seed for the simulation.
+        log_file : bool, optional, default=False
+            If True, enables logging to a file.
+        nonbonded_energy : dict, optional
+            Dictionary specifying nonbonded energy atoms for specific protein-ligand pairs.
+        nonbonded_energy_type : str, optional, default="all"
+            Type of nonbonded energy to calculate. Options: 'all', 'lennard_jones', 'electrostatic'.
+        nonbonded_new_flag : bool, optional, default=False
+            If True, uses the new version of nonbonded energy calculation.
+        covalent_setup : bool, optional, default=False
+            If True, sets up the simulation for covalently bound ligands.
+        covalent_base_aa : dict, optional
+            Dictionary specifying the amino acid residue involved in covalent binding for each ligand.
+        membrane_residues : dict, optional
+            Dictionary specifying membrane residues to apply specific constraints.
+        bias_to_point : dict, optional
+            Dictionary specifying biasing points in the system for specific models.
+        com_bias1 : dict, optional
+            First group of atoms for center-of-mass biasing.
+        com_bias2 : dict, optional
+            Second group of atoms for center-of-mass biasing.
+        epsilon : float, optional, default=0.5
+            Epsilon value used for biasing the center-of-mass distance.
+        rescoring : bool, optional, default=False
+            If True, performs a rescoring calculation.
+        ligand_equilibration_cst : bool, optional, default=True
+            If True, applies constraints during ligand equilibration.
+        regional_metrics : dict, optional
+            Metrics for regional spawning in adaptive sampling.
+        regional_thresholds : dict, optional
+            Thresholds for regional spawning metrics.
+        max_regional_iterations : int, optional
+            Maximum number of iterations for regional spawning.
+        regional_energy_bias : str, optional, default="Binding Energy"
+            Bias metric for regional spawning, either 'Total Energy' or 'Binding Energy'.
+        regional_best_fraction : float, optional, default=0.2
+            Fraction of the best-performing states selected in regional spawning.
+        constraint_level : int, optional, default=1
+            Level of constraints applied during the simulation (0 for none, 1 for basic).
+        restore_input_coordinates : bool, optional, default=True
+            If True, restores the original coordinates after PELE processing.
+
+        Returns
+        -------
+        list
+            A list of shell commands to run the PELE jobs.
+
+        Detailed input examples
+        -----------------------
+        com_group_1 : list of lists
+            A list containing atom definitions for the first group of atoms used in center-of-mass (COM) distance calculations.
+            Each atom is defined as a list with the following format:
+
+            [
+                [chain_id, residue_id, atom_name],
+                [chain_id, residue_id, atom_name],
+                ...
+            ]
+
+            Where:
+            - chain_id : str
+                The ID of the chain where the atom is located (e.g., 'A', 'B').
+            - residue_id : int
+                The residue number where the atom is located (e.g., 100).
+            - atom_name : str
+                The name of the atom (e.g., 'CA' for alpha carbon, 'O' for oxygen).
+
+            Example:
+            [
+                ["A", 100, "CA"],
+                ["A", 102, "CB"],
+                ["B", 150, "O"]
+            ]
+
+            In this example, the group includes:
+            - The alpha carbon atom (CA) of residue 100 in chain 'A'.
+            - The beta carbon atom (CB) of residue 102 in chain 'A'.
+            - The oxygen atom (O) of residue 150 in chain 'B'.
+
+        com_group_2 : list of lists
+            The format is identical to com_group_1 but represents the second group of atoms.
+            These two groups are used to calculate the center-of-mass distance between them.
         """
 
         # Flag for checking if continuation was given as True
@@ -6254,7 +6393,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
-
         os.system(command)
 
         # Read the CSV file into pandas
@@ -7432,7 +7570,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return models
 
-    def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
+    def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True, keep_pdbs=False):
         """
         Convert ligand PDBs into MAE files.
 
@@ -7442,7 +7580,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the folder where ligands are in PDB format
         """
 
-        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(ligands_folder, "PDBtoMAE.py")
         script_name = "._PDBtoMAE.py"
 
@@ -7451,10 +7588,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         command = "run ._PDBtoMAE.py"
         if change_ligand_name:
             command += " --change_ligand_name"
+        if keep_pdbs:
+            command += ' --keep_pdbs'
         os.system(command)
         os.chdir(cwd)
 
-    def convertLigandMAEtoPDB(self, ligands_folder):
+    def convertLigandMAEtoPDB(self, ligands_folder, change_ligand_name=True, modify_maes=False,
+                              assign_pdb_names=False):
         """
         Convert ligand MAEs into PDB files.
 
@@ -7464,14 +7604,38 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the folder where ligands are in MAE format
         """
 
+        if modify_maes:
+            keep_maes = True
+
+        if isinstance(change_ligand_name, dict):
+            with open(ligands_folder+'/ligand_names.json', 'w') as jf:
+                json.dump(change_ligand_name, jf)
+        elif isinstance(change_ligand_name, str):
+            if len(change_ligand_name) != 3:
+                raise ValueError('The ligand name should be three-letters long')
+
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(ligands_folder, "MAEtoPDB.py")
         script_name = "._MAEtoPDB.py"
 
         cwd = os.getcwd()
         os.chdir(ligands_folder)
-        os.system("run ._MAEtoPDB.py")
+        command = "run ._MAEtoPDB.py"
+        if isinstance(change_ligand_name, dict):
+            command += " --residue_names ligand_names.json"
+        elif isinstance(change_ligand_name, str):
+            command += " --residue_names "+change_ligand_name
+        if change_ligand_name:
+            command += " --change_ligand_name"
+        if modify_maes:
+            command += ' --modify_maes'
+        if assign_pdb_names:
+            command += ' --assign_pdb_names'
+        os.system(command)
         os.chdir(cwd)
+
+        if isinstance(change_ligand_name, dict):
+            os.remove(ligands_folder+'/ligand_names.json')
 
     def getDockingDistances(self, model, ligand):
         """
@@ -9781,7 +9945,6 @@ def _copyScriptFile(
         for l in script_file:
             sof.write(l)
 
-
 def _computeCartesianFromInternal(coord2, coord3, coord4, distance, angle, torsion):
     """
     Compute the cartesian coordinates for the i atom based on internal coordinates
@@ -9897,7 +10060,7 @@ def _getStructureCoordinates(
 
     return coordinates
 
-def _readRosettaScoreFile(score_file, indexing=False):
+def _readRosettaScoreFile(score_file, indexing=False, skip_empty=False):
     """
     Reads a Rosetta score file and returns a DataFrame of the scores.
 
@@ -9917,7 +10080,10 @@ def _readRosettaScoreFile(score_file, indexing=False):
         lines = [x.strip() for x in sf if x.startswith("SCORE:")]
 
     if len(lines) < 2:
-        raise ValueError("The score file does not contain enough data.")
+        if not skip_empty:
+            raise ValueError("The score file does not contain enough data.")
+        else:
+            return None
 
     score_terms = lines[0].split()[1:]  # Get the terms excluding the initial "SCORE:"
     scores = {term: [] for term in score_terms}
