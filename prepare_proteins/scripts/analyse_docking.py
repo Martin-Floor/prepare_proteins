@@ -203,13 +203,27 @@ for model in sorted(mae_output):
                     ligand_coordinates[pose_count] = {}
                     scores[pose_count] = st.property['r_i_glide_gscore']
 
+                    element_count = {}
                     for atom in st.atom:
                         residue = atom.getResidue()
                         chain = residue.chain
                         residue_id = residue.resnum
-                        atom_name = atom.pdbname.replace(' ','')
+
+                        # Use PDB name
+                        atom_name = atom.pdbname.replace(' ', '')
+                        if atom_name == '':
+                            # Use atom name
+                            atom_name = atom.name
+
+                        # Assing atom names
+                        if atom_name == '':
+                            element_count.setdefault(atom.element, 0)
+                            element_count[atom.element] += 1
+                            atom.name = atom.element+str(element_count[atom.element])
+                            atom_name = atom.name
+
                         xyz = atom.xyz
-                        ligand_coordinates[pose_count][chain, residue_id, atom_name] = xyz
+                        ligand_coordinates[pose_count][(chain, residue_id, atom_name)] = xyz
 
                     if pose_count == 1:
                         reference_coordinates = [ligand_coordinates[pose_count][a] for a in ligand_coordinates[pose_count]]
@@ -273,19 +287,18 @@ for model in sorted(mae_output):
                         assert len(angle_data[label]) == len(angle_data['Pose'])
 
                 # Pending for an example
-                # if protein_atoms:
-                #     for i,atoms in enumerate(protein_atoms[model][ligand]):
-                #         atoms, coordinates, labels = getAtomCoordinates(atoms, protein_coordinates, ligand_coordinates[pose])
-                #         pa_coordinates = np.array([coordinates[a] for a in atoms])
-                #         l_coordinates = # missing an example to continue
-                #
-                        # Old implementation
-                #         M = distance_matrix(p_coordinates, c_coordinates)
-                #         data["Closest distance"].append(np.amin(M))
-                #         data["Closest atom"].append(atom_names[np.where(M == np.amin(M))[1][0]])
+                if protein_atoms:
+                    atoms, coordinates, labels = getAtomCoordinates(protein_atoms[model][ligand], protein_coordinates, ligand_coordinates[pose])
+                    p_coordinates = np.array([coordinates[tuple(a)] for a in protein_atoms[model][ligand]])
+                    l_coordinates = np.array([ligand_coordinates[pose][a] for a in  ligand_coordinates[pose]])
+                    atom_names = [a[-1] for a in ligand_coordinates[pose]]
+
+                    # Old implementation
+                    M = distance_matrix(p_coordinates, l_coordinates)
+                    data["Closest distance"].append(np.amin(M))
+                    data["Closest atom"].append(atom_names[np.where(M == np.amin(M))[1][0]])
 
             # Create dataframes
-
             csv_name = model+separator+ligand+'.csv'
             if atom_pairs:
                 distance_data = pd.DataFrame(distance_data)
