@@ -6393,6 +6393,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
+        print(command)
         os.system(command)
 
         # Read the CSV file into pandas

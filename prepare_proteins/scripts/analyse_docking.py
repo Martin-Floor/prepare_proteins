@@ -39,7 +39,7 @@ def RMSD(ref_coord, curr_coord):
 def computeLigandSASA(ligand_structure, protein_structure):
 
     ligand_atoms = []
-    for atom in ligand_structure.atoms:
+    for atom in ligand_structure.atom:
         ligand_atoms.append(atom)
     structure = ligand_structure.extend(protein_structure)
     return schrodinger.structutils.analyze.calculate_sasa(structure, atoms=ligand_atoms)
