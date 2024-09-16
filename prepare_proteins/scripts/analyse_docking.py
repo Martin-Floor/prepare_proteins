@@ -2,7 +2,9 @@ import os
 import numpy as np
 import pandas as pd
 from scipy.spatial import distance_matrix
-from schrodinger import structure, structutils
+from schrodinger import structure
+from schrodinger.structutils import analyze
+
 import argparse
 import json
 
@@ -42,7 +44,7 @@ def computeLigandSASA(ligand_structure, protein_structure):
     for atom in ligand_structure.atom:
         ligand_atoms.append(atom)
     structure = ligand_structure.extend(protein_structure)
-    return structutils.analyze.calculate_sasa(structure, atoms=ligand_atoms)
+    return analyze.calculate_sasa(structure, atoms=ligand_atoms)
 
 def getAtomCoordinates(atoms, protein_coordinates, ligand_coordinates):
 
