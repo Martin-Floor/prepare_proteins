@@ -6393,7 +6393,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         command += " --separator " + separator
         if only_models:
             command += " --only_models " + ",".join(only_models)
-        else
+        else:
             command += " --only_models " + ",".join(self.models_names)
         command += " --only_models " + ",".join(self.models_names   else
         if overwrite:
