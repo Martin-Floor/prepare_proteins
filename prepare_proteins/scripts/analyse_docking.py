@@ -44,7 +44,7 @@ def computeLigandSASA(ligand_structure, protein_structure):
     for atom in ligand_structure.atom:
         ligand_atoms.append(atom)
     ligand_structure.extend(protein_structure)
-    return structutils.analyze.calculate_sasa(ligand_structure, atoms=ligand_atoms)
+    return analyze.calculate_sasa(ligand_structure, atoms=ligand_atoms)
 
 def getAtomCoordinates(atoms, protein_coordinates, ligand_coordinates):
 
