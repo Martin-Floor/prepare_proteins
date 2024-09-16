@@ -36,6 +36,14 @@ def RMSD(ref_coord, curr_coord):
     rmsd = np.sqrt(np.sum(sq_distances)/ref_coord.shape[0])
     return rmsd
 
+def computeLigandSASA(ligand_structure, protein_structure):
+
+    ligand_atoms = []
+    for atom in ligand_structure.atoms:
+        ligand_atoms.append(atom)
+    structure = ligand_structure.extend(protein_structure)
+    return schrodinger.structutils.analyze.calculate_sasa(structure, atoms=ligand_atoms)
+
 def getAtomCoordinates(atoms, protein_coordinates, ligand_coordinates):
 
     atoms_formated = []
@@ -151,6 +159,8 @@ data["Ligand"] = []
 data["Pose"] = []
 data["Score"] = []
 data['RMSD'] = []
+data['SASA'] = []
+
 if protein_atoms:
     data["Closest distance"] = []
     data["Closest atom"] = []
@@ -178,6 +188,7 @@ for model in sorted(mae_output):
             protein_coordinates = {}
             ligand_coordinates = {}
             scores = {}
+            sasa = {}
 
             # Get coordinates and scores for docked poses
             for st in structure.StructureReader(mae_output[model][ligand]):
@@ -185,6 +196,7 @@ for model in sorted(mae_output):
                 # Get protein structure
                 if 'r_i_glide_gscore' not in st.property:
 
+                    protein_structure = st
                     # Get protein coordinates
                     for atom in st.atom:
                         residue = atom.getResidue()
@@ -202,6 +214,7 @@ for model in sorted(mae_output):
                     # Get protein coordinates
                     ligand_coordinates[pose_count] = {}
                     scores[pose_count] = st.property['r_i_glide_gscore']
+                    sasa[pose_count] = computeLigandSASA(st, protein_structure)
 
                     element_count = {}
                     for atom in st.atom:
@@ -237,6 +250,7 @@ for model in sorted(mae_output):
                 data["Ligand"].append(ligand)
                 data["Pose"].append(pose)
                 data["Score"].append(scores[pose])
+                data["SASA"].append(sasa[pose])
 
                 # Compute RMSD
                 pose_coordinates = [ligand_coordinates[pose][a] for a in ligand_coordinates[pose]]
