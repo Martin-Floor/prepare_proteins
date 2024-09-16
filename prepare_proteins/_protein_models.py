@@ -6314,6 +6314,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         ignore_hydrogens=False,
         separator="-",
         overwrite=True,
+        only_models=None,
         output_folder='.analysis',
     ):
         """
@@ -6378,6 +6379,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
                 json.dump(protein_atoms, jf)
 
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
         # Write atom_pairs dictionary to json file
         if atom_pairs:
             with open(docking_folder + '/'+output_folder+"/._atom_pairs.json", "w") as jf:
@@ -6411,7 +6415,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         if ignore_hydrogens:
             command += " --ignore_hydrogens"
         command += " --separator " + separator
-        command += " --only_models " + ",".join(self.models_names)
+        if only_models:
+            command += " --only_models " + ",".join(only_models)
+        else:
+            command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
         os.system(command)
