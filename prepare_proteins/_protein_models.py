@@ -6293,6 +6293,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         ignore_hydrogens=False,
         separator="-",
         overwrite=True,
+        only_models=None,
         output_folder='.analysis',
     ):
         """
@@ -6390,10 +6391,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         if ignore_hydrogens:
             command += " --ignore_hydrogens"
         command += " --separator " + separator
-        command += " --only_models " + ",".join(self.models_names)
+        if only_models:
+            command += " --only_models " + ",".join(only_models)
+        else
+            command += " --only_models " + ",".join(self.models_names)
+        command += " --only_models " + ",".join(self.models_names   else
         if overwrite:
             command += " --overwrite "
-        print(command)
         os.system(command)
 
         # Read the CSV file into pandas
