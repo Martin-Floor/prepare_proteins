@@ -4396,6 +4396,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         bias_to_point=None,
         com_bias1=None,
         com_bias2=None,
+        com_residue_pairs={},
         epsilon=0.5,
         rescoring=False,
         ligand_equilibration_cst=True,
@@ -4651,6 +4652,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError(
                 "You must give both COM atom groups to apply a COM distance bias."
             )
+
+        if isinstance(com_residue_pairs, type(None)):
+            com_residue_pairs = {}
 
         # Create PELE job folder
         if not os.path.exists(pele_folder):
@@ -5081,6 +5085,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 membrane_residues,
                                 bias_to_point,
                                 com_bias1,
+                                com_residue_pairs,
                                 ligand_equilibration_cst,
                                 regional_spawning,
                                 constraint_level,
@@ -5228,6 +5233,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if protein in com_bias1:
                         _copyScriptFile(pele_folder, "addComDistancesBias.py")
                         cbs_script = "._addComDistancesBias.py"
+
+                    if protein in com_residue_pairs:
+                        _copyScriptFile(pele_folder, "addComDistances.py")
+                        cds_script = "._addComDistances.py"
 
                     if peptide:
                         _copyScriptFile(pele_folder, "modifyPelePlatformForPeptide.py")
@@ -5400,6 +5409,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += "._com_group1.json "
                             command += "._com_group2.json "
                             command += "--epsilon " + str(epsilon) + "\n"
+                            continuation = True
+
+                        if protein in com_residue_pairs and ligand in com_residue_pairs[protein]:
+                            # Write COM groups as json file
+                            with open(
+                                protein_ligand_folder + "/._com_groups.json", "w"
+                            ) as jf:
+                                json.dump(com_residue_pairs[protein][ligand], jf)
+
+                            command += "python " + rel_path_to_root + cds_script + " "
+                            command += "output "  # I think we should change this for a variable
+                            command += "._com_groups.json "
                             continuation = True
 
                         if covalent_setup:
@@ -7989,6 +8010,77 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 self.docking_data["metric_" + name] = values
 
+    def plotDockingData(self):
+        """
+        Generates an interactive scatter plot for docking data, allowing users to select
+        the protein, ligand, and columns for the X and Y axes.
+
+        The method assumes the docking data is a Pandas DataFrame stored in `self.docking_data`
+        with a MultiIndex (Protein, Ligand, Pose) and numeric columns (Score, RMSD, Closest distance).
+
+        The function creates interactive widgets to select a specific protein, ligand, and which
+        numeric columns to plot on the X and Y axes.
+
+        Returns:
+            An interactive scatter plot that updates based on widget selections.
+        """
+
+        # Subfunction to handle filtering and plotting
+        def scatter_plot(protein, ligand, x_axis, y_axis):
+            """
+            Subfunction to plot the scatter plot for the selected protein and ligand.
+
+            Args:
+                protein (str): Selected protein sequence.
+                ligand (str): Selected ligand.
+                x_axis (str): The column name for the X-axis.
+                y_axis (str): The column name for the Y-axis.
+            """
+            # Filter the data based on selected Protein and Ligand
+            filtered_df = df.loc[(protein, ligand)]
+
+            # Plotting the scatter plot for the selected X and Y axes
+            plt.figure(figsize=(8, 6))
+            plt.scatter(filtered_df[x_axis], filtered_df[y_axis], color='blue')
+            plt.title(f'Scatter Plot for {protein} - {ligand}')
+            plt.xlabel(x_axis)
+            plt.ylabel(y_axis)
+            plt.grid(True)
+            plt.show()
+
+        # Get the docking data from the object's attribute
+        df = self.docking_data
+
+        # Create dropdown widgets for selecting the Protein, Ligand, X-axis, and Y-axis columns
+        protein_dropdown = widgets.Dropdown(
+            options=df.index.levels[0],  # Options for Protein selection
+            description='Protein'        # Label for the dropdown
+        )
+
+        ligand_dropdown = widgets.Dropdown(
+            options=df.index.levels[1],  # Options for Ligand selection
+            description='Ligand'         # Label for the dropdown
+        )
+
+        x_axis_dropdown = widgets.Dropdown(
+            options=df.columns,          # Options for selecting the X-axis (numeric columns)
+            description='X-axis'         # Label for the dropdown
+        )
+
+        y_axis_dropdown = widgets.Dropdown(
+            options=df.columns,          # Options for selecting the Y-axis (numeric columns)
+            description='Y-axis'         # Label for the dropdown
+        )
+
+        # Create an interactive widget that dynamically updates the plot based on selections
+        interact(
+            scatter_plot,
+            protein=protein_dropdown,
+            ligand=ligand_dropdown,
+            x_axis=x_axis_dropdown,
+            y_axis=y_axis_dropdown
+        )
+
     def getBestDockingPoses(
         self,
         filter_values,
@@ -8056,7 +8148,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     if metric not in ["Score", "RMSD"]:
                         # Add prefix if not given
-                        if not metric.startswith("metric_"):
+                        if not metric.startswith("metric_") and not metric == 'Closest distance':
                             metric_label = "metric_" + metric
                         else:
                             metric_label = metric

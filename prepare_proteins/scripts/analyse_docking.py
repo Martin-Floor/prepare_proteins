@@ -165,7 +165,8 @@ data['SASA'] = []
 
 if protein_atoms:
     data["Closest distance"] = []
-    data["Closest atom"] = []
+    data["Closest ligand atom"] = []
+    data["Closest protein atom"] = []
 
 index_count = 0
 
@@ -307,12 +308,15 @@ for model in sorted(mae_output):
                     atoms, coordinates, labels = getAtomCoordinates(protein_atoms[model][ligand], protein_coordinates, ligand_coordinates[pose])
                     p_coordinates = np.array([coordinates[tuple(a)] for a in protein_atoms[model][ligand]])
                     l_coordinates = np.array([ligand_coordinates[pose][a] for a in  ligand_coordinates[pose]])
-                    atom_names = [a[-1] for a in ligand_coordinates[pose]]
+                    ligand_atom_names = [a[-1] for a in ligand_coordinates[pose]]
+                    protein_atom_names = [a for a in protein_atoms[model][ligand]]
 
                     # Old implementation
                     M = distance_matrix(p_coordinates, l_coordinates)
                     data["Closest distance"].append(np.amin(M))
-                    data["Closest atom"].append(atom_names[np.where(M == np.amin(M))[1][0]])
+                    data["Closest ligand atom"].append(ligand_atom_names[np.where(M == np.amin(M))[1][0]])
+                    data["Closest protein atom"].append(protein_atom_names[np.where(M == np.amin(M))[0][0]])
+
 
             # Create dataframes
             csv_name = model+separator+ligand+'.csv'
