@@ -7819,9 +7819,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 self.models_data["metric_" + name] = values
 
-        self.models_data = pd.DataFrame(self.models_data)
-        print(self.models_data)
-        self.models_data.set_index("model", inplace=True)
+        if isinstance(self.models_data, dict):
+            self.models_data = pd.DataFrame(self.models_data)
+            self.models_data.set_index("model", inplace=True)
 
         return self.models_data
 
