@@ -6303,6 +6303,157 @@ make sure of reading the target sequences with the function readTargetSequences(
                         + "/npt/prot_npt_10_no_water.gro"
                     )
 
+    def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
+                               add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None,
+                               extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
+                               nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
+                               restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
+                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None):
+        """
+        Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
+        Includes support for multiple replicas.
+
+        Parameters:
+        - job_folder (str): Path to the folder where the simulations will be set up.
+        - replicas (int): The number of replicas to generate for each model.
+        - simulation_time (float): Total simulation time in ns (mandatory).
+        - ligand_charges (dict, optional): Dictionary of ligand charges to apply during parameterization.
+        - residue_names (dict, optional): Dictionary of residue names to rename for each model. Format: {'model': {(chain, resnum): 'new_resname'}}.
+        - ff (str): Force field to use for the simulations (default is 'amber14').
+        - add_bonds (dict, optional): Dictionary of bonds to be added between atoms for each model.
+        - skip_ligands (list, optional): List of ligand residue names to skip during parameterization.
+        - metal_ligand (optional): Specify metal-ligand interactions if applicable.
+        - metal_parameters (optional): Additional parameters for metals.
+        - extra_frcmod (optional): Extra force field modifications.
+        - extra_mol2 (optional): Extra mol2 files for ligand parameterization.
+        - dcd_report_time (float): The DCD report interval in ps.
+        - data_report_time (float): The data report interval in ps.
+        - nvt_time (float): The NVT equilibration time in ns.
+        - npt_time (float): The NPT equilibration time in ns.
+        - nvt_temp_scaling_steps (int): The number of iterations for NVT temperature scaling.
+        - npt_restraint_scaling_steps (int): The number of iterations for NPT restraint scaling.
+        - restraint_constant (float): Force constant for positional restraints (kcal/mol/Å²).
+        - chunk_size (float): The chunk size for output report files (data and dcd) in ns.
+        - equilibration_report_time (float): The report interval for equilibration steps in ps.
+        - temperature (float): The temperature for the simulation (K).
+        - collision_rate (float): The collision rate for the Langevin integrator (1/ps).
+        - time_step (float): The simulation time step (ps).
+        - cuda (bool): Whether to use CUDA for GPU acceleration.
+        - fixed_seed (int, optional): A fixed seed for the simulation, if provided.
+        - script_file (str, optional): Path to the OpenMM simulation script.
+
+        """
+
+        def setUpJobs(job_folder, openmm_md, script_file, simulation_time=simulation_time, dcd_report_time=dcd_report_time,
+                      data_report_time=data_report_time, nvt_time=nvt_time, npt_time=npt_time,
+                      nvt_temp_scaling_steps=nvt_temp_scaling_steps, npt_restraint_scaling_steps=npt_restraint_scaling_steps,
+                      restraint_constant=restraint_constant, chunk_size=chunk_size,
+                      equilibration_report_time=equilibration_report_time, temperature=temperature,
+                      collision_rate=collision_rate, time_step=time_step, cuda=cuda, fixed_seed=fixed_seed):
+            """
+            Subfunction to set up individual OpenMM simulation jobs with inherited parameters.
+            """
+            if not os.path.exists(os.path.join(job_folder, 'input_files')):
+                os.makedirs(os.path.join(job_folder, 'input_files'))
+
+            prmtop_name = os.path.basename(openmm_md.prmtop_file)
+            inpcrd_name = os.path.basename(openmm_md.inpcrd_file)
+
+            shutil.copyfile(openmm_md.prmtop_file, os.path.join(job_folder, 'input_files', prmtop_name))
+            shutil.copyfile(openmm_md.inpcrd_file, os.path.join(job_folder, 'input_files', inpcrd_name))
+            script = os.path.basename(script_file)
+            shutil.copyfile(script_file, os.path.join(job_folder, script))
+
+            jobs = []
+            command = ''
+            if not fixed_seed:
+                command += f'SEED=$(($SLURM_JOB_ID + $RANDOM % 100000))\n'
+            else:
+                command += f'SEED=' + str(fixed_seed) + '\n'
+            command += 'echo employed seed: $SEED\n'
+            command += f'cd {job_folder}\n'
+            command += f'python {script} '
+            command += f'input_files/{prmtop_name} '
+            command += f'input_files/{inpcrd_name} '
+            command += f'{simulation_time} '
+            command += f'--dcd_report_time {dcd_report_time} '
+            command += f'--data_report_time {data_report_time} '
+            command += f'--nvt_time {nvt_time} '
+            command += f'--npt_time {npt_time} '
+            command += f'--nvt_temp_scaling_steps {nvt_temp_scaling_steps} '
+            command += f'--npt_restraint_scaling_steps {npt_restraint_scaling_steps} '
+            command += f'--restraint_constant {restraint_constant} '
+            command += f'--chunk_size {chunk_size} '
+            command += f'--equilibration_report_time {equilibration_report_time} '
+            command += f'--temperature {temperature} '
+            command += f'--collision_rate {collision_rate} '
+            command += f'--time_step {time_step} '
+            command += f'--seed $SEED '
+            command += '\n'
+            command += f'cd {"../" * len(job_folder.split(os.sep))}\n'
+            jobs.append(command)
+
+            return jobs
+
+        # Create the base job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        self.openmm_md = {}  # Dictionary to hold openmm_md instances for each model
+
+        ligand_parameters_folder = os.path.join(job_folder, 'parameters')
+        if not os.path.exists(ligand_parameters_folder):
+            os.mkdir(ligand_parameters_folder)
+
+        script_folder = os.path.join(job_folder, 'scripts')
+        if not os.path.exists(script_folder):
+            os.mkdir(script_folder)
+
+        if not script_file:
+            _copyScriptFile(script_folder, "openmm_simulation.py", subfolder='md/openmm', hidden=False)
+            script_file = script_folder + '/openmm_simulation.py'
+
+        # Iterate over all models
+        simulation_jobs = []
+        for model in self:
+            model_folder = os.path.join(job_folder, model)
+
+            # Create a subdirectory for the model if it doesn't exist
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            # Generate OpenMM class for setting up calculations
+            self.openmm_md[model] = prepare_proteins.MD.openmm_md(self.models_paths[model])
+            self.openmm_md[model].setUpFF(ff)  # Define the force field
+
+            # Get and set protonation states
+            variants = self.openmm_md[model].getProtonationStates()
+            self.openmm_md[model].removeHydrogens()
+            self.openmm_md[model].addHydrogens(variants=variants)
+
+            # Parameterize ligands and build amber topology
+            qm_jobs = self.openmm_md[model].parameterizePDBLigands(
+                ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
+                add_bonds=add_bonds.get(model) if add_bonds else None,  # Use model-specific bond additions
+                skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
+                extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
+                force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
+                add_counterions=False, save_amber_pdb=True, solvate=True, regenerate_amber_files=True
+            )
+
+            # Create folders for replicas
+            for replica in range(1, replicas+1):
+                replica_str = str(replica).zfill(len(str(replicas)))
+                replica_folder = os.path.join(model_folder, f'replica_{replica_str}')
+
+                if not os.path.exists(replica_folder):
+                    os.mkdir(replica_folder)
+
+                # Call the subfunction to set up the individual simulation for each replica
+                simulation_jobs += setUpJobs(replica_folder, self.openmm_md[model], script_file)
+
+        return simulation_jobs
+
     def analyseDocking(
         self,
         docking_folder,
