@@ -6304,7 +6304,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     )
 
     def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
-                               add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None,
+                               add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
                                extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
@@ -6443,6 +6443,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Create folders for replicas
             for replica in range(1, replicas+1):
+
+                if not isinstance(skip_replicas, type(None)) and replica in skip_replicas:
+                    continue
+
                 replica_str = str(replica).zfill(len(str(replicas)))
                 replica_folder = os.path.join(model_folder, f'replica_{replica_str}')
 
@@ -6464,7 +6468,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return_failed=False,
         ignore_hydrogens=False,
         separator="-",
-        overwrite=True,
+        overwrite=False,
         only_models=None,
         output_folder='.analysis',
     ):
@@ -6572,6 +6576,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
+        print(command)
         os.system(command)
 
         # Read the CSV file into pandas
