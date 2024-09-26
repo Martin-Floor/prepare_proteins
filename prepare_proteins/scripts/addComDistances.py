@@ -11,7 +11,12 @@ args=parser.parse_args()
 
 pele_output = args.pele_output
 with open(args.com_groups) as jf:
-    com_groups = json.load(jf)
+    js_com_groups = json.load(jf)
+
+com_groups = []
+
+for group in js_com_groups:
+    com_groups.append((tuple(group[0]), tuple(group[1])))
 
 # Get atom names dictionary
 parser = PDB.PDBParser()
@@ -50,6 +55,7 @@ pele_tasks = json_conf['commands'][0]['PeleTasks'][0]['metrics']
 for group in com_groups:
     task = {}
     task['type'] = 'com_distance'
+    task['tag'] = 'distance_'+group[1][0]+str(group[1][1])+'_'+group[0][0]+str(group[0][1])
     task['selection_group_1'] = {}
     task['selection_group_2'] = {}
     task['selection_group_1']['atoms'] = {}

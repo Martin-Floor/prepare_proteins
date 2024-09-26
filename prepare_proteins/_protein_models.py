@@ -5420,7 +5420,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                             command += "python " + rel_path_to_root + cds_script + " "
                             command += "output "  # I think we should change this for a variable
-                            command += "._com_groups.json "
+                            command += "._com_groups.json\n"
                             continuation = True
 
                         if covalent_setup:
