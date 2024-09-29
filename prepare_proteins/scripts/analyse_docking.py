@@ -123,11 +123,11 @@ for model in os.listdir(docking_folder+'/output_models'):
                     raise ValueError('The separator %s was found in ligand name %s. Please use a different one!' % (separator, ligand))
 
                 # Check that the CSV distance files exists
-                distance_csv_name = model+separator+ligand+'.csv'
-                if not os.path.exists(docking_folder+'/.analysis/atom_pairs/'+distance_csv_name) or overwrite:
-                    mae_output[model][ligand] = docking_folder+'/output_models/'+model+'/'+f
-                else:
-                    mae_output[model][ligand] = None
+                # distance_csv_name = model+separator+ligand+'.csv'
+                # if not os.path.exists(docking_folder+'/.analysis/atom_pairs/'+distance_csv_name) or overwrite:
+                mae_output[model][ligand] = docking_folder+'/output_models/'+model+'/'+f
+                # else:
+                    # mae_output[model][ligand] = None
 
 # Get failed models
 failed_count = 0
@@ -158,43 +158,60 @@ if return_failed:
     with open(docking_folder+'/.analysis/._failed_dockings.json', 'w') as fdjof:
         json.dump(failed_dockings, fdjof)
 
-data = {}
-data["Protein"] = []
-data["Ligand"] = []
-data["Pose"] = []
-data["Score"] = []
-data['RMSD'] = []
-data['SASA'] = []
-
-if protein_atoms:
-    data["Closest distance"] = []
-    data["Closest ligand atom"] = []
-    data["Closest protein atom"] = []
-
-index_count = 0
-
 # Calculate and add scores
-c = 0
+skip_scores = True
+skip_distances = True
+skip_angles = True
+
 for model in sorted(mae_output):
 
     for ligand in sorted(mae_output[model]):
 
-        if not mae_output[model][ligand]:
-            c+=1
+        csv_name = model+separator+ligand+'.csv'
+        scores_csv = docking_folder+'/.analysis/scores/'+csv_name
+        distance_csv = docking_folder+'/.analysis/atom_pairs/'+csv_name
+        angles_csv = docking_folder+'/.analysis/angles/'+csv_name
+
+        if not os.path.exists(scores_csv) or overwrite:
+            skip_scores = False
+
+        if atom_pairs and not os.path.exists(distance_csv) or overwrite:
+            skip_distances = False
+
+        if angles and not os.path.exists(angles_csv) or overwrite:
+            skip_angles = False
+
+        if skip_scores and skip_distances and skip_angles:
             continue
 
         print(' '*20, end='\r')
-        print(f'Processing model {model} and ligand {ligand}', end='\r')
+        print(f'Processing model {model} and ligand {ligand}', end='\n')
 
-        distance_data = {}
-        distance_data["Protein"] = []
-        distance_data["Ligand"] = []
-        distance_data["Pose"] = []
+        if not skip_scores:
+            data = {}
+            data["Protein"] = []
+            data["Ligand"] = []
+            data["Pose"] = []
+            data["Score"] = []
+            data['RMSD'] = []
+            data['SASA'] = []
 
-        angle_data = {}
-        angle_data["Protein"] = []
-        angle_data["Ligand"] = []
-        angle_data["Pose"] = []
+            if protein_atoms:
+                data["Closest distance"] = []
+                data["Closest ligand atom"] = []
+                data["Closest protein atom"] = []
+
+        if not skip_distances:
+            distance_data = {}
+            distance_data["Protein"] = []
+            distance_data["Ligand"] = []
+            distance_data["Pose"] = []
+
+        if not skip_angles:
+            angle_data = {}
+            angle_data["Protein"] = []
+            angle_data["Ligand"] = []
+            angle_data["Pose"] = []
 
         pose_count = 0
 
@@ -210,6 +227,7 @@ for model in sorted(mae_output):
             if 'r_i_glide_gscore' not in st.property:
 
                 protein_structure = st
+
                 # Get protein coordinates
                 for atom in st.atom:
                     residue = atom.getResidue()
@@ -258,21 +276,22 @@ for model in sorted(mae_output):
         # Analyse docking and store data
         for pose in ligand_coordinates:
 
-            # Store data
-            data["Protein"].append(model)
-            data["Ligand"].append(ligand)
-            data["Pose"].append(pose)
-            data["Score"].append(scores[pose])
-            data["SASA"].append(sasa[pose])
+            if not skip_scores:
+                # Store data
+                data["Protein"].append(model)
+                data["Ligand"].append(ligand)
+                data["Pose"].append(pose)
+                data["Score"].append(scores[pose])
+                data["SASA"].append(sasa[pose])
 
-            # Compute RMSD
-            pose_coordinates = [ligand_coordinates[pose][a] for a in ligand_coordinates[pose]]
-            pose_coordinates = np.array(pose_coordinates)
-            rmsd = RMSD(reference_coordinates, pose_coordinates)
-            data["RMSD"].append(rmsd)
+                # Compute RMSD
+                pose_coordinates = [ligand_coordinates[pose][a] for a in ligand_coordinates[pose]]
+                pose_coordinates = np.array(pose_coordinates)
+                rmsd = RMSD(reference_coordinates, pose_coordinates)
+                data["RMSD"].append(rmsd)
 
             # Compute distances
-            if atom_pairs:
+            if atom_pairs and not skip_distances:
 
                 # Store data
                 distance_data["Protein"].append(model)
@@ -291,7 +310,7 @@ for model in sorted(mae_output):
                     distance_data[label].append(distance)
                     assert len(distance_data[label]) == len(distance_data['Pose'])
 
-            if angles:
+            if angles and not skip_angles:
 
                 # Store data
                 angle_data["Protein"].append(model)
@@ -314,7 +333,7 @@ for model in sorted(mae_output):
                     assert len(angle_data[label]) == len(angle_data['Pose'])
 
             # Pending for an example
-            if protein_atoms:
+            if protein_atoms and not skip_scores:
                 atoms, coordinates, labels = getAtomCoordinates(protein_atoms[model][ligand], protein_coordinates, ligand_coordinates[pose])
                 p_coordinates = np.array([coordinates[tuple(a)] for a in protein_atoms[model][ligand]])
                 l_coordinates = np.array([ligand_coordinates[pose][a] for a in  ligand_coordinates[pose]])
@@ -327,19 +346,21 @@ for model in sorted(mae_output):
                 data["Closest ligand atom"].append(ligand_atom_names[np.where(M == np.amin(M))[1][0]])
                 data["Closest protein atom"].append(protein_atom_names[np.where(M == np.amin(M))[0][0]])
 
+
         # Create dataframes
         csv_name = model+separator+ligand+'.csv'
-        if atom_pairs:
+
+        if  not skip_scores:
+            data = pd.DataFrame(data)
+            data.to_csv(docking_folder+'/.analysis/scores/'+csv_name, index=False)
+
+        if atom_pairs and not skip_distances:
             distance_data = pd.DataFrame(distance_data)
             distance_data.to_csv(docking_folder+'/.analysis/atom_pairs/'+csv_name, index=False)
-        if angles:
+
+        if angles and not skip_angles:
             angle_data = pd.DataFrame(angle_data)
             angle_data.to_csv(docking_folder+'/.analysis/angles/'+csv_name, index=False)
 
 print('\n')
 print('Finished processing models')
-
-csv_name = 'docking_data.csv'
-if not os.path.exists(docking_folder+'/.analysis/'+csv_name) or overwrite:
-    data = pd.DataFrame(data)
-    data.to_csv(docking_folder+'/.analysis/'+csv_name, index=False)
