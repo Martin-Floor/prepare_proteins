@@ -346,6 +346,15 @@ class openmm_md:
                     else:
                         residue.name = 'ASP'
 
+                elif residue.name == 'GLU':
+                    atoms = []
+                    for atom in residue.atoms():
+                        atoms.append(atom.name)
+                    if 'HE2' in atoms:
+                        residue.name = 'GLH'
+                    else:
+                        residue.name = 'GLU'
+
                 elif residue.name == 'CYS':
                     atoms = []
                     for atom in residue.atoms():
