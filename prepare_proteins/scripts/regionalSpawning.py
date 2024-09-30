@@ -590,7 +590,7 @@ while current_spawning <= max_spawnings:
         # Make here modification to the equilibration protocol
         with open(original_equilibration_yaml) as yf:
             for l in yf:
-                elif l.startswith('equilibration_steps:'):
+                if l.startswith('equilibration_steps:'):
                     l = f'equilibration_steps: {equilibration_steps}\n'
                 equilibration_yaml.write(l)
         equilibration_yaml.close()
@@ -601,7 +601,7 @@ while current_spawning <= max_spawnings:
 
         # Correct constraints
         command += 'python ../../._correctPositionalConstraints.py output '
-        command += "../0/"+protein_ligand+separator+pose+".pdb\n"
+        command += "../0/"+protein+separator+ligand+separator+pose+".pdb\n"
 
         if angles:
             # Get topology
