@@ -4409,7 +4409,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_energy_bias="Binding Energy",
         regional_best_fraction=0.2,
         constraint_level=1,
-        restore_input_coordinates=True
+        restore_input_coordinates=False
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -4528,8 +4528,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Fraction of the best-performing states selected in regional spawning.
         constraint_level : int, optional, default=1
             Level of constraints applied during the simulation (0 for none, 1 for basic).
-        restore_input_coordinates : bool, optional, default=True
-            If True, restores the original coordinates after PELE processing.
+        restore_input_coordinates : bool, optional, default=False
+            If True, restores the original coordinates after PELE processing (not working)
 
         Returns
         -------
@@ -5433,6 +5433,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += covalent_command
                     continuation = True
 
+                if restore_input_coordinates:
+                    command += "python "+ rel_path_to_root+restore_coordinates_script_name+" "
+                    command += "output/input/"+protein_ligand+separator+pose+".pdb "
+                    command += "output/input/"+protein_ligand+separator+pose+"_processed.pdb\n"
+                    continuation = True
+
                 if ligand_equilibration_cst:
 
                     # Copy input_yaml for equilibration
@@ -5502,14 +5508,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += (
                         "cp output/adaptive.conf.backup output/adaptive.conf\n"
                     )
-                    # Add commands for launching equilibration only
-
                     continuation = True
-
-                if restore_input_coordinates:
-                    command += "python "+ rel_path_to_root+restore_coordinates_script_name+" "
-                    command += "output/input/"+protein_ligand+separator+pose+".pdb "
-                    command += "output/input/"+protein_ligand+separator+pose+"_processed.pdb\n"
 
             if continuation:
                 debug_line = False
