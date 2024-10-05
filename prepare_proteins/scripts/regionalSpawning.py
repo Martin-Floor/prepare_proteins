@@ -80,7 +80,7 @@ def getSpawningEpochPaths(spawning_index):
             continue
     return {e:spawning_output_dir+'/'+str(e) for e in sorted(spawning_epochs_paths)}
 
-def getTotalEpochs():
+def getTotalEpochs(exclude_first=False):
     """
     Get the total number of epochs
     """
@@ -88,6 +88,8 @@ def getTotalEpochs():
     total_epochs = 0
     for spawning in getSpawningIndexes():
         total_epochs += len(getSpawningEpochPaths(spawning))
+        if exclude_first:
+            total_epochs -= 1
 
     return total_epochs
 
@@ -230,7 +232,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             angles = [d for d in metrics[m] if d.startswith('angle_')]
             if len(angles) > 1:
                 raise ValueError('Combining more than one angle into a metric is not currently supported.')
-            dataframe[m] = dataframe[angles].min(axis=1).tolist()
+            dataframe[m] = dataframe[angles].tolist()
 
     return metric_type
 
@@ -473,7 +475,7 @@ while current_spawning <= max_spawnings:
 
     # Check if max number of iterations has been reached
     if max_iterations:
-        total_iterations = getTotalEpochs()
+        total_iterations = getTotalEpochs(exclude_first=True)
         if total_iterations >= int(max_iterations):
             break
 
