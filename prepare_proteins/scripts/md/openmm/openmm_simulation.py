@@ -403,6 +403,7 @@ try:
 
             print(f'\tThe simulation will run for {npt_simulation_steps} steps with a time step of {time_step} ps ({npt_simulation_time / 1000} ns).')
             initial_restraint_constant = restraint_constant
+            dK = initial_restraint_constant / (npt_restraint_scaling_steps - 1)
             npt_start = current_time()
             for i in range(npt_restraint_scaling_steps):
                 t = i / (npt_restraint_scaling_steps - 1)

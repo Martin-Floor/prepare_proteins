@@ -415,6 +415,43 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if verbose:
                 print(f"Removed {count} from conect lines of model {model}")
 
+    def addCappingGroups(self, rosetta_style_caps=True, stdout=False, stderr=False):
+
+        # Manage stdout and stderr
+        if stdout:
+            stdout = None
+        else:
+            stdout = subprocess.DEVNULL
+
+        if stderr:
+            stderr = None
+        else:
+            stderr = subprocess.DEVNULL
+
+        if not os.path.exists('_capping_'):
+            os.mkdir('_capping_')
+
+        if not os.path.exists('_capping_/input_models'):
+            os.mkdir('_capping_/input_models')
+
+        if not os.path.exists('_capping_/output_models'):
+            os.mkdir('_capping_/output_models')
+
+        self.saveModels('_capping_/input_models')
+
+        _copyScriptFile('_capping_', "addCappingGroups.py")
+        command =  'run python3 _capping_/._addCappingGroups.py '
+        command += '_capping_/input_models/ '
+        command += '_capping_/output_models/ '
+        if rosetta_style_caps:
+            command += '--rosetta_style_caps '
+        subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
+
+        for f in os.listdir('_capping_/output_models'):
+            model = f.replace('.pdb', '')
+            self.readModelFromPDB(model, '_capping_/output_models/'+f, conect_update=False)
+        shutil.rmtree('_capping_')
+
     def removeCaps(self, models=None, remove_ace=True, remove_nma=True):
         """
         Remove caps from models.
@@ -590,10 +627,18 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         Renumber every PDB chain residues from 1 onward.
         """
 
-        for model in self:
-            for c in self.structures[model].get_chains():
-                for i, r in enumerate(c):
-                    r.id = (r.id[0], i + 1, r.id[2])
+        for m in self:
+            for model in self.structures[m]:
+                for c in model:
+                    residues = [r for r in c]
+                    chain_copy = PDB.Chain.Chain(c.id)
+                    for i, r in enumerate(residues):
+                        new_id = (r.id[0], i + 1, r.id[2])
+                        c.detach_child(r.id)
+                        r.id = new_id
+                        chain_copy.add(r)
+                    model.detach_child(c.id)
+                    model.add(chain_copy)
 
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
@@ -1702,6 +1747,8 @@ chain to use for each model with the chains option."
         rosetta_path=None,
         ca_constraint=False,
         ligand_chain=None,
+        hoh_to_wat=True,
+        pdb_output=False,
     ):
         """
         Set up minimizations using Rosetta FastRelax protocol.
@@ -1751,6 +1798,13 @@ chain to use for each model with the chains option."
             raise ValueError(
                 "To run relax with symmetry absolute rosetta path must be given to run make_symmdef_file.pl script."
             )
+
+        # Convert any water to WAT name
+        if hoh_to_wat:
+            for model in self:
+                for r in self.structures[model].get_residues():
+                    if r.id[0] == 'W':
+                        r.resname = 'WAT'
 
         if symmetry:
             for m in self.models_names:
@@ -1951,8 +2005,8 @@ has been carried out. Please run compareSequences() function before setting muta
             if not null:
                 protocol.append(relax)
 
-                # Set protocol
-                xml.setProtocol(protocol)
+            # Set protocol
+            xml.setProtocol(protocol)
 
             # Add scorefunction output
             xml.addOutputScorefunction(sfxn)
@@ -1966,11 +2020,16 @@ has been carried out. Please run compareSequences() function before setting muta
                 input_model = model + ".pdb"
 
             # Create options for minimization protocol
+            if pdb_output:
+                output_silent_file = None
+            else:
+                output_silent_file = model + "_relax.out"
+
             flags = rosettaScripts.flags(
                 "../../xml/" + model + "_relax.xml",
                 nstruct=nstruct,
                 s="../../input_models/" + input_model,
-                output_silent_file=model + "_relax.out",
+                output_silent_file=output_silent_file
             )
 
             # Add extra flags
@@ -1993,6 +2052,10 @@ has been carried out. Please run compareSequences() function before setting muta
                 if not os.path.exists(relax_folder + "/params"):
                     os.mkdir(relax_folder + "/params")
 
+                for r in self.structures[model].get_residues():
+                    if r.resname == 'NMA':
+                        _copyScriptFile(relax_folder+"/params", 'NMA.params', subfolder='rosetta_params', path='prepare_proteins', hidden=False)
+
                 if isinstance(param_files, str):
                     param_files = [param_files]
 
@@ -2002,6 +2065,7 @@ has been carried out. Please run compareSequences() function before setting muta
                     shutil.copyfile(param, relax_folder + "/params/" + param_name)
                     if not param_name.endswith(".params"):
                         patch_line += "../../params/" + param_name + " "
+
                 flags.addOption("in:file:extra_res_path", "../../params")
                 if patch_line != "":
                     flags.addOption("in:file:extra_patch_fa", patch_line)
@@ -6587,11 +6651,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += " --overwrite "
         os.system(command)
 
-        # Read the CSV file into pandas
-        if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
-            raise ValueError(
-                "Docking analysis failed. Check the ouput of the analyse_docking.py script."
-            )
+        # # Read the CSV file into pandas
+        # if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
+        #     raise ValueError(
+        #         "Docking analysis failed. Check the ouput of the analyse_docking.py script."
+        #     )
 
         # Read scores data
         scores_directory = docking_folder + '/'+output_folder+"/scores"
@@ -6602,7 +6666,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Read the CSV file into pandas
             self.docking_data.append(pd.read_csv(
-                distances_directory+'/'+f
+                scores_directory+'/'+f
             ))
 
         # Concatenate the list of DataFrames into a single DataFrame
@@ -10187,7 +10251,7 @@ def _saveStructureToPDB(
         io.save(output_file)
 
 def _copyScriptFile(
-    output_folder, script_name, no_py=False, subfolder=None, hidden=True
+    output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
 ):
     """
     Copy a script file from the prepare_proteins package.
@@ -10197,7 +10261,7 @@ def _copyScriptFile(
 
     """
     # Get script
-    path = "prepare_proteins/scripts"
+
     if subfolder != None:
         path = path + "/" + subfolder
 
