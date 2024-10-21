@@ -13,7 +13,8 @@ setuptools.setup(
     long_description_content_type="text/markdown",
     url="",
     packages=setuptools.find_packages(),
-    package_data = {'':['scripts/md/gromacs/ff/amber99sb-star-ildn/*','scripts/md/gromacs/ff/oplsaam/*','scripts/md/gromacs/mdp/*']},
+    package_data = {'':['scripts/md/gromacs/ff/amber99sb-star-ildn/*','scripts/md/gromacs/ff/oplsaam/*','scripts/md/gromacs/mdp/*',
+                        'rosetta_params/*']},
     include_package_data=True,
     classifiers=[
         "Programming Language :: Python :: 3",

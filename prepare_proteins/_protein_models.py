@@ -415,6 +415,43 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if verbose:
                 print(f"Removed {count} from conect lines of model {model}")
 
+    def addCappingGroups(self, rosetta_style_caps=True, stdout=False, stderr=False):
+
+        # Manage stdout and stderr
+        if stdout:
+            stdout = None
+        else:
+            stdout = subprocess.DEVNULL
+
+        if stderr:
+            stderr = None
+        else:
+            stderr = subprocess.DEVNULL
+
+        if not os.path.exists('_capping_'):
+            os.mkdir('_capping_')
+
+        if not os.path.exists('_capping_/input_models'):
+            os.mkdir('_capping_/input_models')
+
+        if not os.path.exists('_capping_/output_models'):
+            os.mkdir('_capping_/output_models')
+
+        self.saveModels('_capping_/input_models')
+
+        _copyScriptFile('_capping_', "addCappingGroups.py")
+        command =  'run python3 _capping_/._addCappingGroups.py '
+        command += '_capping_/input_models/ '
+        command += '_capping_/output_models/ '
+        if rosetta_style_caps:
+            command += '--rosetta_style_caps '
+        subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
+
+        for f in os.listdir('_capping_/output_models'):
+            model = f.replace('.pdb', '')
+            self.readModelFromPDB(model, '_capping_/output_models/'+f, conect_update=False)
+        shutil.rmtree('_capping_')
+
     def removeCaps(self, models=None, remove_ace=True, remove_nma=True):
         """
         Remove caps from models.
@@ -590,10 +627,18 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         Renumber every PDB chain residues from 1 onward.
         """
 
-        for model in self:
-            for c in self.structures[model].get_chains():
-                for i, r in enumerate(c):
-                    r.id = (r.id[0], i + 1, r.id[2])
+        for m in self:
+            for model in self.structures[m]:
+                for c in model:
+                    residues = [r for r in c]
+                    chain_copy = PDB.Chain.Chain(c.id)
+                    for i, r in enumerate(residues):
+                        new_id = (r.id[0], i + 1, r.id[2])
+                        c.detach_child(r.id)
+                        r.id = new_id
+                        chain_copy.add(r)
+                    model.detach_child(c.id)
+                    model.add(chain_copy)
 
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
@@ -1406,6 +1451,9 @@ chain to use for each model with the chains option."
             # Iterate each mutant
             for mutant in mutants[model]:
 
+                if not isinstance(mutants[model][mutant], list):
+                    raise ValueError('Mutations for a particular variant should be given as a list of tuples!')
+
                 # Create xml mutation (and minimization) protocol
                 xml = rosettaScripts.xmlScript()
                 protocol = []
@@ -1699,6 +1747,8 @@ chain to use for each model with the chains option."
         rosetta_path=None,
         ca_constraint=False,
         ligand_chain=None,
+        hoh_to_wat=True,
+        pdb_output=False,
     ):
         """
         Set up minimizations using Rosetta FastRelax protocol.
@@ -1748,6 +1798,13 @@ chain to use for each model with the chains option."
             raise ValueError(
                 "To run relax with symmetry absolute rosetta path must be given to run make_symmdef_file.pl script."
             )
+
+        # Convert any water to WAT name
+        if hoh_to_wat:
+            for model in self:
+                for r in self.structures[model].get_residues():
+                    if r.id[0] == 'W':
+                        r.resname = 'WAT'
 
         if symmetry:
             for m in self.models_names:
@@ -1805,11 +1862,11 @@ has been carried out. Please run compareSequences() function before setting muta
             if skip_finished:
                 # Check if model has already been calculated and finished
                 score_file = (
-                    relax_folder + "/output_models/" + model + "/" + model + "_relax.sc"
+                    relax_folder + "/output_models/" + model + "/" + model + "_relax.out"
                 )
                 if os.path.exists(score_file):
-                    scores = _readRosettaScoreFile(score_file)
-                    if scores.shape[0] >= nstruct:
+                    scores = _readRosettaScoreFile(score_file, skip_empty=True)
+                    if not isinstance(scores, type(None)) and scores.shape[0] >= nstruct:
                         continue
 
             if ca_constraint:
@@ -1948,8 +2005,8 @@ has been carried out. Please run compareSequences() function before setting muta
             if not null:
                 protocol.append(relax)
 
-                # Set protocol
-                xml.setProtocol(protocol)
+            # Set protocol
+            xml.setProtocol(protocol)
 
             # Add scorefunction output
             xml.addOutputScorefunction(sfxn)
@@ -1963,11 +2020,16 @@ has been carried out. Please run compareSequences() function before setting muta
                 input_model = model + ".pdb"
 
             # Create options for minimization protocol
+            if pdb_output:
+                output_silent_file = None
+            else:
+                output_silent_file = model + "_relax.out"
+
             flags = rosettaScripts.flags(
                 "../../xml/" + model + "_relax.xml",
                 nstruct=nstruct,
                 s="../../input_models/" + input_model,
-                output_silent_file=model + "_relax.out",
+                output_silent_file=output_silent_file
             )
 
             # Add extra flags
@@ -1990,6 +2052,10 @@ has been carried out. Please run compareSequences() function before setting muta
                 if not os.path.exists(relax_folder + "/params"):
                     os.mkdir(relax_folder + "/params")
 
+                for r in self.structures[model].get_residues():
+                    if r.resname == 'NMA':
+                        _copyScriptFile(relax_folder+"/params", 'NMA.params', subfolder='rosetta_params', path='prepare_proteins', hidden=False)
+
                 if isinstance(param_files, str):
                     param_files = [param_files]
 
@@ -1999,6 +2065,7 @@ has been carried out. Please run compareSequences() function before setting muta
                     shutil.copyfile(param, relax_folder + "/params/" + param_name)
                     if not param_name.endswith(".params"):
                         patch_line += "../../params/" + param_name + " "
+
                 flags.addOption("in:file:extra_res_path", "../../params")
                 if patch_line != "":
                     flags.addOption("in:file:extra_patch_fa", patch_line)
@@ -4396,6 +4463,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         bias_to_point=None,
         com_bias1=None,
         com_bias2=None,
+        com_residue_pairs={},
         epsilon=0.5,
         rescoring=False,
         ligand_equilibration_cst=True,
@@ -4405,30 +4473,169 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_energy_bias="Binding Energy",
         regional_best_fraction=0.2,
         constraint_level=1,
-        restore_input_coordinates=True, 
+        restore_input_coordinates=False,
         skip_connect_rewritting=False
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
-        protein ligand poses and creates input for a PELE platform set up run.
-
-        Constraints must be given for positional constraints as:
-        {(model1_name,ligand_name):[(springConstant,(chain_id, residue_id, atom_name)), ...], (model1_name,ligand_name):...}
-        And for distance constraints as:
-        {(model1_name,ligand_name):[(springConstant,distance,(chain1_id, residue1_id, atom_name1),(chain2_id, residue2_id, atom_name2)) ...], (model1_name,ligand_name):...}
-
+        protein-ligand poses and creates input files for a PELE simulation setup.
 
         Parameters
-        ==========
+        ----------
         pele_folder : str
-            Path to the folder where PELE calcualtions will be located
+            Path to the folder where PELE calculations will be located.
         models_folder : str
-            Path to input docking poses folder.
+            Path to the folder containing input docking poses.
         input_yaml : str
-            Path to the input YAML file to be used as template for all the runs.
-        ligand_energy_groups : dict
-            Additional groups to consider when doing energy by residue reports.
-        Missing!
+            Path to the input YAML file used as a template for all runs.
+        box_centers : dict, optional
+            Dictionary specifying the centers of the simulation box for each model.
+        distances : dict, optional
+            Distance constraints for the simulation. Format:
+            {model_name: [(chain1, residue1, atom1), (chain2, residue2, atom2)]}.
+        angles : dict, optional
+            Angular constraints for the simulation.
+        constraints : dict, optional
+            Positional and distance constraints for each model and ligand.
+        ligand_index : int, optional, default=1
+            Index of the ligand in the structure file.
+        box_radius : float, optional, default=10
+            Radius of the simulation box.
+        steps : int, optional, default=100
+            Number of simulation steps per iteration.
+        debug : bool, optional, default=False
+            If True, enables debug mode for the simulation.
+        iterations : int, optional, default=5
+            Number of iterations for the simulation.
+        cpus : int, optional, default=96
+            Number of CPUs to use for parallelization.
+        equilibration_steps : int, optional, default=100
+            Number of equilibration steps before the production run.
+        ligand_energy_groups : dict, optional
+            Additional groups to consider for energy by residue reports.
+        separator : str, optional, default="-"
+            Separator used in filenames between protein and ligand identifiers.
+        use_peleffy : bool, optional, default=True
+            If True, PELEffy will be used for ligand parameterization.
+        usesrun : bool, optional, default=True
+            If True, the PELE simulation will use srun for job submission.
+        energy_by_residue : bool, optional, default=False
+            If True, energy by residue will be calculated.
+        ebr_new_flag : bool, optional, default=False
+            If True, uses the new version of the energy by residue calculation.
+        ninety_degrees_version : bool, optional, default=False
+            If True, uses the 90 degrees version of PELE.
+        analysis : bool, optional, default=False
+            If True, enables analysis mode after the simulation.
+        energy_by_residue_type : str, optional, default="all"
+            Type of energy to be calculated per residue. Options: 'all', 'lennard_jones', 'sgb', 'electrostatic'.
+        peptide : bool, optional, default=False
+            If True, treats the system as a peptide for specific setup steps.
+        equilibration_mode : str, optional, default="equilibrationLastSnapshot"
+            Mode used for equilibration: "equilibrationLastSnapshot" or "equilibrationCluster".
+        spawning : str, optional, default="independent"
+            Spawning method used for adaptive sampling. Options include 'independent', 'epsilon', 'variableEpsilon', etc.
+        continuation : bool, optional, default=False
+            If True, continues from the previous run instead of starting fresh.
+        equilibration : bool, optional, default=True
+            If True, performs equilibration before the production run.
+        skip_models : list, optional
+            List of protein models to skip from the simulation.
+        skip_ligands : list, optional
+            List of ligands to skip from the simulation.
+        extend_iterations : bool, optional, default=False
+            If True, extends the number of iterations beyond the default.
+        only_models : list, optional
+            List of protein models to include in the simulation.
+        only_ligands : list, optional
+            List of ligands to include in the simulation.
+        only_combinations : list, optional
+            List of protein-ligand combinations to include.
+        ligand_templates : str, optional
+            Path to custom ligand templates for parameterization.
+        seed : int, optional, default=12345
+            Random seed for the simulation.
+        log_file : bool, optional, default=False
+            If True, enables logging to a file.
+        nonbonded_energy : dict, optional
+            Dictionary specifying nonbonded energy atoms for specific protein-ligand pairs.
+        nonbonded_energy_type : str, optional, default="all"
+            Type of nonbonded energy to calculate. Options: 'all', 'lennard_jones', 'electrostatic'.
+        nonbonded_new_flag : bool, optional, default=False
+            If True, uses the new version of nonbonded energy calculation.
+        covalent_setup : bool, optional, default=False
+            If True, sets up the simulation for covalently bound ligands.
+        covalent_base_aa : dict, optional
+            Dictionary specifying the amino acid residue involved in covalent binding for each ligand.
+        membrane_residues : dict, optional
+            Dictionary specifying membrane residues to apply specific constraints.
+        bias_to_point : dict, optional
+            Dictionary specifying biasing points in the system for specific models.
+        com_bias1 : dict, optional
+            First group of atoms for center-of-mass biasing.
+        com_bias2 : dict, optional
+            Second group of atoms for center-of-mass biasing.
+        epsilon : float, optional, default=0.5
+            Epsilon value used for biasing the center-of-mass distance.
+        rescoring : bool, optional, default=False
+            If True, performs a rescoring calculation.
+        ligand_equilibration_cst : bool, optional, default=True
+            If True, applies constraints during ligand equilibration.
+        regional_metrics : dict, optional
+            Metrics for regional spawning in adaptive sampling.
+        regional_thresholds : dict, optional
+            Thresholds for regional spawning metrics.
+        max_regional_iterations : int, optional
+            Maximum number of iterations for regional spawning.
+        regional_energy_bias : str, optional, default="Binding Energy"
+            Bias metric for regional spawning, either 'Total Energy' or 'Binding Energy'.
+        regional_best_fraction : float, optional, default=0.2
+            Fraction of the best-performing states selected in regional spawning.
+        constraint_level : int, optional, default=1
+            Level of constraints applied during the simulation (0 for none, 1 for basic).
+        restore_input_coordinates : bool, optional, default=False
+            If True, restores the original coordinates after PELE processing (not working)
+
+        Returns
+        -------
+        list
+            A list of shell commands to run the PELE jobs.
+
+        Detailed input examples
+        -----------------------
+        com_group_1 : list of lists
+            A list containing atom definitions for the first group of atoms used in center-of-mass (COM) distance calculations.
+            Each atom is defined as a list with the following format:
+
+            [
+                [chain_id, residue_id, atom_name],
+                [chain_id, residue_id, atom_name],
+                ...
+            ]
+
+            Where:
+            - chain_id : str
+                The ID of the chain where the atom is located (e.g., 'A', 'B').
+            - residue_id : int
+                The residue number where the atom is located (e.g., 100).
+            - atom_name : str
+                The name of the atom (e.g., 'CA' for alpha carbon, 'O' for oxygen).
+
+            Example:
+            [
+                ["A", 100, "CA"],
+                ["A", 102, "CB"],
+                ["B", 150, "O"]
+            ]
+
+            In this example, the group includes:
+            - The alpha carbon atom (CA) of residue 100 in chain 'A'.
+            - The beta carbon atom (CB) of residue 102 in chain 'A'.
+            - The oxygen atom (O) of residue 150 in chain 'B'.
+
+        com_group_2 : list of lists
+            The format is identical to com_group_1 but represents the second group of atoms.
+            These two groups are used to calculate the center-of-mass distance between them.
         """
 
         # Flag for checking if continuation was given as True
@@ -4514,6 +4721,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 "You must give both COM atom groups to apply a COM distance bias."
             )
 
+        if isinstance(com_residue_pairs, type(None)):
+            com_residue_pairs = {}
+
         # Create PELE job folder
         if not os.path.exists(pele_folder):
             os.mkdir(pele_folder)
@@ -4527,16 +4737,18 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Read docking poses information from models_folder and create pele input
         # folders.
         jobs = []
+        models = {}
+        ligand_pdb_name = {}
+        pose_number = {}
         for d in os.listdir(models_folder):
             if os.path.isdir(models_folder + "/" + d):
-                models = {}
-                ligand_pdb_name = {}
                 for f in os.listdir(models_folder + "/" + d):
 
                     fs = f.split(separator)
                     protein = fs[0]
                     ligand = fs[1]
                     pose = fs[2].replace(".pdb", "")
+                    pose_number[(protein, ligand)] = pose
 
                     # Skip given protein models
                     if skip_models != None:
@@ -4689,730 +4901,545 @@ make sure of reading the target sequences with the function readTargetSequences(
                         models[(protein, ligand)] = []
                     models[(protein, ligand)].append(f)
 
-                # If templates are given for ligands
-                templates = {}
-                if ligand_templates != None:
+                    # If templates are given for ligands
+                    templates = {}
+                    if ligand_templates != None:
 
-                    # Create templates folder
-                    if not os.path.exists(pele_folder + "/templates"):
-                        os.mkdir(pele_folder + "/templates")
+                        # Create templates folder
+                        if not os.path.exists(pele_folder + "/templates"):
+                            os.mkdir(pele_folder + "/templates")
 
-                    for ligand in os.listdir(ligand_templates):
+                        for ligand in os.listdir(ligand_templates):
 
-                        if not os.path.isdir(ligand_templates + "/" + ligand):
-                            continue
+                            if not os.path.isdir(ligand_templates + "/" + ligand):
+                                continue
 
-                        # Create ligand template folder
-                        if not os.path.exists(pele_folder + "/templates/" + ligand):
-                            os.mkdir(pele_folder + "/templates/" + ligand)
+                            # Create ligand template folder
+                            if not os.path.exists(pele_folder + "/templates/" + ligand):
+                                os.mkdir(pele_folder + "/templates/" + ligand)
 
-                        templates[ligand] = []
-                        for f in os.listdir(ligand_templates + "/" + ligand):
-                            if f.endswith(".rot.assign") or f.endswith("z"):
+                            templates[ligand] = []
+                            for f in os.listdir(ligand_templates + "/" + ligand):
+                                if f.endswith(".rot.assign") or f.endswith("z"):
 
-                                # Copy template files
-                                shutil.copyfile(
-                                    ligand_templates + "/" + ligand + "/" + f,
-                                    pele_folder + "/templates/" + ligand + "/" + f,
-                                )
+                                    # Copy template files
+                                    shutil.copyfile(
+                                        ligand_templates + "/" + ligand + "/" + f,
+                                        pele_folder + "/templates/" + ligand + "/" + f,
+                                    )
 
-                                templates[ligand].append(f)
+                                    templates[ligand].append(f)
 
-                # Create YAML file
-                for model in models:
-                    protein, ligand = model
-                    protein_ligand = protein + separator + ligand
-                    protein_ligand_folder = pele_folder + "/" + protein_ligand
-                    if regional_spawning:
-                        protein_ligand_folder += "/0"
+        # Create YAML file
+        for model in models:
+            protein, ligand = model
+            protein_ligand = protein + separator + ligand
+            protein_ligand_folder = pele_folder + "/" + protein_ligand
+            pose = pose_number[model]
+            if regional_spawning:
+                protein_ligand_folder += "/0"
 
-                    keywords = [
-                        "system",
-                        "chain",
-                        "resname",
-                        "steps",
-                        "iterations",
-                        "atom_dist",
-                        "analyse",
-                        "cpus",
-                        "equilibration",
-                        "equilibration_steps",
-                        "traj",
-                        "working_folder",
-                        "usesrun",
-                        "use_peleffy",
-                        "debug",
-                        "box_radius",
-                        "box_center",
-                        "equilibration_mode",
-                        "seed",
-                        "spawning",
-                        "constraint_level",
-                    ]
+            keywords = [
+                "system",
+                "chain",
+                "resname",
+                "steps",
+                "iterations",
+                "atom_dist",
+                "analyse",
+                "cpus",
+                "equilibration",
+                "equilibration_steps",
+                "traj",
+                "working_folder",
+                "usesrun",
+                "use_peleffy",
+                "debug",
+                "box_radius",
+                "box_center",
+                "equilibration_mode",
+                "seed",
+                "spawning",
+                "constraint_level",
+            ]
 
-                    # Generate covalent parameterization setup
-                    if not covalent_setup:
-                        if protein in self.covalent and self.covalent[protein] != []:
-                            print(
-                                "WARNING: Covalent bound ligands were found. Consider giving covalent_setup=True"
+            # Generate covalent parameterization setup
+            if not covalent_setup:
+                if protein in self.covalent and self.covalent[protein] != []:
+                    print(
+                        "WARNING: Covalent bound ligands were found. Consider giving covalent_setup=True"
+                    )
+            else:
+                if covalent_base_aa == None:
+                    message = (
+                        "You must give the base AA upon which each covalently"
+                    )
+                    message += "attached ligand is bound. E.g., covalent_base_aa=base_aa={'FAD':'CYS', 'NAD':'ASP', etc.}"
+                    raise ValueError(message)
+
+                if protein in self.covalent:
+                    for index in self.covalent[protein]:
+                        output_folder = protein_ligand_folder + "/output/"
+                        if not os.path.exists(output_folder + "/ligand"):
+                            os.makedirs(output_folder + "/ligand")
+                        self._setUpCovalentLigandParameterization(
+                            protein,
+                            index,
+                            covalent_base_aa,
+                            output_folder=output_folder + "/ligand",
+                        )
+
+                        # Copy covalent parameterization script
+                        _copyScriptFile(
+                            output_folder, "covalentLigandParameterization.py"
+                        )
+
+                        # Define covalent parameterization command
+                        skip_covalent_residue = [
+                            r.resname
+                            for r in self.structures[protein].get_residues()
+                            if r.id[1] == index
+                        ][0]
+                        covalent_command = "cd output\n"
+                        covalent_command += (
+                            "python "
+                            + rel_path_to_root
+                            + "._covalentLigandParameterization.py ligand/"
+                            + skip_covalent_residue
+                            + ".pdb "
+                            + skip_covalent_residue
+                            + " "
+                            + covalent_base_aa[skip_covalent_residue]
+                            + "\n"
+                        )
+
+                        # Copy modify processed script
+                        _copyScriptFile(
+                            output_folder, "modifyProcessedForCovalentPELE.py"
+                        )
+                        cov_residues = ",".join(
+                            [str(x) for x in self.covalent[protein]]
+                        )
+                        covalent_command += (
+                            "python "
+                            + rel_path_to_root
+                            + "._modifyProcessedForCovalentPELE.py "
+                            + cov_residues
+                            + " \n"
+                        )
+                        covalent_command += "mv DataLocal/Templates/OPLS2005/Protein/templates_generated/* DataLocal/Templates/OPLS2005/Protein/\n"
+                        covalent_command += "cd ..\n"
+
+            # Write input yaml
+            with open(protein_ligand_folder + "/" + "input.yaml", "w") as iyf:
+                if energy_by_residue or nonbonded_energy != None:
+                    # Use new PELE version with implemented energy_by_residue
+                    iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/bin/PELE_mpi"\n')
+                    iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Data"\n')
+                    iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Documents/"\n')
+                elif ninety_degrees_version:
+                    # Use new PELE version with implemented 90 degrees fix
+                    print('paths of PELE version should be changed')
+                    iyf.write(
+                        'pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n'
+                    )
+                    iyf.write(
+                        'pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Data"\n'
+                    )
+                    iyf.write(
+                        'pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Documents/"\n'
+                    )
+                if len(models[model]) > 1:
+                    equilibration_mode = "equilibrationCluster"
+                    iyf.write("system: '*.pdb'\n")
+                else:
+                    iyf.write("system: '" + " ".join(models[model]) + "'\n")
+                iyf.write("chain: 'L'\n")
+                if peptide:
+                    iyf.write("resname: 'XXX'\n")
+                    iyf.write("skip_ligand_prep:\n")
+                    iyf.write(" - 'XXX'\n")
+                else:
+                    iyf.write("resname: '" + ligand_pdb_name[ligand] + "'\n")
+                iyf.write("steps: " + str(steps) + "\n")
+                iyf.write("iterations: " + str(iterations) + "\n")
+                iyf.write("cpus: " + str(cpus) + "\n")
+                if equilibration:
+                    iyf.write("equilibration: true\n")
+                    iyf.write(
+                        "equilibration_mode: '" + equilibration_mode + "'\n"
+                    )
+                    iyf.write(
+                        "equilibration_steps: "
+                        + str(equilibration_steps)
+                        + "\n"
+                    )
+                else:
+                    iyf.write("equilibration: false\n")
+                if spawning != None:
+                    iyf.write("spawning: '" + str(spawning) + "'\n")
+                if constraint_level:
+                    iyf.write(
+                        "constraint_level: '" + str(constraint_level) + "'\n"
+                    )
+                if rescoring:
+                    iyf.write("rescoring: true\n")
+
+                iyf.write("traj: trajectory.xtc\n")
+                iyf.write("working_folder: 'output'\n")
+                if usesrun:
+                    iyf.write("usesrun: true\n")
+                else:
+                    iyf.write("usesrun: false\n")
+                if use_peleffy:
+                    iyf.write("use_peleffy: true\n")
+                else:
+                    iyf.write("use_peleffy: false\n")
+                if analysis:
+                    iyf.write("analyse: true\n")
+                else:
+                    iyf.write("analyse: false\n")
+
+                if covalent_setup:
+                    iyf.write("skip_ligand_prep:\n")
+                    iyf.write(' - "' + skip_covalent_residue + '"\n')
+
+                if ligand in templates:
+                    iyf.write("templates:\n")
+                    iyf.write(' - "LIGAND_TEMPLATE_PATH_ROT"\n')
+                    iyf.write(' - "LIGAND_TEMPLATE_PATH_Z"\n')
+                    iyf.write("skip_ligand_prep:\n")
+                    iyf.write(' - "' + ligand_pdb_name[ligand] + '"\n')
+
+                iyf.write("box_radius: " + str(box_radius) + "\n")
+                if isinstance(box_centers, type(None)) and peptide:
+                    raise ValueError(
+                        "You must give per-protein box_centers when docking peptides!"
+                    )
+                if not isinstance(box_centers, type(None)):
+                    if (
+                        not all(
+                            isinstance(x, float) for x in box_centers[model]
+                        )
+                        and not all(
+                            isinstance(x, int) for x in box_centers[model]
+                        )
+                        and not all(
+                            isinstance(x, np.float32)
+                            for x in box_centers[model]
+                        )
+                    ):
+                        # get coordinates from tuple
+                        coordinates = None
+                        for chain in self.structures[model[0]].get_chains():
+                            if chain.id == box_centers[model][0]:
+                                for r in chain:
+                                    if r.id[1] == box_centers[model][1]:
+                                        for atom in r:
+                                            if (
+                                                atom.name
+                                                == box_centers[model][2]
+                                            ):
+                                                coordinates = atom.coord
+                        if isinstance(coordinates, type(None)):
+                            raise ValueError(
+                                f"Atom {box_centers[model]} was not found for protein {model[0]}"
                             )
                     else:
-                        if covalent_base_aa == None:
-                            message = (
-                                "You must give the base AA upon which each covalently"
-                            )
-                            message += "attached ligand is bound. E.g., covalent_base_aa=base_aa={'FAD':'CYS', 'NAD':'ASP', etc.}"
-                            raise ValueError(message)
+                        coordinates = box_centers[model]
 
-                        if protein in self.covalent:
-                            for index in self.covalent[protein]:
-                                output_folder = protein_ligand_folder + "/output/"
-                                if not os.path.exists(output_folder + "/ligand"):
-                                    os.makedirs(output_folder + "/ligand")
-                                self._setUpCovalentLigandParameterization(
-                                    protein,
-                                    index,
-                                    covalent_base_aa,
-                                    output_folder=output_folder + "/ligand",
-                                )
+                    box_center = ""
+                    for coord in coordinates:
+                        # if not isinstance(coord, float):
+                        #    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
+                        box_center += "  - " + str(float(coord)) + "\n"
+                    iyf.write("box_center: \n" + box_center)
 
-                                # Copy covalent parameterization script
-                                _copyScriptFile(
-                                    output_folder, "covalentLigandParameterization.py"
-                                )
+                # energy by residue is not implemented in PELE platform, therefore
+                # a scond script will modify the PELE.conf file to set up the energy
+                # by residue calculation.
+                if any(
+                    [
+                        debug,
+                        energy_by_residue,
+                        peptide,
+                        nonbonded_energy != None,
+                        membrane_residues,
+                        bias_to_point,
+                        com_bias1,
+                        com_residue_pairs,
+                        ligand_equilibration_cst,
+                        regional_spawning,
+                        constraint_level,
+                    ]
+                ):
+                    iyf.write("debug: true\n")
 
-                                # Define covalent parameterization command
-                                skip_covalent_residue = [
-                                    r.resname
-                                    for r in self.structures[protein].get_residues()
-                                    if r.id[1] == index
-                                ][0]
-                                covalent_command = "cd output\n"
-                                covalent_command += (
-                                    "python "
-                                    + rel_path_to_root
-                                    + "._covalentLigandParameterization.py ligand/"
-                                    + skip_covalent_residue
-                                    + ".pdb "
-                                    + skip_covalent_residue
-                                    + " "
-                                    + covalent_base_aa[skip_covalent_residue]
-                                    + "\n"
-                                )
-
-                                # Copy modify processed script
-                                _copyScriptFile(
-                                    output_folder, "modifyProcessedForCovalentPELE.py"
-                                )
-                                cov_residues = ",".join(
-                                    [str(x) for x in self.covalent[protein]]
-                                )
-                                covalent_command += (
-                                    "python "
-                                    + rel_path_to_root
-                                    + "._modifyProcessedForCovalentPELE.py "
-                                    + cov_residues
-                                    + " \n"
-                                )
-                                covalent_command += "mv DataLocal/Templates/OPLS2005/Protein/templates_generated/* DataLocal/Templates/OPLS2005/Protein/\n"
-                                covalent_command += "cd ..\n"
-
-                    # Write input yaml
-                    with open(protein_ligand_folder + "/" + "input.yaml", "w") as iyf:
-                        if energy_by_residue or nonbonded_energy != None:
-                            # Use new PELE version with implemented energy_by_residue
-                            iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/bin/PELE_mpi"\n')
-                            iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Data"\n')
-                            iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Documents/"\n')
-                        elif ninety_degrees_version:
-                            # Use new PELE version with implemented 90 degrees fix
-                            print('paths of PELE version should be changed')
-                            iyf.write(
-                                'pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n'
-                            )
-                            iyf.write(
-                                'pele_data: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Data"\n'
-                            )
-                            iyf.write(
-                                'pele_documents: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/Documents/"\n'
-                            )
-                        if len(models[model]) > 1:
-                            equilibration_mode = "equilibrationCluster"
-                            iyf.write("system: '*.pdb'\n")
-                        else:
-                            iyf.write("system: '" + " ".join(models[model]) + "'\n")
-                        iyf.write("chain: 'L'\n")
-                        if peptide:
-                            iyf.write("resname: 'XXX'\n")
-                            iyf.write("skip_ligand_prep:\n")
-                            iyf.write(" - 'XXX'\n")
-                        else:
-                            iyf.write("resname: '" + ligand_pdb_name[ligand] + "'\n")
-                        iyf.write("steps: " + str(steps) + "\n")
-                        iyf.write("iterations: " + str(iterations) + "\n")
-                        iyf.write("cpus: " + str(cpus) + "\n")
-                        if equilibration:
-                            iyf.write("equilibration: true\n")
-                            iyf.write(
-                                "equilibration_mode: '" + equilibration_mode + "'\n"
-                            )
-                            iyf.write(
-                                "equilibration_steps: "
-                                + str(equilibration_steps)
-                                + "\n"
+                if distances != None:
+                    iyf.write("atom_dist:\n")
+                    for d in distances[protein][ligand]:
+                        if isinstance(d[0], str):
+                            d1 = (
+                                "- 'L:" + str(ligand_index) + ":" + d[0] + "'\n"
                             )
                         else:
-                            iyf.write("equilibration: false\n")
-                        if spawning != None:
-                            iyf.write("spawning: '" + str(spawning) + "'\n")
-                        if constraint_level:
-                            iyf.write(
-                                "constraint_level: '" + str(constraint_level) + "'\n"
+                            d1 = (
+                                "- '"
+                                + d[0][0]
+                                + ":"
+                                + str(d[0][1])
+                                + ":"
+                                + d[0][2]
+                                + "'\n"
                             )
-                        if rescoring:
-                            iyf.write("rescoring: true\n")
-
-                        iyf.write("traj: trajectory.xtc\n")
-                        iyf.write("working_folder: 'output'\n")
-                        if usesrun:
-                            iyf.write("usesrun: true\n")
+                        if isinstance(d[1], str):
+                            d2 = (
+                                "- 'L:" + str(ligand_index) + ":" + d[1] + "'\n"
+                            )
                         else:
-                            iyf.write("usesrun: false\n")
-                        if use_peleffy:
-                            iyf.write("use_peleffy: true\n")
+                            d2 = (
+                                "- '"
+                                + d[1][0]
+                                + ":"
+                                + str(d[1][1])
+                                + ":"
+                                + d[1][2]
+                                + "'\n"
+                            )
+                        iyf.write(d1)
+                        iyf.write(d2)
+
+                if constraints != None:
+                    iyf.write("external_constraints:\n")
+                    for c in constraints[(protein, ligand)]:
+                        if len(c) == 2:
+                            line = (
+                                "- '"
+                                + str(c[0])
+                                + "-"
+                                + str(c[1][0])
+                                + ":"
+                                + str(c[1][1])
+                                + ":"
+                                + str(c[1][2])
+                                + "'\n"
+                            )  # cst_force and atom_index for positional cst
+                        elif len(c) == 4:
+                            line = (
+                                "- '"
+                                + str(c[0])
+                                + "-"
+                                + str(c[1])
+                                + "-"
+                                + str(c[2][0])
+                                + ":"
+                                + str(c[2][1])
+                                + ":"
+                                + str(c[2][2])
+                                + "-"
+                                + str(c[3][0])
+                                + ":"
+                                + str(c[3][1])
+                                + ":"
+                                + str(c[3][2])
+                                + "'\n"
+                            )  # cst_force, distance, atom_index1, atom_index2 for distance cst
                         else:
-                            iyf.write("use_peleffy: false\n")
-                        if analysis:
-                            iyf.write("analyse: true\n")
-                        else:
-                            iyf.write("analyse: false\n")
-
-                        if covalent_setup:
-                            iyf.write("skip_ligand_prep:\n")
-                            iyf.write(' - "' + skip_covalent_residue + '"\n')
-
-                        if ligand in templates:
-                            iyf.write("templates:\n")
-                            iyf.write(' - "LIGAND_TEMPLATE_PATH_ROT"\n')
-                            iyf.write(' - "LIGAND_TEMPLATE_PATH_Z"\n')
-                            iyf.write("skip_ligand_prep:\n")
-                            iyf.write(' - "' + ligand_pdb_name[ligand] + '"\n')
-
-                        iyf.write("box_radius: " + str(box_radius) + "\n")
-                        if isinstance(box_centers, type(None)) and peptide:
                             raise ValueError(
-                                "You must give per-protein box_centers when docking peptides!"
+                                "Constraint for protein "
+                                + protein
+                                + " with ligand "
+                                + ligand
+                                + " are not defined correctly."
                             )
-                        if not isinstance(box_centers, type(None)):
-                            if (
-                                not all(
-                                    isinstance(x, float) for x in box_centers[model]
-                                )
-                                and not all(
-                                    isinstance(x, int) for x in box_centers[model]
-                                )
-                                and not all(
-                                    isinstance(x, np.float32)
-                                    for x in box_centers[model]
-                                )
-                            ):
-                                # get coordinates from tuple
-                                coordinates = None
-                                for chain in self.structures[model[0]].get_chains():
-                                    if chain.id == box_centers[model][0]:
-                                        for r in chain:
-                                            if r.id[1] == box_centers[model][1]:
-                                                for atom in r:
-                                                    if (
-                                                        atom.name
-                                                        == box_centers[model][2]
-                                                    ):
-                                                        coordinates = atom.coord
-                                if isinstance(coordinates, type(None)):
-                                    raise ValueError(
-                                        f"Atom {box_centers[model]} was not found for protein {model[0]}"
-                                    )
-                            else:
-                                coordinates = box_centers[model]
+                        iyf.write(line)
 
-                            box_center = ""
-                            for coord in coordinates:
-                                # if not isinstance(coord, float):
-                                #    raise ValueError('Box centers must be given as a (x,y,z) tuple or list of floats.')
-                                box_center += "  - " + str(float(coord)) + "\n"
-                            iyf.write("box_center: \n" + box_center)
+                if seed:
+                    iyf.write("seed: " + str(seed) + "\n")
 
-                        # energy by residue is not implemented in PELE platform, therefore
-                        # a scond script will modify the PELE.conf file to set up the energy
-                        # by residue calculation.
-                        if any(
-                            [
-                                debug,
-                                energy_by_residue,
-                                peptide,
-                                nonbonded_energy != None,
-                                membrane_residues,
-                                bias_to_point,
-                                com_bias1,
-                                ligand_equilibration_cst,
-                                regional_spawning,
-                                constraint_level,
-                            ]
-                        ):
-                            iyf.write("debug: true\n")
+                if log_file:
+                    iyf.write("log: true\n")
 
-                        if distances != None:
-                            iyf.write("atom_dist:\n")
-                            for d in distances[protein][ligand]:
-                                if isinstance(d[0], str):
-                                    d1 = (
-                                        "- 'L:" + str(ligand_index) + ":" + d[0] + "'\n"
-                                    )
-                                else:
-                                    d1 = (
-                                        "- '"
-                                        + d[0][0]
-                                        + ":"
-                                        + str(d[0][1])
-                                        + ":"
-                                        + d[0][2]
-                                        + "'\n"
-                                    )
-                                if isinstance(d[1], str):
-                                    d2 = (
-                                        "- 'L:" + str(ligand_index) + ":" + d[1] + "'\n"
-                                    )
-                                else:
-                                    d2 = (
-                                        "- '"
-                                        + d[1][0]
-                                        + ":"
-                                        + str(d[1][1])
-                                        + ":"
-                                        + d[1][2]
-                                        + "'\n"
-                                    )
-                                iyf.write(d1)
-                                iyf.write(d2)
+                iyf.write("\n")
+                iyf.write("#Options gathered from " + input_yaml + "\n")
 
-                        if constraints != None:
-                            iyf.write("external_constraints:\n")
-                            for c in constraints[(protein, ligand)]:
-                                if len(c) == 2:
-                                    line = (
-                                        "- '"
-                                        + str(c[0])
-                                        + "-"
-                                        + str(c[1][0])
-                                        + ":"
-                                        + str(c[1][1])
-                                        + ":"
-                                        + str(c[1][2])
-                                        + "'\n"
-                                    )  # cst_force and atom_index for positional cst
-                                elif len(c) == 4:
-                                    line = (
-                                        "- '"
-                                        + str(c[0])
-                                        + "-"
-                                        + str(c[1])
-                                        + "-"
-                                        + str(c[2][0])
-                                        + ":"
-                                        + str(c[2][1])
-                                        + ":"
-                                        + str(c[2][2])
-                                        + "-"
-                                        + str(c[3][0])
-                                        + ":"
-                                        + str(c[3][1])
-                                        + ":"
-                                        + str(c[3][2])
-                                        + "'\n"
-                                    )  # cst_force, distance, atom_index1, atom_index2 for distance cst
-                                else:
-                                    raise ValueError(
-                                        "Constraint for protein "
-                                        + protein
-                                        + " with ligand "
-                                        + ligand
-                                        + " are not defined correctly."
-                                    )
-                                iyf.write(line)
+                with open(input_yaml) as tyf:
+                    for l in tyf:
+                        if l.startswith("#"):
+                            continue
+                        elif l.startswith("-"):
+                            continue
+                        elif l.strip() == "":
+                            continue
+                        if l.split()[0].replace(":", "") not in keywords:
+                            iyf.write(l)
 
-                        if seed:
-                            iyf.write("seed: " + str(seed) + "\n")
-
-                        if log_file:
-                            iyf.write("log: true\n")
-
-                        iyf.write("\n")
-                        iyf.write("#Options gathered from " + input_yaml + "\n")
-
-                        with open(input_yaml) as tyf:
-                            for l in tyf:
-                                if l.startswith("#"):
-                                    continue
-                                elif l.startswith("-"):
-                                    continue
-                                elif l.strip() == "":
-                                    continue
-                                if l.split()[0].replace(":", "") not in keywords:
-                                    iyf.write(l)
-
-                    if energy_by_residue:
-                        _copyScriptFile(pele_folder, "addEnergyByResidueToPELEconf.py")
-                        ebr_script_name = "._addEnergyByResidueToPELEconf.py"
-                        if not isinstance(ligand_energy_groups, type(None)):
-                            if not isinstance(ligand_energy_groups, dict):
-                                raise ValueError(
-                                    "ligand_energy_groups, must be given as a dictionary"
-                                )
-                            with open(
-                                protein_ligand_folder + "/ligand_energy_groups.json",
-                                "w",
-                            ) as jf:
-                                json.dump(ligand_energy_groups[ligand], jf)
-
-                    if protein in membrane_residues:
-                        _copyScriptFile(pele_folder, "addMembraneConstraints.py")
-                        mem_res_script = (
-                            "._addMembraneConstraints.py"  # I have added the _
+            if energy_by_residue:
+                _copyScriptFile(pele_folder, "addEnergyByResidueToPELEconf.py")
+                ebr_script_name = "._addEnergyByResidueToPELEconf.py"
+                if not isinstance(ligand_energy_groups, type(None)):
+                    if not isinstance(ligand_energy_groups, dict):
+                        raise ValueError(
+                            "ligand_energy_groups, must be given as a dictionary"
                         )
+                    with open(
+                        protein_ligand_folder + "/ligand_energy_groups.json",
+                        "w",
+                    ) as jf:
+                        json.dump(ligand_energy_groups[ligand], jf)
 
-                    if nonbonded_energy != None:
-                        _copyScriptFile(
-                            pele_folder, "addAtomNonBondedEnergyToPELEconf.py"
-                        )
-                        nbe_script_name = "._addAtomNonBondedEnergyToPELEconf.py"
-                        if not isinstance(nonbonded_energy, dict):
-                            raise ValueError(
-                                "nonbonded_energy, must be given as a dictionary"
-                            )
-                        with open(
-                            protein_ligand_folder + "/nonbonded_energy_atoms.json", "w"
-                        ) as jf:
-                            json.dump(nonbonded_energy[protein][ligand], jf)
+            if protein in membrane_residues:
+                _copyScriptFile(pele_folder, "addMembraneConstraints.py")
+                mem_res_script = (
+                    "._addMembraneConstraints.py"  # I have added the _
+                )
 
-                    if protein in bias_to_point:
-                        _copyScriptFile(pele_folder, "addBiasToPoint.py")
-                        btp_script = "._addBiasToPoint.py"
+            if nonbonded_energy != None:
+                _copyScriptFile(
+                    pele_folder, "addAtomNonBondedEnergyToPELEconf.py"
+                )
+                nbe_script_name = "._addAtomNonBondedEnergyToPELEconf.py"
+                if not isinstance(nonbonded_energy, dict):
+                    raise ValueError(
+                        "nonbonded_energy, must be given as a dictionary"
+                    )
+                with open(
+                    protein_ligand_folder + "/nonbonded_energy_atoms.json", "w"
+                ) as jf:
+                    json.dump(nonbonded_energy[protein][ligand], jf)
 
-                    if protein in com_bias1:
-                        _copyScriptFile(pele_folder, "addComDistancesBias.py")
-                        cbs_script = "._addComDistancesBias.py"
+            if protein in bias_to_point:
+                _copyScriptFile(pele_folder, "addBiasToPoint.py")
+                btp_script = "._addBiasToPoint.py"
 
-                    if peptide:
-                        _copyScriptFile(pele_folder, "modifyPelePlatformForPeptide.py")
-                        peptide_script_name = "._modifyPelePlatformForPeptide.py"
+            if protein in com_bias1:
+                _copyScriptFile(pele_folder, "addComDistancesBias.py")
+                cbs_script = "._addComDistancesBias.py"
 
-                    if ligand_equilibration_cst:
-                        _copyScriptFile(
-                            pele_folder, "addLigandConstraintsToPELEconf.py"
-                        )
-                        equilibration_script_name = (
-                            "._addLigandConstraintsToPELEconf.py"
-                        )
-                        _copyScriptFile(pele_folder, "changeAdaptiveIterations.py")
-                        adaptive_script_name = "._changeAdaptiveIterations.py"
+            if protein in com_residue_pairs:
+                _copyScriptFile(pele_folder, "addComDistances.py")
+                cds_script = "._addComDistances.py"
 
-                    if restore_input_coordinates:
-                        _copyScriptFile(
-                            pele_folder, 'restoreChangedCoordinates.py'
-                        )
-                        restore_coordinates_script_name = "._restoreChangedCoordinates.py"
+            if peptide:
+                _copyScriptFile(pele_folder, "modifyPelePlatformForPeptide.py")
+                peptide_script_name = "._modifyPelePlatformForPeptide.py"
 
-                    # Create command
-                    command = "cd " + protein_ligand_folder + "\n"
+            if ligand_equilibration_cst:
+                _copyScriptFile(
+                    pele_folder, "addLigandConstraintsToPELEconf.py"
+                )
+                equilibration_script_name = (
+                    "._addLigandConstraintsToPELEconf.py"
+                )
+                _copyScriptFile(pele_folder, "changeAdaptiveIterations.py")
+                adaptive_script_name = "._changeAdaptiveIterations.py"
 
-                    # Add commands to write template folder absolute paths
-                    if ligand in templates:
-                        command += "export CWD=$(pwd)\n"
-                        command += "cd ../templates/" + ligand + "\n"
-                        command += "export TMPLT_DIR=$(pwd)\n"
-                        command += "cd $CWD\n"
-                        for tf in templates[ligand]:
-                            if continuation:
-                                yaml_file = "input_restart.yaml"
-                            else:
-                                yaml_file = "input.yaml"
-                            if tf.endswith(".assign"):
-                                command += (
-                                    "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"
-                                    + tf
-                                    + ",g "
-                                    + yaml_file
-                                    + "\n"
-                                )
-                            elif tf.endswith("z"):
-                                command += (
-                                    "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"
-                                    + tf
-                                    + ",g "
-                                    + yaml_file
-                                    + "\n"
-                                )
+            if restore_input_coordinates:
+                _copyScriptFile(
+                    pele_folder, 'restoreChangedCoordinates.py'
+                )
+                restore_coordinates_script_name = "._restoreChangedCoordinates.py"
 
-                    if not continuation:
-                        command += "python -m pele_platform.main input.yaml\n"
+            # Create command
+            command = "cd " + protein_ligand_folder + "\n"
 
-                        if regional_spawning:
-                            continuation = True
-
-                        if angles:
-                            # Copy individual angle definitions to each protein and ligand folder
-                            if protein in angles and ligand in angles[protein]:
-                                with open(
-                                    protein_ligand_folder + "/._angles.json", "w"
-                                ) as jf:
-                                    json.dump(angles[protein][ligand], jf)
-
-                            # Copy script to add angles to pele.conf
-                            _copyScriptFile(pele_folder, "addAnglesToPELEConf.py")
-                            command += (
-                                "python "
-                                + rel_path_to_root
-                                + "._addAnglesToPELEConf.py output "
-                            )
-                            command += "._angles.json "
-                            command += (
-                                "output/input/"
-                                + protein_ligand
-                                + separator
-                                + pose
-                                + "_processed.pdb\n"
-                            )
-                            continuation = True
-
-                        if constraint_level:
-                            # Copy script to add angles to pele.conf
-                            _copyScriptFile(
-                                pele_folder, "correctPositionalConstraints.py"
-                            )
-                            command += (
-                                "python "
-                                + rel_path_to_root
-                                + "._correctPositionalConstraints.py output "
-                            )
-                            command += (
-                                "output/input/"
-                                + protein_ligand
-                                + separator
-                                + pose
-                                + "_processed.pdb\n"
-                            )
-                            continuation = True
-
-                        if energy_by_residue:
-                            command += (
-                                "python "
-                                + rel_path_to_root
-                                + ebr_script_name
-                                + " output --energy_type "
-                                + energy_by_residue_type
-                                + "--new_version "
-                                + new_version
-                            )
-                            if isinstance(ligand_energy_groups, dict):
-                                command += (
-                                    " --ligand_energy_groups ligand_energy_groups.json"
-                                )
-                                command += " --ligand_index " + str(ligand_index)
-                            if ebr_new_flag:
-                                command += " --new_version "
-                            if peptide:
-                                command += " --peptide \n"
-                                command += (
-                                    "python "
-                                    + rel_path_to_root
-                                    + peptide_script_name
-                                    + " output "
-                                    + " ".join(models[model])
-                                    + "\n"
-                                )
-                            else:
-                                command += "\n"
-
-                        if protein in membrane_residues:
-                            command += (
-                                "python " + rel_path_to_root + mem_res_script + " "
-                            )
-                            command += "output "  # I think we should change this for a variable
-                            command += "--membrane_residues "
-                            command += (
-                                ",".join([str(x) for x in membrane_residues[protein]])
-                                + "\n"
-                            )  # 1,2,3,4,5
-                            continuation = True
-
-                        if protein in bias_to_point:
-                            command += "python " + rel_path_to_root + btp_script + " "
-                            command += "output "  # I think we should change this for a variable
-                            command += (
-                                "point_"
-                                + ",".join([str(x) for x in bias_to_point[protein]])
-                                + " "
-                            )
-                            command += "--epsilon " + str(epsilon) + "\n"
-                            continuation = True
-
-                        if protein in com_bias1 and ligand in com_bias1[protein]:
-                            # Write both COM groups as json files
-                            with open(
-                                protein_ligand_folder + "/._com_group1.json", "w"
-                            ) as jf:
-                                json.dump(com_bias1[protein][ligand], jf)
-
-                            with open(
-                                protein_ligand_folder + "/._com_group2.json", "w"
-                            ) as jf:
-                                json.dump(com_bias2[protein][ligand], jf)
-
-                            command += "python " + rel_path_to_root + cbs_script + " "
-                            command += "output "  # I think we should change this for a variable
-                            command += "._com_group1.json "
-                            command += "._com_group2.json "
-                            command += "--epsilon " + str(epsilon) + "\n"
-                            continuation = True
-
-                        if covalent_setup:
-                            command += covalent_command
-                            continuation = True
-
-                        if ligand_equilibration_cst:
-
-                            # Copy input_yaml for equilibration
-                            oyml = open(
-                                protein_ligand_folder + "/input_equilibration.yaml", "w"
-                            )
-                            debug_line = False
-                            restart_line = False
-                            with open(protein_ligand_folder + "/input.yaml") as iyml:
-                                for l in iyml:
-                                    if "debug: true" in l:
-                                        debug_line = True
-                                        oyml.write("restart: true\n")
-                                        oyml.write("adaptive_restart: true\n")
-                                        continue
-                                    elif "restart: true" in l:
-                                        restart_line = True
-                                    elif l.startswith("iterations:"):
-                                        l = "iterations: 1\n"
-                                    elif l.startswith("steps:"):
-                                        l = "steps: 1\n"
-                                    oyml.write(l)
-                                if not debug_line and not restart_line:
-                                    oyml.write("restart: true\n")
-                                    oyml.write("adaptive_restart: true\n")
-                            oyml.close()
-
-                            # Add commands for adding ligand constraints
-                            command += "cp output/pele.conf output/pele.conf.backup\n"
-                            command += (
-                                "cp output/adaptive.conf output/adaptive.conf.backup\n"
-                            )
-
-                            # Modify pele.conf to add ligand constraints
-                            command += (
-                                "python "
-                                + rel_path_to_root
-                                + equilibration_script_name
-                                + " "
-                            )
-                            command += "output "  # I think we should change this for a variable
-                            if (
-                                isinstance(ligand_equilibration_cst, (int, float))
-                                and ligand_equilibration_cst != 1.0
-                            ):
-                                command += "--constraint_value " + str(
-                                    float(ligand_equilibration_cst)
-                                )
-                            command += "\n"
-
-                            # Modify adaptive.conf to remove simulation steps
-                            command += (
-                                "python "
-                                + rel_path_to_root
-                                + adaptive_script_name
-                                + " "
-                            )
-                            command += "output "  # I think we should change this for a variable
-                            command += "--iterations 1 "
-                            command += "--steps 1\n"
-
-                            # Launch equilibration
-                            command += "python -m pele_platform.main input_equilibration.yaml\n"
-
-                            # Recover conf files
-                            command += "cp output/pele.conf.backup output/pele.conf\n"
-                            command += (
-                                "cp output/adaptive.conf.backup output/adaptive.conf\n"
-                            )
-                            # Add commands for launching equilibration only
-
-                            continuation = True
-
-                        if restore_input_coordinates:
-                            command += "python "+ rel_path_to_root+restore_coordinates_script_name+" "
-                            command += f+' '
-                            command += "output/input/"+f.replace('.pdb', '_processed.pdb')+'\n'
-
+            # Add commands to write template folder absolute paths
+            if ligand in templates:
+                command += "export CWD=$(pwd)\n"
+                command += "cd ../templates/" + ligand + "\n"
+                command += "export TMPLT_DIR=$(pwd)\n"
+                command += "cd $CWD\n"
+                for tf in templates[ligand]:
                     if continuation:
-                        debug_line = False
-                        restart_line = False
-                        # Copy input_yaml for equilibration
-                        oyml = open(protein_ligand_folder + "/input_restart.yaml", "w")
-                        debug_line = False
-                        restart_line = False
-                        with open(protein_ligand_folder + "/input.yaml") as iyml:
-                            for l in iyml:
-                                if "debug: true" in l:
-                                    debug_line = True
-                                    oyml.write("restart: true\n")
-                                    oyml.write("adaptive_restart: true\n")
-                                    continue
-                                elif "restart: true" in l:
-                                    restart_line = True
-                                oyml.write(l)
-                            if not debug_line and not restart_line:
-                                oyml.write("restart: true\n")
-                                oyml.write("adaptive_restart: true\n")
-                        oyml.close()
+                        yaml_file = "input_restart.yaml"
+                    else:
+                        yaml_file = "input.yaml"
+                    if tf.endswith(".assign"):
+                        command += (
+                            "sed -i s,LIGAND_TEMPLATE_PATH_ROT,$TMPLT_DIR/"
+                            + tf
+                            + ",g "
+                            + yaml_file
+                            + "\n"
+                        )
+                    elif tf.endswith("z"):
+                        command += (
+                            "sed -i s,LIGAND_TEMPLATE_PATH_Z,$TMPLT_DIR/"
+                            + tf
+                            + ",g "
+                            + yaml_file
+                            + "\n"
+                        )
 
-                        if extend_iterations:
-                            _copyScriptFile(pele_folder, "extendAdaptiveIteartions.py")
-                            extend_script_name = "._extendAdaptiveIteartions.py"
-                            command += (
-                                "python "
-                                + rel_path_to_root
-                                + extend_script_name
-                                + " output "
-                                + str(iterations)
-                                + "\n"
-                            )
-                        if not energy_by_residue:
-                            command += (
-                                "python -m pele_platform.main input_restart.yaml\n"
-                            )
+            if not continuation:
+                command += "python -m pele_platform.main input.yaml\n"
 
-                        if (
-                            any(
-                                [
-                                    membrane_residues,
-                                    bias_to_point,
-                                    com_bias1,
-                                    ligand_equilibration_cst,
-                                    angles,
-                                    regional_spawning,
-                                    constraint_level,
-                                ]
-                            )
-                            and not continue_all
-                        ):
-                            continuation = False
-                            debug = False
+                if regional_spawning:
+                    continuation = True
 
-                    elif peptide:
+                if angles:
+                    # Copy individual angle definitions to each protein and ligand folder
+                    if protein in angles and ligand in angles[protein]:
+                        with open(
+                            protein_ligand_folder + "/._angles.json", "w"
+                        ) as jf:
+                            json.dump(angles[protein][ligand], jf)
+
+                    # Copy script to add angles to pele.conf
+                    _copyScriptFile(pele_folder, "addAnglesToPELEConf.py")
+                    command += (
+                        "python "
+                        + rel_path_to_root
+                        + "._addAnglesToPELEConf.py output "
+                    )
+                    command += "._angles.json "
+                    command += (
+                        "output/input/"
+                        + protein_ligand
+                        + separator
+                        + pose
+                        + "_processed.pdb\n"
+                    )
+                    continuation = True
+
+                if constraint_level:
+                    # Copy script to add angles to pele.conf
+                    _copyScriptFile(
+                        pele_folder, "correctPositionalConstraints.py"
+                    )
+                    command += (
+                        "python "
+                        + rel_path_to_root
+                        + "._correctPositionalConstraints.py output "
+                    )
+                    command += (
+                        "output/input/"
+                        + protein_ligand
+                        + separator
+                        + pose
+                        + "_processed.pdb\n"
+                    )
+                    continuation = True
+
+                if energy_by_residue:
+                    command += (
+                        "python "
+                        + rel_path_to_root
+                        + ebr_script_name
+                        + " output --energy_type "
+                        + energy_by_residue_type
+                        + "--new_version "
+                        + new_version
+                    )
+                    if isinstance(ligand_energy_groups, dict):
+                        command += (
+                            " --ligand_energy_groups ligand_energy_groups.json"
+                        )
+                        command += " --ligand_index " + str(ligand_index)
+                    if ebr_new_flag:
+                        command += " --new_version "
+                    if peptide:
+                        command += " --peptide \n"
                         command += (
                             "python "
                             + rel_path_to_root
@@ -5421,98 +5448,300 @@ make sure of reading the target sequences with the function readTargetSequences(
                             + " ".join(models[model])
                             + "\n"
                         )
-                        with open(
-                            protein_ligand_folder + "/" + "input_restart.yaml", "w"
-                        ) as oyml:
-                            with open(
-                                protein_ligand_folder + "/" + "input.yaml"
-                            ) as iyml:
-                                for l in iyml:
-                                    if "debug: true" in l:
-                                        l = "restart: true\n"
-                                    oyml.write(l)
-                        if nonbonded_energy == None:
-                            command += (
-                                "python -m pele_platform.main input_restart.yaml\n"
-                            )
-
-                    elif extend_iterations and not continuation:
-                        raise ValueError(
-                            "extend_iterations must be used together with the continuation keyword"
-                        )
-
-                    if nonbonded_energy != None:
-                        command += (
-                            "python "
-                            + rel_path_to_root
-                            + nbe_script_name
-                            + " output --energy_type "
-                            + nonbonded_energy_type
-                        )
-                        command += " --target_atoms nonbonded_energy_atoms.json"
-                        protein_chain = [
-                            c for c in self.structures[protein].get_chains() if c != "L"
-                        ][0]
-                        command += " --protein_chain " + protein_chain.id
-                        if ebr_new_flag or nonbonded_new_flag:
-                            command += " --new_version"
+                    else:
                         command += "\n"
 
-                        if not os.path.exists(
-                            protein_ligand_folder + "/" + "input_restart.yaml"
-                        ):
-                            with open(
-                                protein_ligand_folder + "/" + "input_restart.yaml", "w"
-                            ) as oyml:
-                                with open(
-                                    protein_ligand_folder + "/" + "input.yaml"
-                                ) as iyml:
-                                    for l in iyml:
-                                        if "debug: true" in l:
-                                            l = "restart: true\n"
-                                        oyml.write(l)
-                        command += "python -m pele_platform.main input_restart.yaml\n"
+                if protein in membrane_residues:
+                    command += (
+                        "python " + rel_path_to_root + mem_res_script + " "
+                    )
+                    command += "output "  # I think we should change this for a variable
+                    command += "--membrane_residues "
+                    command += (
+                        ",".join([str(x) for x in membrane_residues[protein]])
+                        + "\n"
+                    )  # 1,2,3,4,5
+                    continuation = True
 
-                    # Remove debug line from input.yaml for covalent setup (otherwise the Data folder is not copied!)
-                    if covalent_setup:
+                if protein in bias_to_point:
+                    command += "python " + rel_path_to_root + btp_script + " "
+                    command += "output "  # I think we should change this for a variable
+                    command += (
+                        "point_"
+                        + ",".join([str(x) for x in bias_to_point[protein]])
+                        + " "
+                    )
+                    command += "--epsilon " + str(epsilon) + "\n"
+                    continuation = True
+
+                if protein in com_bias1 and ligand in com_bias1[protein]:
+                    # Write both COM groups as json files
+                    with open(
+                        protein_ligand_folder + "/._com_group1.json", "w"
+                    ) as jf:
+                        json.dump(com_bias1[protein][ligand], jf)
+
+                    with open(
+                        protein_ligand_folder + "/._com_group2.json", "w"
+                    ) as jf:
+                        json.dump(com_bias2[protein][ligand], jf)
+
+                    command += "python " + rel_path_to_root + cbs_script + " "
+                    command += "output "  # I think we should change this for a variable
+                    command += "._com_group1.json "
+                    command += "._com_group2.json "
+                    command += "--epsilon " + str(epsilon) + "\n"
+                    continuation = True
+
+                if protein in com_residue_pairs and ligand in com_residue_pairs[protein]:
+                    # Write COM groups as json file
+                    with open(
+                        protein_ligand_folder + "/._com_groups.json", "w"
+                    ) as jf:
+                        json.dump(com_residue_pairs[protein][ligand], jf)
+
+                    command += "python " + rel_path_to_root + cds_script + " "
+                    command += "output "  # I think we should change this for a variable
+                    command += "._com_groups.json\n"
+                    continuation = True
+
+                if covalent_setup:
+                    command += covalent_command
+                    continuation = True
+
+                if restore_input_coordinates:
+                    command += "python "+ rel_path_to_root+restore_coordinates_script_name+" "
+                    command += "output/input/"+protein_ligand+separator+pose+".pdb "
+                    command += "output/input/"+protein_ligand+separator+pose+"_processed.pdb\n"
+                    continuation = True
+
+                if ligand_equilibration_cst:
+
+                    # Copy input_yaml for equilibration
+                    oyml = open(
+                        protein_ligand_folder + "/input_equilibration.yaml", "w"
+                    )
+                    debug_line = False
+                    restart_line = False
+                    with open(protein_ligand_folder + "/input.yaml") as iyml:
+                        for l in iyml:
+                            if "debug: true" in l:
+                                debug_line = True
+                                oyml.write("restart: true\n")
+                                oyml.write("adaptive_restart: true\n")
+                                continue
+                            elif "restart: true" in l:
+                                restart_line = True
+                            elif l.startswith("iterations:"):
+                                l = "iterations: 1\n"
+                            elif l.startswith("steps:"):
+                                l = "steps: 1\n"
+                            oyml.write(l)
+                        if not debug_line and not restart_line:
+                            oyml.write("restart: true\n")
+                            oyml.write("adaptive_restart: true\n")
+                    oyml.close()
+
+                    # Add commands for adding ligand constraints
+                    command += "cp output/pele.conf output/pele.conf.backup\n"
+                    command += (
+                        "cp output/adaptive.conf output/adaptive.conf.backup\n"
+                    )
+
+                    # Modify pele.conf to add ligand constraints
+                    command += (
+                        "python "
+                        + rel_path_to_root
+                        + equilibration_script_name
+                        + " "
+                    )
+                    command += "output "  # I think we should change this for a variable
+                    if (
+                        isinstance(ligand_equilibration_cst, (int, float))
+                        and ligand_equilibration_cst != 1.0
+                    ):
+                        command += "--constraint_value " + str(
+                            float(ligand_equilibration_cst)
+                        )
+                    command += "\n"
+
+                    # Modify adaptive.conf to remove simulation steps
+                    command += (
+                        "python "
+                        + rel_path_to_root
+                        + adaptive_script_name
+                        + " "
+                    )
+                    command += "output "  # I think we should change this for a variable
+                    command += "--iterations 1 "
+                    command += "--steps 1\n"
+
+                    # Launch equilibration
+                    command += "python -m pele_platform.main input_equilibration.yaml\n"
+
+                    # Recover conf files
+                    command += "cp output/pele.conf.backup output/pele.conf\n"
+                    command += (
+                        "cp output/adaptive.conf.backup output/adaptive.conf\n"
+                    )
+                    continuation = True
+
+            if continuation:
+                debug_line = False
+                restart_line = False
+                # Copy input_yaml for equilibration
+                oyml = open(protein_ligand_folder + "/input_restart.yaml", "w")
+                debug_line = False
+                restart_line = False
+                with open(protein_ligand_folder + "/input.yaml") as iyml:
+                    for l in iyml:
+                        if "debug: true" in l:
+                            debug_line = True
+                            oyml.write("restart: true\n")
+                            oyml.write("adaptive_restart: true\n")
+                            continue
+                        elif "restart: true" in l:
+                            restart_line = True
+                        oyml.write(l)
+                    if not debug_line and not restart_line:
+                        oyml.write("restart: true\n")
+                        oyml.write("adaptive_restart: true\n")
+                oyml.close()
+
+                if extend_iterations:
+                    _copyScriptFile(pele_folder, "extendAdaptiveIteartions.py")
+                    extend_script_name = "._extendAdaptiveIteartions.py"
+                    command += (
+                        "python "
+                        + rel_path_to_root
+                        + extend_script_name
+                        + " output "
+                        + str(iterations)
+                        + "\n"
+                    )
+                if not energy_by_residue:
+                    command += (
+                        "python -m pele_platform.main input_restart.yaml\n"
+                    )
+
+                if (
+                    any(
+                        [
+                            membrane_residues,
+                            bias_to_point,
+                            com_bias1,
+                            ligand_equilibration_cst,
+                            angles,
+                            regional_spawning,
+                            constraint_level,
+                        ]
+                    )
+                    and not continue_all
+                ):
+                    continuation = False
+                    debug = False
+
+            elif peptide:
+                command += (
+                    "python "
+                    + rel_path_to_root
+                    + peptide_script_name
+                    + " output "
+                    + " ".join(models[model])
+                    + "\n"
+                )
+                with open(
+                    protein_ligand_folder + "/" + "input_restart.yaml", "w"
+                ) as oyml:
+                    with open(
+                        protein_ligand_folder + "/" + "input.yaml"
+                    ) as iyml:
+                        for l in iyml:
+                            if "debug: true" in l:
+                                l = "restart: true\n"
+                            oyml.write(l)
+                if nonbonded_energy == None:
+                    command += (
+                        "python -m pele_platform.main input_restart.yaml\n"
+                    )
+
+            elif extend_iterations and not continuation:
+                raise ValueError(
+                    "extend_iterations must be used together with the continuation keyword"
+                )
+
+            if nonbonded_energy != None:
+                command += (
+                    "python "
+                    + rel_path_to_root
+                    + nbe_script_name
+                    + " output --energy_type "
+                    + nonbonded_energy_type
+                )
+                command += " --target_atoms nonbonded_energy_atoms.json"
+                protein_chain = [
+                    c for c in self.structures[protein].get_chains() if c != "L"
+                ][0]
+                command += " --protein_chain " + protein_chain.id
+                if ebr_new_flag or nonbonded_new_flag:
+                    command += " --new_version"
+                command += "\n"
+
+                if not os.path.exists(
+                    protein_ligand_folder + "/" + "input_restart.yaml"
+                ):
+                    with open(
+                        protein_ligand_folder + "/" + "input_restart.yaml", "w"
+                    ) as oyml:
                         with open(
-                            protein_ligand_folder + "/" + "input.yaml.tmp", "w"
-                        ) as oyf:
-                            with open(
-                                protein_ligand_folder + "/" + "input.yaml"
-                            ) as iyf:
-                                for l in iyf:
-                                    if not "debug: true" in l:
-                                        oyf.write(l)
-                        shutil.move(
-                            protein_ligand_folder + "/" + "input.yaml.tmp",
-                            protein_ligand_folder + "/" + "input.yaml",
-                        )
+                            protein_ligand_folder + "/" + "input.yaml"
+                        ) as iyml:
+                            for l in iyml:
+                                if "debug: true" in l:
+                                    l = "restart: true\n"
+                                oyml.write(l)
+                command += "python -m pele_platform.main input_restart.yaml\n"
 
-                    if regional_spawning:
-                        command += "cd ../\n"
-                        command += "python ../._regionalSpawning.py "
-                        command += "metrics.json "
-                        command += "metrics_thresholds.json "
-                        command += "--separator " + separator + " "
-                        command += '--energy_bias "' + regional_energy_bias + '" '
-                        command += (
-                            "--regional_best_fraction "
-                            + str(regional_best_fraction)
-                            + " "
-                        )
-                        if max_regional_iterations:
-                            command += (
-                                "--max_iterations " + str(max_regional_iterations) + " "
-                            )
-                        if angles:
-                            command += "--angles "
-                        if restore_input_coordinates:
-                            command += '--restore_coordinates '
-                        command += "\n"
+            # Remove debug line from input.yaml for covalent setup (otherwise the Data folder is not copied!)
+            if covalent_setup:
+                with open(
+                    protein_ligand_folder + "/" + "input.yaml.tmp", "w"
+                ) as oyf:
+                    with open(
+                        protein_ligand_folder + "/" + "input.yaml"
+                    ) as iyf:
+                        for l in iyf:
+                            if not "debug: true" in l:
+                                oyf.write(l)
+                shutil.move(
+                    protein_ligand_folder + "/" + "input.yaml.tmp",
+                    protein_ligand_folder + "/" + "input.yaml",
+                )
 
-                    command += "cd ../../"
-                    jobs.append(command)
+            if regional_spawning:
+                command += "cd ../\n"
+                command += "python ../._regionalSpawning.py "
+                command += "metrics.json "
+                command += "metrics_thresholds.json "
+                command += "--separator " + separator + " "
+                command += '--energy_bias "' + regional_energy_bias + '" '
+                command += (
+                    "--regional_best_fraction "
+                    + str(regional_best_fraction)
+                    + " "
+                )
+                if max_regional_iterations:
+                    command += (
+                        "--max_iterations " + str(max_regional_iterations) + " "
+                    )
+                if angles:
+                    command += "--angles "
+                if restore_input_coordinates:
+                    command += '--restore_coordinates '
+                command += "\n"
+
+            command += "cd ../../"
+            jobs.append(command)
 
         return jobs
 
@@ -6155,6 +6384,161 @@ make sure of reading the target sequences with the function readTargetSequences(
                         + "/npt/prot_npt_10_no_water.gro"
                     )
 
+    def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
+                               add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
+                               extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
+                               nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
+                               restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
+                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None):
+        """
+        Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
+        Includes support for multiple replicas.
+
+        Parameters:
+        - job_folder (str): Path to the folder where the simulations will be set up.
+        - replicas (int): The number of replicas to generate for each model.
+        - simulation_time (float): Total simulation time in ns (mandatory).
+        - ligand_charges (dict, optional): Dictionary of ligand charges to apply during parameterization.
+        - residue_names (dict, optional): Dictionary of residue names to rename for each model. Format: {'model': {(chain, resnum): 'new_resname'}}.
+        - ff (str): Force field to use for the simulations (default is 'amber14').
+        - add_bonds (dict, optional): Dictionary of bonds to be added between atoms for each model.
+        - skip_ligands (list, optional): List of ligand residue names to skip during parameterization.
+        - metal_ligand (optional): Specify metal-ligand interactions if applicable.
+        - metal_parameters (optional): Additional parameters for metals.
+        - extra_frcmod (optional): Extra force field modifications.
+        - extra_mol2 (optional): Extra mol2 files for ligand parameterization.
+        - dcd_report_time (float): The DCD report interval in ps.
+        - data_report_time (float): The data report interval in ps.
+        - nvt_time (float): The NVT equilibration time in ns.
+        - npt_time (float): The NPT equilibration time in ns.
+        - nvt_temp_scaling_steps (int): The number of iterations for NVT temperature scaling.
+        - npt_restraint_scaling_steps (int): The number of iterations for NPT restraint scaling.
+        - restraint_constant (float): Force constant for positional restraints (kcal/mol/Å²).
+        - chunk_size (float): The chunk size for output report files (data and dcd) in ns.
+        - equilibration_report_time (float): The report interval for equilibration steps in ps.
+        - temperature (float): The temperature for the simulation (K).
+        - collision_rate (float): The collision rate for the Langevin integrator (1/ps).
+        - time_step (float): The simulation time step (ps).
+        - cuda (bool): Whether to use CUDA for GPU acceleration.
+        - fixed_seed (int, optional): A fixed seed for the simulation, if provided.
+        - script_file (str, optional): Path to the OpenMM simulation script.
+
+        """
+
+        def setUpJobs(job_folder, openmm_md, script_file, simulation_time=simulation_time, dcd_report_time=dcd_report_time,
+                      data_report_time=data_report_time, nvt_time=nvt_time, npt_time=npt_time,
+                      nvt_temp_scaling_steps=nvt_temp_scaling_steps, npt_restraint_scaling_steps=npt_restraint_scaling_steps,
+                      restraint_constant=restraint_constant, chunk_size=chunk_size,
+                      equilibration_report_time=equilibration_report_time, temperature=temperature,
+                      collision_rate=collision_rate, time_step=time_step, cuda=cuda, fixed_seed=fixed_seed):
+            """
+            Subfunction to set up individual OpenMM simulation jobs with inherited parameters.
+            """
+            if not os.path.exists(os.path.join(job_folder, 'input_files')):
+                os.makedirs(os.path.join(job_folder, 'input_files'))
+
+            prmtop_name = os.path.basename(openmm_md.prmtop_file)
+            inpcrd_name = os.path.basename(openmm_md.inpcrd_file)
+
+            shutil.copyfile(openmm_md.prmtop_file, os.path.join(job_folder, 'input_files', prmtop_name))
+            shutil.copyfile(openmm_md.inpcrd_file, os.path.join(job_folder, 'input_files', inpcrd_name))
+            script = os.path.basename(script_file)
+            shutil.copyfile(script_file, os.path.join(job_folder, script))
+
+            jobs = []
+            command = ''
+            if not fixed_seed:
+                command += f'SEED=$(($SLURM_JOB_ID + $RANDOM % 100000))\n'
+            else:
+                command += f'SEED=' + str(fixed_seed) + '\n'
+            command += 'echo employed seed: $SEED\n'
+            command += f'cd {job_folder}\n'
+            command += f'python {script} '
+            command += f'input_files/{prmtop_name} '
+            command += f'input_files/{inpcrd_name} '
+            command += f'{simulation_time} '
+            command += f'--dcd_report_time {dcd_report_time} '
+            command += f'--data_report_time {data_report_time} '
+            command += f'--nvt_time {nvt_time} '
+            command += f'--npt_time {npt_time} '
+            command += f'--nvt_temp_scaling_steps {nvt_temp_scaling_steps} '
+            command += f'--npt_restraint_scaling_steps {npt_restraint_scaling_steps} '
+            command += f'--restraint_constant {restraint_constant} '
+            command += f'--chunk_size {chunk_size} '
+            command += f'--equilibration_report_time {equilibration_report_time} '
+            command += f'--temperature {temperature} '
+            command += f'--collision_rate {collision_rate} '
+            command += f'--time_step {time_step} '
+            command += f'--seed $SEED '
+            command += '\n'
+            command += f'cd {"../" * len(job_folder.split(os.sep))}\n'
+            jobs.append(command)
+
+            return jobs
+
+        # Create the base job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        self.openmm_md = {}  # Dictionary to hold openmm_md instances for each model
+
+        ligand_parameters_folder = os.path.join(job_folder, 'parameters')
+        if not os.path.exists(ligand_parameters_folder):
+            os.mkdir(ligand_parameters_folder)
+
+        script_folder = os.path.join(job_folder, 'scripts')
+        if not os.path.exists(script_folder):
+            os.mkdir(script_folder)
+
+        if not script_file:
+            _copyScriptFile(script_folder, "openmm_simulation.py", subfolder='md/openmm', hidden=False)
+            script_file = script_folder + '/openmm_simulation.py'
+
+        # Iterate over all models
+        simulation_jobs = []
+        for model in self:
+            model_folder = os.path.join(job_folder, model)
+
+            # Create a subdirectory for the model if it doesn't exist
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            # Generate OpenMM class for setting up calculations
+            self.openmm_md[model] = prepare_proteins.MD.openmm_md(self.models_paths[model])
+            self.openmm_md[model].setUpFF(ff)  # Define the force field
+
+            # Get and set protonation states
+            variants = self.openmm_md[model].getProtonationStates()
+            self.openmm_md[model].removeHydrogens()
+            self.openmm_md[model].addHydrogens(variants=variants)
+
+            # Parameterize ligands and build amber topology
+            qm_jobs = self.openmm_md[model].parameterizePDBLigands(
+                ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
+                add_bonds=add_bonds.get(model) if add_bonds else None,  # Use model-specific bond additions
+                skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
+                extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
+                force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
+                add_counterions=False, save_amber_pdb=True, solvate=True, regenerate_amber_files=True
+            )
+
+            # Create folders for replicas
+            for replica in range(1, replicas+1):
+
+                if not isinstance(skip_replicas, type(None)) and replica in skip_replicas:
+                    continue
+
+                replica_str = str(replica).zfill(len(str(replicas)))
+                replica_folder = os.path.join(model_folder, f'replica_{replica_str}')
+
+                if not os.path.exists(replica_folder):
+                    os.mkdir(replica_folder)
+
+                # Call the subfunction to set up the individual simulation for each replica
+                simulation_jobs += setUpJobs(replica_folder, self.openmm_md[model], script_file)
+
+        return simulation_jobs
+
     def analyseDocking(
         self,
         docking_folder,
@@ -6165,7 +6549,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return_failed=False,
         ignore_hydrogens=False,
         separator="-",
-        overwrite=True,
+        overwrite=False,
+        only_models=None,
         output_folder='.analysis',
     ):
         """
@@ -6210,11 +6595,15 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(docking_folder + '/'+output_folder):
             os.mkdir(docking_folder + '/'+output_folder)
 
-        # Create analysis folder
+        # Create scores data folder
+        if not os.path.exists(docking_folder + '/'+output_folder+"/scores"):
+            os.mkdir(docking_folder + '/'+output_folder+"/scores")
+
+        # Create distance data folder
         if not os.path.exists(docking_folder + '/'+output_folder+"/atom_pairs"):
             os.mkdir(docking_folder + '/'+output_folder+"/atom_pairs")
 
-        # Create analysis folder
+        # Create angle data folder
         if angles:
             if not os.path.exists(docking_folder + '/'+output_folder+"/angles"):
                 os.mkdir(docking_folder + '/'+output_folder+"/angles")
@@ -6229,6 +6618,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if protein_atoms:
             with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
                 json.dump(protein_atoms, jf)
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
 
         # Write atom_pairs dictionary to json file
         if atom_pairs:
@@ -6263,34 +6655,45 @@ make sure of reading the target sequences with the function readTargetSequences(
         if ignore_hydrogens:
             command += " --ignore_hydrogens"
         command += " --separator " + separator
-        command += " --only_models " + ",".join(self.models_names)
+        if only_models:
+            command += " --only_models " + ",".join(only_models)
+        else:
+            command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
-
         os.system(command)
 
-        # Read the CSV file into pandas
-        if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
-            raise ValueError(
-                "Docking analysis failed. Check the ouput of the analyse_docking.py script."
-            )
+        # # Read the CSV file into pandas
+        # if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
+        #     raise ValueError(
+        #         "Docking analysis failed. Check the ouput of the analyse_docking.py script."
+        #     )
 
-        self.docking_data = pd.read_csv(docking_folder + '/'+output_folder+"/docking_data.csv")
-        # Create multiindex dataframe
+        # Read scores data
+        scores_directory = docking_folder + '/'+output_folder+"/scores"
+        self.docking_data = []
+        for f in os.listdir(scores_directory):
+            model = f.split(separator)[0]
+            ligand = f.split(separator)[1].split(".")[0]
+
+            # Read the CSV file into pandas
+            self.docking_data.append(pd.read_csv(
+                scores_directory+'/'+f
+            ))
+
+        # Concatenate the list of DataFrames into a single DataFrame
+        self.docking_data = pd.concat(self.docking_data)
         self.docking_data.set_index(["Protein", "Ligand", "Pose"], inplace=True)
-        # Force de definition of the MultiIndex
-        self.docking_data.index = pd.MultiIndex.from_tuples(
-            self.docking_data.index, names=["Protein", "Ligand", "Pose"]
-        )
 
-        for f in os.listdir(docking_folder + '/'+output_folder+"/atom_pairs"):
+        distances_directory = docking_folder + '/'+output_folder+"/atom_pairs"
+        for f in os.listdir(distances_directory):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split(".")[0]
 
             # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
             self.docking_distances[model][ligand] = pd.read_csv(
-                docking_folder + '/'+output_folder+"/atom_pairs/" + f
+                distances_directory+'/'+f
             )
             self.docking_distances[model][ligand].set_index(
                 ["Protein", "Ligand", "Pose"], inplace=True
@@ -6300,15 +6703,16 @@ make sure of reading the target sequences with the function readTargetSequences(
             if ligand not in self.docking_ligands[model]:
                 self.docking_ligands[model].append(ligand)
 
-        if angles:
-            for f in os.listdir(docking_folder + '/'+output_folder+"/atom_pairs"):
+        angles_directory = docking_folder + '/'+output_folder+"/angles"
+        if os.path.exists(angles_directory):
+            for f in os.listdir(angles_directory):
                 model = f.split(separator)[0]
                 ligand = f.split(separator)[1].split(".")[0]
 
                 # Read the CSV file into pandas
                 self.docking_angles.setdefault(model, {})
                 self.docking_angles[model][ligand] = pd.read_csv(
-                    docking_folder + '/'+output_folder+"/angles/" + f
+                    angles_directory +'/'+ f
                 )
                 self.docking_angles[model][ligand].set_index(
                     ["Protein", "Ligand", "Pose"], inplace=True
@@ -7444,7 +7848,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return models
 
-    def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True):
+    def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True, keep_pdbs=False):
         """
         Convert ligand PDBs into MAE files.
 
@@ -7454,7 +7858,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the folder where ligands are in PDB format
         """
 
-        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(ligands_folder, "PDBtoMAE.py")
         script_name = "._PDBtoMAE.py"
 
@@ -7463,10 +7866,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         command = "run ._PDBtoMAE.py"
         if change_ligand_name:
             command += " --change_ligand_name"
+        if keep_pdbs:
+            command += ' --keep_pdbs'
         os.system(command)
         os.chdir(cwd)
 
-    def convertLigandMAEtoPDB(self, ligands_folder):
+    def convertLigandMAEtoPDB(self, ligands_folder, change_ligand_name=True, modify_maes=False,
+                              assign_pdb_names=False):
         """
         Convert ligand MAEs into PDB files.
 
@@ -7476,14 +7882,38 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to the folder where ligands are in MAE format
         """
 
+        if modify_maes:
+            keep_maes = True
+
+        if isinstance(change_ligand_name, dict):
+            with open(ligands_folder+'/ligand_names.json', 'w') as jf:
+                json.dump(change_ligand_name, jf)
+        elif isinstance(change_ligand_name, str):
+            if len(change_ligand_name) != 3:
+                raise ValueError('The ligand name should be three-letters long')
+
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(ligands_folder, "MAEtoPDB.py")
         script_name = "._MAEtoPDB.py"
 
         cwd = os.getcwd()
         os.chdir(ligands_folder)
-        os.system("run ._MAEtoPDB.py")
+        command = "run ._MAEtoPDB.py"
+        if isinstance(change_ligand_name, dict):
+            command += " --residue_names ligand_names.json"
+        elif isinstance(change_ligand_name, str):
+            command += " --residue_names "+change_ligand_name
+        if change_ligand_name:
+            command += " --change_ligand_name"
+        if modify_maes:
+            command += ' --modify_maes'
+        if assign_pdb_names:
+            command += ' --assign_pdb_names'
+        os.system(command)
         os.chdir(cwd)
+
+        if isinstance(change_ligand_name, dict):
+            os.remove(ligands_folder+'/ligand_names.json')
 
     def getDockingDistances(self, model, ligand):
         """
@@ -7660,9 +8090,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 self.models_data["metric_" + name] = values
 
-        self.models_data = pd.DataFrame(self.models_data)
-        print(self.models_data)
-        self.models_data.set_index("model", inplace=True)
+        if isinstance(self.models_data, dict):
+            self.models_data = pd.DataFrame(self.models_data)
+            self.models_data.set_index("model", inplace=True)
 
         return self.models_data
 
@@ -7830,6 +8260,77 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 self.docking_data["metric_" + name] = values
 
+    def plotDockingData(self):
+        """
+        Generates an interactive scatter plot for docking data, allowing users to select
+        the protein, ligand, and columns for the X and Y axes.
+
+        The method assumes the docking data is a Pandas DataFrame stored in `self.docking_data`
+        with a MultiIndex (Protein, Ligand, Pose) and numeric columns (Score, RMSD, Closest distance).
+
+        The function creates interactive widgets to select a specific protein, ligand, and which
+        numeric columns to plot on the X and Y axes.
+
+        Returns:
+            An interactive scatter plot that updates based on widget selections.
+        """
+
+        # Subfunction to handle filtering and plotting
+        def scatter_plot(protein, ligand, x_axis, y_axis):
+            """
+            Subfunction to plot the scatter plot for the selected protein and ligand.
+
+            Args:
+                protein (str): Selected protein sequence.
+                ligand (str): Selected ligand.
+                x_axis (str): The column name for the X-axis.
+                y_axis (str): The column name for the Y-axis.
+            """
+            # Filter the data based on selected Protein and Ligand
+            filtered_df = df.loc[(protein, ligand)]
+
+            # Plotting the scatter plot for the selected X and Y axes
+            plt.figure(figsize=(8, 6))
+            plt.scatter(filtered_df[x_axis], filtered_df[y_axis], color='blue')
+            plt.title(f'Scatter Plot for {protein} - {ligand}')
+            plt.xlabel(x_axis)
+            plt.ylabel(y_axis)
+            plt.grid(True)
+            plt.show()
+
+        # Get the docking data from the object's attribute
+        df = self.docking_data
+
+        # Create dropdown widgets for selecting the Protein, Ligand, X-axis, and Y-axis columns
+        protein_dropdown = widgets.Dropdown(
+            options=df.index.levels[0],  # Options for Protein selection
+            description='Protein'        # Label for the dropdown
+        )
+
+        ligand_dropdown = widgets.Dropdown(
+            options=df.index.levels[1],  # Options for Ligand selection
+            description='Ligand'         # Label for the dropdown
+        )
+
+        x_axis_dropdown = widgets.Dropdown(
+            options=df.columns,          # Options for selecting the X-axis (numeric columns)
+            description='X-axis'         # Label for the dropdown
+        )
+
+        y_axis_dropdown = widgets.Dropdown(
+            options=df.columns,          # Options for selecting the Y-axis (numeric columns)
+            description='Y-axis'         # Label for the dropdown
+        )
+
+        # Create an interactive widget that dynamically updates the plot based on selections
+        interact(
+            scatter_plot,
+            protein=protein_dropdown,
+            ligand=ligand_dropdown,
+            x_axis=x_axis_dropdown,
+            y_axis=y_axis_dropdown
+        )
+
     def getBestDockingPoses(
         self,
         filter_values,
@@ -7897,7 +8398,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     if metric not in ["Score", "RMSD"]:
                         # Add prefix if not given
-                        if not metric.startswith("metric_"):
+                        if not metric.startswith("metric_") and not metric == 'Closest distance':
                             metric_label = "metric_" + metric
                         else:
                             metric_label = metric
@@ -8324,225 +8825,226 @@ make sure of reading the target sequences with the function readTargetSequences(
         if return_failed:
             return failed_models
 
-        def analyseRosettaCalculation(
-            self,
-            rosetta_folder,
-            atom_pairs=None,
-            energy_by_residue=False,
-            interacting_residues=False,
-            query_residues=None,
-            overwrite=False,
-            protonation_states=False,
-            decompose_bb_hb_into_pair_energies=False,
-            binding_energy=False,
-            cpus=None,
-            return_jobs=False,
-            verbose=False,
-        ):
-            """
-            Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
-            between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
-            Additionally, it can analyse the interaction between specific residues (query_residues option)and
-            their neighbouring sidechains by mutating the neighbour residues to glycines.
+    def analyseRosettaCalculation(
+        self,
+        rosetta_folder,
+        atom_pairs=None,
+        energy_by_residue=False,
+        interacting_residues=False,
+        query_residues=None,
+        overwrite=False,
+        protonation_states=False,
+        decompose_bb_hb_into_pair_energies=False,
+        binding_energy=False,
+        cpus=None,
+        return_jobs=False,
+        verbose=False,
+    ):
+        """
+        Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
+        between atom pairs given. Optionally the analysis get the energy of each residue in each pose.
+        Additionally, it can analyse the interaction between specific residues (query_residues option)and
+        their neighbouring sidechains by mutating the neighbour residues to glycines.
 
-            The atom pairs must be given in a dicionary with each key representing the name
-            of a model and each value a list of the atom pairs to calculate in the format:
-                {model_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], ...}
+        The atom pairs must be given in a dicionary with each key representing the name
+        of a model and each value a list of the atom pairs to calculate in the format:
+            {model_name: [((chain1_id, residue1_id, atom1_name), (chain2_id, residue2_id, atom2_name)), ...], ...}
 
-            The main analysis is stored at self.rosetta_data
-            The energy by residue analysis is soterd at self.rosetta_ebr_data
-            Sidechain interaction analysis is stored at self.rosetta_interacting_residues
+        The main analysis is stored at self.rosetta_data
+        The energy by residue analysis is soterd at self.rosetta_ebr_data
+        Sidechain interaction analysis is stored at self.rosetta_interacting_residues
 
-            Data is also stored in csv files inside the Rosetta folder for easy retrieving the data if found:
+        Data is also stored in csv files inside the Rosetta folder for easy retrieving the data if found:
 
-            The main analysis is stored at ._rosetta_data.csv
-            The energy by residue analysis is soterd at ._rosetta_energy_residue_data.csv
-            Sidechain interaction analysis is stored at ._rosetta_interacting_residues_data.csv
+        The main analysis is stored at ._rosetta_data.csv
+        The energy by residue analysis is soterd at ._rosetta_energy_residue_data.csv
+        Sidechain interaction analysis is stored at ._rosetta_interacting_residues_data.csv
 
 
-            The overwrite option forces recalcualtion of the data.
+        The overwrite option forces recalcualtion of the data.
 
-            Parameters
-            ==========
-            rosetta_folder : str
-                Path to the Rosetta Calculation Folder.
-            atom_pairs : dict
-                Pairs of atom to calculate for each model.
-            energy_by_residue : bool
-                Calculate energy by residue data?
-            overwrite : bool
-                Force the data calculation from the files.
-            interacting_residues : str
-                Calculate interacting energies between residues
-            query_residues : list
-                Residues to query neoghbour atoms. Leave None for all residues (not recommended, too slow!)
-            decompose_bb_hb_into_pair_energies : bool
-                Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
-                number of calculations, so is off by default).
-            binding_energy : str
-                Comma-separated list of chains for which calculate the binding energy.
-            """
+        Parameters
+        ==========
+        rosetta_folder : str
+            Path to the Rosetta Calculation Folder.
+        atom_pairs : dict
+            Pairs of atom to calculate for each model.
+        energy_by_residue : bool
+            Calculate energy by residue data?
+        overwrite : bool
+            Force the data calculation from the files.
+        interacting_residues : str
+            Calculate interacting energies between residues
+        query_residues : list
+            Residues to query neoghbour atoms. Leave None for all residues (not recommended, too slow!)
+        decompose_bb_hb_into_pair_energies : bool
+            Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
+            number of calculations, so is off by default).
+        binding_energy : str
+            Comma-separated list of chains for which calculate the binding energy.
+        """
 
-            if not os.path.exists(rosetta_folder):
-                raise ValueError(
-                    'The Rosetta calculation folder: "%s" does not exists!' % rosetta_folder
-                )
-
-            # Write atom_pairs dictionary to json file
-            if atom_pairs != None:
-                with open(rosetta_folder + "/._atom_pairs.json", "w") as jf:
-                    json.dump(atom_pairs, jf)
-
-            # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
-            _copyScriptFile(rosetta_folder, "analyse_calculation.py", subfolder="pyrosetta")
-
-            # Execute docking analysis
-            command = (
-                "python "
-                + rosetta_folder
-                + "/._analyse_calculation.py "
-                + rosetta_folder
-                + " "
+        if not os.path.exists(rosetta_folder):
+            raise ValueError(
+                'The Rosetta calculation folder: "%s" does not exists!' % rosetta_folder
             )
 
-            if binding_energy:
-                command += "--binding_energy " + binding_energy + " "
-            if atom_pairs != None:
-                command += "--atom_pairs " + rosetta_folder + "/._atom_pairs.json "
-            if return_jobs:
-                command += "--models MODEL "
-            if energy_by_residue:
-                command += "--energy_by_residue "
-            if interacting_residues:
-                command += "--interacting_residues "
-                if query_residues != None:
-                    command += "--query_residues "
-                    command += ",".join([str(r) for r in query_residues]) + " "
-            if protonation_states:
-                command += "--protonation_states "
-            if decompose_bb_hb_into_pair_energies:
-                command += "--decompose_bb_hb_into_pair_energies "
-            if cpus != None:
-                command += "--cpus " + str(cpus) + " "
-            if verbose:
-                command += "--verbose "
-            command += "\n"
+        # Write atom_pairs dictionary to json file
+        if atom_pairs != None:
+            with open(rosetta_folder + "/._atom_pairs.json", "w") as jf:
+                json.dump(atom_pairs, jf)
 
-            # Compile individual models for each job
-            if return_jobs:
-                commands = []
-                for m in self:
-                    commands.append(command.replace("MODEL", m))
+        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
+        _copyScriptFile(rosetta_folder, "analyse_calculation.py", subfolder="pyrosetta")
 
-                print("Returning jobs for running the analysis in parallel.")
-                print(
-                    "After jobs have finished, rerun this function removing return_jobs=True!"
+        # Execute docking analysis
+        command = (
+            "python "
+            + rosetta_folder
+            + "/._analyse_calculation.py "
+            + rosetta_folder
+            + " "
+        )
+
+        if binding_energy:
+            command += "--binding_energy " + binding_energy + " "
+        if atom_pairs != None:
+            command += "--atom_pairs " + rosetta_folder + "/._atom_pairs.json "
+        if return_jobs:
+            command += "--models MODEL "
+        if energy_by_residue:
+            command += "--energy_by_residue "
+        if interacting_residues:
+            command += "--interacting_residues "
+            if query_residues != None:
+                command += "--query_residues "
+                command += ",".join([str(r) for r in query_residues]) + " "
+        if protonation_states:
+            command += "--protonation_states "
+        if decompose_bb_hb_into_pair_energies:
+            command += "--decompose_bb_hb_into_pair_energies "
+        if cpus != None:
+            command += "--cpus " + str(cpus) + " "
+        if verbose:
+            command += "--verbose "
+        command += "\n"
+
+        # Compile individual models for each job
+        if return_jobs:
+            commands = []
+            for m in self:
+                commands.append(command.replace("MODEL", m))
+
+            print("Returning jobs for running the analysis in parallel.")
+            print(
+                "After jobs have finished, rerun this function removing return_jobs=True!"
+            )
+            return commands
+
+        else:
+            try:
+                os.system(command)
+            except:
+                os.chdir("..")
+                raise ValueError(
+                    "Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script."
                 )
-                return commands
 
-            else:
-                try:
-                    os.system(command)
-                except:
-                    os.chdir("..")
-                    raise ValueError(
-                        "Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script."
-                    )
+        # Compile dataframes into rosetta_data attributes
+        self.rosetta_data = []
+        self.rosetta_distances = {}
+        self.rosetta_ebr = []
+        self.rosetta_neighbours = []
+        self.rosetta_protonation = []
+        binding_energy_df = []
 
-            # Compile dataframes into rosetta_data attributes
-            self.rosetta_data = []
-            self.rosetta_distances = {}
-            self.rosetta_ebr = []
-            self.rosetta_neighbours = []
-            self.rosetta_protonation = []
-            binding_energy_df = []
+        output_folder = '.analysis'
+        analysis_folder = rosetta_folder + '/'+output_folder
+        for model in self:
 
-            analysis_folder = rosetta_folder + '/'+output_folder
-            for model in self:
+            # Read scores
+            scores_folder = analysis_folder + "/scores"
+            scores_csv = scores_folder + "/" + model + ".csv"
+            if os.path.exists(scores_csv):
+                self.rosetta_data.append(pd.read_csv(scores_csv))
 
-                # Read scores
-                scores_folder = analysis_folder + "/scores"
-                scores_csv = scores_folder + "/" + model + ".csv"
-                if os.path.exists(scores_csv):
-                    self.rosetta_data.append(pd.read_csv(scores_csv))
+            # Read binding energies
+            be_folder = analysis_folder + "/binding_energy"
+            be_csv = be_folder + "/" + model + ".csv"
+            if os.path.exists(be_csv):
+                binding_energy_df.append(pd.read_csv(be_csv))
 
-                # Read binding energies
-                be_folder = analysis_folder + "/binding_energy"
-                be_csv = be_folder + "/" + model + ".csv"
-                if os.path.exists(be_csv):
-                    binding_energy_df.append(pd.read_csv(be_csv))
+            # Read distances
+            distances_folder = analysis_folder + "/distances"
+            distances_csv = distances_folder + "/" + model + ".csv"
+            if os.path.exists(distances_csv):
+                self.rosetta_distances[model] = pd.read_csv(distances_csv)
+                self.rosetta_distances[model].set_index(["Model", "Pose"], inplace=True)
 
-                # Read distances
-                distances_folder = analysis_folder + "/distances"
-                distances_csv = distances_folder + "/" + model + ".csv"
-                if os.path.exists(distances_csv):
-                    self.rosetta_distances[model] = pd.read_csv(distances_csv)
-                    self.rosetta_distances[model].set_index(["Model", "Pose"], inplace=True)
+            # Read energy-by-residue data
+            ebr_folder = analysis_folder + "/ebr"
+            erb_csv = ebr_folder + "/" + model + ".csv"
+            if os.path.exists(erb_csv):
+                self.rosetta_ebr.append(pd.read_csv(erb_csv))
 
-                # Read energy-by-residue data
-                ebr_folder = analysis_folder + "/ebr"
-                erb_csv = ebr_folder + "/" + model + ".csv"
-                if os.path.exists(erb_csv):
-                    self.rosetta_ebr.append(pd.read_csv(erb_csv))
+            # Read interacting neighbours data
+            neighbours_folder = analysis_folder + "/neighbours"
+            neighbours_csv = neighbours_folder + "/" + model + ".csv"
+            if os.path.exists(neighbours_csv):
+                self.rosetta_neighbours.append(pd.read_csv(neighbours_csv))
 
-                # Read interacting neighbours data
-                neighbours_folder = analysis_folder + "/neighbours"
-                neighbours_csv = neighbours_folder + "/" + model + ".csv"
-                if os.path.exists(neighbours_csv):
-                    self.rosetta_neighbours.append(pd.read_csv(neighbours_csv))
+            # Read protonation data
+            protonation_folder = analysis_folder + "/protonation"
+            protonation_csv = protonation_folder + "/" + model + ".csv"
+            if os.path.exists(protonation_csv):
+                self.rosetta_protonation.append(pd.read_csv(protonation_csv))
 
-                # Read protonation data
-                protonation_folder = analysis_folder + "/protonation"
-                protonation_csv = protonation_folder + "/" + model + ".csv"
-                if os.path.exists(protonation_csv):
-                    self.rosetta_protonation.append(pd.read_csv(protonation_csv))
+        if self.rosetta_data == []:
+            raise ValueError("No rosetta output was found in %s" % rosetta_folder)
 
-            if self.rosetta_data == []:
-                raise ValueError("No rosetta output was found in %s" % rosetta_folder)
+        self.rosetta_data = pd.concat(self.rosetta_data)
+        self.rosetta_data.set_index(["Model", "Pose"], inplace=True)
 
-            self.rosetta_data = pd.concat(self.rosetta_data)
-            self.rosetta_data.set_index(["Model", "Pose"], inplace=True)
+        if binding_energy:
 
-            if binding_energy:
+            binding_energy_df = pd.concat(binding_energy_df)
+            binding_energy_df.set_index(["Model", "Pose"], inplace=True)
 
-                binding_energy_df = pd.concat(binding_energy_df)
-                binding_energy_df.set_index(["Model", "Pose"], inplace=True)
+            # Add interface scores to rosetta_data
+            for score in binding_energy_df:
+                index_value_map = {}
+                for i, v in binding_energy_df.iterrows():
+                    index_value_map[i] = v[score]
 
-                # Add interface scores to rosetta_data
-                for score in binding_energy_df:
-                    index_value_map = {}
-                    for i, v in binding_energy_df.iterrows():
-                        index_value_map[i] = v[score]
+                values = []
+                for i in self.rosetta_data.index:
+                    values.append(index_value_map[i])
 
-                    values = []
-                    for i in self.rosetta_data.index:
-                        values.append(index_value_map[i])
+                self.rosetta_data[score] = values
 
-                    self.rosetta_data[score] = values
+        if energy_by_residue and self.rosetta_ebr != []:
+            self.rosetta_ebr = pd.concat(self.rosetta_ebr)
+            self.rosetta_ebr.set_index(
+                ["Model", "Pose", "Chain", "Residue"], inplace=True
+            )
+        else:
+            self.rosetta_ebr = None
 
-            if energy_by_residue and self.rosetta_ebr != []:
-                self.rosetta_ebr = pd.concat(self.rosetta_ebr)
-                self.rosetta_ebr.set_index(
-                    ["Model", "Pose", "Chain", "Residue"], inplace=True
-                )
-            else:
-                self.rosetta_ebr = None
+        if interacting_residues and self.rosetta_neighbours != []:
+            self.rosetta_neighbours = pd.concat(self.rosetta_neighbours)
+            self.rosetta_neighbours.set_index(
+                ["Model", "Pose", "Chain", "Residue"], inplace=True
+            )
+        else:
+            self.rosetta_neighbours = None
 
-            if interacting_residues and self.rosetta_neighbours != []:
-                self.rosetta_neighbours = pd.concat(self.rosetta_neighbours)
-                self.rosetta_neighbours.set_index(
-                    ["Model", "Pose", "Chain", "Residue"], inplace=True
-                )
-            else:
-                self.rosetta_neighbours = None
-
-            if protonation_states and self.rosetta_protonation != []:
-                self.rosetta_protonation = pd.concat(self.rosetta_protonation)
-                self.rosetta_protonation.set_index(
-                    ["Model", "Pose", "Chain", "Residue"], inplace=True
-                )
-            else:
-                self.rosetta_protonation = None
+        if protonation_states and self.rosetta_protonation != []:
+            self.rosetta_protonation = pd.concat(self.rosetta_protonation)
+            self.rosetta_protonation.set_index(
+                ["Model", "Pose", "Chain", "Residue"], inplace=True
+            )
+        else:
+            self.rosetta_protonation = None
 
     def getRosettaModelDistances(self, model):
         """
@@ -8800,6 +9302,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         wat_to_hoh=True,
         keep_model_name=True,
         only_mutants=None,
+        cst_files=None,
     ):
         """
         Load the best energy models from a set of silent files inside a createMutants()
@@ -9719,7 +10222,6 @@ def _readPDB(name, pdb_file):
     structure = parser.get_structure(name, pdb_file)
     return structure
 
-
 def _saveStructureToPDB(
     structure,
     output_file,
@@ -9761,7 +10263,7 @@ def _saveStructureToPDB(
         io.save(output_file)
 
 def _copyScriptFile(
-    output_folder, script_name, no_py=False, subfolder=None, hidden=True
+    output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
 ):
     """
     Copy a script file from the prepare_proteins package.
@@ -9771,7 +10273,7 @@ def _copyScriptFile(
 
     """
     # Get script
-    path = "prepare_proteins/scripts"
+
     if subfolder != None:
         path = path + "/" + subfolder
 
@@ -9792,7 +10294,6 @@ def _copyScriptFile(
     with open(output_path, "w") as sof:
         for l in script_file:
             sof.write(l)
-
 
 def _computeCartesianFromInternal(coord2, coord3, coord4, distance, angle, torsion):
     """
@@ -9909,7 +10410,7 @@ def _getStructureCoordinates(
 
     return coordinates
 
-def _readRosettaScoreFile(score_file, indexing=False):
+def _readRosettaScoreFile(score_file, indexing=False, skip_empty=False):
     """
     Reads a Rosetta score file and returns a DataFrame of the scores.
 
@@ -9929,7 +10430,10 @@ def _readRosettaScoreFile(score_file, indexing=False):
         lines = [x.strip() for x in sf if x.startswith("SCORE:")]
 
     if len(lines) < 2:
-        raise ValueError("The score file does not contain enough data.")
+        if not skip_empty:
+            raise ValueError("The score file does not contain enough data.")
+        else:
+            return None
 
     score_terms = lines[0].split()[1:]  # Get the terms excluding the initial "SCORE:"
     scores = {term: [] for term in score_terms}

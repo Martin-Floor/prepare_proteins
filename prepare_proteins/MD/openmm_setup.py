@@ -346,6 +346,15 @@ class openmm_md:
                     else:
                         residue.name = 'ASP'
 
+                elif residue.name == 'GLU':
+                    atoms = []
+                    for atom in residue.atoms():
+                        atoms.append(atom.name)
+                    if 'HE2' in atoms:
+                        residue.name = 'GLH'
+                    else:
+                        residue.name = 'GLU'
+
                 elif residue.name == 'CYS':
                     atoms = []
                     for atom in residue.atoms():
@@ -451,7 +460,7 @@ class openmm_md:
             lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb)
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
                                        metal_charge=metal_charge)
-            os.chdir('../../')
+            os.chdir('../'*len(par_folder[residue].split('/')))
 
         # Renumber PDB
         renum_pdb = pdb_file.replace('.pdb', '_renum.pdb')
@@ -570,7 +579,7 @@ class openmm_md:
                     command += 'cd ../\n'
                     commands.append(command)
 
-                os.chdir('../')
+                os.chdir('../'*len(parameters_folder.split('/')))
                 if commands:# and not metal_parameters:
                     if return_qm_jobs:
                         print('Returning QM jobs')
@@ -588,7 +597,7 @@ class openmm_md:
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 2\n'
                 os.system(command)
-                os.chdir('../')
+                os.chdir('../'*len(parameters_folder.split('/')))
 
                 # Run step 3 of the MCPB protocol
                 os.chdir(parameters_folder)
@@ -596,7 +605,7 @@ class openmm_md:
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 3\n'
                 os.system(command)
-                os.chdir('../')
+                os.chdir('../'*len(parameters_folder.split('/')))
 
                 # Run step 4 of the MCPB protocol
                 os.chdir(parameters_folder)
@@ -604,7 +613,7 @@ class openmm_md:
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 4\n'
                 os.system(command)
-                os.chdir('../')
+                os.chdir('../'*len(parameters_folder.split('/')))
 
         # Generate set of metal ligand values
         metal_ligand_values = []

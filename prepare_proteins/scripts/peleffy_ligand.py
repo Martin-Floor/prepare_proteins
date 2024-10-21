@@ -29,7 +29,7 @@ else:
 extension = ligand_file.split('.')[-1]
 ligand_name = ligand_file.replace('.'+extension,'')
 
-os.environ['SCHRODINGER'] = '/gpfs/projects/bsc72/SCHRODINGER_ACADEMIC' # Fill in path to SCHRODINGER
+os.environ['SCHRODINGER'] = '/gpfs/projects/bsc72/Programs/SCHRODINGER_ACADEMIC' # Fill in path to SCHRODINGER
 
 molecule = Molecule(ligand_file,
                     allow_undefined_stereo=True,

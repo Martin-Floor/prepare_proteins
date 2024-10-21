@@ -19,7 +19,8 @@ parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawni
 parser.add_argument('--energy_bias', default='Binding Energy', help='Which energy term to use for bias the simulation.')
 parser.add_argument('--regional_best_fraction', default=0.2, help='Fraction of best total energy poses when using energy_bias="Binding Energy"')
 parser.add_argument('--angles', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
-parser.add_argument('--restore_coordinates', action='store_true', default=False, help='Add angles to the PELE conf of new spawnings')
+parser.add_argument('--equilibration_steps', default=10, help='Number of equilibration steps for new spawnings.')
+parser.add_argument('--restore_coordinates', action='store_true', default=False, help='Restore original coordinates for each spawning (pele platform modifies them at each spawning)')
 args=parser.parse_args()
 
 ### Define variables
@@ -29,6 +30,7 @@ max_spawnings = int(args.max_spawnings)
 energy_bias = args.energy_bias
 regional_best_fraction = float(args.regional_best_fraction)
 angles = args.angles
+equilibration_steps = (args.equilibration_steps)
 restore_coordinates = args.restore_coordinates
 
 if energy_bias not in ['Total Energy', 'Binding Energy']:
@@ -38,6 +40,7 @@ verbose = True
 cwd = os.getcwd()
 
 original_yaml = cwd+'/0/input.yaml'
+original_equilibration_yaml = cwd+'/0/input_equilibration.yaml'
 
 # Get model base name
 for f in os.listdir(cwd+'/0'):
@@ -77,7 +80,7 @@ def getSpawningEpochPaths(spawning_index):
             continue
     return {e:spawning_output_dir+'/'+str(e) for e in sorted(spawning_epochs_paths)}
 
-def getTotalEpochs():
+def getTotalEpochs(exclude_first=False):
     """
     Get the total number of epochs
     """
@@ -85,6 +88,8 @@ def getTotalEpochs():
     total_epochs = 0
     for spawning in getSpawningIndexes():
         total_epochs += len(getSpawningEpochPaths(spawning))
+        if exclude_first:
+            total_epochs -= 1
 
     return total_epochs
 
@@ -227,7 +232,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             angles = [d for d in metrics[m] if d.startswith('angle_')]
             if len(angles) > 1:
                 raise ValueError('Combining more than one angle into a metric is not currently supported.')
-            dataframe[m] = dataframe[angles].min(axis=1).tolist()
+            dataframe[m] = dataframe[angles].tolist()
 
     return metric_type
 
@@ -252,6 +257,9 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
         if m not in metrics_thresholds:
             continue
 
+        if m not in report_data:
+            raise ValueError('The metric {m} for regional spwaning could not be computed. Please check your input!')
+
         acceptance = np.ones(report_data[m].shape[0], dtype=bool)
         if isinstance(metrics_thresholds[m], float):
             acceptance = acceptance & ((report_data[m] <= metrics_thresholds[m]).to_numpy())
@@ -260,6 +268,7 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
             acceptance = acceptance & ((report_data[m] <= metrics_thresholds[m][1]).to_numpy())
         report_data[m+' Acceptance'] = acceptance
         region_acceptance = region_acceptance & acceptance
+
     report_data['Regional Acceptance'] = region_acceptance
 
     # Compute target region probability by trajectory
@@ -464,18 +473,18 @@ current_spawning = spawning_indexes[-1]
 
 while current_spawning <= max_spawnings:
 
+    # Check if max number of iterations has been reached
+    if max_iterations:
+        total_iterations = getTotalEpochs(exclude_first=True)
+        if total_iterations >= int(max_iterations):
+            break
+
     # Restart reading of metrics
     with open(args.metrics) as jf:
         metrics = json.load(jf)
 
     with open(args.metrics_thresholds) as jf:
         metrics_thresholds = json.load(jf)
-
-    # Check if max number of iterations has been reached
-    if max_iterations:
-        total_iterations = getTotalEpochs()
-        if total_iterations >= int(max_iterations):
-            break
 
     # Get last epoch for the current spawning
     epochs_paths = getSpawningEpochPaths(current_spawning)
@@ -549,46 +558,54 @@ while current_spawning <= max_spawnings:
         # Set PELE input files
         new_yaml = open(str(current_spawning)+'/input.yaml', 'w')
 
-        if angles:
-            restart_yaml = open(cwd+'/'+str(current_spawning)+'/input_restart.yaml', 'w')
-            restart_line = False
-            restart_adaptive_line = False
+        equilibration_yaml = open(cwd+'/'+str(current_spawning)+'/input_equilibration.yaml', 'w')
+        restart_yaml = open(cwd+'/'+str(current_spawning)+'/input_restart.yaml', 'w')
+        restart_line = False
+        restart_adaptive_line = False
 
         with open(original_yaml) as yf:
             for l in yf:
                 if l.startswith('iterations:'):
-                    l = 'iterations: 1\n'
-                elif l.startswith('equilibration:'):
-                    l = 'equilibration: false\n'
-                elif l.startswith('equilibration_steps:') or l.startswith('equilibration_mode:'):
-                    continue
-                if angles:
-                    if l.startswith('debug:'):
-                        restart_yaml.write(l)
-                    if l.startswith('restart: true'):
-                        restart_line = True
-                    elif l.startswith('adaptive_restart: true'):
-                        restart_adaptive_line = True
+                    l = 'iterations: 2\n'
+
+                elif l.startswith('equilibration_steps:'):
+                    l = f'equilibration_steps: {equilibration_steps}\n'
+
+                # Add missing lines to restart yaml
+                if l.startswith('debug:'):
                     restart_yaml.write(l)
-                else:
-                    if l.startswith('debug:'):
-                        continue
+                if l.startswith('restart: true'):
+                    restart_line = True
+                elif l.startswith('adaptive_restart: true'):
+                    restart_adaptive_line = True
+                restart_yaml.write(l)
                 new_yaml.write(l)
 
-            if angles and not restart_line:
+            if not restart_line:
                 restart_yaml.write('restart: true\n')
-            if angles and not restart_adaptive_line:
+            if not restart_adaptive_line:
                 restart_yaml.write('adaptive_restart: true\n')
 
         new_yaml.close()
-        if angles:
-            restart_yaml.close()
+        restart_yaml.close()
+
+        # Make here modification to the equilibration protocol
+        with open(original_equilibration_yaml) as yf:
+            for l in yf:
+                if l.startswith('equilibration_steps:'):
+                    l = f'equilibration_steps: {equilibration_steps}\n'
+                equilibration_yaml.write(l)
+        equilibration_yaml.close()
 
         # Run next spawning
         command = 'cd '+str(current_spawning)+'\n'
         command += 'python -m pele_platform.main input.yaml\n'
-        if angles:
 
+        # Correct constraints
+        command += 'python ../../._correctPositionalConstraints.py output '
+        command += "../0/"+protein+separator+ligand+separator+pose+".pdb\n"
+
+        if angles:
             # Get topology
             command += 'python ../../._addAnglesToPELEConf.py output '
             command += '../0/._angles.json '
@@ -598,6 +615,17 @@ while current_spawning <= max_spawnings:
             command += 'python ../../._restoreChangedCoordinates.py '
             command += protein+separator+ligand+separator+pose+'.pdb '
             command += 'output/input/'+protein+separator+ligand+separator+pose+'_processed.pdb\n'
+
+        # Add equilibration flags commands
+        command += 'cp output/pele.conf output/pele.conf.backup\n'
+        command += 'cp output/adaptive.conf output/adaptive.conf.backup\n'
+        command += 'python ../../._addLigandConstraintsToPELEconf.py output\n'
+        command += 'python ../../._changeAdaptiveIterations.py output --iterations 1 --steps 1\n'
+        command += 'python -m pele_platform.main input_equilibration.yaml\n'
+        command += 'cp output/pele.conf.backup output/pele.conf\n'
+        command += 'cp output/adaptive.conf.backup output/adaptive.conf\n'
+
+        # Add spawning sampling commands
         command += 'python -m pele_platform.main input_restart.yaml\n'
         command += 'cd ..\n'
         os.system(command)
