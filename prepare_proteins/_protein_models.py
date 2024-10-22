@@ -4482,7 +4482,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_energy_bias="Binding Energy",
         regional_best_fraction=0.2,
         constraint_level=1,
-        restore_input_coordinates=False
+        restore_input_coordinates=False,
+        skip_connect_rewritting=False
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -4888,11 +4889,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 )
                                 residue.add(atom)
                                 chain.add(residue)
-
-                    _saveStructureToPDB(structure, protein_ligand_folder + "/" + f)
-                    self._write_conect_lines(
-                        protein, protein_ligand_folder + "/" + f, check_file=True
-                    )
+                    
+                    if skip_connect_rewritting:
+                        print(f'The structure {f} has pre-defined CONECT lines probably from extractPELEPoses() function. Skipping saving structure and re-writting them. Directly copying structure to PELE folder..')
+                        # Specify the source file path
+                        source_file = f'{models_folder}/{d}/{f}'
+                        # Specify the destination file path
+                        destination_folder = f'{protein_ligand_folder}/{f}'
+                        # Perform the copy operation
+                        print(f'Copying the structure {f} from source folder: {models_folder}/{d}/{f} to destination_folder: {protein_ligand_folder}')
+                        shutil.copyfile(source_file, destination_folder)
+                        
+                    else:
+                        _saveStructureToPDB(structure, protein_ligand_folder + "/" + f)
+                        self._write_conect_lines(
+                            protein, protein_ligand_folder + "/" + f, check_file=True
+                        )
 
                     if (protein, ligand) not in models:
                         models[(protein, ligand)] = []
