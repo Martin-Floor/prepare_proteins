@@ -546,6 +546,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         add_to_path=False,
         conect_update=True,
         collect_memory=False,
+        only_hetatoms=False,
     ):
         """
         Adds a model from a PDB file.
@@ -576,9 +577,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == "WAT":
                     residue.resname = "HOH"
 
-        if model not in self.conects or self.conects[model] == []:
+        if model not in self.conects or self.conects[model] == [] and conect_update:
             # Read conect lines
-            self.conects[model] = self._readPDBConectLines(pdb_file, model)
+            self.conects[model] = self._readPDBConectLines(pdb_file, model, only_hetatoms=only_hetatoms)
 
         # Check covalent ligands
         if covalent_check:
@@ -2653,6 +2654,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         use_new_version=False,
         cst_fragments=None,
         skip_finished=None,
+        only_ligands=None,
     ):
         """
         Set docking calculations for all the proteins and set of ligands located
@@ -2677,6 +2679,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             {'model': {'ligand': ('[fragment]', feature, True) ...
             }
         """
+
+        if isinstance(only_ligands, str):
+            only_ligands = [only_ligands]
 
         # Create docking job folders
         if not os.path.exists(docking_folder):
@@ -2703,6 +2708,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         for f in os.listdir(ligands_folder):
             if f.endswith(".mae"):
                 name = f.replace(".mae", "")
+
+                if only_ligands and name not in only_ligands:
+                    continue
+
                 substrates_paths[name] = ligands_folder + "/" + f
 
         # Set up docking jobs
@@ -7992,13 +8001,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if atom1[2] not in coordinates[atom1[0]][atom1[1]]:
                     raise ValueError(
-                        "Atom name %s was not found in residue %s of chain %s"
-                        % (atom1[2], atom1[1], atom1[0])
+                        "Atom name %s was not found in residue %s of chain %s for model %s"
+                        % (atom1[2], atom1[1], atom1[0], model)
                     )
                 if atom2[2] not in coordinates[atom2[0]][atom2[1]]:
                     raise ValueError(
-                        "Atom name %s was not found in residue %s of chain %s"
-                        % (atom2[2], atom2[1], atom2[0])
+                        "Atom name %s was not found in residue %s of chain %s for model %s"
+                        % (atom2[2], atom2[1], atom2[0], model)
                     )
 
                 coord1 = coordinates[atom1[0]][atom1[1]][atom1[2]]
@@ -8725,6 +8734,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         conect_update=False,
         replace_symbol=None,
         collect_memory_every=None,
+        only_hetatoms_conect=False,
     ):
         """
         Read structures from a Schrodinger calculation.
@@ -8799,6 +8809,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             atom_mapping=atom_mapping,
                             conect_update=conect_update,
                             collect_memory=collect_memory,
+                            only_hetatoms=only_hetatoms_conect
                         )
                         load_count += 1
 
@@ -9415,6 +9426,245 @@ make sure of reading the target sequences with the function readTargetSequences(
             Return missing models from the optimization_folder.
         """
 
+        def getConectLines(pdb_file, format_for_prepwizard=True):
+
+            ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+
+            # Read PDB file
+            atom_tuples = {}
+            add_one = False
+            previous_chain = None
+            with open(pdb_file, "r") as f:
+                for l in f:
+                    if l.startswith("ATOM") or l.startswith("HETATM"):
+                        index, name, resname, chain, resid = (
+                            int(l[6:11]),        # Atom index
+                            l[12:16].strip(),    # Atom name
+                            l[17:20].strip(),    # Residue name
+                            l[21],               # Chain identifier
+                            int(l[22:26]),       # Residue index
+                        )
+
+                        if not previous_chain:
+                            previous_chain = chain
+
+                        if name in ace_names:
+                            resid -= 1
+
+                            if format_for_prepwizard:
+                                if name == 'CP2':
+                                    name = 'CH3'
+                                elif name == 'CO':
+                                    name = 'C'
+                                elif name == 'OP1':
+                                    name = 'O'
+                                elif name == '1HP2':
+                                    name = '1H'
+                                elif name == '2HP2':
+                                    name = '2H'
+                                elif name == '3HP2':
+                                    name = '3H'
+
+                        if resname == 'NMA':
+                            add_one = True
+
+                            if format_for_prepwizard:
+                                if name == 'HN2':
+                                    name = 'H'
+                                elif name == 'C':
+                                    name = 'CA'
+                                elif name == 'H1':
+                                    name = '1HA'
+                                elif name == 'H2':
+                                    name = '2HA'
+                                elif name == 'H3':
+                                    name = '3HA'
+
+                        if previous_chain != chain:
+                            add_one = False
+
+                        if add_one:
+                            resid += 1
+
+                        atom_tuples[index] = (chain, resid, name)
+                        previous_chain = chain
+
+            conects = []
+            with open(pdb_file) as pdbf:
+                for l in pdbf:
+                    if l.startswith("CONECT"):
+                        l = l.replace("CONECT", "")
+                        l = l.strip("\n").rstrip()
+                        num = len(l) / 5
+                        new_l = [int(l[i * 5 : (i * 5) + 5]) for i in range(int(num))]
+                        conects.append([atom_tuples[int(x)] for x in new_l])
+
+            return conects
+
+        def writeConectLines(conects, pdb_file):
+
+            atom_indexes = {}
+            with open(pdb_file, "r") as f:
+                for l in f:
+                    if l.startswith("ATOM") or l.startswith("HETATM"):
+                        index, name, resname, chain, resid = (
+                            int(l[6:11]),        # Atom index
+                            l[12:16].strip(),    # Atom name
+                            l[17:20].strip(),    # Residue name
+                            l[21],               # Chain identifier
+                            int(l[22:26]),       # Residue index
+                        )
+                        atom_indexes[(chain, resid, name)] = index
+
+            # Check atoms not found in conects
+            with open(pdb_file + ".tmp", "w") as tmp:
+                with open(pdb_file) as pdb:
+                    # write all lines but skip END line
+                    for line in pdb:
+                        if not line.startswith("END"):
+                            tmp.write(line)
+
+                    # Write new conect line mapping
+                    for entry in conects:
+                        line = "CONECT"
+                        for x in entry:
+                            line += "%5s" % atom_indexes[x]
+                        line += "\n"
+                        tmp.write(line)
+                tmp.write("END\n")
+            shutil.move(pdb_file + ".tmp", pdb_file)
+
+        def checkCappingGroups(pdb_file, format_for_prepwizard=True, keep_conects=True):
+
+            ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+
+            if keep_conects:
+                conect_lines = getConectLines(pdb_file)
+
+            # Detect capping groups
+            structure = _readPDB(pdb_file, best_model_tag+".pdb")
+            model = structure[0]
+
+            for chain in model:
+
+                add_one = False
+                residues = [r for r in chain]
+
+                # Check for ACE atoms
+                ace_atoms = []
+                for a in residues[0]:
+                    if a.name in ace_names:
+                        ace_atoms.append(a)
+
+                # Check for NMA residue
+                nma_residue = None
+                for r in residues:
+                    if r.resname == 'NMA':
+                        nma_residue = r
+
+                # Build a separate residue for ACE
+                new_chain = PDB.Chain.Chain(chain.id)
+
+                if ace_atoms:
+
+                    for a in ace_atoms:
+                        residues[0].detach_child(a.name)
+
+                    ace_residue = PDB.Residue.Residue((' ', residues[0].id[1]-1, ' '), 'ACE', '')
+
+                    for i, a in enumerate(ace_atoms):
+                        new_name = a.get_name()
+
+                        # Define the new name based on the old one
+                        if format_for_prepwizard:
+                            if new_name == 'CP2':
+                                new_name = 'CH3'
+                            elif new_name == 'CO':
+                                new_name = 'C'
+                            elif new_name == 'OP1':
+                                new_name = 'O'
+                            elif new_name == '1HP2':
+                                new_name = '1H'
+                            elif new_name == '2HP2':
+                                new_name = '2H'
+                            elif new_name == '3HP2':
+                                new_name = '3H'
+
+                        # Create a new atom
+                        new_atom = PDB.Atom.Atom(
+                            new_name,                  # Atom name
+                            a.get_coord(),             # Coordinates
+                            a.get_bfactor(),           # B-factor
+                            a.get_occupancy(),         # Occupancy
+                            a.get_altloc(),            # AltLoc
+                            "%-4s" % new_name,         # Full atom name (formatted)
+                            a.get_serial_number(),     # Serial number
+                            a.element                  # Element symbol
+                        )
+
+                        ace_residue.add(new_atom)
+
+                    new_chain.add(ace_residue)
+
+                # Renumber residues and rename atoms
+                for i, r in enumerate(residues):
+
+                    # Handle NMA residue atom renaming
+                    if r == nma_residue and format_for_prepwizard:
+                        renamed_atoms = []
+                        for a in nma_residue:
+
+                            new_name = a.get_name()  # Original atom name
+
+                            # Rename the atom based on the rules
+                            if new_name == 'HN2':
+                                new_name = 'H'
+                            elif new_name == 'C':
+                                new_name = 'CA'
+                            elif new_name == 'H1':
+                                new_name = '1HA'
+                            elif new_name == 'H2':
+                                new_name = '2HA'
+                            elif new_name == 'H3':
+                                new_name = '3HA'
+
+                            # Create a new atom with the updated name
+                            new_atom = PDB.Atom.Atom(
+                                new_name,                  # New name
+                                a.get_coord(),             # Same coordinates
+                                a.get_bfactor(),           # Same B-factor
+                                a.get_occupancy(),         # Same occupancy
+                                a.get_altloc(),            # Same altloc
+                                "%-4s" % new_name,         # Full atom name (formatted)
+                                a.get_serial_number(),     # Same serial number
+                                a.element                  # Same element
+                            )
+                            renamed_atoms.append(new_atom)
+
+                        # Create a new residue with renamed atoms
+                        nma_residue = PDB.Residue.Residue(r.id, r.resname, r.segid)
+                        for atom in renamed_atoms:
+                            nma_residue.add(atom)
+
+                        r = nma_residue
+                        add_one = True
+
+                    if add_one:
+                        chain.detach_child(r.id)  # Deatach residue from old chain
+                        new_id = (r.id[0], r.id[1]+1, r.id[2])  # New ID with updated residue number
+                        r.id = new_id  # Update residue ID with renumbered value
+
+                    # Add residue to the new chain
+                    new_chain.add(r)
+
+                model.detach_child(chain.id)
+                model.add(new_chain)
+
+            _saveStructureToPDB(structure, pdb_file)
+
+            if keep_conects:
+                writeConectLines(conect_lines, pdb_file)
+
         executable = "extract_pdbs.linuxgccrelease"
         models = []
 
@@ -9471,6 +9721,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += " -auto_detect_glycan_connections"
                             command += " -maintain_links"
                         os.system(command)
+
+                        checkCappingGroups(best_model_tag+".pdb")
+
                         self.readModelFromPDB(
                             model,
                             best_model_tag + ".pdb",
@@ -10050,10 +10303,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Read PDB file and get conect lines only
         """
+
         # Get atom indexes by tuple and objects
         atoms = self._getAtomIndexes(model, pdb_file)
         if only_hetatoms:
             atoms_objects = self._getAtomIndexes(model, pdb_file, return_objects=True)
+
         conects = []
         # Read conect lines as dictionaries linking atoms
         with open(pdb_file) as pdbf:

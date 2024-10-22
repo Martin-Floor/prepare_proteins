@@ -63,7 +63,6 @@ for f in os.listdir(models_folder):
 
             elif residue.pdbres == 'NMA ':
                 for atom in residue.atom:
-                    print(atom.pdbname)
                     if atom.pdbname.strip() == 'H':
                         atom.pdbname = 'HN2 '
                     elif atom.pdbname.strip() == 'CA':
