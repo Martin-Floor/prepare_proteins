@@ -415,6 +415,43 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if verbose:
                 print(f"Removed {count} from conect lines of model {model}")
 
+    def addCappingGroups(self, rosetta_style_caps=True, stdout=False, stderr=False):
+
+        # Manage stdout and stderr
+        if stdout:
+            stdout = None
+        else:
+            stdout = subprocess.DEVNULL
+
+        if stderr:
+            stderr = None
+        else:
+            stderr = subprocess.DEVNULL
+
+        if not os.path.exists('_capping_'):
+            os.mkdir('_capping_')
+
+        if not os.path.exists('_capping_/input_models'):
+            os.mkdir('_capping_/input_models')
+
+        if not os.path.exists('_capping_/output_models'):
+            os.mkdir('_capping_/output_models')
+
+        self.saveModels('_capping_/input_models')
+
+        _copyScriptFile('_capping_', "addCappingGroups.py")
+        command =  'run python3 _capping_/._addCappingGroups.py '
+        command += '_capping_/input_models/ '
+        command += '_capping_/output_models/ '
+        if rosetta_style_caps:
+            command += '--rosetta_style_caps '
+        subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
+
+        for f in os.listdir('_capping_/output_models'):
+            model = f.replace('.pdb', '')
+            self.readModelFromPDB(model, '_capping_/output_models/'+f, conect_update=False)
+        shutil.rmtree('_capping_')
+
     def removeCaps(self, models=None, remove_ace=True, remove_nma=True):
         """
         Remove caps from models.
@@ -509,6 +546,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         add_to_path=False,
         conect_update=True,
         collect_memory=False,
+        only_hetatoms=False,
     ):
         """
         Adds a model from a PDB file.
@@ -539,9 +577,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == "WAT":
                     residue.resname = "HOH"
 
-        if model not in self.conects or self.conects[model] == []:
+        if model not in self.conects or self.conects[model] == [] and conect_update:
             # Read conect lines
-            self.conects[model] = self._readPDBConectLines(pdb_file, model)
+            self.conects[model] = self._readPDBConectLines(pdb_file, model, only_hetatoms=only_hetatoms)
 
         # Check covalent ligands
         if covalent_check:
@@ -590,10 +628,18 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         Renumber every PDB chain residues from 1 onward.
         """
 
-        for model in self:
-            for c in self.structures[model].get_chains():
-                for i, r in enumerate(c):
-                    r.id = (r.id[0], i + 1, r.id[2])
+        for m in self:
+            for model in self.structures[m]:
+                for c in model:
+                    residues = [r for r in c]
+                    chain_copy = PDB.Chain.Chain(c.id)
+                    for i, r in enumerate(residues):
+                        new_id = (r.id[0], i + 1, r.id[2])
+                        c.detach_child(r.id)
+                        r.id = new_id
+                        chain_copy.add(r)
+                    model.detach_child(c.id)
+                    model.add(chain_copy)
 
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
@@ -1702,6 +1748,8 @@ chain to use for each model with the chains option."
         rosetta_path=None,
         ca_constraint=False,
         ligand_chain=None,
+        hoh_to_wat=True,
+        pdb_output=False,
     ):
         """
         Set up minimizations using Rosetta FastRelax protocol.
@@ -1751,6 +1799,13 @@ chain to use for each model with the chains option."
             raise ValueError(
                 "To run relax with symmetry absolute rosetta path must be given to run make_symmdef_file.pl script."
             )
+
+        # Convert any water to WAT name
+        if hoh_to_wat:
+            for model in self:
+                for r in self.structures[model].get_residues():
+                    if r.id[0] == 'W':
+                        r.resname = 'WAT'
 
         if symmetry:
             for m in self.models_names:
@@ -1951,8 +2006,8 @@ has been carried out. Please run compareSequences() function before setting muta
             if not null:
                 protocol.append(relax)
 
-                # Set protocol
-                xml.setProtocol(protocol)
+            # Set protocol
+            xml.setProtocol(protocol)
 
             # Add scorefunction output
             xml.addOutputScorefunction(sfxn)
@@ -1966,11 +2021,16 @@ has been carried out. Please run compareSequences() function before setting muta
                 input_model = model + ".pdb"
 
             # Create options for minimization protocol
+            if pdb_output:
+                output_silent_file = None
+            else:
+                output_silent_file = model + "_relax.out"
+
             flags = rosettaScripts.flags(
                 "../../xml/" + model + "_relax.xml",
                 nstruct=nstruct,
                 s="../../input_models/" + input_model,
-                output_silent_file=model + "_relax.out",
+                output_silent_file=output_silent_file
             )
 
             # Add extra flags
@@ -1993,6 +2053,10 @@ has been carried out. Please run compareSequences() function before setting muta
                 if not os.path.exists(relax_folder + "/params"):
                     os.mkdir(relax_folder + "/params")
 
+                for r in self.structures[model].get_residues():
+                    if r.resname == 'NMA':
+                        _copyScriptFile(relax_folder+"/params", 'NMA.params', subfolder='rosetta_params', path='prepare_proteins', hidden=False)
+
                 if isinstance(param_files, str):
                     param_files = [param_files]
 
@@ -2002,6 +2066,7 @@ has been carried out. Please run compareSequences() function before setting muta
                     shutil.copyfile(param, relax_folder + "/params/" + param_name)
                     if not param_name.endswith(".params"):
                         patch_line += "../../params/" + param_name + " "
+
                 flags.addOption("in:file:extra_res_path", "../../params")
                 if patch_line != "":
                     flags.addOption("in:file:extra_patch_fa", patch_line)
@@ -2448,8 +2513,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(grid_folder + "/output_models"):
             os.mkdir(grid_folder + "/output_models")
 
+        if isinstance(models, str):
+            models = [models]
+
         # Save all input models
-        self.saveModels(grid_folder + "/input_models", convert_to_mae=mae_input)
+        self.saveModels(grid_folder + "/input_models", convert_to_mae=mae_input, models=models)
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -2463,9 +2531,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         jobs = []
         for model in self.models_names:
 
-            if models != None:
-                if model not in models:
-                    continue
+            if models and model not in models:
+                continue
 
             # Check if output grid exists
             output_path = grid_folder + "/output_models/" + model + ".zip"
@@ -2589,6 +2656,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         use_new_version=False,
         cst_fragments=None,
         skip_finished=None,
+        only_ligands=None,
     ):
         """
         Set docking calculations for all the proteins and set of ligands located
@@ -2614,6 +2682,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             }
         """
 
+        if isinstance(only_ligands, str):
+            only_ligands = [only_ligands]
+
+        if isinstance(models, str):
+            models = [models]
+
         # Create docking job folders
         if not os.path.exists(docking_folder):
             os.mkdir(docking_folder)
@@ -2625,7 +2699,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(docking_folder + "/output_models")
 
         # Save all input models
-        self.saveModels(docking_folder + "/input_models")
+        self.saveModels(docking_folder + "/input_models", models=models)
 
         # Read paths to grid files
         grids_paths = {}
@@ -2639,6 +2713,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         for f in os.listdir(ligands_folder):
             if f.endswith(".mae"):
                 name = f.replace(".mae", "")
+
+                if only_ligands and name not in only_ligands:
+                    continue
+
                 substrates_paths[name] = ligands_folder + "/" + f
 
         # Set up docking jobs
@@ -2646,7 +2724,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         for grid in grids_paths:
 
             # Skip if models are given and not in models
-            if models != None:
+            if models:
                 if grid not in models:
                     continue
 
@@ -4409,7 +4487,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_energy_bias="Binding Energy",
         regional_best_fraction=0.2,
         constraint_level=1,
-        restore_input_coordinates=False
+        restore_input_coordinates=False,
+        skip_connect_rewritting=False
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -4816,10 +4895,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 residue.add(atom)
                                 chain.add(residue)
 
-                    _saveStructureToPDB(structure, protein_ligand_folder + "/" + f)
-                    self._write_conect_lines(
-                        protein, protein_ligand_folder + "/" + f, check_file=True
-                    )
+                    if skip_connect_rewritting:
+                        print(f'The structure {f} has pre-defined CONECT lines probably from extractPELEPoses() function. Skipping saving structure and re-writting them. Directly copying structure to PELE folder..')
+                        # Specify the source file path
+                        source_file = f'{models_folder}/{d}/{f}'
+                        # Specify the destination file path
+                        destination_folder = f'{protein_ligand_folder}/{f}'
+                        # Perform the copy operation
+                        print(f'Copying the structure {f} from source folder: {models_folder}/{d}/{f} to destination_folder: {protein_ligand_folder}')
+                        shutil.copyfile(source_file, destination_folder)
+
+                    else:
+                        _saveStructureToPDB(structure, protein_ligand_folder + "/" + f)
+                        self._write_conect_lines(
+                            protein, protein_ligand_folder + "/" + f, check_file=True
+                        )
 
                     if (protein, ligand) not in models:
                         models[(protein, ligand)] = []
@@ -6587,11 +6677,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += " --overwrite "
         os.system(command)
 
-        # Read the CSV file into pandas
-        if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
-            raise ValueError(
-                "Docking analysis failed. Check the ouput of the analyse_docking.py script."
-            )
+        # # Read the CSV file into pandas
+        # if not os.path.exists(docking_folder + '/'+output_folder+"/docking_data.csv"):
+        #     raise ValueError(
+        #         "Docking analysis failed. Check the ouput of the analyse_docking.py script."
+        #     )
 
         # Read scores data
         scores_directory = docking_folder + '/'+output_folder+"/scores"
@@ -6602,7 +6692,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Read the CSV file into pandas
             self.docking_data.append(pd.read_csv(
-                distances_directory+'/'+f
+                scores_directory+'/'+f
             ))
 
         # Concatenate the list of DataFrames into a single DataFrame
@@ -6646,6 +6736,119 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(docking_folder + '/'+output_folder+"/._failed_dockings.json") as jifd:
                 failed_dockings = json.load(jifd)
             return failed_dockings
+
+    def analyseDockingParallel(self,
+        docking_folder,
+        protein_atoms=None,
+        angles=None,
+        atom_pairs=None,
+        skip_chains=False,
+        return_failed=False,
+        ignore_hydrogens=False,
+        separator="-",
+        overwrite=False,
+        only_models=None,
+        output_folder='.analysis'):
+        """
+        Set up jobs for analysing individual docking and creating CSV files. The files should be
+        read by the analyseDocking function (i.e., the non-parallel version).
+        """
+
+        # Create analysis folder
+        if not os.path.exists(docking_folder + '/'+output_folder):
+            os.mkdir(docking_folder + '/'+output_folder)
+
+        # Create scores data folder
+        if not os.path.exists(docking_folder + '/'+output_folder+"/scores"):
+            os.mkdir(docking_folder + '/'+output_folder+"/scores")
+
+        # Create distance data folder
+        if not os.path.exists(docking_folder + '/'+output_folder+"/atom_pairs"):
+            os.mkdir(docking_folder + '/'+output_folder+"/atom_pairs")
+
+        # Create angle data folder
+        if angles:
+            if not os.path.exists(docking_folder + '/'+output_folder+"/angles"):
+                os.mkdir(docking_folder + '/'+output_folder+"/angles")
+
+        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
+        prepare_proteins._copyScriptFile(
+            docking_folder + '/'+output_folder, "analyse_individual_docking.py"
+        )
+        script_path = docking_folder + '/'+output_folder+"/._analyse_individual_docking.py"
+
+        # Write protein_atoms dictionary to json file
+        if protein_atoms:
+            with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
+                json.dump(protein_atoms, jf)
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        # Write atom_pairs dictionary to json file
+        if atom_pairs:
+            with open(docking_folder + '/'+output_folder+"/._atom_pairs.json", "w") as jf:
+                json.dump(atom_pairs, jf)
+
+        # Write angles dictionary to json file
+        if angles:
+            with open(docking_folder + '/'+output_folder+"/._angles.json", "w") as jf:
+                json.dump(angles, jf)
+
+        jobs = []
+        for model in os.listdir(docking_folder+'/output_models'):
+
+            # Skip models not given in only_models
+            if only_models != None  and model not in only_models:
+                continue
+
+            # Check separator in model name
+            if separator in model:
+                raise ValueError('The separator %s was found in model name %s. Please use a different one!' % (separator, model))
+
+            for f in os.listdir(docking_folder+'/output_models/'+model):
+
+                subjobs = None
+                mae_output = None
+
+                if 'subjobs.log' in f:
+                    ligand = f.replace(model+'_','').replace('_subjobs.log','')
+                    subjobs = docking_folder+'/output_models/'+model+'/'+f
+
+                if f.endswith('.maegz'):
+                    ligand = f.replace(model+'_','').replace('_pv.maegz','')
+
+                    # Check separator in ligand name
+                    if separator in ligand:
+                        raise ValueError('The separator %s was found in ligand name %s. Please use a different one!' % (separator, ligand))
+
+                    mae_output = docking_folder+'/output_models/'+model+'/'+f
+
+                if mae_output:
+
+                    command  = 'run '
+                    command += docking_folder+'/'+output_folder+"/._analyse_individual_docking.py "
+                    command += docking_folder+' '
+                    command += mae_output+' '
+                    command += model+' '
+                    command += ligand+' '
+                    if atom_pairs:
+                        command += "--atom_pairs " + docking_folder + '/'+output_folder+"/._atom_pairs.json "
+                    elif protein_atoms:
+                        command += "--protein_atoms " + docking_folder + '/'+output_folder+"/._protein_atoms.json "
+                    if angles:
+                        command += " --angles " + docking_folder + '/'+output_folder+"/._angles.json"
+                    if skip_chains:
+                        command += " --skip_chains"
+                    if return_failed:
+                        command += " --return_failed"
+                    if ignore_hydrogens:
+                        command += " --ignore_hydrogens"
+                    command += " --separator " + separator
+                    command += '\n'
+                    jobs.append(command)
+
+        return jobs
 
     def analyseRosettaDocking(self, docking_folder, separator='_', only_models=None):
 
@@ -7928,13 +8131,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if atom1[2] not in coordinates[atom1[0]][atom1[1]]:
                     raise ValueError(
-                        "Atom name %s was not found in residue %s of chain %s"
-                        % (atom1[2], atom1[1], atom1[0])
+                        "Atom name %s was not found in residue %s of chain %s for model %s"
+                        % (atom1[2], atom1[1], atom1[0], model)
                     )
                 if atom2[2] not in coordinates[atom2[0]][atom2[1]]:
                     raise ValueError(
-                        "Atom name %s was not found in residue %s of chain %s"
-                        % (atom2[2], atom2[1], atom2[0])
+                        "Atom name %s was not found in residue %s of chain %s for model %s"
+                        % (atom2[2], atom2[1], atom2[0], model)
                     )
 
                 coord1 = coordinates[atom1[0]][atom1[1]][atom1[2]]
@@ -8122,7 +8325,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 )
             else:
                 values = []
-                for model in self.docking_data.index.levels[0]:
+                models = []
+                for index in self.docking_data.index:
+                    if index[0] not in models:
+                        models.append(index[0])
+
+                for model in models:
 
                     # Check whether model is found in docking distances
                     if model not in self.docking_distances:
@@ -8132,7 +8340,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         self.docking_data.index.get_level_values("Protein") == model
                     ]
 
-                    for ligand in self.docking_data.index.levels[1]:
+                    ligands = []
+                    for index in model_series.index:
+                        if index[1] not in ligands:
+                            ligands.append(index[1])
+                    for ligand in ligands:
 
                         # Check whether ligand is found in model's docking distances
                         if ligand not in self.docking_distances[model]:
@@ -8661,6 +8873,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         conect_update=False,
         replace_symbol=None,
         collect_memory_every=None,
+        only_hetatoms_conect=False,
     ):
         """
         Read structures from a Schrodinger calculation.
@@ -8735,6 +8948,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             atom_mapping=atom_mapping,
                             conect_update=conect_update,
                             collect_memory=collect_memory,
+                            only_hetatoms=only_hetatoms_conect
                         )
                         load_count += 1
 
@@ -9351,6 +9565,245 @@ make sure of reading the target sequences with the function readTargetSequences(
             Return missing models from the optimization_folder.
         """
 
+        def getConectLines(pdb_file, format_for_prepwizard=True):
+
+            ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+
+            # Read PDB file
+            atom_tuples = {}
+            add_one = False
+            previous_chain = None
+            with open(pdb_file, "r") as f:
+                for l in f:
+                    if l.startswith("ATOM") or l.startswith("HETATM"):
+                        index, name, resname, chain, resid = (
+                            int(l[6:11]),        # Atom index
+                            l[12:16].strip(),    # Atom name
+                            l[17:20].strip(),    # Residue name
+                            l[21],               # Chain identifier
+                            int(l[22:26]),       # Residue index
+                        )
+
+                        if not previous_chain:
+                            previous_chain = chain
+
+                        if name in ace_names:
+                            resid -= 1
+
+                            if format_for_prepwizard:
+                                if name == 'CP2':
+                                    name = 'CH3'
+                                elif name == 'CO':
+                                    name = 'C'
+                                elif name == 'OP1':
+                                    name = 'O'
+                                elif name == '1HP2':
+                                    name = '1H'
+                                elif name == '2HP2':
+                                    name = '2H'
+                                elif name == '3HP2':
+                                    name = '3H'
+
+                        if resname == 'NMA':
+                            add_one = True
+
+                            if format_for_prepwizard:
+                                if name == 'HN2':
+                                    name = 'H'
+                                elif name == 'C':
+                                    name = 'CA'
+                                elif name == 'H1':
+                                    name = '1HA'
+                                elif name == 'H2':
+                                    name = '2HA'
+                                elif name == 'H3':
+                                    name = '3HA'
+
+                        if previous_chain != chain:
+                            add_one = False
+
+                        if add_one:
+                            resid += 1
+
+                        atom_tuples[index] = (chain, resid, name)
+                        previous_chain = chain
+
+            conects = []
+            with open(pdb_file) as pdbf:
+                for l in pdbf:
+                    if l.startswith("CONECT"):
+                        l = l.replace("CONECT", "")
+                        l = l.strip("\n").rstrip()
+                        num = len(l) / 5
+                        new_l = [int(l[i * 5 : (i * 5) + 5]) for i in range(int(num))]
+                        conects.append([atom_tuples[int(x)] for x in new_l])
+
+            return conects
+
+        def writeConectLines(conects, pdb_file):
+
+            atom_indexes = {}
+            with open(pdb_file, "r") as f:
+                for l in f:
+                    if l.startswith("ATOM") or l.startswith("HETATM"):
+                        index, name, resname, chain, resid = (
+                            int(l[6:11]),        # Atom index
+                            l[12:16].strip(),    # Atom name
+                            l[17:20].strip(),    # Residue name
+                            l[21],               # Chain identifier
+                            int(l[22:26]),       # Residue index
+                        )
+                        atom_indexes[(chain, resid, name)] = index
+
+            # Check atoms not found in conects
+            with open(pdb_file + ".tmp", "w") as tmp:
+                with open(pdb_file) as pdb:
+                    # write all lines but skip END line
+                    for line in pdb:
+                        if not line.startswith("END"):
+                            tmp.write(line)
+
+                    # Write new conect line mapping
+                    for entry in conects:
+                        line = "CONECT"
+                        for x in entry:
+                            line += "%5s" % atom_indexes[x]
+                        line += "\n"
+                        tmp.write(line)
+                tmp.write("END\n")
+            shutil.move(pdb_file + ".tmp", pdb_file)
+
+        def checkCappingGroups(pdb_file, format_for_prepwizard=True, keep_conects=True):
+
+            ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+
+            if keep_conects:
+                conect_lines = getConectLines(pdb_file)
+
+            # Detect capping groups
+            structure = _readPDB(pdb_file, best_model_tag+".pdb")
+            model = structure[0]
+
+            for chain in model:
+
+                add_one = False
+                residues = [r for r in chain]
+
+                # Check for ACE atoms
+                ace_atoms = []
+                for a in residues[0]:
+                    if a.name in ace_names:
+                        ace_atoms.append(a)
+
+                # Check for NMA residue
+                nma_residue = None
+                for r in residues:
+                    if r.resname == 'NMA':
+                        nma_residue = r
+
+                # Build a separate residue for ACE
+                new_chain = PDB.Chain.Chain(chain.id)
+
+                if ace_atoms:
+
+                    for a in ace_atoms:
+                        residues[0].detach_child(a.name)
+
+                    ace_residue = PDB.Residue.Residue((' ', residues[0].id[1]-1, ' '), 'ACE', '')
+
+                    for i, a in enumerate(ace_atoms):
+                        new_name = a.get_name()
+
+                        # Define the new name based on the old one
+                        if format_for_prepwizard:
+                            if new_name == 'CP2':
+                                new_name = 'CH3'
+                            elif new_name == 'CO':
+                                new_name = 'C'
+                            elif new_name == 'OP1':
+                                new_name = 'O'
+                            elif new_name == '1HP2':
+                                new_name = '1H'
+                            elif new_name == '2HP2':
+                                new_name = '2H'
+                            elif new_name == '3HP2':
+                                new_name = '3H'
+
+                        # Create a new atom
+                        new_atom = PDB.Atom.Atom(
+                            new_name,                  # Atom name
+                            a.get_coord(),             # Coordinates
+                            a.get_bfactor(),           # B-factor
+                            a.get_occupancy(),         # Occupancy
+                            a.get_altloc(),            # AltLoc
+                            "%-4s" % new_name,         # Full atom name (formatted)
+                            a.get_serial_number(),     # Serial number
+                            a.element                  # Element symbol
+                        )
+
+                        ace_residue.add(new_atom)
+
+                    new_chain.add(ace_residue)
+
+                # Renumber residues and rename atoms
+                for i, r in enumerate(residues):
+
+                    # Handle NMA residue atom renaming
+                    if r == nma_residue and format_for_prepwizard:
+                        renamed_atoms = []
+                        for a in nma_residue:
+
+                            new_name = a.get_name()  # Original atom name
+
+                            # Rename the atom based on the rules
+                            if new_name == 'HN2':
+                                new_name = 'H'
+                            elif new_name == 'C':
+                                new_name = 'CA'
+                            elif new_name == 'H1':
+                                new_name = '1HA'
+                            elif new_name == 'H2':
+                                new_name = '2HA'
+                            elif new_name == 'H3':
+                                new_name = '3HA'
+
+                            # Create a new atom with the updated name
+                            new_atom = PDB.Atom.Atom(
+                                new_name,                  # New name
+                                a.get_coord(),             # Same coordinates
+                                a.get_bfactor(),           # Same B-factor
+                                a.get_occupancy(),         # Same occupancy
+                                a.get_altloc(),            # Same altloc
+                                "%-4s" % new_name,         # Full atom name (formatted)
+                                a.get_serial_number(),     # Same serial number
+                                a.element                  # Same element
+                            )
+                            renamed_atoms.append(new_atom)
+
+                        # Create a new residue with renamed atoms
+                        nma_residue = PDB.Residue.Residue(r.id, r.resname, r.segid)
+                        for atom in renamed_atoms:
+                            nma_residue.add(atom)
+
+                        r = nma_residue
+                        add_one = True
+
+                    if add_one:
+                        chain.detach_child(r.id)  # Deatach residue from old chain
+                        new_id = (r.id[0], r.id[1]+1, r.id[2])  # New ID with updated residue number
+                        r.id = new_id  # Update residue ID with renumbered value
+
+                    # Add residue to the new chain
+                    new_chain.add(r)
+
+                model.detach_child(chain.id)
+                model.add(new_chain)
+
+            _saveStructureToPDB(structure, pdb_file)
+
+            if keep_conects:
+                writeConectLines(conect_lines, pdb_file)
+
         executable = "extract_pdbs.linuxgccrelease"
         models = []
 
@@ -9407,6 +9860,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += " -auto_detect_glycan_connections"
                             command += " -maintain_links"
                         os.system(command)
+
+                        checkCappingGroups(best_model_tag+".pdb")
+
                         self.readModelFromPDB(
                             model,
                             best_model_tag + ".pdb",
@@ -9986,10 +10442,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Read PDB file and get conect lines only
         """
+
         # Get atom indexes by tuple and objects
         atoms = self._getAtomIndexes(model, pdb_file)
         if only_hetatoms:
             atoms_objects = self._getAtomIndexes(model, pdb_file, return_objects=True)
+
         conects = []
         # Read conect lines as dictionaries linking atoms
         with open(pdb_file) as pdbf:
@@ -10187,7 +10645,7 @@ def _saveStructureToPDB(
         io.save(output_file)
 
 def _copyScriptFile(
-    output_folder, script_name, no_py=False, subfolder=None, hidden=True
+    output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
 ):
     """
     Copy a script file from the prepare_proteins package.
@@ -10197,7 +10655,7 @@ def _copyScriptFile(
 
     """
     # Get script
-    path = "prepare_proteins/scripts"
+
     if subfolder != None:
         path = path + "/" + subfolder
 
