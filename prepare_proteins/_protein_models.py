@@ -6737,6 +6737,119 @@ make sure of reading the target sequences with the function readTargetSequences(
                 failed_dockings = json.load(jifd)
             return failed_dockings
 
+    def analyseDockingParallel(self,
+        docking_folder,
+        protein_atoms=None,
+        angles=None,
+        atom_pairs=None,
+        skip_chains=False,
+        return_failed=False,
+        ignore_hydrogens=False,
+        separator="-",
+        overwrite=False,
+        only_models=None,
+        output_folder='.analysis'):
+        """
+        Set up jobs for analysing individual docking and creating CSV files. The files should be
+        read by the analyseDocking function (i.e., the non-parallel version).
+        """
+
+        # Create analysis folder
+        if not os.path.exists(docking_folder + '/'+output_folder):
+            os.mkdir(docking_folder + '/'+output_folder)
+
+        # Create scores data folder
+        if not os.path.exists(docking_folder + '/'+output_folder+"/scores"):
+            os.mkdir(docking_folder + '/'+output_folder+"/scores")
+
+        # Create distance data folder
+        if not os.path.exists(docking_folder + '/'+output_folder+"/atom_pairs"):
+            os.mkdir(docking_folder + '/'+output_folder+"/atom_pairs")
+
+        # Create angle data folder
+        if angles:
+            if not os.path.exists(docking_folder + '/'+output_folder+"/angles"):
+                os.mkdir(docking_folder + '/'+output_folder+"/angles")
+
+        # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
+        prepare_proteins._copyScriptFile(
+            docking_folder + '/'+output_folder, "analyse_individual_docking.py"
+        )
+        script_path = docking_folder + '/'+output_folder+"/._analyse_individual_docking.py"
+
+        # Write protein_atoms dictionary to json file
+        if protein_atoms:
+            with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
+                json.dump(protein_atoms, jf)
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        # Write atom_pairs dictionary to json file
+        if atom_pairs:
+            with open(docking_folder + '/'+output_folder+"/._atom_pairs.json", "w") as jf:
+                json.dump(atom_pairs, jf)
+
+        # Write angles dictionary to json file
+        if angles:
+            with open(docking_folder + '/'+output_folder+"/._angles.json", "w") as jf:
+                json.dump(angles, jf)
+
+        jobs = []
+        for model in os.listdir(docking_folder+'/output_models'):
+
+            # Skip models not given in only_models
+            if only_models != None  and model not in only_models:
+                continue
+
+            # Check separator in model name
+            if separator in model:
+                raise ValueError('The separator %s was found in model name %s. Please use a different one!' % (separator, model))
+
+            for f in os.listdir(docking_folder+'/output_models/'+model):
+
+                subjobs = None
+                mae_output = None
+
+                if 'subjobs.log' in f:
+                    ligand = f.replace(model+'_','').replace('_subjobs.log','')
+                    subjobs = docking_folder+'/output_models/'+model+'/'+f
+
+                if f.endswith('.maegz'):
+                    ligand = f.replace(model+'_','').replace('_pv.maegz','')
+
+                    # Check separator in ligand name
+                    if separator in ligand:
+                        raise ValueError('The separator %s was found in ligand name %s. Please use a different one!' % (separator, ligand))
+
+                    mae_output = docking_folder+'/output_models/'+model+'/'+f
+
+                if mae_output:
+
+                    command  = 'run '
+                    command += docking_folder+'/'+output_folder+"/._analyse_individual_docking.py "
+                    command += docking_folder+' '
+                    command += mae_output+' '
+                    command += model+' '
+                    command += ligand+' '
+                    if atom_pairs:
+                        command += "--atom_pairs " + docking_folder + '/'+output_folder+"/._atom_pairs.json "
+                    elif protein_atoms:
+                        command += "--protein_atoms " + docking_folder + '/'+output_folder+"/._protein_atoms.json "
+                    if angles:
+                        command += " --angles " + docking_folder + '/'+output_folder+"/._angles.json"
+                    if skip_chains:
+                        command += " --skip_chains"
+                    if return_failed:
+                        command += " --return_failed"
+                    if ignore_hydrogens:
+                        command += " --ignore_hydrogens"
+                    command += " --separator " + separator
+                    command += '\n'
+                    jobs.append(command)
+
+        return jobs
+
     def analyseRosettaDocking(self, docking_folder, separator='_', only_models=None):
 
         # Initialize an empty DataFrame for all scores
@@ -8212,7 +8325,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 )
             else:
                 values = []
-                for model in self.docking_data.index.levels[0]:
+                models = []
+                for index in self.docking_data.index:
+                    if index[0] not in models:
+                        models.append(index[0])
+
+                for model in models:
 
                     # Check whether model is found in docking distances
                     if model not in self.docking_distances:
@@ -8222,7 +8340,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         self.docking_data.index.get_level_values("Protein") == model
                     ]
 
-                    for ligand in self.docking_data.index.levels[1]:
+                    ligands = []
+                    for index in model_series.index:
+                        if index[1] not in ligands:
+                            ligands.append(index[1])
+                    for ligand in ligands:
 
                         # Check whether ligand is found in model's docking distances
                         if ligand not in self.docking_distances[model]:
