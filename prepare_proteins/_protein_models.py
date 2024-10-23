@@ -2513,8 +2513,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(grid_folder + "/output_models"):
             os.mkdir(grid_folder + "/output_models")
 
+        if isinstance(models, str):
+            models = [models]
+
         # Save all input models
-        self.saveModels(grid_folder + "/input_models", convert_to_mae=mae_input)
+        self.saveModels(grid_folder + "/input_models", convert_to_mae=mae_input, models=models)
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -2528,9 +2531,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         jobs = []
         for model in self.models_names:
 
-            if models != None:
-                if model not in models:
-                    continue
+            if models and model not in models:
+                continue
 
             # Check if output grid exists
             output_path = grid_folder + "/output_models/" + model + ".zip"
@@ -2683,6 +2685,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if isinstance(only_ligands, str):
             only_ligands = [only_ligands]
 
+        if isinstance(models, str):
+            models = [models]
+
         # Create docking job folders
         if not os.path.exists(docking_folder):
             os.mkdir(docking_folder)
@@ -2694,7 +2699,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.mkdir(docking_folder + "/output_models")
 
         # Save all input models
-        self.saveModels(docking_folder + "/input_models")
+        self.saveModels(docking_folder + "/input_models", models=models)
 
         # Read paths to grid files
         grids_paths = {}
@@ -2719,7 +2724,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         for grid in grids_paths:
 
             # Skip if models are given and not in models
-            if models != None:
+            if models:
                 if grid not in models:
                     continue
 
@@ -4889,7 +4894,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 )
                                 residue.add(atom)
                                 chain.add(residue)
-                    
+
                     if skip_connect_rewritting:
                         print(f'The structure {f} has pre-defined CONECT lines probably from extractPELEPoses() function. Skipping saving structure and re-writting them. Directly copying structure to PELE folder..')
                         # Specify the source file path
@@ -4899,7 +4904,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         # Perform the copy operation
                         print(f'Copying the structure {f} from source folder: {models_folder}/{d}/{f} to destination_folder: {protein_ligand_folder}')
                         shutil.copyfile(source_file, destination_folder)
-                        
+
                     else:
                         _saveStructureToPDB(structure, protein_ligand_folder + "/" + f)
                         self._write_conect_lines(
