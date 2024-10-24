@@ -11,6 +11,7 @@ import json
 # ## Define input variables
 parser = argparse.ArgumentParser()
 parser.add_argument('docking_folder', default=None, help='Path to the docking folder')
+parser.add_argument('--analysis_folder', default='.analysis', help='Path to the docking folder')
 parser.add_argument('--protein_atoms', default=None, help='Dictionary json file including protein_atoms for closest distance calculations.')
 parser.add_argument('--atom_pairs', default=None, help='Dictionary json file including atom pairs for distance calculations.')
 parser.add_argument('--angles', default=None, help='Dictionary json file including angles definitions.')
@@ -23,6 +24,7 @@ parser.add_argument('--overwrite', default=False, action='store_true', help='Rea
 args=parser.parse_args()
 
 docking_folder = args.docking_folder
+analysis_folder = args.analysis_folder
 protein_atoms = args.protein_atoms
 atom_pairs = args.atom_pairs
 angles = args.angles
@@ -155,7 +157,7 @@ else:
 
 # Write failed dockings to file
 if return_failed:
-    with open(docking_folder+'/.analysis/._failed_dockings.json', 'w') as fdjof:
+    with open(docking_folder+'/'+analysis_folder+'/._failed_dockings.json', 'w') as fdjof:
         json.dump(failed_dockings, fdjof)
 
 # Calculate and add scores
@@ -168,9 +170,9 @@ for model in sorted(mae_output):
     for ligand in sorted(mae_output[model]):
 
         csv_name = model+separator+ligand+'.csv'
-        scores_csv = docking_folder+'/.analysis/scores/'+csv_name
-        distance_csv = docking_folder+'/.analysis/atom_pairs/'+csv_name
-        angles_csv = docking_folder+'/.analysis/angles/'+csv_name
+        scores_csv = docking_folder+'/'+analysis_folder+'/scores/'+csv_name
+        distance_csv = docking_folder+'/'+analysis_folder+'/atom_pairs/'+csv_name
+        angles_csv = docking_folder+'/'+analysis_folder+'/angles/'+csv_name
 
         if not os.path.exists(scores_csv) or overwrite:
             skip_scores = False
@@ -352,15 +354,15 @@ for model in sorted(mae_output):
 
         if  not skip_scores:
             data = pd.DataFrame(data)
-            data.to_csv(docking_folder+'/.analysis/scores/'+csv_name, index=False)
+            data.to_csv(docking_folder+'/'+analysis_folder+'/scores/'+csv_name, index=False)
 
         if atom_pairs and not skip_distances:
             distance_data = pd.DataFrame(distance_data)
-            distance_data.to_csv(docking_folder+'/.analysis/atom_pairs/'+csv_name, index=False)
+            distance_data.to_csv(docking_folder+'/'+analysis_folder+'/atom_pairs/'+csv_name, index=False)
 
         if angles and not skip_angles:
             angle_data = pd.DataFrame(angle_data)
-            angle_data.to_csv(docking_folder+'/.analysis/angles/'+csv_name, index=False)
+            angle_data.to_csv(docking_folder+'/'+analysis_folder+'/angles/'+csv_name, index=False)
 
 print('\n')
 print('Finished processing models')
