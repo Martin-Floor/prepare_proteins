@@ -6537,12 +6537,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             )
 
             # Create folders for replicas
+            zfill = max(len(str(replicas)), 2)
             for replica in range(1, replicas+1):
 
                 if not isinstance(skip_replicas, type(None)) and replica in skip_replicas:
                     continue
 
-                replica_str = str(replica).zfill(len(str(replicas)))
+                replica_str = str(replica).zfill(zfill)
                 replica_folder = os.path.join(model_folder, f'replica_{replica_str}')
 
                 if not os.path.exists(replica_folder):
