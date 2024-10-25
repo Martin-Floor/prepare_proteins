@@ -84,23 +84,3 @@ with open(pele_output+'/pele.conf', 'w') as pc:
             pc.write(l)
 
 os.remove(pele_output+'/pele.conf.tmp')
-
-# Modify adaptive.conf
-# Load modified pele.conf as json
-with open(pele_output+'/adaptive.conf') as ac:
-    adaptive_conf = json.load(ac)
-
-spawning = {}
-spawning['type'] = 'epsilon'
-spawning['params'] = {}
-spawning['params']['reportFilename'] = 'report'
-spawning['params']['metricColumnInReport'] = task_index
-spawning['params']['epsilon'] = epsilon
-spawning['params']['condition'] = 'min'
-spawning['density'] = {}
-spawning['density']['type']= 'continuous'
-adaptive_conf['spawning'] = spawning
-
-# Write adaptive.conf
-with open(pele_output+'/adaptive.conf', 'w') as ac:
-    json.dump(adaptive_conf, ac, indent=4)

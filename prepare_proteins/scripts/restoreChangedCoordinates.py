@@ -68,26 +68,165 @@ def getTerminalAtoms(structure):
 # Define aliases for modified atoms
 aliases = {
     'NTER' : {
+        'H' : '1H',
+    },
+    'CTER' : {
         '' : '',
     },
     'ALA' : {
-        '' : '',
+        'HB1' : '1HB',
+        'HB2' : '2HB',
+        'HB3' : '3HB'
     },
     'GLU' : {
-        '' : '',
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HG2' : '1HG',
+        'HG3' : '2HG'
     },
-    '' : {
-        '' : '',
+    'PRO' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HG2' : '1HG',
+        'HG3' : '2HG',
+        'HD2' : '1HD',
+        'HD3' : '2HD'
     },
-    '' : {
-        '' : '',
+    'GLY' : {
+        'HA2' : '1HA',
+        'HA3' : '2HA'
     },
-    '' : {
-        '' : '',
+    'LEU' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HD11' : '1HD1',
+        'HD12' : '2HD1',
+        'HD13' : '3HD1',
+        'HD21' : '1HD2',
+        'HD22' : '2HD2',
+        'HD23' : '3HD2'
     },
-    '' : {
-        '' : '',
+    'ASN' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HD21' : '1HD2',
+        'HD22' : '2HD2'
     },
+    'SER' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB'
+    },
+    'LYS' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HG2' : '1HG',
+        'HG3' : '2HG',
+        'HD2' : '1HD',
+        'HD3' : '2HD',
+        'HE2' : '1HE',
+        'HE3' : '2HE',
+        'HZ1' : '1HZ',
+        'HZ2' : '2HZ',
+        'HZ3' : '3HZ'
+    },
+    'VAL' : {
+        'HG11' : '1HG1',
+        'HG12' : '2HG1',
+        'HG13' : '3HG1',
+        'HG21' : '1HG2',
+        'HG22' : '2HG2',
+        'HG23' : '3HG2',
+    },
+    'ASP' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+    },
+    'HID' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB'
+    },
+    'TRP' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB'
+    },
+    'ARG' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HG2' : '1HG',
+        'HG3' : '2HG',
+        'HD2' : '1HD',
+        'HD3' : '2HD',
+        'HH11' : '1HH1',
+        'HH12' : '2HH1',
+        'HH21' : '1HH2',
+        'HH22' : '2HH2'
+    },
+    'ILE' : {
+        'HG12' : '1HG1',
+        'HG13' : '2HG1',
+        'HG21' : '1HG2',
+        'HG22' : '2HG2',
+        'HG23' : '3HG2',
+        'HD11' : '1HD1',
+        'HD12' : '2HD1',
+        'HD13' : '3HD1',
+    },
+    'CYT' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB'
+    },
+    'THR' : {
+        'HG21' : '1HG2',
+        'HG22' : '2HG2',
+        'HG23' : '3HG2',
+    },
+    'TYR' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+    },
+    'GLN' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HG2' : '1HG',
+        'HG3' : '2HG',
+        'HE21' : '1HE2',
+        'HE22' : '2HE2',
+    },
+    'PHE' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+    },
+    'HIE' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+    },
+    'ASH' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB'
+    },
+    'HIP' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+    },
+    'MET' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+        'HG2' : '1HG',
+        'HG3' : '2HG',
+        'HE1' : '1HE',
+        'HE2' : '2HE',
+        'HE3' : '3HE',
+    },
+    'CYS' : {
+        'HB2' : '1HB',
+        'HB3' : '2HB',
+    },
+    'HOH' : {
+        'OW' : 'O',
+        '1HW' : 'H1',
+        '2HW' : 'H2',
+    }
+
 }
 
 # Define PDB parser
