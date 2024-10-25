@@ -144,7 +144,7 @@ class openmm_md:
     def parameterizePDBLigands(self, parameters_folder, charges=None, skip_ligands=None, overwrite=False,
                                metal_ligand=None, add_bonds=None, cpus=None, return_qm_jobs=False,
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
-                               extra_mol2=None, add_counterions=None, save_amber_pdb=False, solvate=True,
+                               extra_mol2=None, add_counterions=True, save_amber_pdb=False, solvate=True,
                                regenerate_amber_files=False):
 
         def topologyFromResidue(residue, topol, positions):

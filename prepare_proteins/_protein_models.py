@@ -6540,7 +6540,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
                 extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
                 force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
-                add_counterions=False, save_amber_pdb=True, solvate=True, regenerate_amber_files=True
+                add_counterions=True, save_amber_pdb=True, solvate=True, regenerate_amber_files=True
             )
 
             # Create folders for replicas
