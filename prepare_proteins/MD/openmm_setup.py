@@ -64,7 +64,7 @@ class openmm_md:
         # Create protein only state
         positions = {}
         for residue in self.modeller.topology.residues():
-            if residue.name not in aa3:
+            if residue.name not in set(aa3)-set(ions):
                 positions[residue] = []
                 for atom in residue.atoms():
                     positions[residue].append(self.modeller.positions[atom.index])
@@ -132,7 +132,7 @@ class openmm_md:
                 else:
                     residue_names.append('CYX')
             else:
-                if residue.name not in aa3 and not keep_ligands:
+                if residue.name not in set(aa3)-set(ions) and not keep_ligands:
                     continue
                 residue_names.append(None)
 
@@ -644,6 +644,8 @@ class openmm_md:
                 else:
                     mcpb_pdb = parameters_folder+'/'+self.pdb_name+'_mcpbpy.pdb'
                 pdb = PDBFile(mcpb_pdb)
+
+                # Get mapping as tuples for residues
                 missing_atoms = []
                 for residue in getNonProteinResidues(pdb.topology):
                     if residue in not_metal:
@@ -693,9 +695,29 @@ class openmm_md:
 
             # Add bonds
             if add_bonds:
+
+                # Map original residue indexes to the renumbered ones
+                input_pdb_object = PDBFile(self.input_pdb)
+                o_residues = []
+                for chain in input_pdb_object.topology.chains():
+                    for residue in chain.residues():
+                        o_residues.append((chain.id, int(residue.id)))
+
+                renum_pdb_object = PDBFile(renum_pdb)
+                r_residues = []
+                for chain in renum_pdb_object.topology.chains():
+                    for residue in chain.residues():
+                        r_residues.append((chain.id, int(residue.id)))
+
+                res_mapping = {}
+                for r1, r2 in zip(o_residues, r_residues):
+                    res_mapping[r1] = r2
+
                 for bond in add_bonds:
-                    tlf.write('bond mol.'+str(bond[0][0])+'.'+bond[0][1]+' '
-                                   'mol.'+str(bond[1][0])+'.'+bond[1][1]+'\n')
+                    atom1 = (*res_mapping[bond[0][:2]], bond[0][2])
+                    atom2 = (*res_mapping[bond[1][:2]], bond[1][2])
+                    tlf.write('bond mol.'+str(atom1[1])+'.'+atom1[2]+' '+
+                                   'mol.'+str(atom2[1])+'.'+atom2[2]+'\n')
 
             if solvate:
                 tlf.write('solvatebox mol TIP3PBOX 12\n')
