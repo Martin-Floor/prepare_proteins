@@ -625,7 +625,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return self.sequences
 
-    def renumberModels(self):
+    def renumberModels(self, by_chain=True):
         """
         Renumber every PDB chain residues from 1 onward.
         """
@@ -634,15 +634,18 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             structure = PDB.Structure.Structure(0)
             pdb_model = PDB.Model.Model(0)
             for model in self.structures[m]:
+                i = 0
                 for c in model:
+                    if by_chain:
+                        i = 0
                     residues = [r for r in c]
                     chain_copy = PDB.Chain.Chain(c.id)
-                    for i, r in enumerate(residues):
+                    for r in residues:
                         new_id = (r.id[0], i + 1, r.id[2])
                         c.detach_child(r.id)
                         r.id = new_id
                         chain_copy.add(r)
-                    # model.detach_child(c.id)
+                        i += 1
                     pdb_model.add(chain_copy)
 
             structure.add(pdb_model)
@@ -8772,7 +8775,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     print("Set only_extract_new=False to extract them again!")
                     return
                 else:
-                    print(f"{len(extracted_models)} models were already extracted!")
+                    if len(extracted_models):
+                        print(f"{len(extracted_models)} models were already extracted!")
                     print(f"Extracting {docking_data.shape[0]} new models")
 
         # Copy analyse docking script (it depends on schrodinger so we leave it out.)
