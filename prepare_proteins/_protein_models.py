@@ -81,6 +81,7 @@ class proteinModels:
         exclude_models=None,
         ignore_biopython_warnings=False,
         collect_memory_every=None,
+        only_hetatm_conects=False,
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -175,6 +176,7 @@ class proteinModels:
                 self.models_paths[model],
                 add_to_path=True,
                 collect_memory=collect_memory,
+                only_hetatoms=only_hetatm_conects,
             )
 
         if get_sequences:
@@ -587,7 +589,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Update conect lines
         if conect_update:
-            self.conects[model] = self._readPDBConectLines(pdb_file, model)
+            self.conects[model] = self._readPDBConectLines(pdb_file, model, only_hetatoms=only_hetatoms)
 
         if add_to_path:
             self.models_paths[model] = pdb_file
@@ -629,6 +631,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         """
 
         for m in self:
+            structure = PDB.Structure.Structure(0)
+            pdb_model = PDB.Model.Model(0)
             for model in self.structures[m]:
                 for c in model:
                     residues = [r for r in c]
@@ -638,8 +642,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                         c.detach_child(r.id)
                         r.id = new_id
                         chain_copy.add(r)
-                    model.detach_child(c.id)
-                    model.add(chain_copy)
+                    # model.detach_child(c.id)
+                    pdb_model.add(chain_copy)
+
+            structure.add(pdb_model)
+            self.structures[m] = structure
 
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
@@ -6533,16 +6540,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                 skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
                 extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
                 force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
-                add_counterions=False, save_amber_pdb=True, solvate=True, regenerate_amber_files=True
+                add_counterions=True, save_amber_pdb=True, solvate=True, regenerate_amber_files=True
             )
 
             # Create folders for replicas
+            zfill = max(len(str(replicas)), 2)
             for replica in range(1, replicas+1):
 
                 if not isinstance(skip_replicas, type(None)) and replica in skip_replicas:
                     continue
 
-                replica_str = str(replica).zfill(len(str(replicas)))
+                replica_str = str(replica).zfill(zfill)
                 replica_folder = os.path.join(model_folder, f'replica_{replica_str}')
 
                 if not os.path.exists(replica_folder):
@@ -6675,6 +6683,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
+        command += ' --analysis_folder '+output_folder
+
         os.system(command)
 
         # # Read the CSV file into pandas
@@ -6811,10 +6821,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 subjobs = None
                 mae_output = None
 
-                if 'subjobs.log' in f:
-                    ligand = f.replace(model+'_','').replace('_subjobs.log','')
-                    subjobs = docking_folder+'/output_models/'+model+'/'+f
-
                 if f.endswith('.maegz'):
                     ligand = f.replace(model+'_','').replace('_pv.maegz','')
 
@@ -6824,7 +6830,26 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     mae_output = docking_folder+'/output_models/'+model+'/'+f
 
-                if mae_output:
+                    csv_name = model+separator+ligand+'.csv'
+                    scores_csv = docking_folder+'/'+output_folder+'/scores/'+csv_name
+                    distance_csv = docking_folder+'/'+output_folder+'/atom_pairs/'+csv_name
+                    angles_csv = docking_folder+'/'+output_folder+'/angles/'+csv_name
+
+                    skip_scores = True
+                    skip_distances = True
+                    skip_angles = True
+
+                    if not os.path.exists(scores_csv) or overwrite:
+                        skip_scores = False
+
+                    if atom_pairs and not os.path.exists(distance_csv) or overwrite:
+                        skip_distances = False
+
+                    if angles and not os.path.exists(angles_csv) or overwrite:
+                        skip_angles = False
+
+                    if skip_scores and skip_distances and skip_angles:
+                        continue
 
                     command  = 'run '
                     command += docking_folder+'/'+output_folder+"/._analyse_individual_docking.py "
