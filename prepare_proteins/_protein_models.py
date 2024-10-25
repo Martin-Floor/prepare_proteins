@@ -8349,38 +8349,24 @@ make sure of reading the target sequences with the function readTargetSequences(
                     % name
                 )
             else:
-                values = []
-                models = []
-                for index in self.docking_data.index:
-                    if index[0] not in models:
-                        models.append(index[0])
+                # Initialize a Series with NaN values, indexed the same as self.docking_data
+                metric_series = pd.Series(np.nan, index=self.docking_data.index)
 
-                for model in models:
-
+                for model in self.docking_data.index.get_level_values("Protein").unique():
                     # Check whether model is found in docking distances
                     if model not in self.docking_distances:
                         continue
 
-                    model_series = self.docking_data[
-                        self.docking_data.index.get_level_values("Protein") == model
-                    ]
+                    model_series = self.docking_data.xs(model, level="Protein")
 
-                    ligands = []
-                    for index in model_series.index:
-                        if index[1] not in ligands:
-                            ligands.append(index[1])
-                    for ligand in ligands:
-
+                    for ligand in model_series.index.get_level_values("Ligand").unique():
                         # Check whether ligand is found in model's docking distances
                         if ligand not in self.docking_distances[model]:
                             continue
 
-                        ligand_series = model_series[
-                            model_series.index.get_level_values("Ligand") == ligand
-                        ]
+                        ligand_series = model_series.xs(ligand, level="Ligand")
 
                         # Check input metric
-                        # Check how metrics will be combined
                         distance_metric = False
                         angle_metric = False
                         for x in catalytic_labels[name][model][ligand]:
@@ -8391,18 +8377,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         if distance_metric and angle_metric:
                             raise ValueError(
-                                f"Metric {m} combines distances and angles which is not supported."
+                                f"Metric {name} combines distances and angles which is not supported."
                             )
 
                         if distance_metric:
                             distances = catalytic_labels[name][model][ligand]
-                            distance_values = (
-                                self.docking_distances[model][ligand][distances]
-                                .min(axis=1)
-                                .tolist()
-                            )
-                            assert ligand_series.shape[0] == len(distance_values)
-                            values += distance_values
+                            distance_values = self.docking_distances[model][ligand][distances].min(axis=1)
+                            # Align the indices
+                            indices = ligand_series.index
+                            metric_series.loc[(model, ligand, indices)] = distance_values.values
                             self.docking_metric_type[name] = "distance"
                         elif angle_metric:
                             angles = catalytic_labels[name][model][ligand]
@@ -8410,16 +8393,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 raise ValueError(
                                     "Combining more than one angle into a metric is not currently supported."
                                 )
-                            angle_values = (
-                                self.docking_angles[model][ligand][angles]
-                                .min(axis=1)
-                                .tolist()
-                            )
-                            assert ligand_series.shape[0] == len(angle_values)
-                            values += angle_values
+                            angle_values = self.docking_angles[model][ligand][angles].min(axis=1)
+                            indices = ligand_series.index
+                            metric_series.loc[(model, ligand, indices)] = angle_values.values
                             self.docking_metric_type[name] = "angle"
 
-                self.docking_data["metric_" + name] = values
+                # Assign the Series to the DataFrame
+                self.docking_data["metric_" + name] = metric_series
 
     def plotDockingData(self):
         """
