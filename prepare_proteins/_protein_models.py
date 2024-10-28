@@ -6411,6 +6411,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
                                add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
                                extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
+                               non_standard_residues=None,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None):
@@ -6543,7 +6544,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
                 extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
                 force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
-                add_counterions=True, save_amber_pdb=True, solvate=True, regenerate_amber_files=True
+                add_counterions=True, save_amber_pdb=True, solvate=True, regenerate_amber_files=True,
+                non_standard_residues=non_standard_residues
             )
 
             # Create folders for replicas
@@ -8476,109 +8478,92 @@ make sure of reading the target sequences with the function readTargetSequences(
         )
 
     def getBestDockingPoses(
-        self,
-        filter_values,
-        n_models=1,
-        return_failed=False,
-        exclude_models=None,
-        exclude_ligands=None,
-        exclude_pairs=None,
-    ):
-        """
-        Get best models based on the best SCORE and a set of metrics with specified thresholds.
-        The filter thresholds must be provided with a dictionary using the metric names as keys
-        and the thresholds as the values.
+            self,
+            filter_values,
+            n_models=1,
+            return_failed=False,
+            exclude_models=None,
+            exclude_ligands=None,
+            exclude_pairs=None,
+        ):
+            if exclude_models is None:
+                exclude_models = []
+            if exclude_ligands is None:
+                exclude_ligands = []
+            if exclude_pairs is None:
+                exclude_pairs = []
 
-        Parameters
-        ==========
-        n_models : int
-            The number of models to select for each protein + ligand docking.
-        filter_values : dict
-            Thresholds for the filter.
-        return_failed : bool
-            Whether to return a list of the dockings without any models fulfilling
-            the selection criteria. It is returned as a tuple (index 0) alongside
-            the filtered data frame (index 1).
-        exclude_models : list
-            List of models to be excluded from the selection.
-        exclude_ligands : list
-            List of ligands to be excluded from the selection.
-        exclude_pairs : list
-            List of pair tuples (model, ligand) to be excluded from the selection.
+            # Create exclusion masks
+            docking_data = self.docking_data
+            index = docking_data.index
 
-        """
+            exclude_models_mask = ~index.get_level_values('Protein').isin(exclude_models)
+            exclude_ligands_mask = ~index.get_level_values('Ligand').isin(exclude_ligands)
 
-        if exclude_models == None:
-            exclude_models = []
-        if exclude_ligands == None:
-            exclude_ligands = []
-        if exclude_pairs == None:
-            exclude_pairs = []
+            pairs_to_exclude = set(exclude_pairs)
+            if pairs_to_exclude:
+                exclude_pairs_mask = ~index.map(lambda idx: (idx[index.names.index('Protein')], idx[index.names.index('Ligand')]) in pairs_to_exclude)
+            else:
+                exclude_pairs_mask = np.ones(len(index), dtype=bool)  # Include all
 
-        best_poses = pd.DataFrame()
-        bp = []
-        failed = []
-        for model in self.docking_ligands:
+            mask = exclude_models_mask & exclude_ligands_mask & exclude_pairs_mask
 
-            if model in exclude_models:
-                continue
+            filtered_data = docking_data[mask]
 
-            protein_series = self.docking_data[
-                self.docking_data.index.get_level_values("Protein") == model
-            ]
-
-            for ligand in self.docking_ligands[model]:
-
-                if ligand in exclude_ligands:
-                    continue
-
-                if (model, ligand) in exclude_pairs:
-                    continue
-
-                ligand_data = protein_series[
-                    protein_series.index.get_level_values("Ligand") == ligand
-                ]
-                for metric in filter_values:
-
-                    if metric not in ["Score", "RMSD"]:
-                        # Add prefix if not given
-                        if not metric.startswith("metric_") and not metric == 'Closest distance':
-                            metric_label = "metric_" + metric
-                        else:
-                            metric_label = metric
-
-                        # Filter values according to the type of threshold given
-                        if isinstance(filter_values[metric], (float, int)):
-                            ligand_data = ligand_data[
-                                ligand_data[metric_label] <= filter_values[metric]
-                            ]
-                        elif isinstance(filter_values[metric], (tuple, list)):
-                            ligand_data = ligand_data[
-                                ligand_data[metric_label] >= filter_values[metric][0]
-                            ]
-                            ligand_data = ligand_data[
-                                ligand_data[metric_label] <= filter_values[metric][1]
-                            ]
+            # Apply filters
+            for metric in filter_values:
+                filter_value = filter_values[metric]
+                if metric not in ["Score", "RMSD"]:
+                    if not metric.startswith("metric_") and metric != 'Closest distance':
+                        metric_label = "metric_" + metric
                     else:
                         metric_label = metric
-                        ligand_data = ligand_data[
-                            ligand_data[metric_label] < filter_values[metric]
-                        ]
+                else:
+                    metric_label = metric
 
-                if ligand_data.empty:
-                    failed.append((model, ligand))
-                    continue
-                if ligand_data.shape[0] < n_models:
+                if isinstance(filter_value, (float, int)):
+                    filtered_data = filtered_data[filtered_data[metric_label] <= filter_value]
+                elif isinstance(filter_value, (tuple, list)):
+                    filtered_data = filtered_data[
+                        (filtered_data[metric_label] >= filter_value[0]) &
+                        (filtered_data[metric_label] <= filter_value[1])
+                    ]
+                else:
+                    filtered_data = filtered_data[filtered_data[metric_label] < filter_value]
+
+            # Get all available pairs after exclusions
+            available_pairs = docking_data[mask].index.to_frame(index=False)[['Protein', 'Ligand']].drop_duplicates()
+
+            # Get pairs present in filtered_data
+            filtered_pairs = filtered_data.index.to_frame(index=False)[['Protein', 'Ligand']].drop_duplicates()
+
+            # Find failed pairs
+            failed_pairs = pd.merge(available_pairs, filtered_pairs, on=['Protein', 'Ligand'], how='left', indicator=True)
+            failed_pairs = failed_pairs[failed_pairs['_merge'] == 'left_only'][['Protein', 'Ligand']]
+            failed = list(failed_pairs.itertuples(index=False, name=None))
+
+            # Sort and group
+            filtered_data = filtered_data.sort_values(by=['Protein', 'Ligand', 'Score'])
+
+            grouped = filtered_data.groupby(level=['Protein', 'Ligand'], as_index=False, sort=False)
+
+            # Select top n_models per group
+            top_n = grouped.head(n_models)
+
+            # Warning for groups with less than n_models
+            group_sizes = grouped.size()
+            insufficient_groups = group_sizes[group_sizes < n_models]
+            if not insufficient_groups.empty:
+                for (protein, ligand), size in insufficient_groups.iteritems():
                     print(
                         "WARNING: less than %s models available for docking %s + %s"
-                        % (n_models, model, ligand)
+                        % (n_models, protein, ligand)
                     )
-                for i in ligand_data["Score"].nsmallest(n_models).index:
-                    bp.append(i)
 
-        if return_failed:
-            return failed, self.docking_data[self.docking_data.index.isin(bp)]
-        return self.docking_data[self.docking_data.index.isin(bp)]
+            if return_failed:
+                return failed, top_n
+            else:
+                return top_n
 
     def getBestDockingPosesIteratively(
         self, metrics, ligands=None, distance_step=0.1, angle_step=1.0, fixed=None

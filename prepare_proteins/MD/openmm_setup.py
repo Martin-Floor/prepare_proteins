@@ -145,7 +145,7 @@ class openmm_md:
                                metal_ligand=None, add_bonds=None, cpus=None, return_qm_jobs=False,
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
                                extra_mol2=None, add_counterions=True, save_amber_pdb=False, solvate=True,
-                               regenerate_amber_files=False):
+                               regenerate_amber_files=False, non_standard_residues=None):
 
         def topologyFromResidue(residue, topol, positions):
             top = topology.Topology()
@@ -205,8 +205,16 @@ class openmm_md:
                         if residue == 'HOH':
                             continue
                         # Skip given ligands
-                        if residue in skip_ligands:
+                        if residue in skip_residues:
                             continue
+                        residues.append(r)
+            return residues
+
+        def getResiduesByName(topology, residue_name):
+            residues = []
+            for chain in topology.chains():
+                for r in chain.residues():
+                    if r.name.upper() == residue_name:
                         residues.append(r)
             return residues
 
@@ -369,6 +377,7 @@ class openmm_md:
 
         # Get molecules that need parameterization
         par_folder = {}
+
         for r in getNonProteinResidues(self.modeller.topology, skip_residues=skip_ligands):
 
             residue = r.name.upper()
@@ -692,6 +701,20 @@ class openmm_md:
                 tlf.write('mol = loadpdb '+mcpb_pdb+'\n')
             else:
                 tlf.write('mol = loadpdb '+renum_pdb+'\n')
+
+            if non_standard_residues:
+                if not add_bonds:
+                    add_bonds = []
+
+                for residue in non_standard_residues:
+                    residues = getResiduesByName(self.modeller.topology, residue)
+                    for r in residues:
+                        tlf.write('set mol.'+r.id+' connect0 mol.'+r.id+'.N\n')
+                        tlf.write('set mol.'+r.id+' connect1 mol.'+r.id+'.C\n')
+                        # cn_bond = ((r.chain.id, int(r.id)-1, 'C'),(r.chain.id, int(r.id), 'N'))
+                        # nc_bond = ((r.chain.id, int(r.id), 'C'),(r.chain.id, int(r.id)+1, 'N'))
+                        # add_bonds.append(cn_bond)
+                        # add_bonds.append(nc_bond)
 
             # Add bonds
             if add_bonds:
