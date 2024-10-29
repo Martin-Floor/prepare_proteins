@@ -3,6 +3,8 @@ try:
 except ImportError as e:
     raise ValueError('openmm python module not avaiable. Please install it to use this function.')
 
+from pkg_resources import resource_filename, Requirement
+
 from openmm import *
 from openmm.app import *
 from openmm.unit import *
@@ -143,9 +145,10 @@ class openmm_md:
 
     def parameterizePDBLigands(self, parameters_folder, charges=None, skip_ligands=None, overwrite=False,
                                metal_ligand=None, add_bonds=None, cpus=None, return_qm_jobs=False,
+                               extra_force_field=None,
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
-                               extra_mol2=None, add_counterions=None, save_amber_pdb=False, solvate=True,
-                               regenerate_amber_files=False):
+                               extra_mol2=None, add_counterions=True, save_amber_pdb=False, solvate=True,
+                               regenerate_amber_files=False, non_standard_residues=None):
 
         def topologyFromResidue(residue, topol, positions):
             top = topology.Topology()
@@ -205,8 +208,16 @@ class openmm_md:
                         if residue == 'HOH':
                             continue
                         # Skip given ligands
-                        if residue in skip_ligands:
+                        if residue in skip_residues:
                             continue
+                        residues.append(r)
+            return residues
+
+        def getResiduesByName(topology, residue_name):
+            residues = []
+            for chain in topology.chains():
+                for r in chain.residues():
+                    if r.name.upper() == residue_name:
                         residues.append(r)
             return residues
 
@@ -273,6 +284,38 @@ class openmm_md:
         # Create working folder
         if not os.path.exists(parameters_folder):
             os.mkdir(parameters_folder)
+
+        extra_ffs = ['parmBSC2']
+        if extra_force_field:
+            if extra_force_field not in extra_ffs:
+                raise ValueError(f'The only implemented extra ff is: {extra_ffs[0]}')
+
+            # Copy ff files
+            extra_ff_folder = parameters_folder+'/'+extra_force_field
+            if not os.path.exists(extra_ff_folder):
+                os.mkdir(extra_ff_folder)
+            _copyFFFiles(extra_ff_folder, 'parmBSC2')
+
+            extra_force_field = {}
+            extra_force_field['source'] = extra_ff_folder+'/leaprc.bsc2'
+
+            # Define ff residues
+            ff_residues = [
+                            'A', 'A3', 'A5', 'AN',
+                            'C', 'C3', 'C5', 'CN',
+                            'DA', 'DA3', 'DA5', 'DAN',
+                            'DC', 'DC3', 'DC5', 'DCN',
+                            'DG', 'DG3', 'DG5', 'DGN',
+                            'DT', 'DT3', 'DT5', 'DTN',
+                            'G', 'G3', 'G5', 'GN',
+                            'OHE',
+                            'U', 'U3', 'U5', 'UN'
+                        ]
+
+            if skip_ligands:
+                skip_ligands += ff_residues
+            else:
+                skip_ligands = ff_residues
 
         if not skip_ligands:
             skip_ligands = []
@@ -369,6 +412,7 @@ class openmm_md:
 
         # Get molecules that need parameterization
         par_folder = {}
+
         for r in getNonProteinResidues(self.modeller.topology, skip_residues=skip_ligands):
 
             residue = r.name.upper()
@@ -628,6 +672,8 @@ class openmm_md:
             tlf.write('source leaprc.protein.ff14SB\n')
             tlf.write('source leaprc.gaff\n')
             tlf.write('source leaprc.water.tip3p\n')
+            if extra_force_field:
+                tlf.write('source '+extra_force_field['source']+'\n')
 
             if metal_ligand:
 
@@ -693,6 +739,20 @@ class openmm_md:
             else:
                 tlf.write('mol = loadpdb '+renum_pdb+'\n')
 
+            if non_standard_residues:
+                if not add_bonds:
+                    add_bonds = []
+
+                for residue in non_standard_residues:
+                    residues = getResiduesByName(self.modeller.topology, residue)
+                    for r in residues:
+                        tlf.write('set mol.'+r.id+' connect0 mol.'+r.id+'.N\n')
+                        tlf.write('set mol.'+r.id+' connect1 mol.'+r.id+'.C\n')
+                        # cn_bond = ((r.chain.id, int(r.id)-1, 'C'),(r.chain.id, int(r.id), 'N'))
+                        # nc_bond = ((r.chain.id, int(r.id), 'C'),(r.chain.id, int(r.id)+1, 'N'))
+                        # add_bonds.append(cn_bond)
+                        # add_bonds.append(nc_bond)
+
             # Add bonds
             if add_bonds:
 
@@ -730,7 +790,6 @@ class openmm_md:
                 tlf.write('savepdb mol '+parameters_folder+'/'+self.pdb_name+'_amber.pdb\n')
 
             tlf.write('saveamberparm mol '+parameters_folder+'/'+self.pdb_name+'.prmtop '+parameters_folder+'/'+self.pdb_name+'.inpcrd\n')
-
 
         os.system('tleap -s -f '+parameters_folder+'/tleap.in')
 
@@ -838,3 +897,42 @@ def _getPositionsArrayAsVector(positions):
     for p in positions:
         v3_positions.append(quantity.Quantity(Vec3(*p), unit=nanometer))
     return v3_positions
+
+def _copyFFFiles(output_folder, ff):
+    """
+    Copy all forcefield files from the specified folder in the prepare_proteins package.
+
+    Parameters
+    ==========
+    output_folder : str
+        Path to the folder where the forcefield files will be copied.
+    ff : str
+        Name of the forcefield folder to copy files from.
+    """
+    ffs = ['parmBSC2']
+    if ff not in ffs:
+        raise ValueError(f"{ff} not implemented!")
+
+    # Path to the folder containing the forcefield files
+    ff_folder_path = resource_filename(
+        Requirement.parse("prepare_proteins"), f"prepare_proteins/MD/ff_files/{ff}"
+    )
+
+    # Ensure the output directory exists
+    os.makedirs(output_folder, exist_ok=True)
+
+    # Iterate over all files in the forcefield folder and copy them to the output folder
+    for filename in os.listdir(ff_folder_path):
+        source_file = os.path.join(ff_folder_path, filename)
+
+        # Skip directories like __pycache__
+        if os.path.isdir(source_file):
+            continue
+
+        if source_file == '__init__.py':
+            continue
+
+        destination_file = os.path.join(output_folder, filename)
+
+        # Copy the file to the output directory
+        shutil.copy(source_file, destination_file)
