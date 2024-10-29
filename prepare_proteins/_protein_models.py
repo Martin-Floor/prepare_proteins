@@ -6410,7 +6410,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
                                add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
-                               extra_frcmod=None, extra_mol2=None, ff_file=None, dcd_report_time=100.0, data_report_time=100.0,
+                               extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
                                non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
