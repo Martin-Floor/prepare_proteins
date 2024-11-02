@@ -4493,6 +4493,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         ligand_equilibration_cst=True,
         regional_metrics=None,
         regional_thresholds=None,
+        regional_combinations=None,
+        regional_exclusions=None,
         max_regional_iterations=None,
         regional_energy_bias="Binding Energy",
         regional_best_fraction=0.2,
@@ -4714,6 +4716,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     'You must give either "Total Energy" or "Binding Energy" to bias the regional spawning simulation!'
                 )
 
+            if (regional_combinations or regional_exclusions) and not (regional_combinations and regional_exclusions):
+                raise ValueError('You must give both, regional_combinations and regional_exclusions not just one of them.')
+
             regional_spawning = True
             spawning = "independent"
 
@@ -4807,6 +4812,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         # Create metrics dictionaries
                         reg_met = {}
+                        metric_types = {}
                         for m in regional_metrics:
                             if protein not in regional_metrics[m]:
                                 raise ValueError(
@@ -4827,10 +4833,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                                     "angle_"
                                 ):
                                     if len(v.split("_")) == 2:
-                                        v = "distance_" + v
+                                        prefix = "distance"
                                     elif len(v.split("_")) == 3:
-                                        v = "angle_" + v
+                                        prefix = "angle"
+                                    v =  prefix+'_'+v
+                                else:
+                                    prefix = v.split('_')[0]
                                 reg_met[m].append(v)
+                                metric_types.setdefault(m, prefix)
 
                         with open(protein_ligand_folder + "/metrics.json", "w") as jf:
                             json.dump(reg_met, jf)
@@ -4860,6 +4870,41 @@ make sure of reading the target sequences with the function readTargetSequences(
                             protein_ligand_folder + "/metrics_thresholds.json", "w"
                         ) as jf:
                             json.dump(regional_thresholds, jf)
+
+                        if regional_combinations:
+
+                            # Collect all unique metrics from combinations
+                            unique_metrics = set()
+                            for new_metric, metrics in regional_combinations.items():
+                                metric_metric_types = [metric_types[m] for m in reg_met]
+                                if len(set(metric_metric_types)) != 1:
+                                    raise ValueError('For regional spawning, you are attempting to combine different metric types (e.g., distances and angles) is not allowed.')
+                                unique_metrics.update(metrics)
+                                metrics_list = list(unique_metrics)
+
+                            # Ensure all required metric columns were given in the regional metrics list
+                            missing_columns = set(metrics_list) - set(regional_metrics.keys())
+                            if missing_columns:
+                                raise ValueError(f"Missing combination metrics in regional metrics: {missing_columns}")
+
+                            # Check all exclusion metrics are defined in the combinations metrics
+                            excusion_metrics = []
+                            for exclusion in regional_exclusions:
+                                excusion_metrics += [x for x in exclusion]
+
+                            missing_columns = set(excusion_metrics) - set(metrics_list)
+                            if missing_columns:
+                                raise ValueError(f"Missing exclusion metrics in combination metrics: {missing_columns}")
+
+                            with open(
+                                protein_ligand_folder + "/regional_combinations.json", "w"
+                            ) as jf:
+                                json.dump(regional_combinations, jf)
+
+                            with open(
+                                protein_ligand_folder + "/regional_exclusions.json", "w"
+                            ) as jf:
+                                json.dump(regional_exclusions, jf)
 
                         protein_ligand_folder = protein_ligand_folder + "/0"
                         if not os.path.exists(protein_ligand_folder):
@@ -5747,6 +5792,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += "python ../._regionalSpawning.py "
                 command += "metrics.json "
                 command += "metrics_thresholds.json "
+                if regional_combinations:
+                    command += "--combinations regional_combinations.json "
+                    command += "--exclusions regional_exclusions.json "
                 command += "--separator " + separator + " "
                 command += '--energy_bias "' + regional_energy_bias + '" '
                 command += (
@@ -6765,6 +6813,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         separator="-",
         overwrite=False,
         only_models=None,
+        compute_sasa=False,
         output_folder='.analysis'):
         """
         Set up jobs for analysing individual docking and creating CSV files. The files should be
@@ -6876,6 +6925,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += " --return_failed"
                     if ignore_hydrogens:
                         command += " --ignore_hydrogens"
+                    if compute_sasa:
+                        command += " --compute_sasa"
                     command += " --separator " + separator
                     command += '\n'
                     jobs.append(command)
@@ -8408,6 +8459,104 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Assign the Series to the DataFrame
                 self.docking_data["metric_" + name] = metric_series
 
+    def combineMetricsWithExclusions(self, combinations, exclusions, drop=True):
+        """
+        Combine mutually exclusive metrics into new metrics while handling exclusions.
+
+        Parameters
+        ----------
+        combinations : dict
+            Dictionary defining which metrics to combine under a new common name.
+            Structure:
+                combinations = {
+                    new_metric_name: (metric1, metric2, ...),
+                    ...
+                }
+
+        exclusions : list of tuples
+            List of tuples, each containing metrics that are mutually exclusive.
+
+        drop : bool, optional
+            If True, drop the original metric columns after combining. Default is True.
+
+        """
+
+        # Collect all unique metrics from combinations
+        unique_metrics = set()
+        for new_metric, metrics in combinations.items():
+            metric_types = [self.docking_metric_type[m] for m in metrics]
+            if len(set(metric_types)) != 1:
+                raise ValueError('Attempting to combine different metric types (e.g., distances and angles) is not allowed.')
+            self.docking_metric_type[new_metric] = metric_types[0]
+            unique_metrics.update(metrics)
+
+        # Build a mapping from metric names to column indices
+        metrics_list = list(unique_metrics)
+        metrics_indexes = {m: idx for idx, m in enumerate(metrics_list)}
+
+        # Add metric prefix if not given
+        add_metric_prefix = True
+        for m in metrics_list:
+            if 'metric_' in m:
+                raise ValueError('"metric_" prefix found in given metrics. Please, leave it out.')
+        all_metrics_columns = ['metric_' + m for m in metrics_list]
+
+        # Ensure all required metric columns exist in the data
+        missing_columns = set(all_metrics_columns) - set(self.docking_data.columns)
+        if missing_columns:
+            raise ValueError(f"Missing metric columns in data: {missing_columns}")
+
+        # Extract metric data
+        data = self.docking_data[all_metrics_columns]
+
+        # Get labels of the shortest distance for each row
+        min_metric_labels = data.idxmin(axis=1)  # Series of column names
+
+        # Positions of values to be excluded (row index, column index)
+        excluded_positions = set()
+
+        for row_idx, metric_col_label in enumerate(min_metric_labels):
+            m = metric_col_label.replace('metric_', '')
+
+            # Exclude metrics specified in exclusions
+            for exclusion_group in exclusions:
+                if m in exclusion_group:
+                    others = set(exclusion_group) - {m}
+                    for x in others:
+                        if x in metrics_indexes:
+                            col_idx = metrics_indexes[x]
+                            excluded_positions.add((row_idx, col_idx))
+
+            # Exclude other metrics in the same combination group
+            for metrics_group in combinations.values():
+                if m in metrics_group:
+                    others = set(metrics_group) - {m}
+                    for y in others:
+                        if y in metrics_indexes:
+                            col_idx = metrics_indexes[y]
+                            excluded_positions.add((row_idx, col_idx))
+
+        # Convert data to NumPy array for efficient indexing
+        data_array = data.to_numpy()
+
+        # Set excluded values to infinity
+        for i, j in excluded_positions:
+            data_array[i, j] = np.inf
+
+        # Combine metrics and add new columns to the DataFrame
+        for new_metric_name, metrics_to_combine in combinations.items():
+            c_indexes = [metrics_indexes[m] for m in metrics_to_combine if m in metrics_indexes]
+            if c_indexes:
+                # Calculate the minimum value among the combined metrics
+                combined_min = np.min(data_array[:, c_indexes], axis=1)
+                self.docking_data['metric_' + new_metric_name] = combined_min
+            else:
+                raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
+
+        # Drop original metric columns if specified
+        if drop:
+            self.docking_data.drop(columns=all_metrics_columns, inplace=True)
+
     def plotDockingData(self):
         """
         Generates an interactive scatter plot for docking data, allowing users to select
@@ -8495,6 +8644,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if exclude_pairs is None:
             exclude_pairs = []
 
+        if not isinstance(n_models, int):
+            n_models = int(n_models)
+
         # Create exclusion masks
         docking_data = self.docking_data
         index = docking_data.index
@@ -8504,7 +8656,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         pairs_to_exclude = set(exclude_pairs)
         if pairs_to_exclude:
-            exclude_pairs_mask = ~index.map(lambda idx: (idx[index.names.index('Protein')], idx[index.names.index('Ligand')]) in pairs_to_exclude)
+            exclude_pairs_mask = ~index.map(lambda idx: (idx[0], idx[1]) in pairs_to_exclude)
         else:
             exclude_pairs_mask = np.ones(len(index), dtype=bool)  # Include all
 
@@ -8533,6 +8685,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 filtered_data = filtered_data[filtered_data[metric_label] < filter_value]
 
+        # Ensure index levels are named
+        if filtered_data.index.nlevels == 3:
+            filtered_data.index.set_names(['Protein', 'Ligand', 'Pose'], inplace=True)
+        else:
+            # If index levels are not named, we can set default names
+            filtered_data.index.set_names(['Protein', 'Ligand'], inplace=True)
+
         # Get all available pairs after exclusions
         available_pairs = docking_data[mask].index.to_frame(index=False)[['Protein', 'Ligand']].drop_duplicates()
 
@@ -8540,27 +8699,44 @@ make sure of reading the target sequences with the function readTargetSequences(
         filtered_pairs = filtered_data.index.to_frame(index=False)[['Protein', 'Ligand']].drop_duplicates()
 
         # Find failed pairs
-        failed_pairs = pd.merge(available_pairs, filtered_pairs, on=['Protein', 'Ligand'], how='left', indicator=True)
+        failed_pairs = pd.merge(
+            available_pairs,
+            filtered_pairs,
+            on=['Protein', 'Ligand'],
+            how='left',
+            indicator=True
+        )
         failed_pairs = failed_pairs[failed_pairs['_merge'] == 'left_only'][['Protein', 'Ligand']]
         failed = list(failed_pairs.itertuples(index=False, name=None))
 
         # Sort and group
         filtered_data = filtered_data.sort_values(by=['Protein', 'Ligand', 'Score'])
 
-        grouped = filtered_data.groupby(level=['Protein', 'Ligand'], sort=False)
+        # Use level indices if names are not consistent
+        if filtered_data.index.nlevels >= 2:
+            grouped = filtered_data.groupby(level=[0, 1], sort=False)
+        else:
+            grouped = filtered_data.groupby(['Protein', 'Ligand'], sort=False)
 
         # Select top n_models per group
         top_n = grouped.head(n_models)
 
         # Warning for groups with less than n_models
         group_sizes = grouped.size()
-        insufficient_groups = group_sizes[group_sizes < n_models]
-        if not insufficient_groups.empty:
-            for (protein, ligand), size in insufficient_groups.iteritems():
-                print(
-                    "WARNING: less than %s models available for docking %s + %s"
-                    % (n_models, protein, ligand)
-                )
+        # print("Group Sizes:")
+        # print(group_sizes)
+        # print("Data Types of Group Sizes:")
+        # print(group_sizes.dtypes)
+        if not group_sizes.empty:
+            insufficient_groups = group_sizes[group_sizes < n_models]
+            if not insufficient_groups.empty:
+                for (protein, ligand), size in insufficient_groups.iteritems():
+                    print(
+                        "WARNING: less than %s models available for docking %s + %s"
+                        % (n_models, protein, ligand)
+                    )
+        else:
+            insufficient_groups = pd.Series(dtype=int)
 
         if return_failed:
             return failed, top_n
@@ -8568,101 +8744,194 @@ make sure of reading the target sequences with the function readTargetSequences(
             return top_n
 
     def getBestDockingPosesIteratively(
-        self, metrics, ligands=None, distance_step=0.1, angle_step=1.0, fixed=None
+        self,
+        metrics,
+        ligands=None,
+        distance_step=0.1,
+        angle_step=1.0,
+        fixed=None,
+        max_distance=None,
+        max_distance_step_shift=None,
+        verbose=False,
     ):
+        """
+        Iteratively select the best docking poses for protein-ligand pairs based on given metric thresholds.
+        If not all protein-ligand pairs have acceptable models under the initial thresholds, the function
+        iteratively relaxes the thresholds of the non-fixed metrics, starting with the ones that accept the
+        fewest models, until at least one model is selected for each protein-ligand pair or until
+        max_distance is reached.
 
-        # Create a list for fixed metrics
-        if not fixed:
+        Parameters:
+        - metrics (dict): Dictionary of metric thresholds. Keys are metric names, values are thresholds.
+                          Thresholds can be a scalar (upper limit) or a tuple/list (lower and upper limits).
+        - ligands (list, optional): List of ligands to consider. If None, all ligands are considered.
+        - distance_step (float, optional): Step size to adjust distance metrics.
+        - angle_step (float, optional): Step size to adjust angle metrics.
+        - fixed (list, optional): List of metric names that should not be adjusted.
+        - max_distance (float, optional): Maximum allowed value for distance metrics.
+        - max_distance_step_shift (float, optional): New step size for distance metrics after reaching max_distance.
+
+        Returns:
+        - pandas.DataFrame: DataFrame containing the selected docking poses.
+        """
+
+        # Ensure fixed is a list
+        if fixed is None:
             fixed = []
         elif isinstance(fixed, str):
             fixed = [fixed]
 
-        if set(metrics.keys()) - set(fixed) == set():
+        # Ensure there is at least one non-fixed metric
+        non_fixed_metrics = set(metrics.keys()) - set(fixed)
+        if not non_fixed_metrics:
             raise ValueError("You must leave at least one metric not fixed")
 
         metrics = metrics.copy()
 
-        extracted = []
-        selected_indexes = []
+        # Filter data by ligands if provided
+        if ligands is not None:
+            # Assuming that the ligand identifier is at index level 1
+            data = self.docking_data[self.docking_data.index.get_level_values(1).isin(ligands)]
+        else:
+            data = self.docking_data
 
-        # Define all protein and ligand combinations with docking data
-        protein_and_ligands = set([x[:2] for x in self.docking_data.index])
+        # Get all unique protein-ligand pairs
+        protein_ligand_pairs = set(zip(
+            data.index.get_level_values(0),  # Assuming protein identifier is at index level 0
+            data.index.get_level_values(1)   # Ligand identifier at index level 1
+        ))
 
-        extracted = set()  # Save extracted models
+        extracted_pairs = set()
         selected_indexes = []
-        while len(extracted) < len(protein_and_ligands):
+        current_distance_step = distance_step
+        step_shift_applied = False  # Flag to indicate if step shift has been applied
+
+        while len(extracted_pairs) < len(protein_ligand_pairs):
+            if verbose:
+                ti = time.time()
 
             # Get best poses with current thresholds
-            best_poses = self.getBestDockingPoses(metrics, n_models=1)
+            best_poses = self.getBestDockingPoses(metrics, n_models=1)  # Assuming self has this method
 
-            # Save indexes of best models
-            selected_protein_ligands = set()
-            for index in best_poses.index:
-                if (
-                    index[:2] not in extracted
-                ):  # Omit selected models in previous iterations
-                    selected_indexes.append(index)
-                    selected_protein_ligands.add(index[:2])
+            # Select new models
+            new_selected_pairs = set()
+            for idx in best_poses.index:
+                pair = (idx[0], idx[1])  # Adjust index levels if needed
+                if pair not in extracted_pairs:
+                    selected_indexes.append(idx)
+                    new_selected_pairs.add(pair)
 
-            # Store models extracted at this iteration
-            for pair in selected_protein_ligands:
-                extracted.add(pair)
+            extracted_pairs.update(new_selected_pairs)
 
-            # Get docking data for missing entries
-            mask = []
-            for index in self.docking_data.index:
-                if index[:2] in (protein_and_ligands - extracted):
-                    mask.append(True)
-                else:
-                    mask.append(False)
+            # If we've selected models for all pairs, break the loop
+            if len(extracted_pairs) >= len(protein_ligand_pairs):
+                break
 
-            remaining_data = self.docking_data[np.array(mask)]
+            # Prepare remaining data
+            remaining_pairs = protein_ligand_pairs - extracted_pairs
+            mask = [((idx[0], idx[1]) in remaining_pairs) for idx in data.index]
+            remaining_data = data[mask]
 
-            # Compute metric acceptance for each metric for all missing pairs
-            if not remaining_data.empty:
-                metric_acceptance = {}
-                for metric in metrics:
-                    if not metric.startswith("metric_"):
-                        metric_label = "metric_" + metric
+            if remaining_data.empty:
+                break  # No more data to process
+
+            # Compute acceptance counts for each metric
+            metric_acceptance = {}
+            for metric in metrics:
+                if metric in fixed:
+                    continue
+                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+                metric_type = self.docking_metric_type.get(metric_label.replace('metric_', ''), None)
+                if metric_type is None:
+                    raise ValueError(f"Metric type for {metric_label} not defined.")
+
+                metric_values = remaining_data[metric_label]
+
+                if isinstance(metrics[metric], (int, float)):
+                    if metric_type in ['distance', 'angle']:
+                        acceptance = metric_values <= metrics[metric]
                     else:
-                        metric_label = metric
-                    if isinstance(metrics[metric], (float, int)):
-                        metric_acceptance[metric] = remaining_data[
-                            remaining_data[metric_label] <= metrics[metric]
-                        ].shape[0]
-                    elif isinstance(metrics[metric], (tuple, list)):
-                        metric_filter = remaining_data[
-                            metrics[metric][0] <= remaining_data[metric_label]
-                        ]
-                        metric_acceptance[metric] = metric_filter[
-                            metric_filter[metric_label] <= metrics[metric][1]
-                        ].shape[0]
+                        acceptance = metric_values >= metrics[metric]
+                elif isinstance(metrics[metric], (tuple, list)):
+                    lower, upper = metrics[metric]
+                    acceptance = (metric_values >= lower) & (metric_values <= upper)
+                else:
+                    raise ValueError(f"Invalid threshold type for metric {metric}")
 
-                lowest_metric = [
-                    m
-                    for m, a in sorted(metric_acceptance.items(), key=lambda x: x[1])
-                    if m not in fixed
-                ][0]
-                lowest_metric_doc = lowest_metric.replace("metric_", "")
-                if self.docking_metric_type[lowest_metric_doc] == "distance":
-                    step = distance_step
-                if self.docking_metric_type[lowest_metric_doc] == "angle":
+                metric_acceptance[metric] = acceptance.sum()
+
+            # Order metrics by acceptance count (ascending)
+            ordered_metrics = sorted(
+                [(m, a) for m, a in metric_acceptance.items() if m not in fixed],
+                key=lambda x: x[1]
+            )
+
+            # Adjust thresholds for the metric with lowest acceptance
+            updated = False
+            for metric, _ in ordered_metrics:
+                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+                metric_type = self.docking_metric_type.get(metric_label.replace('metric_', ''), None)
+                if metric_type == 'distance':
+                    step = current_distance_step
+                elif metric_type == 'angle':
                     step = angle_step
+                else:
+                    raise ValueError(f"Unknown metric type for {metric_label}")
 
-                if isinstance(metrics[lowest_metric], (float, int)):
-                    metrics[lowest_metric] += step
+                if isinstance(metrics[metric], (int, float)):
+                    # For upper limit thresholds (assuming distance and angle are upper limits)
+                    new_value = metrics[metric] + step
 
-                # Change to list to allow item assignment
-                if isinstance(metrics[lowest_metric], tuple):
-                    metrics[lowest_metric] = list(metrics[lowest_metric])
+                    if metric_type == 'distance' and max_distance is not None:
+                        if not step_shift_applied and new_value >= max_distance:
+                            if max_distance_step_shift is not None:
+                                # Apply step shift
+                                current_distance_step = max_distance_step_shift
+                                step_shift_applied = True
+                                print(f"Max distance {max_distance} reached for metric {metric}. Applying step shift to {current_distance_step}.")
+                                # Do not cap the value; allow it to exceed max_distance
+                            else:
+                                # If no step shift, cap at max_distance and terminate
+                                new_value = max_distance
+                                metrics[metric] = new_value
+                                print(f"Max distance {max_distance} reached for metric {metric}. Terminating iteration.")
+                                updated = True
+                                break  # Exit the for-loop to terminate the while-loop
+                    # Update the metric
+                    metrics[metric] = new_value
+                    updated = True
+                    break  # Adjusted one metric, exit the loop
 
-                if isinstance(metrics[lowest_metric], list):
-                    metrics[lowest_metric][0] -= step
-                    metrics[lowest_metric][1] += step
+                elif isinstance(metrics[metric], (tuple, list)):
+                    # For range thresholds
+                    lower, upper = metrics[metric]
+                    new_lower = lower - step
+                    new_upper = upper + step
+                    metrics[metric] = (new_lower, new_upper)
+                    updated = True
+                    break  # Adjusted one metric, exit the loop
+                else:
+                    raise ValueError(f"Invalid threshold type for metric {metric}")
 
-        # Get rows with the selected indexes
-        mask = self.docking_data.index.isin(selected_indexes)
-        best_poses = self.docking_data[mask]
+            # Check if step shift was applied and allow further adjustments
+            if not updated:
+                # Could not adjust any metric, exit the loop
+                print("No metrics were updated. Terminating iteration.")
+                break
+
+            # If step shift was applied and already applied before, continue adjusting with new step size
+            # No additional action needed as current_distance_step has been updated
+
+            # Optional: Print progress for debugging
+            if verbose:
+                elapsed_time = time.time() - ti
+                print(f"Max distance reached: {step_shift_applied}, Current step: {current_distance_step}, Metrics: {metrics}, Time elapsed: {elapsed_time:.2f}s", end='\r')
+
+        # Collect selected models
+        if selected_indexes:
+            best_poses = data.loc[selected_indexes]
+        else:
+            best_poses = pd.DataFrame()  # Return empty DataFrame if no poses selected
 
         return best_poses
 

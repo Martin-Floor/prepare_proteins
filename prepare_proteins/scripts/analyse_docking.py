@@ -348,7 +348,6 @@ for model in sorted(mae_output):
                 data["Closest ligand atom"].append(ligand_atom_names[np.where(M == np.amin(M))[1][0]])
                 data["Closest protein atom"].append(protein_atom_names[np.where(M == np.amin(M))[0][0]])
 
-
         # Create dataframes
         csv_name = model+separator+ligand+'.csv'
 

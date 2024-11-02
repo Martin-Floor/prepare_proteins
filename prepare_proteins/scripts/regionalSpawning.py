@@ -13,6 +13,8 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('metrics', default=None, help='Path to the JSON file contanining the regional definitions')
 parser.add_argument('metrics_thresholds', default=None, help='Path to the JSON file with the thresholds for defining the regions.')
+parser.add_argument('--combinations', default=None, help='Path to a JSON file containing the metric combinations defintions.')
+parser.add_argument('--exclusions', default=None, help='Path to a JSON file containing the metric exclusions defintions.')
 parser.add_argument('--separator', default='_', help='Separator used for the protein and ligand for file names')
 parser.add_argument('--max_iterations', default=None, help='Maximum number of iterations allowed.')
 parser.add_argument('--max_spawnings', default=10, help='Maximum regional spawnings allowed.')
@@ -47,6 +49,10 @@ for f in os.listdir(cwd+'/0'):
     if f.endswith('.pdb'):
         protein, ligand, pose = f.split(separator)
         pose = pose.replace('.pdb', '')
+
+# Check inputs
+if not (args.combinations and args.exclusions):
+    raise ValueError('You must give both, metrics combinations and exclusions not just one.')
 
 # Define functions
 def getSpawningIndexes():
@@ -236,7 +242,100 @@ def combineDistancesIntoMetrics(metrics, dataframe):
 
     return metric_type
 
-def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fraction=0.5, verbose=True):
+def combineMetricsWithExclusions(combinations, exclusions, dataframe, drop=True):
+    """
+    Combine mutually exclusive metrics into new metrics while handling exclusions.
+
+    Parameters
+    ----------
+    combinations : dict
+        Dictionary defining which metrics to combine under a new common name.
+        Structure:
+            combinations = {
+                new_metric_name: (metric1, metric2, ...),
+                ...
+            }
+
+    exclusions : list of tuples
+        List of tuples, each containing metrics that are mutually exclusive.
+
+    drop : bool, optional
+        If True, drop the original metric columns after combining. Default is True.
+
+    """
+
+    # Collect all unique metrics from combinations
+    unique_metrics = set()
+    for new_metric, metrics in combinations.items():
+        unique_metrics.update(metrics)
+
+    # Build a mapping from metric names to column indices
+    metrics_list = list(unique_metrics)
+    metrics_indexes = {m: idx for idx, m in enumerate(metrics_list)}
+
+    # Add metric prefix if not given
+    add_metric_prefix = True
+    for m in metrics_list:
+        if 'metric_' in m:
+            raise ValueError('"metric_" prefix found in given metrics. Please, leave it out.')
+
+    # Ensure all required metric columns exist in the data
+    missing_columns = set(metrics_list) - set(dataframe.columns)
+    if missing_columns:
+        raise ValueError(f"Missing metric columns in data: {missing_columns}")
+
+    # Extract metric data
+    data = dataframe[metrics_list]
+
+    # Get labels of the shortest distance for each row
+    min_metric_labels = data.idxmin(axis=1)  # Series of column names
+
+    # Positions of values to be excluded (row index, column index)
+    excluded_positions = set()
+
+    for row_idx, metric_col_label in enumerate(min_metric_labels):
+        m = metric_col_label.replace('metric_', '')
+
+        # Exclude metrics specified in exclusions
+        for exclusion_group in exclusions:
+            if m in exclusion_group:
+                others = set(exclusion_group) - {m}
+                for x in others:
+                    if x in metrics_indexes:
+                        col_idx = metrics_indexes[x]
+                        excluded_positions.add((row_idx, col_idx))
+
+        # Exclude other metrics in the same combination group
+        for metrics_group in combinations.values():
+            if m in metrics_group:
+                others = set(metrics_group) - {m}
+                for y in others:
+                    if y in metrics_indexes:
+                        col_idx = metrics_indexes[y]
+                        excluded_positions.add((row_idx, col_idx))
+
+    # Convert data to NumPy array for efficient indexing
+    data_array = data.to_numpy()
+
+    # Set excluded values to infinity
+    for i, j in excluded_positions:
+        data_array[i, j] = np.inf
+
+    # Combine metrics and add new columns to the DataFrame
+    for new_metric_name, metrics_to_combine in combinations.items():
+        c_indexes = [metrics_indexes[m] for m in metrics_to_combine if m in metrics_indexes]
+        if c_indexes:
+            # Calculate the minimum value among the combined metrics
+            combined_min = np.min(data_array[:, c_indexes], axis=1)
+            dataframe[new_metric_name] = combined_min
+        else:
+            raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
+
+    # Drop original metric columns if specified
+    if drop:
+        dataframe.drop(columns=metrics_list, inplace=True)
+
+def checkIteration(epoch_folder, metrics, metrics_thresholds, combinations=None, exclusions=None, theta=0.5, fraction=0.5, verbose=True):
                    # late_arrival=0.2, conditional=0.1):
     """
     Check iteration acceptance probability for the defined regions.
@@ -246,16 +345,14 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, theta=0.5, fractio
     report_files = getReportFiles(epoch_folder)
     trajectory_files = getTrajectoryFiles(epoch_folder)
     report_data = readIterationFiles(report_files)
-
     metric_type = combineDistancesIntoMetrics(metrics, report_data)
+
+    if combinations:
+        combineMetricsWithExclusions(combinations, exclusions, report_data)
 
     # Add region membership information to report dataframe
     region_acceptance = np.ones(report_data.shape[0], dtype=bool)
-    for m in metrics:
-
-        # Skip metric filters that do not have a defined threshold
-        if m not in metrics_thresholds:
-            continue
+    for m in metrics_thresholds:
 
         if m not in report_data:
             raise ValueError('The metric {m} for regional spwaning could not be computed. Please check your input!')
@@ -486,6 +583,13 @@ while current_spawning <= max_spawnings:
     with open(args.metrics_thresholds) as jf:
         metrics_thresholds = json.load(jf)
 
+    if args.combinations:
+        with open(args.combinations) as jf:
+            combinations = json.load(jf)
+
+        with open(args.exclusions) as jf:
+            exclusions = json.load(jf)
+
     # Get last epoch for the current spawning
     epochs_paths = getSpawningEpochPaths(current_spawning)
 
@@ -497,7 +601,7 @@ while current_spawning <= max_spawnings:
     print(f'Checking current spawning {current_spawning} and epoch {current_epoch}')
 
     # Check the last epoch for regional spawning logic
-    accepted, best_pose = checkIteration(epochs_paths[current_epoch], metrics, metrics_thresholds)
+    accepted, best_pose = checkIteration(epochs_paths[current_epoch], metrics, metrics_thresholds, combinations=combinations, exclusions=exclusions)
 
     if accepted:
 
