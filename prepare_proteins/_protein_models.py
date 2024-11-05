@@ -8459,7 +8459,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Assign the Series to the DataFrame
                 self.docking_data["metric_" + name] = metric_series
 
-    def combineMetricsWithExclusions(self, combinations, exclusions, drop=True):
+    def combineDockingMetricsWithExclusions(self, combinations, exclusions, drop=True):
         """
         Combine mutually exclusive metrics into new metrics while handling exclusions.
 
