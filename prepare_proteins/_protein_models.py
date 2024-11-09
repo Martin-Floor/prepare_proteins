@@ -419,7 +419,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
     def addCappingGroups(self, rosetta_style_caps=False, prepwizard_style_caps=False,
                          openmm_style_caps=False, stdout=False, stderr=False,
-                         conect_update=True, only_hetatoms=True):
+                         conect_update=True, only_hetatoms=False):
 
         if sum([bool(rosetta_style_caps), bool(prepwizard_style_caps), bool(openmm_style_caps)]) > 1:
             raise ValueError('You must give only on cap style option!')
