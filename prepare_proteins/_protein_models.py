@@ -417,7 +417,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if verbose:
                 print(f"Removed {count} from conect lines of model {model}")
 
-    def addCappingGroups(self, rosetta_style_caps=True, stdout=False, stderr=False):
+    def addCappingGroups(self, rosetta_style_caps=False, prepwizard_style_caps=False,
+                         openmm_style_caps=False, stdout=False, stderr=False,
+                         conect_update=True, only_hetatoms=True):
+
+        if sum([bool(rosetta_style_caps), bool(prepwizard_style_caps), bool(openmm_style_caps)]) > 1:
+            raise ValueError('You must give only on cap style option!')
 
         # Manage stdout and stderr
         if stdout:
@@ -447,11 +452,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         command += '_capping_/output_models/ '
         if rosetta_style_caps:
             command += '--rosetta_style_caps '
+        elif prepwizard_style_caps:
+            command += '--prepwizard_style_caps '
+        elif openmm_style_caps:
+            command += '--openmm_style_caps '
+
         subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
 
         for f in os.listdir('_capping_/output_models'):
             model = f.replace('.pdb', '')
-            self.readModelFromPDB(model, '_capping_/output_models/'+f, conect_update=False)
+            self.readModelFromPDB(model, '_capping_/output_models/'+f, conect_update=conect_update, only_hetatoms=only_hetatoms)
         shutil.rmtree('_capping_')
 
     def removeCaps(self, models=None, remove_ace=True, remove_nma=True):

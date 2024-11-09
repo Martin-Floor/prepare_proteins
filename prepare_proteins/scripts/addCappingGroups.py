@@ -9,12 +9,13 @@ parser = argparse.ArgumentParser()
 parser.add_argument('models_folder', help='Path to the folder where the PDB inputs are stored.')
 parser.add_argument('output_folder', help='Path to the folder where the PDB outputs will be stored.')
 parser.add_argument('--rosetta_style_caps', action='store_true', help='Change cap atom names to match those of Rosetta.')
-
+parser.add_argument('--prepwizard_style_caps', action='store_true', help='Change cap atom names to match those of Prepwizard.')
 args = parser.parse_args()
 
 models_folder = args.models_folder
 output_folder = args.output_folder
 rosetta_style_caps = args.rosetta_style_caps
+prepwizard_style_caps = args.prepwizard_style_caps
 
 # Ensure output folder exists
 os.makedirs(output_folder, exist_ok=True)
@@ -33,16 +34,14 @@ for f in os.listdir(models_folder):
     # Cap termini
     capped_st = captermini.cap_termini(st)
 
-    # Modify residue names in the capped structure
-    if rosetta_style_caps:
+    # Get protein residues and added terminal caps
+    residues = [r for r in capped_st.residue if r.getAlphaCarbon() or r.pdbres.strip() in ['ACE', 'NMA']]
+    for i,residue in enumerate(residues):
 
-        # Get protein residues and added terminal caps
-        residues = [r for r in capped_st.residue if r.getAlphaCarbon() or r.pdbres.strip() in ['ACE', 'NMA']]
+        # Modify residue names in the capped structure
+        if residue.pdbres == 'ACE ':
 
-        for i,residue in enumerate(residues):
-
-            if residue.pdbres == 'ACE ':
-
+            if rosetta_style_caps:
                 for atom in residue.atom:
                     if atom.pdbname.strip() == 'CH3':
                         atom.pdbname = ' CP2'
@@ -61,7 +60,16 @@ for f in os.listdir(models_folder):
                 residues[i].pdbres = residues[i+1].pdbres
                 residues[i].resnum = residues[i+1].resnum
 
-            elif residue.pdbres == 'NMA ':
+            elif openmm_style_caps:
+                elif atom.pdbname.strip() == '1H':
+                    atom.pdbname = 'HH31'
+                elif atom.pdbname.strip() == '2H':
+                    atom.pdbname = 'HH32'
+                elif atom.pdbname.strip() == '3H':
+                    atom.pdbname = 'HH33'
+
+        elif residue.pdbres == 'NMA ':
+            if rosetta_style_caps:
                 for atom in residue.atom:
                     if atom.pdbname.strip() == 'H':
                         atom.pdbname = 'HN2 '
@@ -73,6 +81,26 @@ for f in os.listdir(models_folder):
                         atom.pdbname = ' H2 '
                     elif atom.pdbname.strip() == '3HA':
                         atom.pdbname = ' H3 '
+
+            elif prepwizard_style_caps:
+                for atom in residue.atom:
+                    if atom.pdbname.strip() == '1HA':
+                        atom.pdbname = ' HA1'
+                    elif atom.pdbname.strip() == '2HA':
+                        atom.pdbname = ' HA2'
+                    elif atom.pdbname.strip() == '3HA':
+                        atom.pdbname = ' HA3'
+
+            elif openmm_style_caps:
+                for atom in residue.atom:
+                    if atom.pdbname.strip() == 'CA':
+                        atom.pdbname = 'CH3  '
+                    elif atom.pdbname.strip() == '1HA':
+                        atom.pdbname = 'HH31'
+                    elif atom.pdbname.strip() == '2HA':
+                        atom.pdbname = 'HH32'
+                    elif atom.pdbname.strip() == '3HA':
+                        atom.pdbname = 'HH33'
 
     # Save modified structure to the output folder
     output_path = os.path.join(output_folder, f)
