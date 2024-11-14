@@ -203,7 +203,7 @@ def clusterTrajectories(trajectory_files, report_data, metric):
 
     regional_mask = report_data['Regional Acceptance'].to_numpy()
 
-    print(trajectory_files)
+    # print(trajectory_files)
 
 def combineDistancesIntoMetrics(metrics, dataframe):
     """
@@ -213,6 +213,9 @@ def combineDistancesIntoMetrics(metrics, dataframe):
     # Add metrics to dataframe
     metric_type = {} # Store metric type
     for m in metrics:
+
+        if not m.startswith('metric_'):
+            metric_name = 'metric_'+m
 
         # Check how metrics will be combined
         distances = False
@@ -230,7 +233,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             metric_type[m] = 'distance'
             # Combine distances into metrics
             distances = [d for d in metrics[m] if d.startswith('distance_')]
-            dataframe[m] = dataframe[distances].min(axis=1).tolist()
+            dataframe[metric_name] = dataframe[distances].min(axis=1).tolist()
 
         elif angles:
             metric_type[m] = 'angle'
@@ -238,7 +241,7 @@ def combineDistancesIntoMetrics(metrics, dataframe):
             angles = [d for d in metrics[m] if d.startswith('angle_')]
             if len(angles) > 1:
                 raise ValueError('Combining more than one angle into a metric is not currently supported.')
-            dataframe[m] = dataframe[angles].tolist()
+            dataframe[metric_name] = dataframe[angles].tolist()
 
     return metric_type
 
@@ -256,13 +259,25 @@ def combineMetricsWithExclusions(combinations, exclusions, dataframe, drop=True)
                 ...
             }
 
-    exclusions : list of tuples
-        List of tuples, each containing metrics that are mutually exclusive.
+    exclusions : list of tuples or dict
+        List of tuples (for simple exclusions) or dictionary by metrics for by-metric exclusions.
+
+    dataframe : pd.DataFrame
+        The DataFrame containing metric columns.
 
     drop : bool, optional
         If True, drop the original metric columns after combining. Default is True.
-
     """
+
+    # Determine exclusion type
+    simple_exclusions = False
+    by_metric_exclusions = False
+    if isinstance(exclusions, list):
+        simple_exclusions = True
+    elif isinstance(exclusions, dict):
+        by_metric_exclusions = True
+    else:
+        raise ValueError('Exclusions should be a list of tuples or a dictionary by metrics.')
 
     # Collect all unique metrics from combinations
     unique_metrics = set()
@@ -270,70 +285,121 @@ def combineMetricsWithExclusions(combinations, exclusions, dataframe, drop=True)
         unique_metrics.update(metrics)
 
     # Build a mapping from metric names to column indices
-    metrics_list = list(unique_metrics)
-    metrics_indexes = {m: idx for idx, m in enumerate(metrics_list)}
+    metrics_list = []
+    for metric in unique_metrics:
+        if not metric.startswith('metric_'):
+            metric = 'metric_' + metric
+        metrics_list.append(metric)
 
-    # Add metric prefix if not given
-    add_metric_prefix = True
-    for m in metrics_list:
-        if 'metric_' in m:
-            raise ValueError('"metric_" prefix found in given metrics. Please, leave it out.')
+    metrics_indexes = {m: idx for idx, m in enumerate(metrics_list)}
 
     # Ensure all required metric columns exist in the data
     missing_columns = set(metrics_list) - set(dataframe.columns)
     if missing_columns:
         raise ValueError(f"Missing metric columns in data: {missing_columns}")
 
-    # Extract metric data
+    # Extract metric data and convert to a NumPy array for processing
     data = dataframe[metrics_list]
-
-    # Get labels of the shortest distance for each row
-    min_metric_labels = data.idxmin(axis=1)  # Series of column names
+    data_array = data.to_numpy()  # Define data_array here for consistent use below
 
     # Positions of values to be excluded (row index, column index)
     excluded_positions = set()
 
-    for row_idx, metric_col_label in enumerate(min_metric_labels):
-        m = metric_col_label.replace('metric_', '')
+    # Get labels of the shortest distance for each row
+    min_metric_labels = data.idxmin(axis=1)  # Series of column names
 
-        # Exclude metrics specified in exclusions
-        for exclusion_group in exclusions:
-            if m in exclusion_group:
-                others = set(exclusion_group) - {m}
-                for x in others:
-                    if x in metrics_indexes:
-                        col_idx = metrics_indexes[x]
-                        excluded_positions.add((row_idx, col_idx))
+    if simple_exclusions:
+        for row_idx, metric_col_label in enumerate(min_metric_labels):
+            m = metric_col_label
 
-        # Exclude other metrics in the same combination group
-        for metrics_group in combinations.values():
-            if m in metrics_group:
-                others = set(metrics_group) - {m}
-                for y in others:
-                    if y in metrics_indexes:
-                        col_idx = metrics_indexes[y]
-                        excluded_positions.add((row_idx, col_idx))
+            # Exclude metrics specified in exclusions
+            for exclusion_group in exclusions:
+                if m in exclusion_group:
+                    others = set(exclusion_group) - {m}
+                    for x in others:
+                        if x in metrics_indexes:
+                            col_idx = metrics_indexes[x]
+                            excluded_positions.add((row_idx, col_idx))
 
-    # Convert data to NumPy array for efficient indexing
-    data_array = data.to_numpy()
+            # Exclude other metrics in the same combination group
+            for metrics_group in combinations.values():
+                if m in metrics_group:
+                    others = set(metrics_group) - {m}
+                    for y in others:
+                        if y in metrics_indexes:
+                            col_idx = metrics_indexes[y]
+                            excluded_positions.add((row_idx, col_idx))
+                            
+        # Set excluded values to infinity for consistency across both exclusion types
+        for i, j in excluded_positions:
+            data_array[i, j] = np.inf
 
-    # Set excluded values to infinity
-    for i, j in excluded_positions:
-        data_array[i, j] = np.inf
+    if by_metric_exclusions:
+        # Iterate over each row to handle exclusions iteratively
+        for row_idx in range(data_array.shape[0]):
+            considered_metrics = set()  # Track metrics already considered as minimums in this row
+
+            while True:
+                # Find the minimum among metrics that haven't been excluded or considered as minimums
+                min_value = np.inf
+                min_col_idx = -1
+
+                # Identify the next lowest metric that hasn't been excluded or already considered
+                for col_idx, metric_value in enumerate(data_array[row_idx]):
+                    if col_idx not in considered_metrics and (row_idx, col_idx) not in excluded_positions:
+                        if metric_value < min_value:
+                            min_value = metric_value
+                            min_col_idx = col_idx
+
+                # Break the loop if no valid minimum metric is found
+                if min_col_idx == -1:
+                    break
+
+                # Mark this metric as considered so it's not reused as minimum in future iterations
+                considered_metrics.add(min_col_idx)
+
+                # Get the name of the metric and retrieve exclusions based on this metric
+                min_metric_label = data.columns[min_col_idx]
+                excluded_metrics = exclusions.get(min_metric_label, [])
+
+                # Apply exclusions for this metric
+                for excluded_metric in excluded_metrics:
+                    if excluded_metric in metrics_indexes:
+                        excluded_col_idx = metrics_indexes[excluded_metric]
+                        if (row_idx, excluded_col_idx) not in excluded_positions:
+                            excluded_positions.add((row_idx, excluded_col_idx))
+                            data_array[row_idx, excluded_col_idx] = np.inf  # Set excluded metric to infinity
 
     # Combine metrics and add new columns to the DataFrame
     for new_metric_name, metrics_to_combine in combinations.items():
-        c_indexes = [metrics_indexes[m] for m in metrics_to_combine if m in metrics_indexes]
+        c_indexes = []
+        for m in metrics_to_combine:
+            if not m.startswith('metric_'):
+                m = 'metric_' + m
+            if m in metrics_indexes:
+                c_indexes.append(metrics_indexes[m])
+
         if c_indexes:
-            # Calculate the minimum value among the combined metrics
+            # Calculate the minimum value among the combined metrics, excluding inf-only combinations
             combined_min = np.min(data_array[:, c_indexes], axis=1)
-            dataframe[new_metric_name] = combined_min
+            if np.all(np.isinf(combined_min)):
+                print(f"Skipping combination for '{new_metric_name}' due to incompatible exclusions.")
+                continue
+            dataframe['metric_' + new_metric_name] = combined_min
         else:
             raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
 
     # Drop original metric columns if specified
     if drop:
         dataframe.drop(columns=metrics_list, inplace=True)
+
+    # Ensure compatibility of combinations with exclusions
+    for new_metric_name, metrics_to_combine in combinations.items():
+        non_excluded_found = any(
+            not np.all(np.isinf(data_array[:, metrics_indexes[m]])) for m in metrics_to_combine if m in metrics_indexes
+        )
+        if not non_excluded_found:
+            print(f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'.")
 
 def checkIteration(epoch_folder, metrics, metrics_thresholds, combinations=None, exclusions=None, theta=0.5, fraction=0.5, verbose=True):
                    # late_arrival=0.2, conditional=0.1):
@@ -354,15 +420,18 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, combinations=None,
     region_acceptance = np.ones(report_data.shape[0], dtype=bool)
     for m in metrics_thresholds:
 
-        if m not in report_data:
-            raise ValueError('The metric {m} for regional spwaning could not be computed. Please check your input!')
+        if not m.startswith('metric_'):
+            metric_name = 'metric_'+m
 
-        acceptance = np.ones(report_data[m].shape[0], dtype=bool)
+        if metric_name not in report_data:
+            raise ValueError(f'The metric {metric_name} for regional spwaning could not be computed. Please check your input!')
+
+        acceptance = np.ones(report_data[metric_name].shape[0], dtype=bool)
         if isinstance(metrics_thresholds[m], float):
-            acceptance = acceptance & ((report_data[m] <= metrics_thresholds[m]).to_numpy())
+            acceptance = acceptance & ((report_data[metric_name] <= metrics_thresholds[m]).to_numpy())
         elif isinstance(metrics_thresholds[m], list):
-            acceptance = acceptance & ((report_data[m] >= metrics_thresholds[m][0]).to_numpy())
-            acceptance = acceptance & ((report_data[m] <= metrics_thresholds[m][1]).to_numpy())
+            acceptance = acceptance & ((report_data[metric_name] >= metrics_thresholds[m][0]).to_numpy())
+            acceptance = acceptance & ((report_data[metric_name] <= metrics_thresholds[m][1]).to_numpy())
         report_data[m+' Acceptance'] = acceptance
         region_acceptance = region_acceptance & acceptance
 
@@ -427,17 +496,20 @@ def checkIteration(epoch_folder, metrics, metrics_thresholds, combinations=None,
                 if m not in metrics_thresholds:
                     continue
 
+                if not m.startswith('metric_'):
+                    metric_name = 'metric_'+m
+
                 # Filter by values lower than the given value
                 if isinstance(metrics_thresholds[m], float):
-                    metric_acceptance[m] = spawning_data[spawning_data[m] <= metrics_thresholds[m]].shape[0]
-                    filtered = filtered[filtered[m] <= metrics_thresholds[m]]
+                    metric_acceptance[m] = spawning_data[spawning_data[metric_name] <= metrics_thresholds[m]].shape[0]
+                    filtered = filtered[filtered[metric_name] <= metrics_thresholds[m]]
 
                 # Filter by values inside the two values
                 elif isinstance(metrics_thresholds[m], list):
-                    metric_filter = spawning_data[metrics_thresholds[m][0] <= spawning_data[m]]
+                    metric_filter = spawning_data[metrics_thresholds[m][0] <= spawning_data[metric_name]]
                     metric_acceptance[m] = metric_filter[metric_filter[m] <= metrics_thresholds[m][1]].shape[0]
-                    filtered = filtered[metrics_thresholds[m][0] <= filtered[m]]
-                    filtered = filtered[filtered[m] <= metrics_thresholds[m][1]]
+                    filtered = filtered[metrics_thresholds[m][0] <= filtered[metric_name]]
+                    filtered = filtered[filtered[metric_name] <= metrics_thresholds[m][1]]
 
             if energy_bias == 'Binding Energy':
                 n_poses = int(filtered.shape[0]*regional_best_fraction)

@@ -4899,8 +4899,12 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                             # Check all exclusion metrics are defined in the combinations metrics
                             excusion_metrics = []
+
                             for exclusion in regional_exclusions:
-                                excusion_metrics += [x for x in exclusion]
+                                if isinstance(regional_exclusions, list):
+                                    excusion_metrics += [x for x in exclusion]
+                                elif isinstance(regional_exclusions, dict):
+                                    excusion_metrics += [x for x in regional_exclusions[exclusion]]
 
                             missing_columns = set(excusion_metrics) - set(metrics_list)
                             if missing_columns:
@@ -5688,14 +5692,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                 oyml.close()
 
                 if extend_iterations:
-                    _copyScriptFile(pele_folder, "extendAdaptiveIteartions.py")
-                    extend_script_name = "._extendAdaptiveIteartions.py"
+                    _copyScriptFile(pele_folder, "changeAdaptiveIterations.py")
+                    extend_script_name = "._changeAdaptiveIterations.py"
                     command += (
                         "python "
                         + rel_path_to_root
                         + extend_script_name
-                        + " output "
-                        + str(iterations)
+                        + " output "  # I think we should change this for a variable
+                        + "--iterations "
+                        + str(iterations)+' '
+                        + "--steps "
+                        + str(steps)+' '
                         + "\n"
                     )
                 if not energy_by_residue:
@@ -8483,13 +8490,23 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ...
                 }
 
-        exclusions : list of tuples
-            List of tuples, each containing metrics that are mutually exclusive.
+        exclusions : list of tuples or dict
+            List of tuples (for simple exclusions) or dictionary by metrics for by-metric exclusions.
 
         drop : bool, optional
             If True, drop the original metric columns after combining. Default is True.
 
         """
+
+        # Determine exclusion type
+        simple_exclusions = False
+        by_metric_exclusions = False
+        if isinstance(exclusions, list):
+            simple_exclusions = True
+        elif isinstance(exclusions, dict):
+            by_metric_exclusions = True
+        else:
+            raise ValueError('exclusions should be a list of tuples or a dictionary by metrics.')
 
         # Collect all unique metrics from combinations
         unique_metrics = set()
@@ -8519,46 +8536,93 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Extract metric data
         data = self.docking_data[all_metrics_columns]
 
-        # Get labels of the shortest distance for each row
-        min_metric_labels = data.idxmin(axis=1)  # Series of column names
-
         # Positions of values to be excluded (row index, column index)
         excluded_positions = set()
 
-        for row_idx, metric_col_label in enumerate(min_metric_labels):
-            m = metric_col_label.replace('metric_', '')
+        # Get labels of the shortest distance for each row
+        min_metric_labels = data.idxmin(axis=1)  # Series of column names
 
-            # Exclude metrics specified in exclusions
-            for exclusion_group in exclusions:
-                if m in exclusion_group:
-                    others = set(exclusion_group) - {m}
-                    for x in others:
-                        if x in metrics_indexes:
-                            col_idx = metrics_indexes[x]
-                            excluded_positions.add((row_idx, col_idx))
+        if simple_exclusions:
+            for row_idx, metric_col_label in enumerate(min_metric_labels):
+                m = metric_col_label.replace('metric_', '')
 
-            # Exclude other metrics in the same combination group
-            for metrics_group in combinations.values():
-                if m in metrics_group:
-                    others = set(metrics_group) - {m}
-                    for y in others:
-                        if y in metrics_indexes:
-                            col_idx = metrics_indexes[y]
-                            excluded_positions.add((row_idx, col_idx))
+                # Exclude metrics specified in exclusions
+                for exclusion_group in exclusions:
+                    if m in exclusion_group:
+                        others = set(exclusion_group) - {m}
+                        for x in others:
+                            if x in metrics_indexes:
+                                col_idx = metrics_indexes[x]
+                                excluded_positions.add((row_idx, col_idx))
 
-        # Convert data to NumPy array for efficient indexing
-        data_array = data.to_numpy()
+                # Exclude other metrics in the same combination group
+                for metrics_group in combinations.values():
+                    if m in metrics_group:
+                        others = set(metrics_group) - {m}
+                        for y in others:
+                            if y in metrics_indexes:
+                                col_idx = metrics_indexes[y]
+                                excluded_positions.add((row_idx, col_idx))
 
-        # Set excluded values to infinity
-        for i, j in excluded_positions:
-            data_array[i, j] = np.inf
+        if by_metric_exclusions:
+            # Convert data to a NumPy array for efficient processing
+            data_array = data.to_numpy()
+
+            # Iterate over each row to handle exclusions iteratively
+            for row_idx in range(data_array.shape[0]):
+
+                considered_metrics = set()  # Track metrics already considered as minimums in this row
+
+                while True:
+                    # Find the minimum among metrics that haven't been excluded or considered as minimums
+                    min_value = np.inf
+                    min_col_idx = -1
+
+                    # Identify the next lowest metric that hasn't been excluded or already considered
+                    for col_idx, metric_value in enumerate(data_array[row_idx]):
+                        if col_idx not in considered_metrics and (row_idx, col_idx) not in excluded_positions:
+                            if metric_value < min_value:
+                                min_value = metric_value
+                                min_col_idx = col_idx
+                    # if row_idx == 3:
+                        # print(min_value, min_col_idx, data.columns[min_col_idx])
+
+                    # Break the loop if no valid minimum metric is found
+                    if min_col_idx == -1:
+                        break
+
+                    # Mark this metric as considered so it's not reused as minimum in future iterations
+                    considered_metrics.add(min_col_idx)
+
+                    # Get the name of the metric and retrieve exclusions based on this metric
+                    min_metric_label = data.columns[min_col_idx]
+                    min_metric_name = min_metric_label.replace('metric_', '')
+                    excluded_metrics = exclusions.get(min_metric_name, [])
+
+                    # Apply exclusions for this metric
+                    for excluded_metric in excluded_metrics:
+                        if excluded_metric in metrics_indexes:
+                            excluded_col_idx = metrics_indexes[excluded_metric]
+                            if (row_idx, excluded_col_idx) not in excluded_positions:
+                                excluded_positions.add((row_idx, excluded_col_idx))
+                                data_array[row_idx, excluded_col_idx] = np.inf  # Set excluded metric to infinity
+                # if row_idx == 3:
+                #     print()
+                #     for x, m in zip(data_array[row_idx], metrics_indexes.items()):
+                #         print(x, m)
 
         # Combine metrics and add new columns to the DataFrame
         for new_metric_name, metrics_to_combine in combinations.items():
             c_indexes = [metrics_indexes[m] for m in metrics_to_combine if m in metrics_indexes]
+
             if c_indexes:
-                # Calculate the minimum value among the combined metrics
+                # Calculate the minimum value among the combined metrics, excluding inf-only combinations
                 combined_min = np.min(data_array[:, c_indexes], axis=1)
+
+                # Check if combined_min is all inf and handle accordingly
+                if np.all(np.isinf(combined_min)):
+                    print(f"Skipping combination for '{new_metric_name}' due to incompatible exclusions.")
+                    continue
                 self.docking_data['metric_' + new_metric_name] = combined_min
             else:
                 raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
@@ -8566,6 +8630,26 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Drop original metric columns if specified
         if drop:
             self.docking_data.drop(columns=all_metrics_columns, inplace=True)
+
+        # Ensure compatibility of combinations with exclusions
+        for new_metric_name, metrics_to_combine in combinations.items():
+            non_excluded_found = False
+
+            for metric in metrics_to_combine:
+                # Use standardized names for consistent indexing
+                metric_column_name = 'metric_' + metric if 'metric_' not in metric else metric
+                col_idx = metrics_indexes.get(metric_column_name)
+
+                if col_idx is not None:
+                    # Check directly in data_array for non-excluded values
+                    column_values = data_array[:, col_idx]
+                    if not np.all(np.isinf(column_values)):
+                        non_excluded_found = True
+                        break
+
+            # Print warning if all values for a combination are excluded
+            if not non_excluded_found:
+                print(f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'.")
 
     def plotDockingData(self):
         """
