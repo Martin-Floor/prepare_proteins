@@ -359,7 +359,7 @@ class sequenceModels:
             raise StopIteration
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
-                          cpus=40, version="5.69-101.0", max_bin_size=10000):
+                          cpus=40, version="5.71-102.0", max_bin_size=10000):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
 
