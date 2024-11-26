@@ -46,6 +46,7 @@ class md_analysis:
         self.traj_paths = {'nvt': {}, 'npt': {}, 'md': {}}
         self.top_paths = {}
         self.distances = {}
+        self.angles = {}
 
         for model in self.models:
             self.traj_paths['nvt'][model] = {}
@@ -133,6 +134,7 @@ class md_analysis:
                             remove_paths.append(path)
 
 
+                    print(md_path)
                     # sort files in case they are higher than 10
                     file_list = [f for f in os.listdir(md_path) if f.endswith('_noPBC.xtc')]
                     sorted_file_list = sorted(file_list, key=lambda x: int(x.split('_')[2]))
@@ -161,13 +163,34 @@ class md_analysis:
         step (str): MD simulation step to use for calculations (default: 'md').
         overwrite (bool): Whether to overwrite existing distance data (default: False).
         """
+
+        def angle(a, b, c):
+            """
+            Calculate the angle between three coordinate vectors
+            """
+            # Compute vectors BA and BC
+            ba = a - b  # Vector from atom B to atom A
+            bc = c - b  # Vector from atom B to atom C
+
+            ba_norm = ba / np.linalg.norm(ba, axis=1)[:, np.newaxis]
+            bc_norm = bc / np.linalg.norm(bc, axis=1)[:, np.newaxis]
+
+            cos_theta = np.einsum('ij,ij->i', ba_norm, bc_norm)
+            cos_theta = np.clip(cos_theta, -1.0, 1.0)
+
+            angles = np.arccos(cos_theta)
+
+            return np.rad2deg(angles)
+
         def euclidean(XA, XB, *, out=None):
             """Calculates the Euclidean distance between two points."""
             return np.sqrt(np.add.reduce(np.square(XA - XB), 1), out=out)
 
+
         for model in self.traj_paths[step]:
             if model not in self.distances:
                 self.distances[model] = {}
+                self.angles[model] = {}
 
             for replica in self.traj_paths[step][model]:
                 if replica not in self.distances[model] or overwrite:
@@ -181,17 +204,36 @@ class md_analysis:
                     traj = md.load(self.traj_paths[step][model][replica], top=self.top_paths[model][replica])
                     top = traj.topology
 
+                    if replica not in self.angles[model]:
+                        self.angles[model][replica] = {}
+
                     distance = {}
                     for m in metrics[model]:
                         joined_distances = []
                         for d in metrics[model][m]:
-                            atom1 = top.select(f'resSeq {d[0][0]} and name {d[0][1]}')
-                            atom2 = top.select(f'resSeq {d[1][0]} and name {d[1][1]}')
+                            if len(d) == 2:
+                                atom1 = top.select(f'resSeq {d[0][0]} and name {d[0][1]}')
+                                atom2 = top.select(f'resSeq {d[1][0]} and name {d[1][1]}')
 
-                            atom1_xyz = traj.xyz[:, atom1[0]]
-                            atom2_xyz = traj.xyz[:, atom2[0]]
+                                atom1_xyz = traj.xyz[:, atom1[0]]
+                                atom2_xyz = traj.xyz[:, atom2[0]]
+                                joined_distances.append(euclidean(atom1_xyz, atom2_xyz))
 
-                            joined_distances.append(euclidean(atom1_xyz, atom2_xyz))
+                                #joined_distances.append(md.compute_distances(traj,np.array([[atom1,atom2]])))
+
+                            elif len(d) == 3:
+                                atom1 = top.select(f'resSeq {d[0][0]} and name {d[0][1]}')
+                                atom2 = top.select(f'resSeq {d[1][0]} and name {d[1][1]}')
+                                atom3 = top.select(f'resSeq {d[2][0]} and name {d[2][1]}')
+
+                                atom1_xyz = traj.xyz[:, atom1[0]]
+                                atom2_xyz = traj.xyz[:, atom2[0]]
+                                atom3_xyz = traj.xyz[:, atom3[0]]
+                                self.angles[model][replica][m] = np.array(angle(atom1_xyz,atom2_xyz,atom3_xyz))
+
+                                #self.angles[model] = md.compute_angles(traj,np.array([atom1,atom2,atom3]))
+                            else:
+                                raise ValueError('Metric has more than three atoms. This function can only be used to compute distances and angles.')
 
                         distance[m] = [min(values) for values in zip(*joined_distances)]
 

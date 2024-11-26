@@ -669,7 +669,7 @@ check
                 for line in new_line:
                     file.write(line)
 
-    def ligandToPolymer(model_folder, output_folder,polymer_sequence_dict,lig_atom_name):
+    def ligandToPolymer(model_folder, output_folder, ligand_name, polymer_sequence_dict, lig_atom_name):
         """
         Function to convert ligand to multiple residue polymer.
 
@@ -679,6 +679,8 @@ check
             Path to the folder with pele models.
         output_folder: str
             Path to the folder to dump new models.
+        ligand_name: str
+            Name of the ligand in the pdb
         polymer_sequence_dict: dict
             Dictionary with the positions of the polymer as keys and theit three-letter codes as values
         lig_atom_name: dict
@@ -704,7 +706,7 @@ check
             lig_lines = {}
 
             for line in open(model_folder+'/'+file):
-                if line.startswith('HETATM') and 'LIG' in line:
+                if line.startswith('HETATM') and ligand_name in line:
 
                     atom = line[12:17].strip()
 

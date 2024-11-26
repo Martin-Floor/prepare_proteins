@@ -6032,13 +6032,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                         ref_res, ref_chain = res, chain
                     if ref_chain != chain:
                         ref_res, ref_chain = res, chain
+
+                    ca_atom = None
                     for atom in r.get_atoms():
                         if atom.name == "CA":
                             ca_atom = atom
-                    ca_coordinate = list(ca_atom.coord)
-                    cst_line = f"CoordinateConstraint CA {res}{chain} CA {ref_res}{ref_chain} "
-                    cst_line += " ".join([f"{c:.4f}" for c in ca_coordinate]) + f" HARMONIC 0 {sd}\n"
-                    f.write(cst_line)
+
+                    if ca_atom != None:
+                        ca_coordinate = list(ca_atom.coord)
+                        cst_line = f"CoordinateConstraint CA {res}{chain} CA {ref_res}{ref_chain} "
+                        cst_line += " ".join([f"{c:.4f}" for c in ca_coordinate]) + f" HARMONIC 0 {sd}\n"
+                        f.write(cst_line)
 
         def _generateLocalCommand(command_name, model, i, ligand_chains, ligand_res, ion_residues, ion_chains, md_folder, ff, his_pro):
             command_local = f"cd {md_folder}\nexport GMXLIB=$(pwd)/FF\nmkdir -p output_models/{model}/{i}/topol\n"
