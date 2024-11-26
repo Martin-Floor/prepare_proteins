@@ -2502,6 +2502,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         mae_input=True,
         cst_positions=None,
         models=None,
+        exclude_models=None,
         skip_finished=False,
     ):
         """
@@ -2536,6 +2537,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if isinstance(models, str):
             models = [models]
 
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+
         # Save all input models
         self.saveModels(grid_folder + "/input_models", convert_to_mae=mae_input, models=models)
 
@@ -2552,6 +2556,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         for model in self.models_names:
 
             if models and model not in models:
+                continue
+
+            if exclude_models and model in exclude_models:
                 continue
 
             # Check if output grid exists
