@@ -147,7 +147,7 @@ class openmm_md:
                                metal_ligand=None, add_bonds=None, cpus=None, return_qm_jobs=False,
                                extra_force_field=None,
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
-                               extra_mol2=None, add_counterions=True, save_amber_pdb=False, solvate=True,
+                               extra_mol2=None, add_counterions=True, add_counterionsRand=False, save_amber_pdb=False, solvate=True,
                                regenerate_amber_files=False, non_standard_residues=None):
 
         def topologyFromResidue(residue, topol, positions):
@@ -781,10 +781,17 @@ class openmm_md:
 
             if solvate:
                 tlf.write('solvatebox mol TIP3PBOX 12\n')
-
+            
+            #Add ions with addIons2 (fast) or addIonsRand (slow)
+            if add_counterionsRand:
+                add_counterions = False
             if add_counterions:
                 tlf.write('addIons2 mol Na+ 0\n')
                 tlf.write('addIons2 mol Cl- 0\n')
+            if add_counterionsRand:
+                tlf.write('addIonsRand mol Na+ 0\n')
+                tlf.write('addIonsRand mol Cl- 0\n')
+            
 
             if save_amber_pdb:
                 tlf.write('savepdb mol '+parameters_folder+'/'+self.pdb_name+'_amber.pdb\n')
