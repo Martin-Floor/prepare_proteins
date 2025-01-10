@@ -698,8 +698,7 @@ def _calculateProtonationStates(arguments):
     return protonation_data
 
 # Create folder to store analysis dataframes
-if not os.path.exists(rosetta_folder+'/.analysis'):
-    os.mkdir(rosetta_folder+'/.analysis')
+os.makedirs(rosetta_folder+'/.analysis', exist_ok=True)
 
 # Create subfolder to store scores
 scores_folder = rosetta_folder+'/.analysis/scores'
