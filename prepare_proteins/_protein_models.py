@@ -6515,7 +6515,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
-                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None):
+                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None, add_counterionsRand=False):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
         Includes support for multiple replicas.
@@ -6548,6 +6548,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         - cuda (bool): Whether to use CUDA for GPU acceleration.
         - fixed_seed (int, optional): A fixed seed for the simulation, if provided.
         - script_file (str, optional): Path to the OpenMM simulation script.
+        - add_counterionsRand(bool, optional): use the tleap function add_counterionsRand instead of addions2 to place the ions in the simulation box. It places 
+        the ions randomly in the simulation box without computing charges, so it is much faster than addions2. The default is False. Use when you have a large number of systems to prepare.  
 
         """
 
@@ -6556,7 +6558,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                       nvt_temp_scaling_steps=nvt_temp_scaling_steps, npt_restraint_scaling_steps=npt_restraint_scaling_steps,
                       restraint_constant=restraint_constant, chunk_size=chunk_size,
                       equilibration_report_time=equilibration_report_time, temperature=temperature,
-                      collision_rate=collision_rate, time_step=time_step, cuda=cuda, fixed_seed=fixed_seed):
+                      collision_rate=collision_rate, time_step=time_step, cuda=cuda, fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
             """
             Subfunction to set up individual OpenMM simulation jobs with inherited parameters.
             """
@@ -6647,7 +6649,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
                 extra_force_field=extra_force_field,
                 force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
-                add_counterions=True, save_amber_pdb=True, solvate=True, regenerate_amber_files=True,
+                add_counterions=True, add_counterionsRand=add_counterionsRand,save_amber_pdb=True, solvate=True, regenerate_amber_files=True,
                 non_standard_residues=non_standard_residues
             )
 
