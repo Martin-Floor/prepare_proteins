@@ -235,7 +235,10 @@ def readScoreFromSilent(score_file, indexing=False):
                 if score not in scores:
                     scores[score] = []
                 try:
-                    scores[score].append(float(line.split()[i]))
+                    if '_' in line.split()[i]: # For models that have numeric numbers
+                        scores[score].append(line.split()[i])
+                    else:
+                        scores[score].append(float(line.split()[i]))
                 except:
                     scores[score].append(line.split()[i])
 
