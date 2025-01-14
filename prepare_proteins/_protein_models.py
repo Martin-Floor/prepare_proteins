@@ -929,29 +929,43 @@ chain to use for each model with the chains option."
         self.calculateSecondaryStructure(_save_structure=True)
 
     def removeTerminiByConfidenceScore(
-        self, confidence_threshold=70.0, keep_up_to=5, verbose=True
+        self,
+        confidence_threshold=70.0,
+        keep_up_to=5,
+        lr=None,
+        ur=None,
+        renumber=False,
+        verbose=True,
+        output=None,
     ):
         """
-        Remove terminal regions with low confidence scores from models.
+        Remove terminal regions with low confidence scores and optionally trim residues by range.
 
-        confidence_threshold : float
-            AlphaFold confidence threshold to consider residues as having a low score.
-        keep_up_to : int
-            If any terminal region is no larger than this value it will be kept.
+        Parameters:
+            confidence_threshold : float
+                AlphaFold confidence threshold to consider residues as having a low score.
+            keep_up_to : int
+                If any terminal region is no larger than this value it will be kept.
+            lr : int, optional
+                Lower range of residue indices to keep.
+            ur : int, optional
+                Upper range of residue indices to keep.
+            renumber : bool
+                Whether to renumber residues after trimming.
+            verbose : bool
+                Whether to print warnings and updates.
+            output : str, optional
+                File path to save the modified structure.
         """
-
         remove_models = set()
-        ## Warning only single chain implemented
         for model in self.models_names:
-
             atoms = [a for a in self.structures[model].get_atoms()]
             bfactors = [a.bfactor for a in atoms]
 
             if np.average(bfactors) == 0:
                 if verbose:
                     print(
-                        "Warning: model %s has no atom with the selected confidence!"
-                        % model
+                        f"Warning: model {model} has no atom with the selected confidence!"
                     )
                 remove_models.add(model)
                 continue
@@ -966,7 +980,6 @@ chain to use for each model with the chains option."
                     break
 
             c_terminus = set()
-
             for a in reversed(atoms):
                 if a.bfactor < confidence_threshold:
                     c_terminus.add(a.get_parent().id[1])
@@ -977,8 +990,7 @@ chain to use for each model with the chains option."
             if not something:
                 if verbose and model not in remove_models:
                     print(
-                        "Warning: model %s has no atom with the selected confidence!"
-                        % model
+                        f"Warning: model {model} has no atom with the selected confidence!"
                     )
                 remove_models.add(model)
                 continue
@@ -991,18 +1003,31 @@ chain to use for each model with the chains option."
             if len(c_terminus) <= keep_up_to:
                 c_terminus = []
 
-            remove_this = []
             for c in self.structures[model].get_chains():
+                remove_this = []
                 for r in c.get_residues():
-                    if r.id[1] in n_terminus or r.id[1] in c_terminus:
+                    if (
+                        r.id[1] in n_terminus
+                        or r.id[1] in c_terminus
+                        or (lr and ur and r.id[1] not in range(lr, ur + 1))
+                    ):
                         remove_this.append(r)
                 chain = c
-                # Remove residues
                 for r in remove_this:
                     chain.detach_child(r.id)
 
+            if renumber:
+                for c in self.structures[model].get_chains():
+                    for i, r in enumerate(c):
+                        r.id = (r.id[0], i + 1, r.id[2])
+
         for model in remove_models:
             self.removeModel(model)
+
+        if output:
+            for model in self.models_names:
+                io.set_structure(self.structures[model])
+                io.save(output)
 
         self.getModelsSequences()
         # self.calculateSecondaryStructure(_save_structure=True)
@@ -9617,6 +9642,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 values = []
                 for model in rosetta_data.index.levels[0]:
+                    if isinstance(model, int):
+                        model = str(model)
                     model_distances = rosetta_distances[model]
                     md = model_distances[metric_labels[name][model]]
                     values += md.min(axis=1).tolist()
@@ -10954,7 +10981,10 @@ def readSilentScores(silent_file):
                 else:
                     for i, t in enumerate(terms):
                         try:
-                            scores[t].append(float(l.strip().split()[i]))
+                            if '_' in l.strip().split()[i]:
+                                scores[t].append(l.strip().split()[i])
+                            else:
+                                scores[t].append(float(l.strip().split()[i]))
                         except:
                             scores[t].append(l.strip().split()[i])
     scores = pd.DataFrame(scores)
