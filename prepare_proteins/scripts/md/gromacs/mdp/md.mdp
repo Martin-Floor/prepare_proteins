@@ -1,7 +1,7 @@
 ; Run parameters
 integrator		= md		; leap-frog integrator
 nsteps			= NUMBER_OF_STEPS	; 100ns
-dt		    	= TIME_INTEGRATOR		; 4 fs with virtual sites
+dt		    	= TIME_INTEGRATOR		; x fs with virtual sites
 ; Output control
 nstxout                 = 0             ; don't write coordinates to .trr file
 nstvout                 = 0             ; don't write velocities
@@ -13,7 +13,7 @@ nstxout-compressed      = 25000         ; write coordinates every 100 ps to .xtc
 ; Bond parameters
 continuation	    	= yes		; Restarting after NPT
 constraint_algorithm    = lincs	    	; holonomic constraints
-constraints	        = all-bonds	; all bonds (even heavy atom-H bonds) constrained
+constraints	        = BOND_CONSTRAINTS	; all bonds (even heavy atom-H bonds) constrained
 lincs_iter	       	= 1		; accuracy of LINCS
 lincs_order	       	= 6		; normally 4, but 6 is needed for 4 fs timestep
 ; Neighborsearching

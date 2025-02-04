@@ -231,7 +231,7 @@ class sequenceModels:
             for f in os.listdir(mdir):
                 if f.startswith('relaxed_model_1_ptm'):
                     models_paths[d] = mdir+'/'+f
-                elif f.startswith('ranked__0'):
+                elif f.startswith('ranked_0'):
                     models_paths[d] = mdir+'/'+f
 
         # Create output folder
@@ -359,7 +359,7 @@ class sequenceModels:
             raise StopIteration
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
-                          cpus=40, version="5.67-99.0", max_bin_size=10000):
+                          cpus=40, version="5.71-102.0", max_bin_size=10000):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
 
@@ -368,7 +368,10 @@ class sequenceModels:
             impact on the time.
 
         If an update is needed, download in bubbles the new version (replace XX-XX with the version number):
-            wget -O interproscan-5.XX-XX.0-64-bit.tar.gz http://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/5.XX-XX.0/interproscan-5.67-99.0-64-bit.tar.gz
+            wget -O interproscan-5.XX-XX.0-64-bit.tar.gz http://ftp.ebi.ac.uk/pub/software/unix/iprscan/5/5.XX-XX.0/interproscan-5.XX-XX.0-64-bit.tar.gz
+
+        To get the link you can also visit:
+            https://www.ebi.ac.uk/interpro/about/interproscan/
         """
 
         if isinstance(not_exclude, str):
@@ -384,9 +387,9 @@ class sequenceModels:
             os.mkdir(job_folder+'/output')
 
         # Define number of bins to execute interproscan
-        n_bins = len(self.sequences) // 10000
-        # if len(self.sequences) % 10000 > 0:
-        #     n_bins += 1
+        n_bins = len(self.sequences) // max_bin_size
+        if len(self.sequences) % 10000 > 0:
+            n_bins += 1
         zf = len(str(n_bins))
 
         # Get all sequences names
@@ -394,13 +397,13 @@ class sequenceModels:
 
         # Create commands for each sequence bin
         jobs = []
-        for bin in range(1, n_bins+1):
+        for i in range(n_bins):
 
-            bin_index = str(bin).zfill(zf)
+            bin_index = str(i).zfill(zf)
 
             input_file = 'input_fasta/input_'+bin_index+'.fasta'
 
-            bin_sequences = {s:self.sequences[s] for s in all_sequences[bin*10000:(bin+1)*10000]}
+            bin_sequences = {s:self.sequences[s] for s in all_sequences[i*max_bin_size:(i+1)*max_bin_size]}
 
             alignment.writeFastaFile(bin_sequences, job_folder+'/'+input_file)
 

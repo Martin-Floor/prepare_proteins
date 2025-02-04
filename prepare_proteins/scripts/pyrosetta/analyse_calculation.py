@@ -235,7 +235,10 @@ def readScoreFromSilent(score_file, indexing=False):
                 if score not in scores:
                     scores[score] = []
                 try:
-                    scores[score].append(float(line.split()[i]))
+                    if '_' in line.split()[i]: # For models that have numeric numbers
+                        scores[score].append(line.split()[i])
+                    else:
+                        scores[score].append(float(line.split()[i]))
                 except:
                     scores[score].append(line.split()[i])
 
@@ -698,8 +701,7 @@ def _calculateProtonationStates(arguments):
     return protonation_data
 
 # Create folder to store analysis dataframes
-if not os.path.exists(rosetta_folder+'/.analysis'):
-    os.mkdir(rosetta_folder+'/.analysis')
+os.makedirs(rosetta_folder+'/.analysis', exist_ok=True)
 
 # Create subfolder to store scores
 scores_folder = rosetta_folder+'/.analysis/scores'
