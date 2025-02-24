@@ -210,7 +210,8 @@ class sequenceModels:
 
         return jobs
 
-    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='', return_missing=False):
+    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='',
+                                           return_missing=False, copy_all=False):
         """
         Copy models from an AlphaFold calculation to an specfied output folder.
 
@@ -240,18 +241,25 @@ class sequenceModels:
 
         if return_missing:
             missing = []
-        for m in self:
-            if m in models_paths:
-                if models_paths[m].endswith('.pdb'):
-                    shutil.copyfile(models_paths[m], output_folder+'/'+prefix+m+'.pdb')
-                elif models_paths[m].endswith('.bz2'):
-                    file = bz2.BZ2File(models_paths[m], 'rb')
-                    pdbfile = open(output_folder+'/'+prefix+m+'.pdb', 'wb')
-                    shutil.copyfileobj(file, pdbfile)
-            else:
-                if return_missing:
+
+        af_models = []
+        if copy_all:
+            af_models = list(models_paths.keys())
+        else:
+            for m in self:
+                if m in models_paths:
+                    af_models.append(m)
+                elif return_missing:
                     missing.append(m)
-                print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
+                    print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
+
+        for m in af_models:
+            if models_paths[m].endswith('.pdb'):
+                shutil.copyfile(models_paths[m], output_folder+'/'+prefix+m+'.pdb')
+            elif models_paths[m].endswith('.bz2'):
+                file = bz2.BZ2File(models_paths[m], 'rb')
+                pdbfile = open(output_folder+'/'+prefix+m+'.pdb', 'wb')
+                shutil.copyfileobj(file, pdbfile)
 
         if return_missing:
             return missing
