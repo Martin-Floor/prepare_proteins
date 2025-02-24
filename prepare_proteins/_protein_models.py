@@ -11,6 +11,7 @@ import time
 import uuid
 import warnings
 import copy
+import re
 
 import ipywidgets as widgets
 import matplotlib as mpl
@@ -799,42 +800,42 @@ chain to use for each model with the chains option."
 
         return sequence_positions
 
-    def calculateSecondaryStructure(self, _save_structure=False):
+    import mdtraj as md
+
+    def calculateSecondaryStructure(self, simplified=True):
         """
-        Calculate secondary structure information for each model.
-        DSSP Code:
-        H : Alpha helix (4-12)
-        B : Isolated beta-bridge residue
-        E : Strand
-        G : 3-10 helix
-        I : Pi helix
-        T : Turn
-        S : Bend
-        - : None
+        Calculate secondary structure information for each model using MDTraj.
+
         Parameters
         ==========
-        _save_structure : bool
-            Save structure model before computing secondary structure. This option
-            is used if models have been modified.
+        simplified : bool, default=False
+            If True, reduces the DSSP codes to:
+            - H (helix) → "H"
+            - E (sheet) → "E"
+            - Everything else → "C" (coil)
+
+        frame : int, default=0
+            Frame index to extract the secondary structure from (MD simulations).
+
+        dssp : str, default='score'
+            The DSSP algorithm to use. Options:
+            - 'score' : Uses MDTraj’s built-in DSSP scoring method.
+            - 'sander' : Uses Sander DSSP method.
+            - 'mkdssp' : Calls external DSSP executable (if available).
+
         Returns
+        =======
         ss : dict
             Contains the secondary structure strings for each model.
         """
 
         for model in self.models_names:
-            structure_path = self.models_paths[model]
-            if _save_structure:
-                structure_path = "." + str(uuid.uuid4()) + ".pdb"
-                _saveStructureToPDB(self.structures[model], structure_path)
 
-            dssp = DSSP(self.structures[model][0], structure_path)
-            if _save_structure:
-                os.remove(structure_path)
-            ss = []
-            for k in dssp.keys():
-                ss.append(dssp[k][2])
-            ss = "".join(ss)
-            self.ss[model] = ss
+            # Load structure into MDTraj
+            traj = md.load(self.models_paths[model])
+
+            # Compute secondary structure
+            self.ss[model] = md.compute_dssp(traj, simplified=simplified)[0]
 
         return self.ss
 
@@ -936,8 +937,7 @@ chain to use for each model with the chains option."
         ur=None,
         renumber=False,
         verbose=True,
-        output=None,
-    ):
+        output=None):
         """
         Remove terminal regions with low confidence scores and optionally trim residues by range.
 
@@ -946,10 +946,10 @@ chain to use for each model with the chains option."
                 AlphaFold confidence threshold to consider residues as having a low score.
             keep_up_to : int
                 If any terminal region is no larger than this value it will be kept.
-            lr : int, optional
-                Lower range of residue indices to keep.
-            ur : int, optional
-                Upper range of residue indices to keep.
+            lr : dict, optional
+                Dictionary specifying the lower range of residue indices to keep per model.
+            ur : dict, optional
+                Dictionary specifying the upper range of residue indices to keep per model.
             renumber : bool
                 Whether to renumber residues after trimming.
             verbose : bool
@@ -1003,13 +1003,20 @@ chain to use for each model with the chains option."
             if len(c_terminus) <= keep_up_to:
                 c_terminus = []
 
+            model_lr = lr.get(model, None) if lr else None
+            model_ur = ur.get(model, None) if ur else None
+
             for c in self.structures[model].get_chains():
                 remove_this = []
                 for r in c.get_residues():
                     if (
                         r.id[1] in n_terminus
                         or r.id[1] in c_terminus
-                        or (lr and ur and r.id[1] not in range(lr, ur + 1))
+                        or (
+                            model_lr is not None
+                            and model_ur is not None
+                            and r.id[1] not in range(model_lr, model_ur + 1)
+                        )
                     ):
                         remove_this.append(r)
                 chain = c
@@ -1030,6 +1037,7 @@ chain to use for each model with the chains option."
                 io.save(output)
 
         self.getModelsSequences()
+
         # self.calculateSecondaryStructure(_save_structure=True)
 
         # Missing save models and reload them to take effect.
@@ -4109,12 +4117,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def definePocketResiduesWithSiteMap(
         self,
-        volpts_models,
+        sitemap_folder,
         distance_to_points=2.5,
         only_models=None,
         output_file=None,
         overwrite=False,
         replace_symbol=None,
+        sidechain_only=False,
     ):
         """
         Calculates the active site residues based on the volume points from a sitemap
@@ -4123,8 +4132,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         Parameters
         ==========
-        volpts_models : str
-            Path to the folder where models containing the sitemap volume points residues.
+        sitemap_folder : str
+            Path to the folder where sitemap calculation, containing the sitemap volume points residues, is located.
         only_models : (str, list)
             Specific models to be processed, if None all the models loaded in this class
             will be used
@@ -4135,6 +4144,35 @@ make sure of reading the target sequences with the function readTargetSequences(
         overwrite : bool
             Overwrite json file if found? (essentially, calculate all again)
         """
+
+        def merge_pdbs_one_model(pdb1, pdb2, output_pdb):
+            parser = PDB.PDBParser(QUIET=True)
+            io = PDB.PDBIO()
+
+            # Load both PDB structures
+            struct1 = parser.get_structure("struct1", pdb1)
+            struct2 = parser.get_structure("struct2", pdb2)
+
+            # Create a new structure and a new model (single frame)
+            merged_struct = PDB.Structure.Structure("merged")
+            merged_model = PDB.Model.Model(0)  # Single model with ID 0
+
+            # Add all chains from the first structure's first model
+            for chain in struct1[0]:
+                merged_model.add(chain)
+
+            # Add all chains from the second structure's first model
+            for chain in struct2[0]:
+                # Optionally, rename chain IDs if there's a conflict:
+                # chain.id = chain.id + "_2"
+                merged_model.add(chain)
+
+            # Add the merged model to the new structure
+            merged_struct.add(merged_model)
+
+            # Write the merged structure to file
+            io.set_structure(merged_struct)
+            io.save(output_pdb)
 
         if output_file == None:
             raise ValueError("An ouput file name must be given")
@@ -4165,29 +4203,60 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     model_name = model
 
-                # Check if the volume points model file exists
-                volpts_file = volpts_models + "/" + model_name + "_vpts.pdb"
-                if not os.path.exists(volpts_file):
-                    print(
-                        "Model %s not found in the volume points folder %s!"
-                        % (model, volpts_models)
-                    )
 
-                traj = md.load(volpts_file)
-                protein = traj.topology.select("protein and not resname vpt")
-                vpts = traj.topology.select("resname vpt")
-                n = md.compute_neighbors(
-                    traj, distance_to_points / 10, vpts, haystack_indices=protein
-                )
-                residues[model] = list(
-                    set(
-                        [
-                            traj.topology.atom(i).residue.resSeq
-                            for i in n[0]
-                            if traj.topology.atom(i).is_sidechain
-                        ]
+                # Get input PDB
+                input_pdb = f'{sitemap_folder}/input_models/{model}.pdb'
+
+                if not os.path.exists(input_pdb):
+                    raise ValueError(f'Input file {input_pdb} not found!')
+
+                residues.setdefault(model, {})
+
+                # Check if the volume points model file exists
+                output_path = f'{sitemap_folder}/output_models/{model}'
+                for resp in os.listdir(output_path):
+
+                    if not bool(re.search(r'\d+$', resp)):
+                        continue
+
+                    resp_path = output_path+"/"+resp
+                    volpts_file = None
+                    for pdb in os.listdir(resp_path):
+                        if pdb.endswith('volpts.pdb'):
+                            volpts_file =  resp_path+"/"+pdb
+
+                    if not volpts_file:
+                        print(
+                            "Model %s not found in the volume points folder %s!"
+                            % (model, resp_path)
+                        )
+
+                    # Combine input and volpts pdbs
+                    tmp_file = volpts_file.replace('.pdb', '.tmp.pdb')
+                    merge_pdbs_one_model(input_pdb, volpts_file, tmp_file)
+
+                    # Compute neighbours
+                    traj = md.load(tmp_file)
+                    os.remove(tmp_file)
+
+                    if sidechain_only:
+                        protein = traj.topology.select("protein and sidechain and not resname vpt")
+                    else:
+                        protein = traj.topology.select("protein and not resname vpt")
+
+                    vpts = traj.topology.select("resname vpt")
+                    n = md.compute_neighbors(
+                        traj, distance_to_points / 10, vpts, haystack_indices=protein
                     )
-                )
+                    residues[model][resp] = list(
+                        set(
+                            [
+                                traj.topology.atom(i).residue.resSeq
+                                for i in n[0]
+                                if traj.topology.atom(i).is_sidechain
+                            ]
+                        )
+                    )
 
             with open(output_file, "w") as jf:
                 json.dump(residues, jf)
@@ -4197,7 +4266,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 residues = json.load(jf)
 
         for model in residues:
-            residues[model] = np.array(list(residues[model]))
+            for residue in residues[model]:
+                residues[model][residue] = np.array(list(residues[model][residue]))
 
         return residues
 
@@ -6548,8 +6618,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         - cuda (bool): Whether to use CUDA for GPU acceleration.
         - fixed_seed (int, optional): A fixed seed for the simulation, if provided.
         - script_file (str, optional): Path to the OpenMM simulation script.
-        - add_counterionsRand(bool, optional): use the tleap function add_counterionsRand instead of addions2 to place the ions in the simulation box. It places 
-        the ions randomly in the simulation box without computing charges, so it is much faster than addions2. The default is False. Use when you have a large number of systems to prepare.  
+        - add_counterionsRand(bool, optional): use the tleap function add_counterionsRand instead of addions2 to place the ions in the simulation box. It places
+        the ions randomly in the simulation box without computing charges, so it is much faster than addions2. The default is False. Use when you have a large number of systems to prepare.
 
         """
 
@@ -9312,7 +9382,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                                             replace_symbol[1], replace_symbol[0]
                                         )
 
+                                    if models and model not in models:
+                                        continue
+
                                     failed_models.append(model)
+
                                     break
 
                     if f.endswith(".pdb"):
@@ -9350,7 +9424,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                         load_count += 1
 
         self.getModelsSequences()
-        missing_models = set(self.models_names) - set(all_models)
+
+        # Gather missing models
+        # Remove
+        if models:
+            missing_models = set(models) - set(all_models)
+        else:
+            missing_models = set(self.models_names) - set(all_models)
+
         if missing_models != set():
             print("Missing models in prepwizard folder:")
             print("\t" + ", ".join(missing_models))
