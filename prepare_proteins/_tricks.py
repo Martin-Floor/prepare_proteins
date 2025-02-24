@@ -6,7 +6,7 @@ import pandas as pd
 import uuid
 import re
 import prepare_proteins
-
+import numpy as np
 
 class tricks:
     """
@@ -794,3 +794,49 @@ check
             f.close()
 
         return lig_atom_name
+
+    def correct_rosetta_params_charges(file_path, target_charge, output_path):
+        """
+        Adjusts the atomic charges in a parameter file to match a target total charge,
+        maintaining proper spacing and formatting.
+
+        Parameters:
+            file_path (str): Path to the input parameter file.
+            target_charge (float): Desired total charge.
+            output_path (str): Path to save the corrected parameter file.
+        """
+        # Get charges
+        charges = []
+        lines = []
+        charge_indices = []
+
+        with open(file_path, 'r') as pf:
+            for i, line in enumerate(pf):
+                lines.append(line.rstrip())  # Keep original formatting
+                if line.startswith('ATOM'):
+                    parts = line.split()
+                    charge = float(parts[-1])
+                    charges.append(charge)
+                    charge_indices.append(i)
+
+        # Compute weights
+        tcq = np.sum(np.abs(charges))
+        weights = np.array([np.abs(c)/tcq for c in charges])
+
+        # Correct charges
+        offset = target_charge - np.sum(charges)
+        corrected_charges = charges + offset * weights
+
+        assert np.round(np.sum(corrected_charges)) == target_charge
+
+        # Write new file with corrected charges maintaining original formatting
+        for index, new_charge in zip(charge_indices, corrected_charges):
+            parts = lines[index].split()
+            formatted_charge = f"{new_charge:.2f}"
+            formatted_line = "ATOM %-4s %-4s %-4s %.2f" % (parts[1], parts[2], parts[3], new_charge)
+            lines[index] = formatted_line
+
+        with open(output_path, 'w') as pf:
+            pf.write('\n'.join(lines) + '\n')
+
+        return output_path
