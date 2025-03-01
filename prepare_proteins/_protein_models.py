@@ -4203,7 +4203,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     model_name = model
 
-
                 # Get input PDB
                 input_pdb = f'{sitemap_folder}/input_models/{model}.pdb'
 
@@ -4214,6 +4213,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 # Check if the volume points model file exists
                 output_path = f'{sitemap_folder}/output_models/{model}'
+
                 for resp in os.listdir(output_path):
 
                     if not bool(re.search(r'\d+$', resp)):
@@ -4230,6 +4230,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             "Model %s not found in the volume points folder %s!"
                             % (model, resp_path)
                         )
+                        continue
 
                     # Combine input and volpts pdbs
                     tmp_file = volpts_file.replace('.pdb', '.tmp.pdb')
