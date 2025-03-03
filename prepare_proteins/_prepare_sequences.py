@@ -353,18 +353,27 @@ class sequenceModels:
 
         return
 
-    def __iter__(self):
-        #returning __iter__ object
-        self._iter_n = -1
-        self._stop_inter = len(self.sequences_names)
-        return self
+    def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20):
 
-    def __next__(self):
-        self._iter_n += 1
-        if self._iter_n < self._stop_inter:
-            return self.sequences_names[self._iter_n]
-        else:
-            raise StopIteration
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        jobs = []
+        for model in self.sequences:
+
+            model_folder = job_folder+'/'+model
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            command  = 'python -m bioemu.sample '
+            command += f'--sequence {self.sequences[model]} '
+            command += f'--num_samples {num_samples} '
+            command += f'--batch_size_100 {batch_size_100} '
+            command += f'--output_dir {model_folder}\n'
+
+            jobs.append(command)
+
+        return jobs
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
                           cpus=40, version="5.71-102.0", max_bin_size=10000):
@@ -516,3 +525,16 @@ class sequenceModels:
             return missing
 
         return folds
+
+    def __iter__(self):
+        #returning __iter__ object
+        self._iter_n = -1
+        self._stop_inter = len(self.sequences_names)
+        return self
+
+    def __next__(self):
+        self._iter_n += 1
+        if self._iter_n < self._stop_inter:
+            return self.sequences_names[self._iter_n]
+        else:
+            raise StopIteration
