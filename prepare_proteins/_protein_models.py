@@ -6586,7 +6586,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
-                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None, add_counterionsRand=False):
+                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None, extra_script_options=None,
+                               add_counterionsRand=False):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
         Includes support for multiple replicas.
@@ -6669,6 +6670,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += f'--collision_rate {collision_rate} '
             command += f'--time_step {time_step} '
             command += f'--seed $SEED '
+            if extra_script_options:
+                for option in extra_script_options:
+                    command += f'--{option[0]} {str(option[1])} '
             command += '\n'
             command += f'cd {"../" * len(job_folder.split(os.sep))}\n'
             jobs.append(command)
