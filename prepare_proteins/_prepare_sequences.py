@@ -356,7 +356,7 @@ class sequenceModels:
 
         return
 
-    def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20):
+    def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False):
 
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
@@ -368,7 +368,10 @@ class sequenceModels:
             if not os.path.exists(model_folder):
                 os.mkdir(model_folder)
 
-            command  = 'python -m bioemu.sample '
+            command = ''
+            if gpu_local:
+                command += 'CUDA_VISIBLE_DEVICES=GPUID '
+            command += 'python -m bioemu.sample '
             command += f'--sequence {self.sequences[model]} '
             command += f'--num_samples {num_samples} '
             command += f'--batch_size_100 {batch_size_100} '
@@ -455,8 +458,8 @@ class sequenceModels:
                 for item in os.listdir(model_folder):
                     item_path = os.path.join(model_folder, item)
                     if item == 'input_models':
-                        if remove_input_pdb:
-                            os.remove(item_path)
+                        if remove_input_pdb and os.path.exists(item_path):
+                            shutil.rmtree(item_path)
                     else:
                         if os.path.isdir(item_path):
                             shutil.rmtree(item_path)
