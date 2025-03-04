@@ -9456,6 +9456,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         cpus=None,
         return_jobs=False,
         verbose=False,
+        skip_finished=False,
     ):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
@@ -9550,6 +9551,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         if return_jobs:
             commands = []
             for m in self:
+
+                if not os.path.exists(f'{rosetta_folder}/output_models/{m}/{m}_relax.out'):
+                    print(f'Silent file for model {m} was not found!')
+                    continue
+
+                if skip_finished and os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
+                    continue
+
                 commands.append(command.replace("MODEL", m))
 
             print("Returning jobs for running the analysis in parallel.")
@@ -9662,6 +9671,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             )
         else:
             self.rosetta_protonation = None
+
+        return self.rosetta_data
 
     def getRosettaModelDistances(self, model):
         """
