@@ -4,6 +4,9 @@ import shutil
 import bz2
 import pickle
 import pandas as pd
+import mdtraj as md
+import json
+import subprocess
 
 class sequenceModels:
 
@@ -375,6 +378,151 @@ class sequenceModels:
 
         return jobs
 
+    def clusterBioEmuSamples(self, job_folder, bioemu_folder, models=None, stderr=True, stdout=True,
+                             output_dcd=False, output_pdb=False, c=0.9, cov_mode=0, verbose=True,
+                             evalue=10.0, overwrite=False, remove_input_pdb=True):
+        """
+        Process BioEmu models by extracting trajectory frames (saved as PDBs) and clustering them.
+        Each model’s clustering results are cached in its model folder (clusters.json) and then
+        compiled into an overall cache file (overall_clusters.json) in the job folder. Optionally,
+        after clustering the extracted input PDBs are removed.
+
+        The model name from the bioemu folder is used as the prefix for naming output PDB files.
+
+        Parameters
+        ----------
+        job_folder : str
+            Path to the job folder where model subfolders will be created.
+        bioemu_folder : str
+            Path to the folder containing BioEmu models.
+        models : list, optional
+            List of model names to process. If None, all models in bioemu_folder will be processed.
+        output_dcd : bool, optional
+            If True, save clustered structures as DCD files (default: False).
+        output_pdb : bool, optional
+            If True, save clustered structures as PDB files (default: False).
+        c : float, optional
+            Fraction of aligned residues for clustering (default: 0.9).
+        cov_mode : int, optional
+            Coverage mode for clustering (default: 0).
+        evalue : float, optional
+            E-value threshold for clustering (default: 10.0).
+        overwrite : bool, optional
+            If True, previous clustering outputs and caches are deleted (default: False).
+        remove_input_pdb : bool, optional
+            If True, remove the extracted input PDB files (input_models folder) after clustering.
+            Default is True.
+
+        Returns
+        -------
+        overall_clusters : dict
+            Dictionary mapping each model to its clustering output.
+        """
+
+        # Convert paths to absolute.
+        job_folder = os.path.abspath(job_folder)
+        bioemu_folder = os.path.abspath(bioemu_folder)
+
+        # Define overall cache file.
+        overall_cache_file = os.path.join(job_folder, "overall_clusters.json")
+
+        # Load existing overall clusters if not overwriting
+        if os.path.exists(overall_cache_file) and not overwrite:
+            if verbose:
+                print("Loading cached overall clusters from", overall_cache_file)
+            with open(overall_cache_file, "r") as f:
+                overall_clusters = json.load(f)
+        else:
+            overall_clusters = {}
+
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        # Loop over each model in the bioemu_folder.
+        for model in os.listdir(bioemu_folder):
+            if models and model not in models:
+                continue
+
+            # Skip models that are already in the cache unless overwrite=True
+            if model in overall_clusters and not overwrite:
+                if verbose:
+                    print(f"Skipping model {model}, already clustered and cached.")
+                continue
+
+            # Delete previous clustering information
+            model_folder = os.path.join(job_folder, model)
+            if overwrite and os.path.exists(model_folder):
+                for item in os.listdir(model_folder):
+                    item_path = os.path.join(model_folder, item)
+                    if item == 'input_models':
+                        if remove_input_pdb:
+                            os.remove(item_path)
+                    else:
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                        else:
+                            os.remove(item_path)
+
+
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            input_models_folder = os.path.join(model_folder, 'input_models')
+            if not os.path.exists(input_models_folder):
+                os.mkdir(input_models_folder)
+
+            # Define file paths for topology and trajectory.
+            top_file = os.path.join(bioemu_folder, model, 'topology.pdb')
+            traj_file = os.path.join(bioemu_folder, model, 'samples.xtc')
+
+            # Load the topology and trajectory; superpose the trajectory.
+            traj_top = md.load(top_file)
+            traj = md.load(traj_file, top=top_file)
+            traj.superpose(traj_top[0])
+
+            # Save each frame of the trajectory as a separate PDB file.
+            for i in range(traj.n_frames):
+                pdb_path = os.path.join(input_models_folder, f"frame_{i:07d}.pdb")
+                if not os.path.exists(pdb_path):
+                    traj[i].save_pdb(pdb_path)
+
+            # Use the model name as the prefix.
+            prefix = model
+
+            # Run structural clustering on the extracted PDBs.
+            if verbose:
+                print(f"Clustering PDBs for model {model}...")
+            clusters = _structuralClustering(
+                job_folder=model_folder,
+                models_folder=input_models_folder,
+                output_dcd=output_dcd,
+                save_as_pdb=output_pdb,
+                model_prefix=prefix,
+                c=c,
+                cov_mode=cov_mode,
+                evalue=evalue,
+                overwrite=overwrite,
+                stderr=stderr,
+                stdout=stdout,
+                verbose=verbose
+            )
+            overall_clusters[model] = clusters
+            if verbose:
+                print(f"Clusters for model {model}: {clusters}")
+
+            # Optionally remove the extracted PDB files.
+            if remove_input_pdb and os.path.exists(input_models_folder):
+                shutil.rmtree(input_models_folder)
+                print(f"Removed input PDB folder: {input_models_folder}")
+
+        # Cache the updated overall clusters.
+        with open(overall_cache_file, "w") as f:
+            json.dump(overall_clusters, f, indent=2)
+        if verbose:
+            print("Overall clusters cached to", overall_cache_file)
+
+        return overall_clusters
+
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
                           cpus=40, version="5.71-102.0", max_bin_size=10000):
         """
@@ -538,3 +686,205 @@ class sequenceModels:
             return self.sequences_names[self._iter_n]
         else:
             raise StopIteration
+
+def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pdb=False,
+                          model_prefix=None, c=0.9, cov_mode=0, evalue=10.0, overwrite=False,
+                          stderr=True, stdout=True, verbose=True):
+    """
+    Perform structural clustering on the PDB files in models_folder using foldseek.
+    Clusters are renamed as cluster_01, cluster_02, etc.
+    Optionally, each cluster’s structures are loaded and saved as a DCD file.
+    Additionally, if save_as_pdb is True, all cluster member PDBs are copied into a single folder
+    with filenames of the form: {model_prefix}_{cluster}_{member}.pdb.
+    The function caches the output to disk so that subsequent calls will
+    simply recover previous results unless overwrite is True. When overwrite is True,
+    previous output folders and cache files are deleted.
+
+    Parameters
+    ----------
+    job_folder : str
+        Path where the clustering job will run.
+    models_folder : str
+        Path to the folder containing the input PDB models.
+    output_dcd : bool, optional
+        If True, save clustered structures as DCD files (default: True).
+    save_as_pdb : bool, optional
+        If True, copy all cluster member PDBs into a single folder using the naming format
+        {model_prefix}_{cluster}_{member}.pdb (default: False).
+    model_prefix : str, optional
+        A prefix to use for naming the output PDB files. If None, the basename of models_folder is used.
+    c : float, optional
+        Fraction of aligned residues for clustering (default: 0.9).
+    cov_mode : int, optional
+        Coverage mode for clustering (default: 0).
+    evalue : float, optional
+        E-value threshold for clustering (default: 10.0).
+    overwrite : bool, optional
+        If True, previous clustering output is deleted and re-run (default: False).
+
+    Returns
+    -------
+    clusters : dict
+        Dictionary where keys are "cluster_XX" and values are dicts with keys "centroid"
+        and "members" (a list of member names).
+    """
+
+    # Manage stdout and stderr
+    if stdout:
+        stdout = None
+    else:
+        stdout = subprocess.DEVNULL
+
+    if stderr:
+        stderr = None
+    else:
+        stderr = subprocess.DEVNULL
+
+    # Convert paths to absolute.
+    job_folder = os.path.abspath(job_folder)
+    models_folder = os.path.abspath(models_folder)
+
+    if not os.path.exists(job_folder):
+        os.mkdir(job_folder)
+
+    # Define cache and output file paths.
+    cache_file = os.path.join(job_folder, "clusters.json")
+    cluster_output_file = os.path.join(job_folder, "result_cluster.tsv")
+    dcd_folder = os.path.join(job_folder, "clustered_dcd")
+    pdb_folder = os.path.join(job_folder, "clustered_pdb")  # For saving PDB copies
+
+    # If overwrite is requested, remove previous outputs.
+    if overwrite:
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+        if os.path.exists(cluster_output_file):
+            os.remove(cluster_output_file)
+        if os.path.exists(dcd_folder):
+            shutil.rmtree(dcd_folder)
+        if os.path.exists(pdb_folder):
+            shutil.rmtree(pdb_folder)
+
+    # If cache exists and not overwriting, load and return.
+    if os.path.exists(cache_file) and not overwrite:
+        print("Loading cached clusters from", cache_file)
+        with open(cache_file, "r") as cf:
+            renamed_clusters = json.load(cf)
+        return renamed_clusters
+
+    # Create temporary folder for foldseek.
+    tmp_folder = os.path.join(job_folder, 'tmp')
+    if overwrite and os.path.exists(tmp_folder):
+        shutil.rmtree(tmp_folder)
+    if not os.path.exists(tmp_folder):
+        os.mkdir(tmp_folder)
+
+    clusters_temp = {}
+
+    # If the foldseek output exists and we're not overwriting, use it.
+    if os.path.exists(cluster_output_file) and not overwrite:
+        if verbose:
+            print("Existing foldseek clustering output found. Reading clusters...")
+        with open(cluster_output_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                centroid = parts[0].replace('.pdb', '')
+                member = parts[1].replace('.pdb', '')
+                clusters_temp.setdefault(centroid, []).append(member)
+        print(f"Found {len(clusters_temp)} clusters from foldseek output.")
+    else:
+        # Build and run the foldseek easy-cluster command.
+        command = f"cd {job_folder}\n"
+        command += (f"foldseek easy-cluster {models_folder} result tmp "
+                    f"--cov-mode {cov_mode} -e {evalue} -c {c}\n")
+        command += f"cd {'../'*len(job_folder.split(os.sep))}\n"
+        if verbose:
+            print("Running foldseek clustering...")
+        subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
+
+        if not os.path.exists(cluster_output_file):
+            raise FileNotFoundError(f"Clustering output file not found: {cluster_output_file}")
+
+        with open(cluster_output_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                centroid = parts[0].replace('.pdb', '')
+                member = parts[1].replace('.pdb', '')
+                clusters_temp.setdefault(centroid, []).append(member)
+        if verbose:
+            print(f"Clustering complete. Found {len(clusters_temp)} clusters.")
+
+    # Sort clusters by size and rename them as cluster_01, cluster_02, etc.
+    clusters_sorted = sorted(clusters_temp.items(), key=lambda x: len(x[1]), reverse=True)
+    renamed_clusters = {}
+    for i, (centroid, members) in enumerate(clusters_sorted, start=1):
+        cluster_name = f"cluster_{i:02d}"
+        renamed_clusters[cluster_name] = {"centroid": centroid, "members": members}
+
+    # Optionally, generate a DCD file for each cluster.
+    if output_dcd:
+        if os.path.exists(dcd_folder):
+            shutil.rmtree(dcd_folder)
+        os.mkdir(dcd_folder)
+        for cluster_name, data in renamed_clusters.items():
+            centroid = data["centroid"]
+            members = data["members"]
+            pdb_names = [centroid] + members
+            pdb_files = [os.path.join(models_folder, f"{name}.pdb") for name in pdb_names]
+
+            traj_list = []
+            for pdb in pdb_files:
+                if os.path.exists(pdb):
+                    try:
+                        traj = md.load(pdb)
+                        traj_list.append(traj)
+                    except Exception as e:
+                        print(f"Error loading {pdb}: {e}")
+                else:
+                    print(f"Warning: {pdb} not found.")
+            if not traj_list:
+                print(f"No valid PDB files found for {cluster_name}. Skipping DCD generation.")
+                continue
+            try:
+                combined_traj = traj_list[0] if len(traj_list) == 1 else md.join(traj_list)
+            except Exception as e:
+                print(f"Error joining trajectories for {cluster_name}: {e}")
+                continue
+
+            dcd_file = os.path.join(dcd_folder, f"{cluster_name}.dcd")
+            combined_traj.save_dcd(dcd_file)
+            if verbose:
+                print(f"Saved {cluster_name} as DCD file: {dcd_file}")
+
+    # Optionally, save the clusters as individual PDBs in one folder.
+    if save_as_pdb:
+        if os.path.exists(pdb_folder):
+            shutil.rmtree(pdb_folder)
+        os.mkdir(pdb_folder)
+        # Use model_prefix if provided; otherwise derive it from the basename of models_folder.
+        prefix = model_prefix if model_prefix is not None else os.path.basename(models_folder)
+        for cluster_name, data in renamed_clusters.items():
+            for member in [data["centroid"]] + data["members"]:
+                source_file = os.path.join(models_folder, f"{member}.pdb")
+                if os.path.exists(source_file):
+                    target_file = os.path.join(pdb_folder, f"{prefix}_{cluster_name}_{member}.pdb")
+                    shutil.copyfile(source_file, target_file)
+                    if verbose:
+                        print(f"Copied {source_file} to {target_file}")
+                else:
+                    print(f"Warning: {source_file} not found. Skipping copy.")
+
+    # Clean up temporary folder.
+    if os.path.exists(tmp_folder):
+        shutil.rmtree(tmp_folder)
+
+    # Cache the clusters to disk.
+    with open(cache_file, "w") as cf:
+        json.dump(renamed_clusters, cf, indent=2)
+    if verbose:
+        print("Clusters cached to", cache_file)
+
+    return renamed_clusters
