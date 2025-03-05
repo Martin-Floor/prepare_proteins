@@ -365,22 +365,22 @@ class sequenceModels:
         For each model in self.sequences, this function creates a dedicated folder structure
         (job folder, model folder, and cache directory). If a Conda environment is provided
         via the 'bioemu_env' parameter, the function activates the specified Conda environment,
-        runs a sample command with minimal sample settings, and deactivates the environment,
-        returning the subprocess result. Otherwise, it compiles and returns a list of command
-        strings (which can be executed later) for each model.
+        runs a sample command with minimal sample settings, and deactivates the environment
+        (this is relevant if your computing node does not have access to internet, e.g., MN5).
+        Otherwise, it compiles and returns a list of command strings (which can be executed later) for each model.
 
         Parameters:
             job_folder (str): The root folder where job outputs will be stored.
             num_samples (int): Number of samples to run in BioEmu (default 10000).
             batch_size_100 (int): Batch size (default 20).
-            gpu_local (bool): If True, sets the CUDA_VISIBLE_DEVICES variable.
+            gpu_local (bool): If True, sets the CUDA_VISIBLE_DEVICES variable for running GPUs in
+                              local computer with multiple GPUS.
             bioemu_env (str): Name of the Conda environment to activate. If provided, the command
-                              is executed immediately.
+                              is executed to store the cached files that are obtained with an internet connection.
             conda_sh (str): Path to the conda.sh initialization script (default '~/miniconda3/etc/profile.d/conda.sh').
 
         Returns:
-            If bioemu_env is provided, returns the subprocess.CompletedProcess result from executing
-            the command. Otherwise, returns a list of command strings for each model.
+            Returns a list of command strings to run bioemu for each model.
         """
         import os
         import subprocess
