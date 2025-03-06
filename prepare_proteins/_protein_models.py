@@ -6382,7 +6382,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             else:
                                 command += f"{remote_command_name} grompp -f md.mdp -c prot_md_{j - 1}.gro -t prot_md_{j - 1}.cpt -p ../topol/topol.top -o prot_md_{j}.tpr -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_md_{j}\n"
-                        command += "cd ../../../..\n"
+                    command += "cd ../../../..\n"
                 else:
                     command = ''
 
