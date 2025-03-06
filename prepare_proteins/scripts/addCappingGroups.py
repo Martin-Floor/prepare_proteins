@@ -61,7 +61,7 @@ for f in os.listdir(models_folder):
                 residues[i].resnum = residues[i+1].resnum
 
             elif openmm_style_caps:
-                elif atom.pdbname.strip() == '1H':
+                if atom.pdbname.strip() == '1H':
                     atom.pdbname = 'HH31'
                 elif atom.pdbname.strip() == '2H':
                     atom.pdbname = 'HH32'
