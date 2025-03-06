@@ -4,6 +4,9 @@ import shutil
 import bz2
 import pickle
 import pandas as pd
+import mdtraj as md
+import json
+import subprocess
 
 class sequenceModels:
 
@@ -87,130 +90,131 @@ class sequenceModels:
 
         return jobs
 
-    def setUpAlphaFold_tunned_mn(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                                 remove_extras=False, remove_msas=False, nstruct=1, nrecycles=1,
-                                 max_extra_msa=None, keep_compress=False):
-        """
-        Set up AlphaFold predictions for the loaded sequences. This is a tunned
-        version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
-        """
+    # def setUpAlphaFold_tunned_mn(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
+    #                              remove_extras=False, remove_msas=False, nstruct=1, nrecycles=1,
+    #                              max_extra_msa=None, keep_compress=False):
+    #     """
+    #     Set up AlphaFold predictions for the loaded sequences. This is a tunned
+    #     version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
+    #     """
+    #
+    #     # Create Job folders
+    #     if not os.path.exists(job_folder):
+    #         os.mkdir(job_folder)
+    #
+    #     if not os.path.exists(job_folder+'/input_sequences'):
+    #         os.mkdir(job_folder+'/input_sequences')
+    #
+    #     if not os.path.exists(job_folder+'/output_models'):
+    #         os.mkdir(job_folder+'/output_models')
+    #
+    #     # Check for finished models
+    #     excluded = []
+    #     if exclude_finished:
+    #         for model in os.listdir(job_folder+'/output_models'):
+    #             for f in os.listdir(job_folder+'/output_models/'+model):
+    #                 if f == 'ranked_0.pdb' or f == 'ranked__0.pdb.bz2':
+    #                     excluded.append(model)
+    #
+    #     jobs = []
+    #     for model in self.sequences:
+    #         if exclude_finished and model in excluded:
+    #             continue
+    #         sequence = {}
+    #         sequence[model] = self.sequences[model]
+    #         alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
+    #         command = 'cd '+job_folder+'\n'
+    #         command += 'Path=$(pwd)\n'
+    #         command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
+    #         command += f' --nstruct={nstruct}'
+    #         command += f' --max_recycles={nrecycles}'
+    #         if max_extra_msa is not None:
+    #             command += f' --max_extra_msa={max_extra_msa}'
+    #         command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
+    #         command += ' --output_dir=$Path/output_models'
+    #         command += ' --model_preset='+model_preset
+    #         command += ' --max_template_date=2022-01-01'
+    #         command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
+    #
+    #         if keep_compress==False:
+    #             command += 'bzip2 -d *.pdb.bz2\n'
+    #
+    #         if remove_extras:
+    #             command += f'rm -r $Path/output_models/{model}/msas\n'
+    #             command += f'rm -r $Path/output_models/{model}/*.pkl\n'
+    #
+    #         if remove_msas:
+    #             command += f'rm -r $Path/output_models/{model}/msas\n'
+    #
+    #         command += 'cd ..\n'
+    #
+    #         jobs.append(command)
+    #
+    #     return jobs
+    #
+    # def setUpAlphaFold_tunned_mt(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
+    #                    remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
+    #     """
+    #     Set up AlphaFold predictions for the loaded sequneces. This is a tunned version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
+    #
+    #     """
+    #
+    #     # Create Job folders
+    #     if not os.path.exists(job_folder):
+    #         os.mkdir(job_folder)
+    #
+    #     if not os.path.exists(job_folder+'/input_sequences'):
+    #         os.mkdir(job_folder+'/input_sequences')
+    #
+    #     if not os.path.exists(job_folder+'/output_models'):
+    #         os.mkdir(job_folder+'/output_models')
+    #
+    #     # Check for finished models
+    #     excluded = []
+    #     if exclude_finished:
+    #         for model in os.listdir(job_folder+'/output_models'):
+    #             for f in os.listdir(job_folder+'/output_models/'+model):
+    #                 if f == 'ranked_0.pdb':
+    #                     excluded.append(model)
+    #
+    #     jobs = []
+    #     for model in self.sequences:
+    #         if exclude_finished and model in excluded:
+    #             continue
+    #         sequence = {}
+    #         sequence[model] = self.sequences[model]
+    #         alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
+    #         command = 'cd '+job_folder+'\n'
+    #         command += 'Path=$(pwd)\n'
+    #         command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /opt/cuda/10.1,.:/etc,$TMPDIR:/tmp -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
+    #         command += f' --nstruct={nstruct}'
+    #         command += f' --max_recycles={nrecycles}'
+    #         if max_extra_msa is not None:
+    #             command += f' --max_extra_msa={max_extra_msa}'
+    #         command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
+    #         command += ' --output_dir=$Path/output_models'
+    #         command += ' --model_preset='+model_preset
+    #         command += ' --max_template_date=2022-01-01'
+    #         command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
+    #
+    #         if keep_compress==False:
+    #             command += 'bzip2 -d *.pdb.bz2\n'
+    #
+    #         if remove_extras:
+    #             command += f'rm -r $Path/output_models/{model}/msas\n'
+    #             command += f'rm -r $Path/output_models/{model}/*.pkl\n'
+    #
+    #         if remove_msas:
+    #             command += f'rm -r $Path/output_models/{model}/msas\n'
+    #
+    #         command += 'cd ..\n'
+    #
+    #         jobs.append(command)
+    #
+    #     return jobs
 
-        # Create Job folders
-        if not os.path.exists(job_folder):
-            os.mkdir(job_folder)
-
-        if not os.path.exists(job_folder+'/input_sequences'):
-            os.mkdir(job_folder+'/input_sequences')
-
-        if not os.path.exists(job_folder+'/output_models'):
-            os.mkdir(job_folder+'/output_models')
-
-        # Check for finished models
-        excluded = []
-        if exclude_finished:
-            for model in os.listdir(job_folder+'/output_models'):
-                for f in os.listdir(job_folder+'/output_models/'+model):
-                    if f == 'ranked_0.pdb' or f == 'ranked__0.pdb.bz2':
-                        excluded.append(model)
-
-        jobs = []
-        for model in self.sequences:
-            if exclude_finished and model in excluded:
-                continue
-            sequence = {}
-            sequence[model] = self.sequences[model]
-            alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
-            command = 'cd '+job_folder+'\n'
-            command += 'Path=$(pwd)\n'
-            command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
-            command += f' --nstruct={nstruct}'
-            command += f' --max_recycles={nrecycles}'
-            if max_extra_msa is not None:
-                command += f' --max_extra_msa={max_extra_msa}'
-            command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
-            command += ' --output_dir=$Path/output_models'
-            command += ' --model_preset='+model_preset
-            command += ' --max_template_date=2022-01-01'
-            command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
-
-            if keep_compress==False:
-                command += 'bzip2 -d *.pdb.bz2\n'
-
-            if remove_extras:
-                command += f'rm -r $Path/output_models/{model}/msas\n'
-                command += f'rm -r $Path/output_models/{model}/*.pkl\n'
-
-            if remove_msas:
-                command += f'rm -r $Path/output_models/{model}/msas\n'
-
-            command += 'cd ..\n'
-
-            jobs.append(command)
-
-        return jobs
-
-    def setUpAlphaFold_tunned_mt(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
-        """
-        Set up AlphaFold predictions for the loaded sequneces. This is a tunned version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
-
-        """
-
-        # Create Job folders
-        if not os.path.exists(job_folder):
-            os.mkdir(job_folder)
-
-        if not os.path.exists(job_folder+'/input_sequences'):
-            os.mkdir(job_folder+'/input_sequences')
-
-        if not os.path.exists(job_folder+'/output_models'):
-            os.mkdir(job_folder+'/output_models')
-
-        # Check for finished models
-        excluded = []
-        if exclude_finished:
-            for model in os.listdir(job_folder+'/output_models'):
-                for f in os.listdir(job_folder+'/output_models/'+model):
-                    if f == 'ranked_0.pdb':
-                        excluded.append(model)
-
-        jobs = []
-        for model in self.sequences:
-            if exclude_finished and model in excluded:
-                continue
-            sequence = {}
-            sequence[model] = self.sequences[model]
-            alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
-            command = 'cd '+job_folder+'\n'
-            command += 'Path=$(pwd)\n'
-            command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /opt/cuda/10.1,.:/etc,$TMPDIR:/tmp -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
-            command += f' --nstruct={nstruct}'
-            command += f' --max_recycles={nrecycles}'
-            if max_extra_msa is not None:
-                command += f' --max_extra_msa={max_extra_msa}'
-            command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
-            command += ' --output_dir=$Path/output_models'
-            command += ' --model_preset='+model_preset
-            command += ' --max_template_date=2022-01-01'
-            command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
-
-            if keep_compress==False:
-                command += 'bzip2 -d *.pdb.bz2\n'
-
-            if remove_extras:
-                command += f'rm -r $Path/output_models/{model}/msas\n'
-                command += f'rm -r $Path/output_models/{model}/*.pkl\n'
-
-            if remove_msas:
-                command += f'rm -r $Path/output_models/{model}/msas\n'
-
-            command += 'cd ..\n'
-
-            jobs.append(command)
-
-        return jobs
-
-    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='', return_missing=False):
+    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='',
+                                           return_missing=False, copy_all=False):
         """
         Copy models from an AlphaFold calculation to an specfied output folder.
 
@@ -240,18 +244,25 @@ class sequenceModels:
 
         if return_missing:
             missing = []
-        for m in self:
-            if m in models_paths:
-                if models_paths[m].endswith('.pdb'):
-                    shutil.copyfile(models_paths[m], output_folder+'/'+prefix+m+'.pdb')
-                elif models_paths[m].endswith('.bz2'):
-                    file = bz2.BZ2File(models_paths[m], 'rb')
-                    pdbfile = open(output_folder+'/'+prefix+m+'.pdb', 'wb')
-                    shutil.copyfileobj(file, pdbfile)
-            else:
-                if return_missing:
+
+        af_models = []
+        if copy_all:
+            af_models = list(models_paths.keys())
+        else:
+            for m in self:
+                if m in models_paths:
+                    af_models.append(m)
+                elif return_missing:
                     missing.append(m)
-                print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
+                    print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
+
+        for m in af_models:
+            if models_paths[m].endswith('.pdb'):
+                shutil.copyfile(models_paths[m], output_folder+'/'+prefix+m+'.pdb')
+            elif models_paths[m].endswith('.bz2'):
+                file = bz2.BZ2File(models_paths[m], 'rb')
+                pdbfile = open(output_folder+'/'+prefix+m+'.pdb', 'wb')
+                shutil.copyfileobj(file, pdbfile)
 
         if return_missing:
             return missing
@@ -345,21 +356,230 @@ class sequenceModels:
 
         return
 
-    def __iter__(self):
-        #returning __iter__ object
-        self._iter_n = -1
-        self._stop_inter = len(self.sequences_names)
-        return self
+    def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
+                    verbose=True,
+                    bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
+        """
+        Set up and optionally execute BioEmu commands for each model sequence.
 
-    def __next__(self):
-        self._iter_n += 1
-        if self._iter_n < self._stop_inter:
-            return self.sequences_names[self._iter_n]
+        For each model in self.sequences, this function creates a dedicated folder structure
+        (job folder, model folder, and cache directory). If a Conda environment is provided
+        via the 'bioemu_env' parameter, the function activates the specified Conda environment,
+        runs a sample command with minimal sample settings, and deactivates the environment
+        (this is relevant if your computing node does not have access to internet, e.g., MN5).
+        Otherwise, it compiles and returns a list of command strings (which can be executed later) for each model.
+
+        Parameters:
+            job_folder (str): The root folder where job outputs will be stored.
+            num_samples (int): Number of samples to run in BioEmu (default 10000).
+            batch_size_100 (int): Batch size (default 20).
+            gpu_local (bool): If True, sets the CUDA_VISIBLE_DEVICES variable for running GPUs in
+                              local computer with multiple GPUS.
+            bioemu_env (str): Name of the Conda environment to activate. If provided, the command
+                              is executed to store the cached files that are obtained with an internet connection.
+            conda_sh (str): Path to the conda.sh initialization script (default '~/miniconda3/etc/profile.d/conda.sh').
+
+        Returns:
+            Returns a list of command strings to run bioemu for each model.
+        """
+        import os
+        import subprocess
+
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        jobs = []
+        for model in self.sequences:
+            model_folder = os.path.join(job_folder, model)
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            cache_embeds_dir = os.path.join(model_folder, 'cache')
+            if not os.path.exists(cache_embeds_dir):
+                os.mkdir(cache_embeds_dir)
+
+            if bioemu_env:
+
+                cached_files = [f for f in os.listdir(cache_embeds_dir)]
+                fasta_cached_file = [f for f in cached_files if f.endswith('.fasta')]
+                npy_cached_files = [f for f in cached_files if f.endswith('.npy')]
+
+                if len(fasta_cached_file) == 1 and len(npy_cached_files) == 2:
+                    if verbose:
+                        print(f'Input files for model {model} were found.')
+                else:
+                    command = f"""
+                    source {conda_sh}
+                    conda activate {bioemu_env}
+                    python -m bioemu.sample --sequence {self.sequences[model]} --num_samples 1 --batch_size_100 {batch_size_100} --cache_embeds_dir {cache_embeds_dir} --output_dir {model_folder}
+                    conda deactivate
+                    """
+                    if verbose:
+                        print(f"Setting input files for model {model}")
+                    result = subprocess.run(["bash", "-i", "-c", command], capture_output=True, text=True)
+
+            command = ''
+            if gpu_local:
+                command += 'CUDA_VISIBLE_DEVICES=GPUID '
+            command += 'python -m bioemu.sample '
+            command += f'--sequence {self.sequences[model]} '
+            command += f'--num_samples {num_samples} '
+            command += f'--batch_size_100 {batch_size_100} '
+            command += f'--cache_embeds_dir {cache_embeds_dir} '
+            command += f'--output_dir {model_folder}\n'
+
+            jobs.append(command)
+
+        return jobs
+
+
+    def clusterBioEmuSamples(self, job_folder, bioemu_folder, models=None, stderr=True, stdout=True,
+                             output_dcd=False, output_pdb=False, c=0.9, cov_mode=0, verbose=True,
+                             evalue=10.0, overwrite=False, remove_input_pdb=True):
+        """
+        Process BioEmu models by extracting trajectory frames (saved as PDBs) and clustering them.
+        Each model’s clustering results are cached in its model folder (clusters.json) and then
+        compiled into an overall cache file (overall_clusters.json) in the job folder. Optionally,
+        after clustering the extracted input PDBs are removed.
+
+        The model name from the bioemu folder is used as the prefix for naming output PDB files.
+
+        Parameters
+        ----------
+        job_folder : str
+            Path to the job folder where model subfolders will be created.
+        bioemu_folder : str
+            Path to the folder containing BioEmu models.
+        models : list, optional
+            List of model names to process. If None, all models in bioemu_folder will be processed.
+        output_dcd : bool, optional
+            If True, save clustered structures as DCD files (default: False).
+        output_pdb : bool, optional
+            If True, save clustered structures as PDB files (default: False).
+        c : float, optional
+            Fraction of aligned residues for clustering (default: 0.9).
+        cov_mode : int, optional
+            Coverage mode for clustering (default: 0).
+        evalue : float, optional
+            E-value threshold for clustering (default: 10.0).
+        overwrite : bool, optional
+            If True, previous clustering outputs and caches are deleted (default: False).
+        remove_input_pdb : bool, optional
+            If True, remove the extracted input PDB files (input_models folder) after clustering.
+            Default is True.
+
+        Returns
+        -------
+        overall_clusters : dict
+            Dictionary mapping each model to its clustering output.
+        """
+
+        # Convert paths to absolute.
+        job_folder = os.path.abspath(job_folder)
+        bioemu_folder = os.path.abspath(bioemu_folder)
+
+        # Define overall cache file.
+        overall_cache_file = os.path.join(job_folder, "overall_clusters.json")
+
+        # Load existing overall clusters if not overwriting
+        if os.path.exists(overall_cache_file) and not overwrite:
+            if verbose:
+                print("Loading cached overall clusters from", overall_cache_file)
+            with open(overall_cache_file, "r") as f:
+                overall_clusters = json.load(f)
         else:
-            raise StopIteration
+            overall_clusters = {}
+
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        # Loop over each model in the bioemu_folder.
+        for model in os.listdir(bioemu_folder):
+            if models and model not in models:
+                continue
+
+            # Skip models that are already in the cache unless overwrite=True
+            if model in overall_clusters and not overwrite:
+                if verbose:
+                    print(f"Skipping model {model}, already clustered and cached.")
+                continue
+
+            # Delete previous clustering information
+            model_folder = os.path.join(job_folder, model)
+            if overwrite and os.path.exists(model_folder):
+                for item in os.listdir(model_folder):
+                    item_path = os.path.join(model_folder, item)
+                    if item == 'input_models':
+                        if remove_input_pdb and os.path.exists(item_path):
+                            shutil.rmtree(item_path)
+                    else:
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                        else:
+                            os.remove(item_path)
+
+
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            input_models_folder = os.path.join(model_folder, 'input_models')
+            if not os.path.exists(input_models_folder):
+                os.mkdir(input_models_folder)
+
+            # Define file paths for topology and trajectory.
+            top_file = os.path.join(bioemu_folder, model, 'topology.pdb')
+            traj_file = os.path.join(bioemu_folder, model, 'samples.xtc')
+
+            # Load the topology and trajectory; superpose the trajectory.
+            traj_top = md.load(top_file)
+            traj = md.load(traj_file, top=top_file)
+            traj.superpose(traj_top[0])
+
+            # Save each frame of the trajectory as a separate PDB file.
+            for i in range(traj.n_frames):
+                pdb_path = os.path.join(input_models_folder, f"frame_{i:07d}.pdb")
+                if not os.path.exists(pdb_path):
+                    traj[i].save_pdb(pdb_path)
+
+            # Use the model name as the prefix.
+            prefix = model
+
+            # Run structural clustering on the extracted PDBs.
+            if verbose:
+                print(f"Clustering PDBs for model {model}...")
+            clusters = _structuralClustering(
+                job_folder=model_folder,
+                models_folder=input_models_folder,
+                output_dcd=output_dcd,
+                save_as_pdb=output_pdb,
+                model_prefix=prefix,
+                c=c,
+                cov_mode=cov_mode,
+                evalue=evalue,
+                overwrite=overwrite,
+                stderr=stderr,
+                stdout=stdout,
+                verbose=verbose
+            )
+            overall_clusters[model] = clusters
+            if verbose:
+                print(f"Clusters for model {model}: {clusters}")
+
+            # Optionally remove the extracted PDB files.
+            if remove_input_pdb and os.path.exists(input_models_folder):
+                shutil.rmtree(input_models_folder)
+                print(f"Removed input PDB folder: {input_models_folder}")
+
+        # Cache the updated overall clusters.
+        with open(overall_cache_file, "w") as f:
+            json.dump(overall_clusters, f, indent=2)
+        if verbose:
+            print("Overall clusters cached to", overall_cache_file)
+
+        return overall_clusters
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
-                          cpus=40, version="5.69-101.0", max_bin_size=10000):
+                          cpus=40, version="5.71-102.0", max_bin_size=10000):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
 
@@ -508,3 +728,218 @@ class sequenceModels:
             return missing
 
         return folds
+
+    def __iter__(self):
+        #returning __iter__ object
+        self._iter_n = -1
+        self._stop_inter = len(self.sequences_names)
+        return self
+
+    def __next__(self):
+        self._iter_n += 1
+        if self._iter_n < self._stop_inter:
+            return self.sequences_names[self._iter_n]
+        else:
+            raise StopIteration
+
+def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pdb=False,
+                          model_prefix=None, c=0.9, cov_mode=0, evalue=10.0, overwrite=False,
+                          stderr=True, stdout=True, verbose=True):
+    """
+    Perform structural clustering on the PDB files in models_folder using foldseek.
+    Clusters are renamed as cluster_01, cluster_02, etc.
+    Optionally, each cluster’s structures are loaded and saved as a DCD file.
+    Additionally, if save_as_pdb is True, all cluster member PDBs are copied into a single folder
+    with filenames of the form: {model_prefix}_{cluster}_{member}.pdb.
+    The function caches the output to disk so that subsequent calls will
+    simply recover previous results unless overwrite is True. When overwrite is True,
+    previous output folders and cache files are deleted.
+
+    Parameters
+    ----------
+    job_folder : str
+        Path where the clustering job will run.
+    models_folder : str
+        Path to the folder containing the input PDB models.
+    output_dcd : bool, optional
+        If True, save clustered structures as DCD files (default: True).
+    save_as_pdb : bool, optional
+        If True, copy all cluster member PDBs into a single folder using the naming format
+        {model_prefix}_{cluster}_{member}.pdb (default: False).
+    model_prefix : str, optional
+        A prefix to use for naming the output PDB files. If None, the basename of models_folder is used.
+    c : float, optional
+        Fraction of aligned residues for clustering (default: 0.9).
+    cov_mode : int, optional
+        Coverage mode for clustering (default: 0).
+    evalue : float, optional
+        E-value threshold for clustering (default: 10.0).
+    overwrite : bool, optional
+        If True, previous clustering output is deleted and re-run (default: False).
+
+    Returns
+    -------
+    clusters : dict
+        Dictionary where keys are "cluster_XX" and values are dicts with keys "centroid"
+        and "members" (a list of member names).
+    """
+
+    # Manage stdout and stderr
+    if stdout:
+        stdout = None
+    else:
+        stdout = subprocess.DEVNULL
+
+    if stderr:
+        stderr = None
+    else:
+        stderr = subprocess.DEVNULL
+
+    # Convert paths to absolute.
+    job_folder = os.path.abspath(job_folder)
+    models_folder = os.path.abspath(models_folder)
+
+    if not os.path.exists(job_folder):
+        os.mkdir(job_folder)
+
+    # Define cache and output file paths.
+    cache_file = os.path.join(job_folder, "clusters.json")
+    cluster_output_file = os.path.join(job_folder, "result_cluster.tsv")
+    dcd_folder = os.path.join(job_folder, "clustered_dcd")
+    pdb_folder = os.path.join(job_folder, "clustered_pdb")  # For saving PDB copies
+
+    # If overwrite is requested, remove previous outputs.
+    if overwrite:
+        if os.path.exists(cache_file):
+            os.remove(cache_file)
+        if os.path.exists(cluster_output_file):
+            os.remove(cluster_output_file)
+        if os.path.exists(dcd_folder):
+            shutil.rmtree(dcd_folder)
+        if os.path.exists(pdb_folder):
+            shutil.rmtree(pdb_folder)
+
+    # If cache exists and not overwriting, load and return.
+    if os.path.exists(cache_file) and not overwrite:
+        print("Loading cached clusters from", cache_file)
+        with open(cache_file, "r") as cf:
+            renamed_clusters = json.load(cf)
+        return renamed_clusters
+
+    # Create temporary folder for foldseek.
+    tmp_folder = os.path.join(job_folder, 'tmp')
+    if overwrite and os.path.exists(tmp_folder):
+        shutil.rmtree(tmp_folder)
+    if not os.path.exists(tmp_folder):
+        os.mkdir(tmp_folder)
+
+    clusters_temp = {}
+
+    # If the foldseek output exists and we're not overwriting, use it.
+    if os.path.exists(cluster_output_file) and not overwrite:
+        if verbose:
+            print("Existing foldseek clustering output found. Reading clusters...")
+        with open(cluster_output_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                centroid = parts[0].replace('.pdb', '')
+                member = parts[1].replace('.pdb', '')
+                clusters_temp.setdefault(centroid, []).append(member)
+        print(f"Found {len(clusters_temp)} clusters from foldseek output.")
+    else:
+        # Build and run the foldseek easy-cluster command.
+        command = f"cd {job_folder}\n"
+        command += (f"foldseek easy-cluster {models_folder} result tmp "
+                    f"--cov-mode {cov_mode} -e {evalue} -c {c}\n")
+        command += f"cd {'../'*len(job_folder.split(os.sep))}\n"
+        if verbose:
+            print("Running foldseek clustering...")
+        subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
+
+        if not os.path.exists(cluster_output_file):
+            raise FileNotFoundError(f"Clustering output file not found: {cluster_output_file}")
+
+        with open(cluster_output_file, 'r') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 2:
+                    continue
+                centroid = parts[0].replace('.pdb', '')
+                member = parts[1].replace('.pdb', '')
+                clusters_temp.setdefault(centroid, []).append(member)
+        if verbose:
+            print(f"Clustering complete. Found {len(clusters_temp)} clusters.")
+
+    # Sort clusters by size and rename them as cluster_01, cluster_02, etc.
+    clusters_sorted = sorted(clusters_temp.items(), key=lambda x: len(x[1]), reverse=True)
+    renamed_clusters = {}
+    for i, (centroid, members) in enumerate(clusters_sorted, start=1):
+        cluster_name = f"cluster_{i:02d}"
+        renamed_clusters[cluster_name] = {"centroid": centroid, "members": members}
+
+    # Optionally, generate a DCD file for each cluster.
+    if output_dcd:
+        if os.path.exists(dcd_folder):
+            shutil.rmtree(dcd_folder)
+        os.mkdir(dcd_folder)
+        for cluster_name, data in renamed_clusters.items():
+            centroid = data["centroid"]
+            members = data["members"]
+            pdb_names = [centroid] + members
+            pdb_files = [os.path.join(models_folder, f"{name}.pdb") for name in pdb_names]
+
+            traj_list = []
+            for pdb in pdb_files:
+                if os.path.exists(pdb):
+                    try:
+                        traj = md.load(pdb)
+                        traj_list.append(traj)
+                    except Exception as e:
+                        print(f"Error loading {pdb}: {e}")
+                else:
+                    print(f"Warning: {pdb} not found.")
+            if not traj_list:
+                print(f"No valid PDB files found for {cluster_name}. Skipping DCD generation.")
+                continue
+            try:
+                combined_traj = traj_list[0] if len(traj_list) == 1 else md.join(traj_list)
+            except Exception as e:
+                print(f"Error joining trajectories for {cluster_name}: {e}")
+                continue
+
+            dcd_file = os.path.join(dcd_folder, f"{cluster_name}.dcd")
+            combined_traj.save_dcd(dcd_file)
+            if verbose:
+                print(f"Saved {cluster_name} as DCD file: {dcd_file}")
+
+    # Optionally, save the clusters as individual PDBs in one folder.
+    if save_as_pdb:
+        if os.path.exists(pdb_folder):
+            shutil.rmtree(pdb_folder)
+        os.mkdir(pdb_folder)
+        # Use model_prefix if provided; otherwise derive it from the basename of models_folder.
+        prefix = model_prefix if model_prefix is not None else os.path.basename(models_folder)
+        for cluster_name, data in renamed_clusters.items():
+            for member in [data["centroid"]] + data["members"]:
+                source_file = os.path.join(models_folder, f"{member}.pdb")
+                if os.path.exists(source_file):
+                    target_file = os.path.join(pdb_folder, f"{prefix}_{cluster_name}_{member}.pdb")
+                    shutil.copyfile(source_file, target_file)
+                    if verbose:
+                        print(f"Copied {source_file} to {target_file}")
+                else:
+                    print(f"Warning: {source_file} not found. Skipping copy.")
+
+    # Clean up temporary folder.
+    if os.path.exists(tmp_folder):
+        shutil.rmtree(tmp_folder)
+
+    # Cache the clusters to disk.
+    with open(cache_file, "w") as cf:
+        json.dump(renamed_clusters, cf, indent=2)
+    if verbose:
+        print("Clusters cached to", cache_file)
+
+    return renamed_clusters
