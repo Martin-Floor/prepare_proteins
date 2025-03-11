@@ -343,23 +343,27 @@ class md_analysis:
                 else:
                     print(f'Warning: Distance file not found for {model} - {replica}')
 
-    def plot_distances(self, threshold=0.45, lim=True):
+    def plot_distances(self, threshold=0.45, lim=True, metrics_to_use=None):
         """
         Plots distances over time for visual inspection using matplotlib.
 
         Parameters:
         threshold (float): Threshold to highlight in the plot (default: 0.45).
         lim (bool): Whether to limit the y-axis (default: True).
+        metrics_to_use (str list): List of distance metrics to plot. If None all will be plotted.
 
         """
 
         def options1(model):
             if self.distances[model]:
                 for replica in self.distances[model]:
+                    leg = []
                     for metric in self.distances[model][replica]:
-                        y = np.array(self.distances[model][replica][metric]) * 10
-                        x = [x * 0.1 for x in range(len(y))]
-                        plt.plot(x, y)
+                        if metrics_to_use == None or metric in metrics_to_use:
+                            y = np.array(self.distances[model][replica][metric]) * 10
+                            x = [x * 0.1 for x in range(len(y))]
+                            plt.plot(x, y)
+                            leg.append(metric)
 
                     plt.axhline(y=threshold, color='r', linestyle='-')
                     if lim:
@@ -368,7 +372,7 @@ class md_analysis:
                     plt.title(replica)
                     plt.xlabel("time (ns)")
                     plt.ylabel("distance (Å)")
-                    plt.legend(list(self.distances[model][replica].keys()))
+                    plt.legend(leg)
                     plt.show()
             else:
                 print(f'No distance data for model {model}')
