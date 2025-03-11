@@ -5,8 +5,11 @@ import bz2
 import pickle
 import pandas as pd
 import mdtraj as md
+import numpy as np
 import json
 import subprocess
+import io
+from pkg_resources import Requirement, resource_listdir, resource_stream
 
 class sequenceModels:
 
@@ -357,7 +360,7 @@ class sequenceModels:
         return
 
     def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
-                    verbose=True,
+                    verbose=True, models=None,
                     bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
         """
         Set up and optionally execute BioEmu commands for each model sequence.
@@ -390,6 +393,10 @@ class sequenceModels:
 
         jobs = []
         for model in self.sequences:
+
+            if models and model not in models:
+                continue
+
             model_folder = os.path.join(job_folder, model)
             if not os.path.exists(model_folder):
                 os.mkdir(model_folder)
@@ -435,7 +442,7 @@ class sequenceModels:
 
     def clusterBioEmuSamples(self, job_folder, bioemu_folder, models=None, stderr=True, stdout=True,
                              output_dcd=False, output_pdb=False, c=0.9, cov_mode=0, verbose=True,
-                             evalue=10.0, overwrite=False, remove_input_pdb=True):
+                             evalue=10.0, overwrite=False, remove_input_pdb=True, min_sampled_points=None):
         """
         Process BioEmu models by extracting trajectory frames (saved as PDBs) and clustering them.
         Each model’s clustering results are cached in its model folder (clusters.json) and then
@@ -530,9 +537,22 @@ class sequenceModels:
             top_file = os.path.join(bioemu_folder, model, 'topology.pdb')
             traj_file = os.path.join(bioemu_folder, model, 'samples.xtc')
 
+            if not os.path.exists(top_file):
+                print(f'WARNING: No topology file was found for model {model}. Skipping it.')
+                continue
+
+            if not os.path.exists(traj_file):
+                print(f'WARNING: No trajectory file was found for model {model}. Skipping it.')
+                continue
+
             # Load the topology and trajectory; superpose the trajectory.
             traj_top = md.load(top_file)
             traj = md.load(traj_file, top=top_file)
+
+            if min_sampled_points and traj.n_frames < min_sampled_points:
+                print(f'WARNING: trajectory file for {model} has only {traj.n_frames} poses. Skipping it.')
+                continue
+
             traj.superpose(traj_top[0])
 
             # Save each frame of the trajectory as a separate PDB file.
@@ -577,6 +597,229 @@ class sequenceModels:
             print("Overall clusters cached to", overall_cache_file)
 
         return overall_clusters
+
+    def setUpBioEmuClustering(self, job_folder, bioemu_folder, evalues, models=None, c=0.9, cov_mode=0,
+                              overwrite=False, min_sampled_points=None, skip_finished=True, verbose=True,
+                              cluster_reassign=True):
+        """
+        Set up clustering jobs by copying a Python script into the job folder, extracting trajectory frames,
+        and generating execution commands.
+
+        Parameters
+        ----------
+        job_folder : str
+            Path to the job folder where model subfolders will be created.
+        bioemu_folder : str
+            Path to the folder containing BioEmu models.
+        evalues : float or list
+            List of E-value thresholds for clustering. Each value will have a unique subfolder.
+        models : list, optional
+            List of model names to process. If None, all models in bioemu_folder will be processed.
+        c : float, optional
+            Fraction of aligned residues for clustering (default: 0.9).
+        cov_mode : int, optional
+            Coverage mode for clustering (default: 0).
+        overwrite : bool, optional
+            If True, previous clustering outputs and caches are deleted (default: False).
+        min_sampled_points : int, optional
+            Minimum number of sampled trajectory frames required for clustering.
+        skip_finished : bool, optional
+            If True, skip generating commands for model–evalue combinations where the results file
+            already exists (default: True).
+        verbose : bool, optional
+            If True, print progress messages.
+
+        Returns
+        -------
+        jobs : list
+            List of command strings for executing clustering.
+        """
+
+        def format_evalue(x):
+            """
+            Format a float scientific value (e.g., 1e-30 or 0.5e-30)
+            into a string of the form "e_0.5e-30" or "e_1.0e-30".
+            """
+            # x is the actual evalue, e.g., 1e-30
+            # Compute the exponent: for 1e-30, log10(x) is -30.
+            exponent = -int(round(np.log10(x)))
+            # Compute the coefficient: x * 10**exponent gives 1.0 or 0.5.
+            coefficient = x * (10 ** exponent)
+            return f"e_{coefficient:.1f}e-{exponent}"
+
+        # Convert single evalue to a list if necessary
+        if isinstance(evalues, float):
+            evalues = [evalues]
+
+        # Use relative paths
+        job_folder = os.path.relpath(job_folder)
+        bioemu_folder = os.path.relpath(bioemu_folder)
+
+        os.makedirs(job_folder, exist_ok=True)
+
+        # Copy the clustering Python script to the job folder.
+        # Assumes that _copyScriptFile copies "foldseekClustering.py" from a known location.
+        _copyScriptFile(job_folder, "foldseekClustering.py")
+
+        jobs = []
+        for model in os.listdir(bioemu_folder):
+            if models and model not in models:
+                continue
+
+            model_path = os.path.join(bioemu_folder, model)
+            model_folder = os.path.join(job_folder, model)
+            os.makedirs(model_folder, exist_ok=True)
+
+            # Extraction step: create input_models folder and extract frames if needed.
+            input_models_folder = os.path.join(model_folder, 'input_models')
+            os.makedirs(input_models_folder, exist_ok=True)
+
+            # Locate topology and trajectory files in the BioEmu model folder.
+            top_file = os.path.join(model_path, 'topology.pdb')
+            traj_file = os.path.join(model_path, 'samples.xtc')
+            if not os.path.exists(top_file):
+                print(f"WARNING: No topology file found for model {model}. Skipping it.")
+                continue
+            if not os.path.exists(traj_file):
+                print(f"WARNING: No trajectory file found for model {model}. Skipping it.")
+                continue
+
+            # Load the trajectory using mdtraj.
+            traj_top = md.load(top_file)
+            traj = md.load(traj_file, top=top_file)
+
+            # If a minimum number of frames is specified, check against trajectory length.
+            if min_sampled_points and traj.n_frames < min_sampled_points:
+                print(f"WARNING: Model {model} has only {traj.n_frames} frames (min required is {min_sampled_points}). Skipping.")
+                continue
+
+            # Check if the number of extracted PDB files equals the number of frames.
+            existing_pdbs = [f for f in os.listdir(input_models_folder) if f.endswith('.pdb')]
+            if len(existing_pdbs) != traj.n_frames:
+                if verbose:
+                    print(f"Extracting {traj.n_frames} frames for model {model}...")
+                # Superpose on the first frame
+                traj.superpose(traj_top[0])
+                for i in range(traj.n_frames):
+                    pdb_path = os.path.join(input_models_folder, f"frame_{i:07d}.pdb")
+                    traj[i].save_pdb(pdb_path)
+                if verbose:
+                    print(f"Saved {traj.n_frames} frames for model {model}.")
+            else:
+                if verbose:
+                    print(f"Skipping extraction for model {model} (found {len(existing_pdbs)} PDBs).")
+
+            # Generate clustering commands for each evalue.
+            for evalue in evalues:
+                # Create a shorter folder name for the evalue (e.g., 1e-3 becomes e_1e-3)
+                formatted_evalue = format_evalue(float(evalue))
+                evalue_folder = os.path.join(model_folder, formatted_evalue)
+                os.makedirs(evalue_folder, exist_ok=True)
+
+                # Check for existing clustering results if skip_finished is set.
+                clusters_file = os.path.join(evalue_folder, "result", "clusters.json")
+                if skip_finished and os.path.exists(clusters_file):
+                    if verbose:
+                        print(f"Skipping clustering for model {model}, evalue {evalue} "
+                              f"(results already exist in {clusters_file}).")
+                    continue
+
+                # Generate command using relative paths.
+                # From evalue_folder, the foldseekClustering.py script is at ../../foldseekClustering.py,
+                # and the input_models folder is at ../../input_models.
+                command = f"cd {evalue_folder}\n"
+                command += f"python ../../._foldseekClustering.py ../input_models result tmp "
+                command += f"--cov_mode {cov_mode} --evalue {evalue} --c {c} "
+                if cluster_reassign:
+                    command += f"--cluster-reassign"
+                command += '\n'
+                command += f"cd ../../..\n"
+                jobs.append(command)
+
+                if verbose:
+                    print(f"Prepared command for model {model}, evalue {evalue} → Folder: {formatted_evalue}")
+
+        return jobs
+
+    def readBioEmuClusteringResults(self, job_folder, models=None, verbose=True):
+        """
+        Reads clustering results from a job folder and returns a dictionary mapping each model
+        and e-value folder to its clustering results.
+
+        The expected folder structure is:
+
+            job_folder/
+            ├── model1/
+            │   ├── e_1e-04/
+            │   │   └── result/
+            │   │       └── clusters.json
+            │   ├── e_1e-03/
+            │   │   └── result/
+            │   │       └── clusters.json
+            │   └── ...
+            ├── model2/
+            │   └── e_1e-04/
+            │       └── result/
+            │           └── clusters.json
+            └── ...
+
+        Parameters
+        ----------
+        job_folder : str
+            Path to the job folder containing model subfolders.
+        models : list, optional
+            List of model names to process. If None, all subdirectories in job_folder are processed.
+        verbose : bool, optional
+            If True, prints progress messages.
+
+        Returns
+        -------
+        results : dict
+            Dictionary in the form:
+            {
+                "model1": {
+                    "e_1e-04": { ... clustering results ... },
+                    "e_1e-03": { ... clustering results ... }
+                },
+                "model2": {
+                    "e_1e-04": { ... clustering results ... },
+                    ...
+                },
+                ...
+            }
+        """
+
+        results = {}
+        for model in os.listdir(job_folder):
+            model_path = os.path.join(job_folder, model)
+            if not os.path.isdir(model_path):
+                continue
+            if models and model not in models:
+                continue
+
+            results[model] = {}
+            # Loop over each folder in the model directory; we assume e-value folders start with "e_"
+            for item in os.listdir(model_path):
+                if not item.startswith("e_"):
+                    continue
+                evalue_folder = os.path.join(model_path, item)
+                result_dir = os.path.join(evalue_folder, "result")
+                clusters_file = os.path.join(result_dir, "clusters.json")
+                if os.path.exists(clusters_file):
+                    try:
+                        with open(clusters_file, "r") as f:
+                            clusters = json.load(f)
+                        results[model][item] = clusters
+                        if verbose:
+                            print(f"Read clustering results for model '{model}', folder '{item}'.")
+                    except Exception as e:
+                        if verbose:
+                            print(f"Error reading {clusters_file}: {e}")
+                else:
+                    if verbose:
+                        print(f"Warning: {clusters_file} not found for model '{model}', folder '{item}'.")
+
+        return results
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
                           cpus=40, version="5.71-102.0", max_bin_size=10000):
@@ -943,3 +1186,36 @@ def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pd
         print("Clusters cached to", cache_file)
 
     return renamed_clusters
+
+def _copyScriptFile(
+    output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
+):
+    """
+    Copy a script file from the prepare_proteins package.
+
+    Parameters
+    ==========
+
+    """
+    # Get script
+
+    if subfolder != None:
+        path = path + "/" + subfolder
+
+    script_file = resource_stream(
+        Requirement.parse("prepare_proteins"), path + "/" + script_name
+    )
+    script_file = io.TextIOWrapper(script_file)
+
+    # Write control script to output folder
+    if no_py == True:
+        script_name = script_name.replace(".py", "")
+
+    if hidden:
+        output_path = output_folder + "/._" + script_name
+    else:
+        output_path = output_folder + "/" + script_name
+
+    with open(output_path, "w") as sof:
+        for l in script_file:
+            sof.write(l)
