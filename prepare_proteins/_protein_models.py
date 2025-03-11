@@ -10025,6 +10025,358 @@ make sure of reading the target sequences with the function readTargetSequences(
         print("Added the following mutants from folder %s:" % mutants_folder)
         print("\t" + ", ".join(models))
 
+    # def loadModelsFromRosettaOptimization(
+    #     self,
+    #     optimization_folder,
+    #     filter_score_term="score",
+    #     min_value=True,
+    #     tags=None,
+    #     wat_to_hoh=True,
+    #     return_missing=False,
+    #     sugars=False,
+    #     conect_update=False,
+    # ):
+    #     """
+    #     Load the best energy models from a set of silent files inside a specfic folder.
+    #     Useful to get the best models from a relaxation run.
+    #
+    #     Parameters
+    #     ==========
+    #     optimization_folder : str
+    #         Path to folder where the Rosetta optimization files are contained
+    #     filter_score_term : str
+    #         Score term used to filter models
+    #     relax_run : bool
+    #         Is this a relax run?
+    #     min_value : bool
+    #         Grab the minimum score value. Set false to grab the maximum scored value.
+    #     tags : dict
+    #         The tag of a specific pose to be loaded for the given model. Each model
+    #         must have a single tag in the tags dictionary. If a model is not found
+    #         in the tags dictionary, normal processing will follow to select
+    #         the loaded pose.
+    #     wat_to_hoh : bool
+    #         Change water names from WAT to HOH when loading.
+    #     return_missing : bool
+    #         Return missing models from the optimization_folder.
+    #     """
+    #
+    #     def getConectLines(pdb_file, format_for_prepwizard=True):
+    #
+    #         ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+    #
+    #         # Read PDB file
+    #         atom_tuples = {}
+    #         add_one = False
+    #         previous_chain = None
+    #         with open(pdb_file, "r") as f:
+    #             for l in f:
+    #                 if l.startswith("ATOM") or l.startswith("HETATM"):
+    #                     index, name, resname, chain, resid = (
+    #                         int(l[6:11]),        # Atom index
+    #                         l[12:16].strip(),    # Atom name
+    #                         l[17:20].strip(),    # Residue name
+    #                         l[21],               # Chain identifier
+    #                         int(l[22:26]),       # Residue index
+    #                     )
+    #
+    #                     if not previous_chain:
+    #                         previous_chain = chain
+    #
+    #                     if name in ace_names:
+    #                         resid -= 1
+    #
+    #                         if format_for_prepwizard:
+    #                             if name == 'CP2':
+    #                                 name = 'CH3'
+    #                             elif name == 'CO':
+    #                                 name = 'C'
+    #                             elif name == 'OP1':
+    #                                 name = 'O'
+    #                             elif name == '1HP2':
+    #                                 name = '1H'
+    #                             elif name == '2HP2':
+    #                                 name = '2H'
+    #                             elif name == '3HP2':
+    #                                 name = '3H'
+    #
+    #                     if resname == 'NMA':
+    #                         add_one = True
+    #
+    #                         if format_for_prepwizard:
+    #                             if name == 'HN2':
+    #                                 name = 'H'
+    #                             elif name == 'C':
+    #                                 name = 'CA'
+    #                             elif name == 'H1':
+    #                                 name = '1HA'
+    #                             elif name == 'H2':
+    #                                 name = '2HA'
+    #                             elif name == 'H3':
+    #                                 name = '3HA'
+    #
+    #                     if previous_chain != chain:
+    #                         add_one = False
+    #
+    #                     if add_one:
+    #                         resid += 1
+    #
+    #                     atom_tuples[index] = (chain, resid, name)
+    #                     previous_chain = chain
+    #
+    #         conects = []
+    #         with open(pdb_file) as pdbf:
+    #             for l in pdbf:
+    #                 if l.startswith("CONECT"):
+    #                     l = l.replace("CONECT", "")
+    #                     l = l.strip("\n").rstrip()
+    #                     num = len(l) / 5
+    #                     new_l = [int(l[i * 5 : (i * 5) + 5]) for i in range(int(num))]
+    #                     conects.append([atom_tuples[int(x)] for x in new_l])
+    #
+    #         return conects
+    #
+    #     def writeConectLines(conects, pdb_file):
+    #
+    #         atom_indexes = {}
+    #         with open(pdb_file, "r") as f:
+    #             for l in f:
+    #                 if l.startswith("ATOM") or l.startswith("HETATM"):
+    #                     index, name, resname, chain, resid = (
+    #                         int(l[6:11]),        # Atom index
+    #                         l[12:16].strip(),    # Atom name
+    #                         l[17:20].strip(),    # Residue name
+    #                         l[21],               # Chain identifier
+    #                         int(l[22:26]),       # Residue index
+    #                     )
+    #                     atom_indexes[(chain, resid, name)] = index
+    #
+    #         # Check atoms not found in conects
+    #         with open(pdb_file + ".tmp", "w") as tmp:
+    #             with open(pdb_file) as pdb:
+    #                 # write all lines but skip END line
+    #                 for line in pdb:
+    #                     if not line.startswith("END"):
+    #                         tmp.write(line)
+    #
+    #                 # Write new conect line mapping
+    #                 for entry in conects:
+    #                     line = "CONECT"
+    #                     for x in entry:
+    #                         line += "%5s" % atom_indexes[x]
+    #                     line += "\n"
+    #                     tmp.write(line)
+    #             tmp.write("END\n")
+    #         shutil.move(pdb_file + ".tmp", pdb_file)
+    #
+    #     def checkCappingGroups(pdb_file, format_for_prepwizard=True, keep_conects=True):
+    #
+    #         ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+    #
+    #         if keep_conects:
+    #             conect_lines = getConectLines(pdb_file)
+    #
+    #         # Detect capping groups
+    #         structure = _readPDB(pdb_file, best_model_tag+".pdb")
+    #         model = structure[0]
+    #
+    #         for chain in model:
+    #
+    #             add_one = False
+    #             residues = [r for r in chain]
+    #
+    #             # Check for ACE atoms
+    #             ace_atoms = []
+    #             for a in residues[0]:
+    #                 if a.name in ace_names:
+    #                     ace_atoms.append(a)
+    #
+    #             # Check for NMA residue
+    #             nma_residue = None
+    #             for r in residues:
+    #                 if r.resname == 'NMA':
+    #                     nma_residue = r
+    #
+    #             # Build a separate residue for ACE
+    #             new_chain = PDB.Chain.Chain(chain.id)
+    #
+    #             if ace_atoms:
+    #
+    #                 for a in ace_atoms:
+    #                     residues[0].detach_child(a.name)
+    #
+    #                 ace_residue = PDB.Residue.Residue((' ', residues[0].id[1]-1, ' '), 'ACE', '')
+    #
+    #                 for i, a in enumerate(ace_atoms):
+    #                     new_name = a.get_name()
+    #
+    #                     # Define the new name based on the old one
+    #                     if format_for_prepwizard:
+    #                         if new_name == 'CP2':
+    #                             new_name = 'CH3'
+    #                         elif new_name == 'CO':
+    #                             new_name = 'C'
+    #                         elif new_name == 'OP1':
+    #                             new_name = 'O'
+    #                         elif new_name == '1HP2':
+    #                             new_name = '1H'
+    #                         elif new_name == '2HP2':
+    #                             new_name = '2H'
+    #                         elif new_name == '3HP2':
+    #                             new_name = '3H'
+    #
+    #                     # Create a new atom
+    #                     new_atom = PDB.Atom.Atom(
+    #                         new_name,                  # Atom name
+    #                         a.get_coord(),             # Coordinates
+    #                         a.get_bfactor(),           # B-factor
+    #                         a.get_occupancy(),         # Occupancy
+    #                         a.get_altloc(),            # AltLoc
+    #                         "%-4s" % new_name,         # Full atom name (formatted)
+    #                         a.get_serial_number(),     # Serial number
+    #                         a.element                  # Element symbol
+    #                     )
+    #
+    #                     ace_residue.add(new_atom)
+    #
+    #                 new_chain.add(ace_residue)
+    #
+    #             # Renumber residues and rename atoms
+    #             for i, r in enumerate(residues):
+    #
+    #                 # Handle NMA residue atom renaming
+    #                 if r == nma_residue and format_for_prepwizard:
+    #                     renamed_atoms = []
+    #                     for a in nma_residue:
+    #
+    #                         new_name = a.get_name()  # Original atom name
+    #
+    #                         # Rename the atom based on the rules
+    #                         if new_name == 'HN2':
+    #                             new_name = 'H'
+    #                         elif new_name == 'C':
+    #                             new_name = 'CA'
+    #                         elif new_name == 'H1':
+    #                             new_name = '1HA'
+    #                         elif new_name == 'H2':
+    #                             new_name = '2HA'
+    #                         elif new_name == 'H3':
+    #                             new_name = '3HA'
+    #
+    #                         # Create a new atom with the updated name
+    #                         new_atom = PDB.Atom.Atom(
+    #                             new_name,                  # New name
+    #                             a.get_coord(),             # Same coordinates
+    #                             a.get_bfactor(),           # Same B-factor
+    #                             a.get_occupancy(),         # Same occupancy
+    #                             a.get_altloc(),            # Same altloc
+    #                             "%-4s" % new_name,         # Full atom name (formatted)
+    #                             a.get_serial_number(),     # Same serial number
+    #                             a.element                  # Same element
+    #                         )
+    #                         renamed_atoms.append(new_atom)
+    #
+    #                     # Create a new residue with renamed atoms
+    #                     nma_residue = PDB.Residue.Residue(r.id, r.resname, r.segid)
+    #                     for atom in renamed_atoms:
+    #                         nma_residue.add(atom)
+    #
+    #                     r = nma_residue
+    #                     add_one = True
+    #
+    #                 if add_one:
+    #                     chain.detach_child(r.id)  # Deatach residue from old chain
+    #                     new_id = (r.id[0], r.id[1]+1, r.id[2])  # New ID with updated residue number
+    #                     r.id = new_id  # Update residue ID with renumbered value
+    #
+    #                 # Add residue to the new chain
+    #                 new_chain.add(r)
+    #
+    #             model.detach_child(chain.id)
+    #             model.add(new_chain)
+    #
+    #         _saveStructureToPDB(structure, pdb_file)
+    #
+    #         if keep_conects:
+    #             writeConectLines(conect_lines, pdb_file)
+    #
+    #     executable = "extract_pdbs.linuxgccrelease"
+    #     models = []
+    #
+    #     # Check if params were given
+    #     params = None
+    #     if os.path.exists(optimization_folder + "/params"):
+    #         params = optimization_folder + "/params"
+    #         patch_line = ""
+    #         for p in os.listdir(params):
+    #             if not p.endswith(".params"):
+    #                 patch_line += params + "/" + p + " "
+    #
+    #     for d in os.listdir(optimization_folder + "/output_models"):
+    #         if os.path.isdir(optimization_folder + "/output_models/" + d):
+    #             for f in os.listdir(optimization_folder + "/output_models/" + d):
+    #                 if f.endswith("_relax.out"):
+    #                     model = d
+    #
+    #                     # skip models not loaded into the library
+    #                     if model not in self.models_names:
+    #                         continue
+    #
+    #                     scores = readSilentScores(
+    #                         optimization_folder + "/output_models/" + d + "/" + f
+    #                     )
+    #                     if tags != None and model in tags:
+    #                         print(
+    #                             "Reading model %s from the given tag %s"
+    #                             % (model, tags[model])
+    #                         )
+    #                         best_model_tag = tags[model]
+    #                     elif min_value:
+    #                         best_model_tag = scores.idxmin()[filter_score_term]
+    #                     else:
+    #                         best_model_tag = scores.idxmxn()[filter_score_term]
+    #                     command = executable
+    #                     command += (
+    #                         " -silent "
+    #                         + optimization_folder
+    #                         + "/output_models/"
+    #                         + d
+    #                         + "/"
+    #                         + f
+    #                     )
+    #                     if params != None:
+    #                         command += " -extra_res_path " + params
+    #                         if patch_line != "":
+    #                             command += " -extra_patch_fa " + patch_line
+    #                     command += " -tags " + best_model_tag
+    #                     if sugars:
+    #                         command += " -include_sugars"
+    #                         command += " -alternate_3_letter_codes pdb_sugar"
+    #                         command += " -write_glycan_pdb_codes"
+    #                         command += " -auto_detect_glycan_connections"
+    #                         command += " -maintain_links"
+    #                     os.system(command)
+    #
+    #                     checkCappingGroups(best_model_tag+".pdb")
+    #
+    #                     self.readModelFromPDB(
+    #                         model,
+    #                         best_model_tag + ".pdb",
+    #                         wat_to_hoh=wat_to_hoh,
+    #                         conect_update=conect_update,
+    #                     )
+    #                     os.remove(best_model_tag + ".pdb")
+    #                     models.append(model)
+    #
+    #     self.getModelsSequences()
+    #
+    #     missing_models = set(self.models_names) - set(models)
+    #     if missing_models != set():
+    #         print("Missing models in relaxation folder:")
+    #         print("\t" + ", ".join(missing_models))
+    #         if return_missing:
+    #             return missing_models
+
     def loadModelsFromRosettaOptimization(
         self,
         optimization_folder,
@@ -10035,10 +10387,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         return_missing=False,
         sugars=False,
         conect_update=False,
+        output_folder=None,
     ):
         """
-        Load the best energy models from a set of silent files inside a specfic folder.
+        Load the best energy models from a set of silent files inside a specific folder.
         Useful to get the best models from a relaxation run.
+
+        If output_folder is provided, the best model is extracted and saved there
+        (with the pose index removed from the filename) rather than loaded into the class.
 
         Parameters
         ==========
@@ -10046,8 +10402,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             Path to folder where the Rosetta optimization files are contained
         filter_score_term : str
             Score term used to filter models
-        relax_run : bool
-            Is this a relax run?
         min_value : bool
             Grab the minimum score value. Set false to grab the maximum scored value.
         tags : dict
@@ -10059,6 +10413,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             Change water names from WAT to HOH when loading.
         return_missing : bool
             Return missing models from the optimization_folder.
+        sugars : bool
+            Additional flag for sugar handling.
+        conect_update : bool
+            Flag to update CONECT lines.
+        output_folder : str or None
+            If provided, extracted PDB files (with pose index removed from filename) are written
+            into this folder instead of being loaded into the class.
         """
 
         def getConectLines(pdb_file, format_for_prepwizard=True):
@@ -10312,39 +10673,32 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not p.endswith(".params"):
                     patch_line += params + "/" + p + " "
 
+        if output_folder:
+            if not os.path.exists(output_folder):
+                os.makedirs(output_folder)
+
         for d in os.listdir(optimization_folder + "/output_models"):
-            if os.path.isdir(optimization_folder + "/output_models/" + d):
-                for f in os.listdir(optimization_folder + "/output_models/" + d):
+            subfolder = os.path.join(optimization_folder, "output_models", d)
+            if os.path.isdir(subfolder):
+                for f in os.listdir(subfolder):
                     if f.endswith("_relax.out"):
                         model = d
 
-                        # skip models not loaded into the library
+                        # Skip models not loaded into the library
                         if model not in self.models_names:
                             continue
 
-                        scores = readSilentScores(
-                            optimization_folder + "/output_models/" + d + "/" + f
-                        )
-                        if tags != None and model in tags:
-                            print(
-                                "Reading model %s from the given tag %s"
-                                % (model, tags[model])
-                            )
+                        scores = readSilentScores(os.path.join(subfolder, f))
+                        if tags is not None and model in tags:
+                            print("Reading model %s from the given tag %s" % (model, tags[model]))
                             best_model_tag = tags[model]
                         elif min_value:
                             best_model_tag = scores.idxmin()[filter_score_term]
                         else:
                             best_model_tag = scores.idxmxn()[filter_score_term]
                         command = executable
-                        command += (
-                            " -silent "
-                            + optimization_folder
-                            + "/output_models/"
-                            + d
-                            + "/"
-                            + f
-                        )
-                        if params != None:
+                        command += " -silent " + os.path.join(subfolder, f)
+                        if params is not None:
                             command += " -extra_res_path " + params
                             if patch_line != "":
                                 command += " -extra_patch_fa " + patch_line
@@ -10357,21 +10711,27 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += " -maintain_links"
                         os.system(command)
 
-                        checkCappingGroups(best_model_tag+".pdb")
+                        checkCappingGroups(best_model_tag + ".pdb")
 
-                        self.readModelFromPDB(
-                            model,
-                            best_model_tag + ".pdb",
-                            wat_to_hoh=wat_to_hoh,
-                            conect_update=conect_update,
-                        )
-                        os.remove(best_model_tag + ".pdb")
+                        # Remove the pose index from the name.
+                        base_name = '_'.join(best_model_tag.split("_")[:-1])
+                        new_filename = base_name + ".pdb"
+                        if output_folder:
+                            os.rename(best_model_tag + ".pdb", os.path.join(output_folder, new_filename))
+                        else:
+                            self.readModelFromPDB(
+                                model,
+                                best_model_tag + ".pdb",
+                                wat_to_hoh=wat_to_hoh,
+                                conect_update=conect_update,
+                            )
+                            os.remove(best_model_tag + ".pdb")
                         models.append(model)
 
         self.getModelsSequences()
 
         missing_models = set(self.models_names) - set(models)
-        if missing_models != set():
+        if missing_models:
             print("Missing models in relaxation folder:")
             print("\t" + ", ".join(missing_models))
             if return_missing:
