@@ -11,8 +11,10 @@ parser = argparse.ArgumentParser(description="Run Foldseek clustering and save r
 parser.add_argument("input_folder", help="Path to the folder containing input PDB models.")
 parser.add_argument("output_folder", help="Path to store clustering results.")
 parser.add_argument("tmp_folder", help="Temporary folder for Foldseek intermediate files.")
+parser.add_argument("--sensitivity", type=float, default=4, help="Sensitivity: 1.0 faster; 4.0 fast; 7.5 sensitive [4.000]")
 parser.add_argument("--cov_mode", type=int, default=0, help="Coverage mode for Foldseek (default: 0).")
 parser.add_argument("--evalue", type=float, default=10.0, help="E-value threshold for clustering (default: 10.0).")
+parser.add_argument("--tmscore_threshold", type=float, default=0.0, help="accept alignments with a tmsore > thr [0.0,1.0] [0.000]")
 parser.add_argument("--c", type=float, default=0.9, help="Fraction of aligned residues for clustering (default: 0.9).")
 parser.add_argument("--keep-tmp", action="store_true", help="Keep temporary folder after execution.")
 parser.add_argument("--cluster-reassign", action="store_true", help="Cascaded clustering can cluster sequence that do not fulfill the clustering criteria. \
@@ -30,7 +32,7 @@ os.makedirs(tmp_folder, exist_ok=True)
 
 # Run Foldseek clustering
 foldseek_cmd  = f"foldseek easy-cluster {input_folder} {output_folder} {tmp_folder} "
-foldseek_cmd += f"--cov-mode {args.cov_mode} -e {args.evalue} -c {args.c} "
+foldseek_cmd += f"--cov-mode {args.cov_mode} -e {args.evalue} -c {args.c} -s {args.sensitivity} --tmscore-threshold {args.tmscore_threshold}"
 if args.cluster_reassign:
     foldseek_cmd += f"--cluster-reassign "
 subprocess.run(foldseek_cmd, shell=True, check=True)
