@@ -425,15 +425,24 @@ class sequenceModels:
                         print(f"Setting input files for model {model}")
                     result = subprocess.run(["bash", "-i", "-c", command], capture_output=True, text=True)
 
-            command = ''
+            command = 'RUN_SAMPLES='+str(num_samples)+'\n'
+            command += 'while true; do\n'
+            #command += 'FILE_COUNT=$(find "'+job_folder+'/'+model+'/batch*'+'" -type f | wc -l)\n'
             if gpu_local:
                 command += 'CUDA_VISIBLE_DEVICES=GPUID '
             command += 'python -m bioemu.sample '
             command += f'--sequence {self.sequences[model]} '
-            command += f'--num_samples {num_samples} '
+            command += f'--num_samples $RUN_SAMPLES '
             command += f'--batch_size_100 {batch_size_100} '
             command += f'--cache_embeds_dir {cache_embeds_dir} '
             command += f'--output_dir {model_folder}\n'
+            command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
+            command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
+            command += 'echo "All samples computed. Exiting."\n'
+            command += 'exit 0\n'
+            command += 'fi\n'
+            command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
+            command += 'done \n'
 
             jobs.append(command)
 
@@ -598,7 +607,7 @@ class sequenceModels:
 
         return overall_clusters
 
-    def setUpBioEmuClustering(self, job_folder, bioemu_folder, evalues, models=None, c=0.9, cov_mode=0,
+    def setUpBioEmuClustering(self, job_folder, bioemu_folder, evalues, sensitivity=7.5 , models=None, c=0.9, cov_mode=0,
                               overwrite=False, min_sampled_points=None, skip_finished=True, verbose=True,
                               cluster_reassign=True):
         """
@@ -729,7 +738,7 @@ class sequenceModels:
                 # and the input_models folder is at ../../input_models.
                 command = f"cd {evalue_folder}\n"
                 command += f"python ../../._foldseekClustering.py ../input_models result tmp "
-                command += f"--cov_mode {cov_mode} --evalue {evalue} --c {c} "
+                command += f"--cov_mode {cov_mode} --evalue {evalue} --c {c}  --sensitivity {sensitivity} "
                 if cluster_reassign:
                     command += f"--cluster-reassign"
                 command += '\n'
