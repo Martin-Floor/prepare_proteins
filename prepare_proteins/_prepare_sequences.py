@@ -10,6 +10,9 @@ import json
 import subprocess
 import io
 from pkg_resources import Requirement, resource_listdir, resource_stream
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from scipy.optimize import curve_fit
 
 class sequenceModels:
 
@@ -92,129 +95,6 @@ class sequenceModels:
             jobs.append(command)
 
         return jobs
-
-    # def setUpAlphaFold_tunned_mn(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-    #                              remove_extras=False, remove_msas=False, nstruct=1, nrecycles=1,
-    #                              max_extra_msa=None, keep_compress=False):
-    #     """
-    #     Set up AlphaFold predictions for the loaded sequences. This is a tunned
-    #     version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
-    #     """
-    #
-    #     # Create Job folders
-    #     if not os.path.exists(job_folder):
-    #         os.mkdir(job_folder)
-    #
-    #     if not os.path.exists(job_folder+'/input_sequences'):
-    #         os.mkdir(job_folder+'/input_sequences')
-    #
-    #     if not os.path.exists(job_folder+'/output_models'):
-    #         os.mkdir(job_folder+'/output_models')
-    #
-    #     # Check for finished models
-    #     excluded = []
-    #     if exclude_finished:
-    #         for model in os.listdir(job_folder+'/output_models'):
-    #             for f in os.listdir(job_folder+'/output_models/'+model):
-    #                 if f == 'ranked_0.pdb' or f == 'ranked__0.pdb.bz2':
-    #                     excluded.append(model)
-    #
-    #     jobs = []
-    #     for model in self.sequences:
-    #         if exclude_finished and model in excluded:
-    #             continue
-    #         sequence = {}
-    #         sequence[model] = self.sequences[model]
-    #         alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
-    #         command = 'cd '+job_folder+'\n'
-    #         command += 'Path=$(pwd)\n'
-    #         command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
-    #         command += f' --nstruct={nstruct}'
-    #         command += f' --max_recycles={nrecycles}'
-    #         if max_extra_msa is not None:
-    #             command += f' --max_extra_msa={max_extra_msa}'
-    #         command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
-    #         command += ' --output_dir=$Path/output_models'
-    #         command += ' --model_preset='+model_preset
-    #         command += ' --max_template_date=2022-01-01'
-    #         command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
-    #
-    #         if keep_compress==False:
-    #             command += 'bzip2 -d *.pdb.bz2\n'
-    #
-    #         if remove_extras:
-    #             command += f'rm -r $Path/output_models/{model}/msas\n'
-    #             command += f'rm -r $Path/output_models/{model}/*.pkl\n'
-    #
-    #         if remove_msas:
-    #             command += f'rm -r $Path/output_models/{model}/msas\n'
-    #
-    #         command += 'cd ..\n'
-    #
-    #         jobs.append(command)
-    #
-    #     return jobs
-    #
-    # def setUpAlphaFold_tunned_mt(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-    #                    remove_extras=False, remove_msas=False,nstruct=1,nrecycles=1,max_extra_msa=None,keep_compress=False):
-    #     """
-    #     Set up AlphaFold predictions for the loaded sequneces. This is a tunned version adapted from https://github.com/bjornwallner/alphafoldv2.2.0
-    #
-    #     """
-    #
-    #     # Create Job folders
-    #     if not os.path.exists(job_folder):
-    #         os.mkdir(job_folder)
-    #
-    #     if not os.path.exists(job_folder+'/input_sequences'):
-    #         os.mkdir(job_folder+'/input_sequences')
-    #
-    #     if not os.path.exists(job_folder+'/output_models'):
-    #         os.mkdir(job_folder+'/output_models')
-    #
-    #     # Check for finished models
-    #     excluded = []
-    #     if exclude_finished:
-    #         for model in os.listdir(job_folder+'/output_models'):
-    #             for f in os.listdir(job_folder+'/output_models/'+model):
-    #                 if f == 'ranked_0.pdb':
-    #                     excluded.append(model)
-    #
-    #     jobs = []
-    #     for model in self.sequences:
-    #         if exclude_finished and model in excluded:
-    #             continue
-    #         sequence = {}
-    #         sequence[model] = self.sequences[model]
-    #         alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
-    #         command = 'cd '+job_folder+'\n'
-    #         command += 'Path=$(pwd)\n'
-    #         command += 'singularity run -B $ALPHAFOLD_DATA_PATH:/data -B /opt/cuda/10.1,.:/etc,$TMPDIR:/tmp -B /gpfs/projects/bsc72/alphafold_tunned/alphafoldv2.2.0:/app/alphafold --pwd /app/alphafold --nv $ALPHAFOLD_CONTAINER --data_dir=/data --uniref90_database_path=/gpfs/projects/shared/public/AlphaFold/uniref90/uniref90.fasta --mgnify_database_path=/gpfs/projects/shared/public/AlphaFold/mgnify/mgy_clusters_2018_12.fa --uniclust30_database_path=/gpfs/projects/shared/public/AlphaFold/uniclust30/uniclust30_2018_08/uniclust30_2018_08 --bfd_database_path=/gpfs/projects/shared/public/AlphaFold/bfd/bfd_metaclust_clu_complete_id30_c90_final_seq.sorted_opt --pdb70_database_path=/gpfs/projects/shared/public/AlphaFold/pdb70/pdb70 --template_mmcif_dir=/data/pdb_mmcif/mmcif_files'
-    #         command += f' --nstruct={nstruct}'
-    #         command += f' --max_recycles={nrecycles}'
-    #         if max_extra_msa is not None:
-    #             command += f' --max_extra_msa={max_extra_msa}'
-    #         command += ' --fasta_paths $Path/input_sequences/'+model+'.fasta'
-    #         command += ' --output_dir=$Path/output_models'
-    #         command += ' --model_preset='+model_preset
-    #         command += ' --max_template_date=2022-01-01'
-    #         command += ' --random_seed 1 --obsolete_pdbs_path=/data/pdb_mmcif/obsolete.dat "$@"\n'
-    #
-    #         if keep_compress==False:
-    #             command += 'bzip2 -d *.pdb.bz2\n'
-    #
-    #         if remove_extras:
-    #             command += f'rm -r $Path/output_models/{model}/msas\n'
-    #             command += f'rm -r $Path/output_models/{model}/*.pkl\n'
-    #
-    #         if remove_msas:
-    #             command += f'rm -r $Path/output_models/{model}/msas\n'
-    #
-    #         command += 'cd ..\n'
-    #
-    #         jobs.append(command)
-    #
-    #     return jobs
 
     def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='',
                                            return_missing=False, copy_all=False):
@@ -360,7 +240,7 @@ class sequenceModels:
         return
 
     def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
-                    verbose=True, models=None,
+                    verbose=True, models=None, skip_finished=False,
                     bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
         """
         Set up and optionally execute BioEmu commands for each model sequence.
@@ -400,6 +280,18 @@ class sequenceModels:
             model_folder = os.path.join(job_folder, model)
             if not os.path.exists(model_folder):
                 os.mkdir(model_folder)
+
+            if skip_finished:
+
+                sample_file = os.path.join(model_folder, 'samples.xtc')
+                topology_file = os.path.join(model_folder, 'topology.pdb')
+
+                if os.path.exists(sample_file) and os.path.exists(topology_file):
+                    traj = md.load(sample_file, top=topology_file)
+
+                    if traj.n_frames >= num_samples:
+                        print(f'{model} has already sampled {num_samples} poses')
+                        continue
 
             cache_embeds_dir = os.path.join(model_folder, 'cache')
             if not os.path.exists(cache_embeds_dir):
@@ -447,7 +339,6 @@ class sequenceModels:
             jobs.append(command)
 
         return jobs
-
 
     def clusterBioEmuSamples(self, job_folder, bioemu_folder, models=None, stderr=True, stdout=True,
                              output_dcd=False, output_pdb=False, c=0.9, cov_mode=0, verbose=True,
@@ -829,6 +720,234 @@ class sequenceModels:
                         print(f"Warning: {clusters_file} not found for model '{model}', folder '{item}'.")
 
         return results
+
+    def fitBioEmuClusteringToHillEquation(self, clustering_data, plot=True, plot_fits_only=False, verbose=False):
+        """
+        Analyze clustering data from readBioEmuClusteringResults.
+
+        Parameters:
+        - clustering_data (dict): Output from readBioEmuClusteringResults.
+          Expected to be a dictionary structured as {model: {folder: clusters, ...}, ...}.
+        - plot (bool): Optional flag to generate and show plots. Default is True.
+
+        Returns:
+        - model_half_evalues (dict): Fitted E_half values for each model.
+        - model_slopes (dict): Fitted Hill slopes for each model.
+        """
+
+        def hill_equation(e, y_min, y_max, e_half, n):
+            return y_min + (y_max - y_min) / (1 + (e_half / e)**n)
+
+        # Dictionaries to store fitted E_half values and Hill slopes for each model
+        model_half_evalues = {}
+        model_slopes = {}
+
+        # Extract and sort data
+        data = {}
+        for model, evalue_dict in clustering_data.items():
+            e_vals, counts = [], []
+            for folder, clusters in evalue_dict.items():
+                try:
+                    e_val = float(folder[2:])  # Extract numeric e-value from folder name
+                    e_vals.append(e_val)
+                    counts.append(len(clusters))
+                except ValueError:
+                    continue
+            if e_vals:
+                idx = np.argsort(e_vals)
+                data[model] = (np.array(e_vals)[idx], np.array(counts)[idx])
+
+        if plot:
+            # Create the first plot: E-value vs. Number of Clusters with Hill Fit
+            fig, ax = plt.subplots(figsize=(8, 6))
+
+            # Handles for the first legend
+            data_handle = Line2D([], [], color='black', marker='o', linestyle='-', label='Data')
+            fit_handle  = Line2D([], [], color='black', linestyle='--', label='Fit')
+
+            # Handles for the model-specific legend
+            model_handles = []
+            colors = plt.cm.tab20(np.linspace(0, 1, len(data)))
+
+        # Loop through each model and perform the fit
+        for i, (model, (e_vals, clusters)) in enumerate(data.items()):
+            if plot:
+                color = colors[i % len(colors)]
+                if not plot_fits_only:
+                    # Plot the data
+                    ax.plot(e_vals, clusters, marker='o', linestyle='-', color=color, alpha=0.8)
+                    # Create a model legend handle
+                    model_handle = Line2D([], [], color=color, marker='o', linestyle='-', label=model)
+                    model_handles.append(model_handle)
+            else:
+                color = 'blue'  # Default color when not plotting
+
+            # Fit the data if there are enough points
+            if len(e_vals) >= 4:
+                # Provide initial guesses
+                y_min_guess = clusters.min()
+                y_max_guess = clusters.max()
+                e_half_guess = np.median(e_vals)
+                slope_guess = 1.0
+
+                try:
+                    popt, _ = curve_fit(
+                        hill_equation,
+                        e_vals,
+                        clusters,
+                        p0=[y_min_guess, y_max_guess, e_half_guess, slope_guess]
+                    )
+                    y_min_fit, y_max_fit, e_half_fit, n_fit = popt
+
+                    # Store the fitted values
+                    model_half_evalues[model] = e_half_fit
+                    model_slopes[model] = n_fit
+
+                    if plot:
+                        # Generate a smooth range for the fit curve
+                        e_fine = np.logspace(np.log10(e_vals.min()), np.log10(e_vals.max()), 300)
+                        fit_curve = hill_equation(e_fine, y_min_fit, y_max_fit, e_half_fit, n_fit)
+                        # Plot the fit as a dashed line
+                        ax.plot(e_fine, fit_curve, '--', color=color, alpha=0.8)
+
+                except Exception as ex:
+                    print(f"Error fitting {model}: {ex}")
+            else:
+                print(f"Skipping fit for {model}: only {len(e_vals)} data points")
+
+        if plot:
+            # Configure the first plot
+            ax.set_xscale('log')
+            ax.set_xlabel("E-value", fontsize=12)
+            ax.set_ylabel("Number of Clusters", fontsize=12)
+            ax.set_title("E-value vs. Number of Clusters (Hill Fit)", fontsize=14, fontweight='bold')
+
+            # Add legends
+            legend1 = ax.legend(handles=[data_handle, fit_handle], loc='upper left', title="Plot Types")
+            ax.add_artist(legend1)
+            legend2 = ax.legend(handles=model_handles, loc='lower left', bbox_to_anchor=(0.02, 0.02),
+                                title="Models", ncol=1, frameon=False)
+            ax.add_artist(legend2)
+
+            plt.subplots_adjust(left=0.2, bottom=0.15)
+            plt.show()
+
+        # Optionally, print out the fitted values for confirmation
+        if verbose:
+            print("Fitted E_half values and Hill slopes:")
+            for m in model_half_evalues:
+                print(f"  {m}: E_half = {model_half_evalues[m]:.4g}, slope = {model_slopes[m]:.4g}")
+
+        return model_half_evalues, model_slopes
+
+    def computeBioEmuRMSF(self, bioemu_folder, ref_pdb, plot=False, ylim=None):
+        """
+        Computes RMSF values for all models in the specified folder and optionally plots RMSF by residue.
+
+        Parameters:
+        - bioemu_folder (str): Path to the folder containing model subdirectories with trajectory and topology files.
+        - ref_pdb (str): Path to the reference PDB structure for RMSF calculation.
+        - plot (bool, optional): Whether to generate a plot of RMSF vs. residue. Default is False.
+
+        Returns:
+        - rmsf (dict): Dictionary containing RMSF arrays for each model.
+          Each array holds the per-residue RMSF (in nm) for the selected backbone (Cα) atoms.
+        """
+        # Load reference structure and select backbone Cα atoms
+        ref = md.load(ref_pdb)
+        ref_bb_atoms = ref.topology.select('name CA')
+
+        # Dictionary to store RMSF values for each model
+        rmsf = {}
+
+        # Iterate through each model folder
+        for model in os.listdir(bioemu_folder):
+            traj_file = f'{bioemu_folder}/{model}/samples.xtc'
+            top_file = f'{bioemu_folder}/{model}/topology.pdb'
+
+            if not os.path.exists(traj_file):
+                continue
+
+            traj = md.load(traj_file, top=top_file)
+            traj_bb_atoms = traj.topology.select('name CA')
+
+            # Compute RMSF for the selected atoms (per-residue fluctuations)
+            rmsf[model] = md.rmsf(traj, ref, atom_indices=traj_bb_atoms)
+
+        if plot:
+            # Get the residue numbers corresponding to the selected Cα atoms from the reference structure
+            residue_ids = [ref.topology.atom(i).residue.resSeq for i in ref_bb_atoms]
+
+            plt.figure(figsize=(12, 6))
+            # Plot each model's RMSF as a line plot
+            for model, rmsf_values in rmsf.items():
+                plt.plot(residue_ids, rmsf_values, label=model)
+
+            if ylim:
+                plt.ylim(ylim)
+            plt.xlabel("Residue Number", fontsize=12)
+            plt.ylabel("RMSF (nm)", fontsize=12)
+            plt.title("RMSF by Residue", fontsize=14, fontweight='bold')
+            plt.legend()
+            plt.tight_layout()
+
+        return rmsf
+
+    def computeBioEmuRMSD(self, bioemu_folder, ref_pdb, plot=False):
+        """
+        Computes RMSD values for all models in the specified folder and optionally plots a violin plot.
+
+        Parameters:
+        - bioemu_folder (str): Path to the folder containing model subdirectories with trajectory and topology files.
+        - ref_pdb (str): Path to the reference PDB structure for RMSD calculation.
+        - plot (bool, optional): Whether to generate a violin plot. Default is True.
+
+        Returns:
+        - rmsd (dict): Dictionary containing RMSD arrays for each model.
+        """
+
+        # Load reference structure
+        ref = md.load(ref_pdb)
+        ref_bb_atoms = ref.topology.select('name CA')
+
+        # Dictionary to store RMSD values
+        rmsd = {}
+
+        # Iterate through each model folder
+        for model in os.listdir(bioemu_folder):
+            traj_file = f'{bioemu_folder}/{model}/samples.xtc'
+            top_file = f'{bioemu_folder}/{model}/topology.pdb'
+
+            if not os.path.exists(traj_file):
+                continue
+
+            traj = md.load(traj_file, top=top_file)
+            traj_bb_atoms = traj.topology.select('name CA')
+
+            rmsd[model] = md.rmsd(traj, ref, atom_indices=traj_bb_atoms, ref_atom_indices=ref_bb_atoms)
+
+        if plot:
+            # Compute average RMSD for each model and order models by average value
+            model_avg = {model: np.mean(vals) for model, vals in rmsd.items()}
+            ordered_models = sorted(model_avg, key=model_avg.get)
+
+            # Build a DataFrame for plotting
+            data = []
+            for model, values in rmsd.items():
+                for value in values:
+                    data.append({'Model': model, 'RMSD': value})
+            df = pd.DataFrame(data)
+
+            # Create a violin plot using seaborn
+            plt.figure(figsize=(10, 6))
+            sns.violinplot(x='Model', y='RMSD', data=df, order=ordered_models, inner="quartile")
+
+            plt.xticks(rotation=45)
+            plt.title("RMSD Distributions Ordered by Average RMSD")
+            plt.tight_layout()
+            plt.show()
+
+        return rmsd
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
                           cpus=40, version="5.71-102.0", max_bin_size=10000):
