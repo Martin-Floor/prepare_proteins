@@ -13,6 +13,7 @@ from pkg_resources import Requirement, resource_listdir, resource_stream
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.optimize import curve_fit
+import seaborn as sns
 
 class sequenceModels:
 
@@ -854,14 +855,21 @@ class sequenceModels:
           Each array holds the per-residue RMSF (in nm) for the selected backbone (Cα) atoms.
         """
         # Load reference structure and select backbone Cα atoms
-        ref = md.load(ref_pdb)
-        ref_bb_atoms = ref.topology.select('name CA')
+        if isinstance(ref_pdb,str):
+            ref = md.load(ref_pdb)
+            ref_bb_atoms = ref.topology.select('name CA')
 
         # Dictionary to store RMSF values for each model
         rmsf = {}
 
         # Iterate through each model folder
         for model in os.listdir(bioemu_folder):
+
+            # Load reference structure and select backbone Cα atoms
+            if isinstance(ref_pdb,dict):
+                ref = md.load(ref_pdb[model])
+                ref_bb_atoms = ref.topology.select('name CA')
+
             traj_file = f'{bioemu_folder}/{model}/samples.xtc'
             top_file = f'{bioemu_folder}/{model}/topology.pdb'
 
@@ -906,15 +914,21 @@ class sequenceModels:
         - rmsd (dict): Dictionary containing RMSD arrays for each model.
         """
 
-        # Load reference structure
-        ref = md.load(ref_pdb)
-        ref_bb_atoms = ref.topology.select('name CA')
+        if isinstance(ref_pdb,str):
+            # Load reference structure
+            ref = md.load(ref_pdb)
+            ref_bb_atoms = ref.topology.select('name CA')
 
         # Dictionary to store RMSD values
         rmsd = {}
 
         # Iterate through each model folder
         for model in os.listdir(bioemu_folder):
+
+            if isinstance(ref_pdb,dict):
+                ref = md.load(ref_pdb[model])
+                ref_bb_atoms = ref.topology.select('name CA')
+
             traj_file = f'{bioemu_folder}/{model}/samples.xtc'
             top_file = f'{bioemu_folder}/{model}/topology.pdb'
 
