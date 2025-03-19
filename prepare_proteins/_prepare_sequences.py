@@ -290,7 +290,7 @@ class sequenceModels:
                     traj = md.load(sample_file, top=topology_file)
 
                     if traj.n_frames >= num_samples:
-                        print(f'{model} has already sampled {num_samples} poses')
+                        print(f'{model} has already sampled {num_samples} poses. Skipping it.')
                         continue
 
             cache_embeds_dir = os.path.join(model_folder, 'cache')
@@ -721,7 +721,8 @@ class sequenceModels:
 
         return results
 
-    def fitBioEmuClusteringToHillEquation(self, clustering_data, plot=True, plot_fits_only=False, verbose=False):
+    def fitBioEmuClusteringToHillEquation(self, clustering_data, plot=True, plot_fits_only=False, verbose=False,
+                                          plot_only=None, plot_legend=True):
         """
         Analyze clustering data from readBioEmuClusteringResults.
 
@@ -773,6 +774,10 @@ class sequenceModels:
         for i, (model, (e_vals, clusters)) in enumerate(data.items()):
             if plot:
                 color = colors[i % len(colors)]
+
+                if plot_only and model not in plot_only:
+                    continue
+
                 if not plot_fits_only:
                     # Plot the data
                     ax.plot(e_vals, clusters, marker='o', linestyle='-', color=color, alpha=0.8)
@@ -784,11 +789,33 @@ class sequenceModels:
 
             # Fit the data if there are enough points
             if len(e_vals) >= 4:
-                # Provide initial guesses
+
+                slope_guess = 0.5
                 y_min_guess = clusters.min()
                 y_max_guess = clusters.max()
-                e_half_guess = np.median(e_vals)
-                slope_guess = 1.0
+                half_y = y_min_guess + (y_max_guess - y_min_guess) / 2
+
+                # Convert to log10 once (for interpolation)
+                log_e = np.log10(e_vals)
+
+                # Boolean mask: True for points ≥ half‑maximum
+                above = clusters >= half_y
+
+                if np.any(above) and np.any(~above):
+                    # Last index where cluster is still above half_y
+                    i = np.where(above)[0][-1]
+                    # Guard: if it’s not the very last point, interpolate
+                    if i < len(e_vals) - 1:
+                        y1, y2 = clusters[i], clusters[i+1]
+                        x1, x2 = log_e[i], log_e[i+1]
+                        frac = (y1 - half_y) / (y1 - y2)
+                        log10_e_half_guess = x1 + frac * (x2 - x1)
+                        e_half_guess = 10**log10_e_half_guess
+                    else:
+                        e_half_guess = e_vals[i]
+                else:
+                    # No crossing (flat region at one end) → geometric median
+                    e_half_guess = 10**np.median(log_e)
 
                 try:
                     popt, _ = curve_fit(
@@ -804,6 +831,10 @@ class sequenceModels:
                     model_slopes[model] = n_fit
 
                     if plot:
+
+                        if plot_only and model not in plot_only:
+                            continue
+
                         # Generate a smooth range for the fit curve
                         e_fine = np.logspace(np.log10(e_vals.min()), np.log10(e_vals.max()), 300)
                         fit_curve = hill_equation(e_fine, y_min_fit, y_max_fit, e_half_fit, n_fit)
@@ -823,11 +854,12 @@ class sequenceModels:
             ax.set_title("E-value vs. Number of Clusters (Hill Fit)", fontsize=14, fontweight='bold')
 
             # Add legends
-            legend1 = ax.legend(handles=[data_handle, fit_handle], loc='upper left', title="Plot Types")
-            ax.add_artist(legend1)
-            legend2 = ax.legend(handles=model_handles, loc='lower left', bbox_to_anchor=(0.02, 0.02),
-                                title="Models", ncol=1, frameon=False)
-            ax.add_artist(legend2)
+            if plot_legend:
+                legend1 = ax.legend(handles=[data_handle, fit_handle], loc='upper left', title="Plot Types")
+                ax.add_artist(legend1)
+                legend2 = ax.legend(handles=model_handles, loc='lower left', bbox_to_anchor=(0.02, 0.02),
+                                    title="Models", ncol=1, frameon=False)
+                ax.add_artist(legend2)
 
             plt.subplots_adjust(left=0.2, bottom=0.15)
             plt.show()
