@@ -6747,7 +6747,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return simulation_jobs
 
     def setUpPLACERcalculation(self, PLACERfolder, output_folder="output_folder", PLACER_PATH="/gpfs/projects/bsc72/conda_envs/PLACER/", suffix=None, num_samples=50, 
-                           ligand=None, rerank="prmsd", mutate=None, mutate_chain="A", 
+                           ligand=None, apo=False,rerank="prmsd", mutate=None, mutate_chain="A", 
                            mutate_to=None, residue_json=None):
         """
         Set up PLACER calculations for evaluating catalytic centers, with or without ligand. 
@@ -6768,7 +6768,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         ligand : str, optional
             Ligand <name3>, <name3-resno>, or <chain-name3-resno> (e.g., "L-LIG-1") to be predicted.
             All other ligands will be fixed. 
-            If not specified, PLACER runs in apo mode (`--no-use_sm`).
+            If not specified, PLACER will detect the ligand automatically.
+        apo : bool, default=False
+            run PLACER in apo mode: 
         rerank : str, optional
             Rank models using one of the input metrics: "prmsd", "plddt", or "plddt_pde".
             "prmsd" is sorted in ascending order, "plddt" and "plddt_pde" in descending order.
@@ -6804,6 +6806,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not mutate_to or not isinstance(mutate_to, str) or len(mutate_to) != 3:
                 raise ValueError("Expected 'mutate_to' to be a 3-letter residue code string.")
 
+        # Validate ligand options
+        if ligand:
+            if apo:
+                raise ValueError("Cannot specify both ligand and apo at the same time!.")
+
         # Prepare output directories
         os.makedirs(PLACERfolder, exist_ok=True)
         input_pdbs_folder = os.path.join(PLACERfolder, "input_pdbs")
@@ -6829,7 +6836,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += f"--rerank {rerank} "
             if ligand:
                 command += f"--predict_ligand {ligand} "
-            else:
+            if apo:
                 command += f"--no-use_sm "
             if mutate: 
                 command += f"--mutate {mutate[model]}{mutate_chain}:{mutate_to} " 
