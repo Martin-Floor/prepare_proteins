@@ -16,6 +16,7 @@ import numpy as np
 from sys import stdout
 import shutil
 import os
+import fileinput
 from multiprocessing import cpu_count
 
 aa3 = aa3+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX', 'ACE', 'NME']
@@ -285,7 +286,7 @@ class openmm_md:
         if not os.path.exists(parameters_folder):
             os.mkdir(parameters_folder)
 
-        extra_ffs = ['parmBSC2']
+        extra_ffs = ['parmBSC1', 'parmBSC2']
         if extra_force_field:
             if extra_force_field not in extra_ffs:
                 raise ValueError(f'The only implemented extra ff is: {extra_ffs[0]}')
@@ -294,10 +295,9 @@ class openmm_md:
             extra_ff_folder = parameters_folder+'/'+extra_force_field
             if not os.path.exists(extra_ff_folder):
                 os.mkdir(extra_ff_folder)
-            _copyFFFiles(extra_ff_folder, 'parmBSC2')
+            _copyFFFiles(extra_ff_folder, extra_force_field)
 
-            extra_force_field = {}
-            extra_force_field['source'] = extra_ff_folder+'/leaprc.bsc2'
+            extra_force_field_source = extra_ff_folder+'/leaprc.bsc'+extra_force_field[-1]
 
             # Define ff residues
             ff_residues = [
@@ -673,7 +673,7 @@ class openmm_md:
             tlf.write('source leaprc.gaff\n')
             tlf.write('source leaprc.water.tip3p\n')
             if extra_force_field:
-                tlf.write('source '+extra_force_field['source']+'\n')
+                tlf.write('source '+extra_force_field_source+'\n')
 
             if metal_ligand:
 
@@ -781,7 +781,7 @@ class openmm_md:
 
             if solvate:
                 tlf.write('solvatebox mol TIP3PBOX 12\n')
-            
+
             #Add ions with addIons2 (fast) or addIonsRand (slow)
             if add_counterionsRand:
                 add_counterions = False
@@ -791,7 +791,7 @@ class openmm_md:
             if add_counterionsRand:
                 tlf.write('addIonsRand mol Na+ 0\n')
                 tlf.write('addIonsRand mol Cl- 0\n')
-            
+
 
             if save_amber_pdb:
                 tlf.write('savepdb mol '+parameters_folder+'/'+self.pdb_name+'_amber.pdb\n')
@@ -916,7 +916,7 @@ def _copyFFFiles(output_folder, ff):
     ff : str
         Name of the forcefield folder to copy files from.
     """
-    ffs = ['parmBSC2']
+    ffs = ['parmBSC1', 'parmBSC2']
     if ff not in ffs:
         raise ValueError(f"{ff} not implemented!")
 
@@ -943,3 +943,8 @@ def _copyFFFiles(output_folder, ff):
 
         # Copy the file to the output directory
         shutil.copy(source_file, destination_file)
+
+        # Give ff path to leaprc file
+        if 'leaprc.bsc' in destination_file:
+            for line in fileinput.input(destination_file, inplace=True):
+                line.replace('FF_PATH', output_folder)

@@ -1,6 +1,6 @@
 ### DNA FF
+prepare_proteins/MD/ff_files/parmBSC1/*
 prepare_proteins/MD/ff_files/parmBSC2/*
-
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
