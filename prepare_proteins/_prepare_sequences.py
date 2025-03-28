@@ -240,7 +240,7 @@ class sequenceModels:
         return
 
     def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
-                    verbose=True, models=None, skip_finished=False,
+                    verbose=True, models=None, skip_finished=False, filter_samples=True,
                     bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
         """
         Set up and optionally execute BioEmu commands for each model sequence.
@@ -318,7 +318,8 @@ class sequenceModels:
                     result = subprocess.run(["bash", "-i", "-c", command], capture_output=True, text=True)
 
             command = 'RUN_SAMPLES='+str(num_samples)+'\n'
-            command += 'while true; do\n'
+            if not filter_samples:
+                command += 'while true; do\n'
             #command += 'FILE_COUNT=$(find "'+job_folder+'/'+model+'/batch*'+'" -type f | wc -l)\n'
             if gpu_local:
                 command += 'CUDA_VISIBLE_DEVICES=GPUID '
@@ -327,14 +328,17 @@ class sequenceModels:
             command += f'--num_samples $RUN_SAMPLES '
             command += f'--batch_size_100 {batch_size_100} '
             command += f'--cache_embeds_dir {cache_embeds_dir} '
+            if not filter_samples:
+                command += f'--filter_samples 0 '
             command += f'--output_dir {model_folder}\n'
-            command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
-            command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
-            command += 'echo "All samples computed. Exiting."\n'
-            command += 'exit 0\n'
-            command += 'fi\n'
-            command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
-            command += 'done \n'
+            if not filter_samples:
+                command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
+                command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
+                command += 'echo "All samples computed. Exiting."\n'
+                command += 'exit 0\n'
+                command += 'fi\n'
+                command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
+                command += 'done \n'
 
             jobs.append(command)
 
@@ -872,13 +876,13 @@ class sequenceModels:
 
         return model_half_evalues, model_slopes
 
-    def computeBioEmuRMSF(self, bioemu_folder, ref_pdb, plot=False, ylim=None):
+    def computeBioEmuRMSF(self, bioemu_folder, ref_pdb, plot=False, ylim=None, plot_legend=True):
         """
         Computes RMSF values for all models in the specified folder and optionally plots RMSF by residue.
 
         Parameters:
         - bioemu_folder (str): Path to the folder containing model subdirectories with trajectory and topology files.
-        - ref_pdb (str): Path to the reference PDB structure for RMSF calculation.
+        - ref_pdb (dict): Dictionary with paths to the reference PDB structure for RMSF calculation for each model.
         - plot (bool, optional): Whether to generate a plot of RMSF vs. residue. Default is False.
 
         Returns:
@@ -886,14 +890,22 @@ class sequenceModels:
           Each array holds the per-residue RMSF (in nm) for the selected backbone (Cα) atoms.
         """
         # Load reference structure and select backbone Cα atoms
-        ref = md.load(ref_pdb)
-        ref_bb_atoms = ref.topology.select('name CA')
+        if isinstance(ref_pdb, str):
+            unique_ref = ref_pdb
+            ref_pdb = {}
+            for model in os.listdir(bioemu_folder):
+                ref_pdb[model] = unique_ref
 
         # Dictionary to store RMSF values for each model
         rmsf = {}
 
         # Iterate through each model folder
         for model in os.listdir(bioemu_folder):
+
+            # Load reference structure
+            ref = md.load(ref_pdb[model])
+            ref_bb_atoms = ref.topology.select('name CA')
+
             traj_file = f'{bioemu_folder}/{model}/samples.xtc'
             top_file = f'{bioemu_folder}/{model}/topology.pdb'
 
@@ -920,33 +932,49 @@ class sequenceModels:
             plt.xlabel("Residue Number", fontsize=12)
             plt.ylabel("RMSF (nm)", fontsize=12)
             plt.title("RMSF by Residue", fontsize=14, fontweight='bold')
-            plt.legend()
+            if plot_legend:
+                plt.legend()
             plt.tight_layout()
 
         return rmsf
 
-    def computeBioEmuRMSD(self, bioemu_folder, ref_pdb, plot=False):
+    def computeBioEmuRMSD(self, bioemu_folder, ref_pdb, residues=None, plot=False):
         """
         Computes RMSD values for all models in the specified folder and optionally plots a violin plot.
 
         Parameters:
         - bioemu_folder (str): Path to the folder containing model subdirectories with trajectory and topology files.
-        - ref_pdb (str): Path to the reference PDB structure for RMSD calculation.
+        - ref_pdb (dict): Dictionary with paths to the reference PDB structure for RMSD calculation for each model.
         - plot (bool, optional): Whether to generate a violin plot. Default is True.
 
         Returns:
         - rmsd (dict): Dictionary containing RMSD arrays for each model.
         """
 
-        # Load reference structure
-        ref = md.load(ref_pdb)
-        ref_bb_atoms = ref.topology.select('name CA')
+        if isinstance(ref_pdb, str):
+            unique_ref = ref_pdb
+            ref_pdb = {}
+            for model in os.listdir(bioemu_folder):
+                ref_pdb[model] = unique_ref
 
         # Dictionary to store RMSD values
         rmsd = {}
 
         # Iterate through each model folder
         for model in os.listdir(bioemu_folder):
+
+            # Load reference structure
+            ref = md.load(ref_pdb[model])
+
+            ref_bb_atoms = []
+            for residue in ref.topology.residues:
+                if residues and residue.resSeq not in residues:
+                    continue
+                for atom in residue.atoms:
+                    if atom.name == 'CA':
+                        ref_bb_atoms.append(atom.index)
+            ref_bb_atoms = np.array(ref_bb_atoms)
+
             traj_file = f'{bioemu_folder}/{model}/samples.xtc'
             top_file = f'{bioemu_folder}/{model}/topology.pdb'
 
@@ -954,7 +982,15 @@ class sequenceModels:
                 continue
 
             traj = md.load(traj_file, top=top_file)
-            traj_bb_atoms = traj.topology.select('name CA')
+
+            traj_bb_atoms = []
+            for residue in traj.topology.residues:
+                if residues and residue.resSeq not in residues:
+                    continue
+                for atom in residue.atoms:
+                    if atom.name == 'CA':
+                        traj_bb_atoms.append(atom.index)
+            traj_bb_atoms = np.array(traj_bb_atoms)
 
             rmsd[model] = md.rmsd(traj, ref, atom_indices=traj_bb_atoms, ref_atom_indices=ref_bb_atoms)
 
