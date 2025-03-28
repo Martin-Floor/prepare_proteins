@@ -6746,6 +6746,108 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return simulation_jobs
 
+    def setUpPLACERcalculation(self, PLACERfolder, output_folder="output_folder", PLACER_PATH="/gpfs/projects/bsc72/conda_envs/PLACER/", suffix=None, num_samples=50, 
+                           ligand=None, apo=False,rerank="prmsd", mutate=None, mutate_chain="A", 
+                           mutate_to=None, residue_json=None):
+        """
+        Set up PLACER calculations for evaluating catalytic centers, with or without ligand. 
+        Special amino acids can be added.
+
+        Visit https://github.com/baker-laboratory/PLACER/tree/main for more options.
+
+        Parameters
+        ----------
+        PLACERfolder : str
+            Directory where all job-related files will be stored.
+        output_folder : str, default="output_folder"
+            Folder containing PDB files to run.
+        suffix : str, optional
+            Suffix added to output PDB file.
+        num_samples : int, default=50
+            Number of samples to generate. 50-100 is a good number in most cases.
+        ligand : str, optional
+            Ligand <name3>, <name3-resno>, or <chain-name3-resno> (e.g., "L-LIG-1") to be predicted.
+            All other ligands will be fixed. 
+            If not specified, PLACER will detect the ligand automatically.
+        apo : bool, default=False
+            run PLACER in apo mode: 
+        rerank : str, optional
+            Rank models using one of the input metrics: "prmsd", "plddt", or "plddt_pde".
+            "prmsd" is sorted in ascending order, "plddt" and "plddt_pde" in descending order.
+        mutate : dict, optional
+            Dictionary with model names as keys and residue numbers to mutate as values.
+            Requires `mutate_to` to be specified.
+        mutate_chain : str, default="A"
+            Chain where the residues to mutate are located.
+        mutate_to : str, optional
+            Residue name (3-letter code) to mutate into.
+        residue_json : str, optional
+            JSON file specifying custom residues used in the PDB or with `mutate`.
+
+        Returns
+        -------
+        list
+            List of command-line commands to be executed.
+        """
+        # validate PLACER_PATH option
+        valid_PLACER_PATH = {"/gpfs/projects/bsc72/conda_envs/PLACER/","/gpfs/home/bsc/bsc072871/repos/PLACER/","/shared/work/NBD_Utilities/PLACER/"}
+        if PLACER_PATH not in valid_PLACER_PATH:
+            raise ValueError(f"Invalid path! option. Choose from {valid_PLACER_PATH}")
+        
+        # Validate rerank option
+        rerank_options = {"prmsd", "plddt_pde", "plddt"}
+        if rerank not in rerank_options:
+            raise ValueError(f"Invalid rerank option '{rerank}'. Choose from {rerank_options}")
+
+        # Validate mutation options
+        if mutate:
+            if not isinstance(mutate, dict):
+                raise TypeError("Expected 'mutate' to be a dictionary mapping model names to residue numbers.")
+            if not mutate_to or not isinstance(mutate_to, str) or len(mutate_to) != 3:
+                raise ValueError("Expected 'mutate_to' to be a 3-letter residue code string.")
+
+        # Validate ligand options
+        if ligand:
+            if apo:
+                raise ValueError("Cannot specify both ligand and apo at the same time!.")
+
+        # Prepare output directories
+        os.makedirs(PLACERfolder, exist_ok=True)
+        input_pdbs_folder = os.path.join(PLACERfolder, "input_pdbs")
+        os.makedirs(input_pdbs_folder, exist_ok=True)
+
+        # Save input models
+        self.saveModels(input_pdbs_folder)
+
+        # Generate PLACER commands
+        jobs = []
+        for model in self:
+            pdb_name = f"{model}.pdb"
+            pdb_path = os.path.join(input_pdbs_folder, pdb_name)
+
+            command = f"python {PLACER_PATH}run_PLACER.py "
+            command +=  f"-f {pdb_path} "
+            command +=  f"-o {PLACERfolder}/{output_folder} "
+            command +=  f"--nsamples {num_samples} "
+        
+            if suffix:
+                command += f"--suffix {suffix} "
+            if rerank:
+                command += f"--rerank {rerank} "
+            if ligand:
+                command += f"--predict_ligand {ligand} "
+            if apo:
+                command += f"--no-use_sm "
+            if mutate: 
+                command += f"--mutate {mutate[model]}{mutate_chain}:{mutate_to} " 
+                command += "--no-use_sm "
+            if residue_json:
+                command += f"--residue_json {residue_json} "
+            command += "\n"
+            jobs.append(command)
+
+        return jobs
+
     def analyseDocking(
         self,
         docking_folder,

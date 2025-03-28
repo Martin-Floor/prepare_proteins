@@ -13,6 +13,7 @@ from pkg_resources import Requirement, resource_listdir, resource_stream
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.optimize import curve_fit
+import seaborn as sns
 
 class sequenceModels:
 
