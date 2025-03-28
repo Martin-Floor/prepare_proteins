@@ -941,10 +941,14 @@ def _copyFFFiles(output_folder, ff):
 
         destination_file = os.path.join(output_folder, filename)
 
-        # Copy the file to the output directory
-        shutil.copy(source_file, destination_file)
-
         # Give ff path to leaprc file
         if 'leaprc.bsc' in destination_file:
-            for line in fileinput.input(destination_file, inplace=True):
-                line.replace('FF_PATH', output_folder)
+            destination_file = open(destination_file, 'w')
+            with open(source_file) as sf:
+                for line in sf:
+                    line = line.replace('FF_PATH', output_folder)
+                    destination_file.write(line)
+            destination_file.close()
+        else:
+            # Copy the file to the output directory
+            shutil.copy(source_file, destination_file)
