@@ -319,7 +319,7 @@ class sequenceModels:
                     result = subprocess.run(["bash", "-i", "-c", command], capture_output=True, text=True)
 
             command = 'RUN_SAMPLES='+str(num_samples)+'\n'
-            if not filter_samples:
+            if filter_samples:
                 command += 'while true; do\n'
             #command += 'FILE_COUNT=$(find "'+job_folder+'/'+model+'/batch*'+'" -type f | wc -l)\n'
             if gpu_local:
@@ -329,10 +329,10 @@ class sequenceModels:
             command += f'--num_samples $RUN_SAMPLES '
             command += f'--batch_size_100 {batch_size_100} '
             command += f'--cache_embeds_dir {cache_embeds_dir} '
-            if not filter_samples:
+            if filter_samples:
                 command += f'--filter_samples 0 '
             command += f'--output_dir {model_folder}\n'
-            if not filter_samples:
+            if filter_samples:
                 command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
                 command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
                 command += 'echo "All samples computed. Exiting."\n'
