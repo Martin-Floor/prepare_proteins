@@ -5266,7 +5266,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     iyf.write("spawning: '" + str(spawning) + "'\n")
                 if constraint_level:
                     iyf.write(
-                        "constraint_level: '" + str(constraint_level) + "'\n"
+                        "constraint_level: " + str(constraint_level) + "\n"
                     )
                 if rescoring:
                     iyf.write("rescoring: true\n")
