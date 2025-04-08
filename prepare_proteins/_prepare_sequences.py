@@ -241,7 +241,7 @@ class sequenceModels:
         return
 
     def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
-                    verbose=True, models=None, skip_finished=False,
+                    verbose=True, models=None, skip_finished=False, ensure_num_samples=True,
                     bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
         """
         Set up and optionally execute BioEmu commands for each model sequence.
@@ -319,8 +319,8 @@ class sequenceModels:
                     result = subprocess.run(["bash", "-i", "-c", command], capture_output=True, text=True)
 
             command = 'RUN_SAMPLES='+str(num_samples)+'\n'
-            command += 'while true; do\n'
-            #command += 'FILE_COUNT=$(find "'+job_folder+'/'+model+'/batch*'+'" -type f | wc -l)\n'
+            if ensure_num_samples:
+                command += 'while true; do\n'
             if gpu_local:
                 command += 'CUDA_VISIBLE_DEVICES=GPUID '
             command += 'python -m bioemu.sample '
@@ -329,13 +329,14 @@ class sequenceModels:
             command += f'--batch_size_100 {batch_size_100} '
             command += f'--cache_embeds_dir {cache_embeds_dir} '
             command += f'--output_dir {model_folder}\n'
-            command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
-            command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
-            command += 'echo "All samples computed. Exiting."\n'
-            command += 'exit 0\n'
-            command += 'fi\n'
-            command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
-            command += 'done \n'
+            if ensure_num_samples:
+                command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
+                command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
+                command += 'echo "All samples computed. Exiting."\n'
+                command += 'break\n'
+                command += 'fi\n'
+                command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
+                command += 'done \n'
 
             jobs.append(command)
 
