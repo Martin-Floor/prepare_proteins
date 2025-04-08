@@ -241,7 +241,8 @@ class sequenceModels:
         return
 
     def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
-                    verbose=True, models=None, skip_finished=False, filter_samples=True,
+                    verbose=True, models=None, skip_finished=False, return_finished=False,
+                    filter_samples=True,
                     bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
         """
         Set up and optionally execute BioEmu commands for each model sequence.
@@ -273,6 +274,7 @@ class sequenceModels:
             os.mkdir(job_folder)
 
         jobs = []
+        finished = []
         for model in self.sequences:
 
             if models and model not in models:
@@ -292,6 +294,7 @@ class sequenceModels:
 
                     if traj.n_frames >= num_samples:
                         print(f'{model} has already sampled {num_samples} poses. Skipping it.')
+                        finished.append(model)
                         continue
 
             cache_embeds_dir = os.path.join(model_folder, 'cache')
@@ -343,6 +346,8 @@ class sequenceModels:
 
             jobs.append(command)
 
+        if return_finished:
+            return finished
         return jobs
 
     def clusterBioEmuSamples(self, job_folder, bioemu_folder, models=None, stderr=True, stdout=True,
@@ -1017,6 +1022,113 @@ class sequenceModels:
             plt.show()
 
         return rmsd
+
+    def computeNativeContacts(self, job_folder, bioemu_folder, native_models_folder):
+        """
+        Compute the distances between native contacts across frames for each model in the dataset.
+
+        For each model:
+        - Removes hydrogens and OXT atoms from the native PDB file.
+        - Uses SMOG2 to define native contacts (C-alpha based).
+        - Computes distances between native contacts over the trajectory.
+        - Returns a DataFrame for each model, where:
+            - Rows = frames
+            - Columns = native contacts (formatted as "resA-resB")
+            - Values = distances in nm
+
+        Parameters:
+        - job_folder (str): Path where temporary SMOG files will be stored.
+        - bioemu_folder (str): Path to BioEmu output folders, one per model (should include topology and trajectory).
+        - native_models_folder (str): Path to PDB files of native models, one per model.
+
+        Returns:
+        - df_distances (dict): Dictionary with model names as keys and DataFrames as values.
+                               Each DataFrame contains native contact distances across frames.
+        """
+
+        def remove_hydrogens_and_oxt(pdb_path, output_path):
+            """Removes all hydrogen atoms and OXT atoms from a PDB file."""
+            with open(pdb_path) as f_in, open(output_path, 'w') as f_out:
+                for line in f_in:
+                    if line.startswith("TER") or line.startswith("END"):
+                        continue
+                    if not line.startswith("ATOM"):
+                        f_out.write(line)
+                        continue
+
+                    atom_name = line[12:16].strip()
+                    element = line[76:78].strip()
+                    if element == 'H' or atom_name.startswith('H') or atom_name == 'OXT':
+                        continue
+
+                    f_out.write(line)
+                f_out.write('END\n')
+
+        def readNC(nc_file):
+            """Reads a .contacts.CG file and returns a list of (res1, res2) tuples."""
+            contacts = []
+            for l in open(nc_file):
+                contacts.append((int(l.split()[1]), int(l.split()[3])))
+            return contacts
+
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        native_models = {
+            m.replace('.pdb', ''): os.path.join(native_models_folder, m)
+            for m in os.listdir(native_models_folder) if m.endswith('.pdb')
+        }
+
+        df_distances = {}
+
+        models = list(self)  # Ensures tqdm knows the total number of items
+        for model in tqdm(models, desc="Computing native contacts", ncols=100):
+
+            if model not in native_models:
+                raise ValueError(f'Model "{model}" not found in native_models_folder: {native_models_folder}')
+
+            model_folder = os.path.join(job_folder, model)
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            contacts_file = os.path.join(model_folder, f'{model}.contacts.CG')
+
+            # Generate native contacts with SMOG2 if not already done
+            if not os.path.exists(contacts_file):
+                filtered_pdb = os.path.join(model_folder, f'{model}.pdb')
+                remove_hydrogens_and_oxt(native_models[model], filtered_pdb)
+
+                command = f'cd {model_folder} && smog2 -i {model}.pdb -s {model} -CA'
+                os.system(command)
+
+            native_contacts = readNC(contacts_file)
+
+            # Load topology and Cα atom indices
+            top_file = os.path.join(bioemu_folder, model, 'topology.pdb')
+            top_traj = md.load(top_file)
+            ca_atoms = [a.index for a in top_traj.topology.atoms if a.name == 'CA']
+            native_pairs = [(ca_atoms[c[0]-1], ca_atoms[c[1]-1]) for c in native_contacts]
+
+            # Load trajectory
+            traj_file = os.path.join(bioemu_folder, model, 'samples.xtc')
+            traj = md.load(traj_file, top=top_file)
+
+            # Compute distances
+            D = md.compute_distances(traj, native_pairs)
+
+            # Label columns as "resA-resB"
+            contact_labels = [
+                f'{native_contacts[i][0]}-{native_contacts[i][1]}'
+                for i in range(len(native_contacts))
+            ]
+
+            # Build DataFrame
+            df = pd.DataFrame(D, columns=contact_labels)
+            df['Frame'] = df.index + 1
+            df = df.set_index('Frame')
+            df_distances[model] = df
+
+        return df_distances
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
                           cpus=40, version="5.71-102.0", max_bin_size=10000):
