@@ -66,11 +66,11 @@ class md_analysis:
                 md_path = replica_path + '/md'
 
                 # Print warnings for missing files
-                if not os.path.exists(top_path):
+                if not os.path.exists(top_path) and not os.path.exists(top_path.replace('.gro', '_noPBC.gro')):
                     self.top_paths[model][replica] = ''
                     print(f'WARNING: Topology for model {model} and replica {replica} could not be found. EM gro does not exist')
 
-                if not os.path.exists(nvt_path):
+                if not os.path.exists(nvt_path) and  not os.path.exists(nvt_path.replace('.xtc', '_noPBC.xtc')):
                     self.traj_paths['nvt'][model][replica] = ''
                     print(f'WARNING: NVT trajectory for model {model} and replica {replica} could not be found. NVT xtc does not exist')
 
@@ -82,7 +82,7 @@ class md_analysis:
                     self.traj_paths['md'][model][replica] = ''
                     print(f'WARNING: MD trajectory for model {model} and replica {replica} could not be found. Folder does not exist or is empty')
 
-                if not os.path.exists(top_path) or not os.path.exists(nvt_path) or not os.path.exists(npt_path) or not os.path.exists(md_path):
+                if (not os.path.exists(top_path) and not os.path.exists(top_path.replace('.gro', '_noPBC.gro'))) or (not os.path.exists(nvt_path) and  not os.path.exists(nvt_path.replace('.xtc', '_noPBC.xtc'))) or not os.path.exists(npt_path) or not os.path.exists(md_path):
                     continue
 
                 # Get groups from topol index
