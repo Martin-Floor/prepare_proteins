@@ -12,6 +12,7 @@ import uuid
 import warnings
 import copy
 import re
+import pkg_resources
 
 import ipywidgets as widgets
 import matplotlib as mpl
@@ -6746,11 +6747,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return simulation_jobs
 
-    def setUpPLACERcalculation(self, PLACERfolder, output_folder="output_folder", PLACER_PATH="/gpfs/projects/bsc72/conda_envs/PLACER/", suffix=None, num_samples=50, 
-                           ligand=None, apo=False,rerank="prmsd", mutate=None, mutate_chain="A", 
+    def setUpPLACERcalculation(self, PLACERfolder, output_folder="output_folder", PLACER_PATH="/gpfs/projects/bsc72/conda_envs/PLACER/", suffix=None, num_samples=50,
+                           ligand=None, apo=False,rerank="prmsd", mutate=None, mutate_chain="A",
                            mutate_to=None, residue_json=None):
         """
-        Set up PLACER calculations for evaluating catalytic centers, with or without ligand. 
+        Set up PLACER calculations for evaluating catalytic centers, with or without ligand.
         Special amino acids can be added.
 
         Visit https://github.com/baker-laboratory/PLACER/tree/main for more options.
@@ -6767,10 +6768,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Number of samples to generate. 50-100 is a good number in most cases.
         ligand : str, optional
             Ligand <name3>, <name3-resno>, or <chain-name3-resno> (e.g., "L-LIG-1") to be predicted.
-            All other ligands will be fixed. 
+            All other ligands will be fixed.
             If not specified, PLACER will detect the ligand automatically.
         apo : bool, default=False
-            run PLACER in apo mode: 
+            run PLACER in apo mode:
         rerank : str, optional
             Rank models using one of the input metrics: "prmsd", "plddt", or "plddt_pde".
             "prmsd" is sorted in ascending order, "plddt" and "plddt_pde" in descending order.
@@ -6793,7 +6794,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         valid_PLACER_PATH = {"/gpfs/projects/bsc72/conda_envs/PLACER/","/gpfs/home/bsc/bsc072871/repos/PLACER/","/shared/work/NBD_Utilities/PLACER/"}
         if PLACER_PATH not in valid_PLACER_PATH:
             raise ValueError(f"Invalid path! option. Choose from {valid_PLACER_PATH}")
-        
+
         # Validate rerank option
         rerank_options = {"prmsd", "plddt_pde", "plddt"}
         if rerank not in rerank_options:
@@ -6829,7 +6830,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             command +=  f"-f {pdb_path} "
             command +=  f"-o {PLACERfolder}/{output_folder} "
             command +=  f"--nsamples {num_samples} "
-        
+
             if suffix:
                 command += f"--suffix {suffix} "
             if rerank:
@@ -6838,8 +6839,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += f"--predict_ligand {ligand} "
             if apo:
                 command += f"--no-use_sm "
-            if mutate: 
-                command += f"--mutate {mutate[model]}{mutate_chain}:{mutate_to} " 
+            if mutate:
+                command += f"--mutate {mutate[model]}{mutate_chain}:{mutate_to} "
                 command += "--no-use_sm "
             if residue_json:
                 command += f"--residue_json {residue_json} "
@@ -9674,13 +9675,22 @@ make sure of reading the target sequences with the function readTargetSequences(
             return commands
 
         else:
-            try:
-                os.system(command)
-            except:
-                os.chdir("..")
-                raise ValueError(
-                    "Rosetta calculation analysis failed. Check the ouput of the analyse_calculation.py script."
-                )
+            count = 0
+            for m in self:
+                if not os.path.exists(f'{rosetta_folder}/output_models/{m}/{m}_relax.out'):
+                    print(f'Silent file for model {m} was not found!')
+                    continue
+                if not os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
+                    count += 1
+
+            if count:
+                required = {}
+                installed = {pkg.key for pkg in pkg_resources.working_set}
+                if 'pyrosetta' not in installed:
+                    raise ValueError('PyRosetta was not found in your Python environment.\
+                    Consider using return_jobs=True or activating an environment the does have it.')
+                else:
+                    os.system(command)
 
         # Compile dataframes into rosetta_data attributes
         self.rosetta_data = []
