@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.optimize import curve_fit
 import seaborn as sns
+from tqdm import tqdm
 
 class sequenceModels:
 
@@ -1113,18 +1114,26 @@ class sequenceModels:
             traj_file = os.path.join(bioemu_folder, model, 'samples.xtc')
             traj = md.load(traj_file, top=top_file)
 
-            # Compute distances
+            # Compute distances from trajectory
             D = md.compute_distances(traj, native_pairs)
 
-            # Label columns as "resA-resB"
+            # Compute Frame 0 (native contact distances) from the filtered native structure
+            filtered_pdb = os.path.join(model_folder, f'{model}.pdb')
+            native_traj = md.load(filtered_pdb)
+            native_distances = md.compute_distances(native_traj, native_pairs)
+
+            # Combine native distances with trajectory distances
+            D_all = np.vstack([native_distances, D])  # shape: (n_frames + 1, n_contacts)
+
+            # Create labels like "resA-resB"
             contact_labels = [
                 f'{native_contacts[i][0]}-{native_contacts[i][1]}'
                 for i in range(len(native_contacts))
             ]
 
-            # Build DataFrame
-            df = pd.DataFrame(D, columns=contact_labels)
-            df['Frame'] = df.index + 1
+            # Build DataFrame with Frame 0 included
+            df = pd.DataFrame(D_all, columns=contact_labels)
+            df['Frame'] = range(D_all.shape[0])  # Frame 0 = native
             df = df.set_index('Frame')
             df_distances[model] = df
 
