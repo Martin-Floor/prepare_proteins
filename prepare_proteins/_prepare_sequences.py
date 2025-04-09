@@ -342,7 +342,7 @@ class sequenceModels:
                 command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
                 command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
                 command += 'echo "All samples computed. Exiting."\n'
-                command += 'exit 0\n'
+                command += 'break \n'
                 command += 'fi\n'
                 command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
                 command += 'done \n'
