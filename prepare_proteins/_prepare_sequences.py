@@ -15,6 +15,8 @@ from matplotlib.lines import Line2D
 from scipy.optimize import curve_fit
 import seaborn as sns
 from tqdm import tqdm
+import ipywidgets as widgets
+from ipywidgets import interact
 
 class sequenceModels:
 
@@ -883,13 +885,13 @@ class sequenceModels:
 
         return model_half_evalues, model_slopes
 
-    def computeBioEmuRMSF(self, bioemu_folder, ref_pdb, plot=False, ylim=None, plot_legend=True):
+    def computeBioEmuRMSF(self, bioemu_folder, ref_pdb=None, plot=False, ylim=None, plot_legend=True):
         """
         Computes RMSF values for all models in the specified folder and optionally plots RMSF by residue.
 
         Parameters:
         - bioemu_folder (str): Path to the folder containing model subdirectories with trajectory and topology files.
-        - ref_pdb (dict): Dictionary with paths to the reference PDB structure for RMSF calculation for each model.
+        - ref_pdb (dict): Dictionary with paths to the reference PDB structures for RMSF calculation for each model.
         - plot (bool, optional): Whether to generate a plot of RMSF vs. residue. Default is False.
 
         Returns:
@@ -903,6 +905,9 @@ class sequenceModels:
             for model in os.listdir(bioemu_folder):
                 ref_pdb[model] = unique_ref
 
+        if not ref_pdb:
+            print('No reference PDBs given. Computing RMSF relative to the average positions')
+
         # Dictionary to store RMSF values for each model
         rmsf = {}
 
@@ -910,8 +915,9 @@ class sequenceModels:
         for model in os.listdir(bioemu_folder):
 
             # Load reference structure
-            ref = md.load(ref_pdb[model])
-            ref_bb_atoms = ref.topology.select('name CA')
+            if ref_pdb and model in ref_pdb:
+                ref = md.load(ref_pdb[model])
+                ref_bb_atoms = ref.topology.select('name CA')
 
             traj_file = f'{bioemu_folder}/{model}/samples.xtc'
             top_file = f'{bioemu_folder}/{model}/topology.pdb'
@@ -921,6 +927,10 @@ class sequenceModels:
 
             traj = md.load(traj_file, top=top_file)
             traj_bb_atoms = traj.topology.select('name CA')
+
+            if not ref_pdb:
+                ref = md.load(top_file)
+                ref.xyz = np.mean(ref.xyz, axis=0) # Set reference to the average positions
 
             # Compute RMSF for the selected atoms (per-residue fluctuations)
             rmsf[model] = md.rmsf(traj, ref, atom_indices=traj_bb_atoms)
@@ -1093,12 +1103,12 @@ class sequenceModels:
                 os.mkdir(model_folder)
 
             contacts_file = os.path.join(model_folder, f'{model}.contacts.CG')
+            contacts_pdb = os.path.join(model_folder, f'{model}.pdb')
 
             # Generate native contacts with SMOG2 if not already done
             if not os.path.exists(contacts_file):
                 filtered_pdb = os.path.join(model_folder, f'{model}.pdb')
                 remove_hydrogens_and_oxt(native_models[model], filtered_pdb)
-
                 command = f'cd {model_folder} && smog2 -i {model}.pdb -s {model} -CA'
                 os.system(command)
 
@@ -1118,8 +1128,9 @@ class sequenceModels:
             D = md.compute_distances(traj, native_pairs)
 
             # Compute Frame 0 (native contact distances) from the filtered native structure
-            filtered_pdb = os.path.join(model_folder, f'{model}.pdb')
-            native_traj = md.load(filtered_pdb)
+            native_traj = md.load(contacts_pdb)
+            ca_atoms = [a.index for a in native_traj.topology.atoms if a.name == 'CA']
+            native_pairs = [(ca_atoms[c[0]-1], ca_atoms[c[1]-1]) for c in native_contacts]
             native_distances = md.compute_distances(native_traj, native_pairs)
 
             # Combine native distances with trajectory distances
@@ -1138,6 +1149,187 @@ class sequenceModels:
             df_distances[model] = df
 
         return df_distances
+
+    def computeFractionOfNativeContacts(self, df_distances, method="hard",
+                                        inflation=1.2, rel_tolerance=0.2):
+        """
+        Compute the fraction of native contacts (Q) per frame and per model, using either a
+        hard cutoff or a relative tolerance.
+
+        This function accepts a dictionary of DataFrames (one per model), as returned by
+        computeNativeContacts(). Each DataFrame must have:
+          - A row at index=0 containing the native contact distances.
+          - Additional rows (index=1..N) for simulation frames.
+
+        The fraction of native contacts (Q) is computed for each frame by determining
+        how many contacts are "formed" (according to the chosen method) and then dividing
+        by the total number of contacts.
+
+        Supported methods:
+          - "hard":
+              Each contact is considered formed if its distance in a given frame is below
+              the native distance (index=0) multiplied by an inflation factor.
+
+              Q(frame) = (# of contacts with distance < native_distance * inflation) / (# contacts)
+
+          - "relative":
+              Each contact is formed if its distance does not exceed the native distance by more
+              than a relative tolerance.
+
+              Q(frame) = (# of contacts satisfying ((distance / native_distance) - 1) < rel_tolerance) / (# contacts)
+
+        Parameters
+        ----------
+        df_distances : dict
+            Dictionary with model names as keys and DataFrames as values.
+            Each DataFrame has distances per contact (columns) across frames (rows).
+            Row index 0 must represent the native (equilibrium) distances.
+
+        method : str, optional
+            Choice of method to compute Q. Must be "hard" or "relative".
+            Default is "hard".
+
+        inflation : float, optional
+            Factor by which the native distance is multiplied when using the "hard" method.
+            Default is 1.2.
+
+        rel_tolerance : float, optional
+            Relative tolerance for the "relative" method.
+            Default is 0.2 (i.e., 20% deviation allowed).
+
+        Returns
+        -------
+        df_q : pd.DataFrame
+            DataFrame with a MultiIndex [Model, Frame] and a single column "Q".
+            The "Frame" index excludes row 0 (the native reference).
+            "Q" is the fraction of native contacts formed at each frame.
+        """
+        records = []
+
+        # Iterate over each model and its DataFrame of distances
+        for model, df in df_distances.items():
+            # 1) Native distances (row 0)
+            native = df.loc[0].values.astype(float)  # shape: (n_contacts,)
+
+            # 2) Simulation frames (all rows except 0)
+            sim_df = df.drop(index=0)
+            frames = sim_df.values.astype(float)  # shape: (n_frames, n_contacts)
+            n_contacts = native.shape[0]
+
+            # 3) Compute Q according to the chosen method
+            if method == "hard":
+                # Hard cutoff = native * inflation
+                cutoff = native[None, :] * inflation
+                formed = frames < cutoff  # boolean array (n_frames, n_contacts)
+                q_vals = formed.sum(axis=1) / n_contacts
+
+            elif method == "relative":
+                # Relative tolerance around native distance
+                formed = ((frames / native[None, :]) - 1) < rel_tolerance
+                q_vals = formed.sum(axis=1) / n_contacts
+
+            else:
+                raise ValueError(f"Unsupported method: {method}")
+
+            # 4) Build temporary DataFrame with Q values for each frame
+            tmp_df = pd.DataFrame({
+                "Model": model,
+                "Frame": sim_df.index,  # original frame numbers
+                "Q": q_vals
+            })
+            records.append(tmp_df)
+
+        # Combine results for all models into a single DataFrame with a MultiIndex
+        df_q = pd.concat(records, ignore_index=True).set_index(['Model', 'Frame'])
+        return df_q
+
+    def plotNativeContactsDistribution(self, q_df):
+        """
+        Create an interactive KDE plot of the distribution of native contact fraction (Q)
+        for a selected model.
+
+        This function uses ipywidgets to create a dropdown menu of models based on the input
+        Q dataframe. When a model is selected, it displays a Kernel Density Estimate (KDE)
+        plot of Q values for that model.
+
+        Parameters:
+          - q_df (pd.DataFrame): DataFrame containing the fraction of native contacts for each frame
+                                 and for each model. It is assumed that the index contains the
+                                 "Model" level.
+        """
+        # Reset index to easily filter by the "Model" column.
+        q_reset = q_df.reset_index()
+        # Get the unique models present in the Q dataframe.
+        models = q_reset["Model"].unique()
+
+        def plot_model_q(model):
+            """
+            Inner function: filters the Q dataframe for the selected model and plots its KDE.
+            """
+            df_model = q_reset[q_reset['Model'] == model]
+            plt.figure(figsize=(8, 6))
+            sns.kdeplot(df_model['Q'], shade=True, color="skyblue", bw_adjust=1)
+            plt.title(f"KDE of Q for model: {model}", fontsize=16)
+            plt.xlabel("Fraction of Native Contacts (Q)", fontsize=12)
+            plt.ylabel("Density", fontsize=12)
+            plt.tight_layout()
+            plt.show()
+
+        # Create a dropdown widget and link it to the plotting function.
+        model_dropdown = widgets.Dropdown(options=sorted(models), description='Select Model:')
+        interact(plot_model_q, model=model_dropdown)
+
+    def computeFoldingFreeEnergy(self, df_q, q_threshold=0.8, temperature=300.0):
+        """
+        Compute the free energy of folding (ΔG_f) for each model from Q distributions.
+
+        A frame is considered "folded" if Q ≥ q_threshold, and "unfolded" otherwise.
+
+        ΔG is calculated using:
+            ΔG = -RT * ln(P_folded / P_unfolded)
+
+        Parameters:
+        ----------
+        df_q : pd.DataFrame
+            DataFrame with MultiIndex ['Model', 'Frame'] and a 'Q' column.
+
+        q_threshold : float
+            Threshold to distinguish folded vs. unfolded (default: 0.5)
+
+        temperature : float
+            Temperature in Kelvin (default: 300.0)
+
+        Returns:
+        --------
+        df_dG : pd.DataFrame
+            DataFrame with one row per model and columns:
+            ['Model', 'ΔG (kcal/mol)', 'P_folded', 'P_unfolded']
+        """
+        R = 0.001987  # kcal/mol·K
+
+        data = []
+        for model in df_q.index.get_level_values('Model').unique():
+            q_vals = df_q.loc[model, 'Q'].values
+            total = len(q_vals)
+            n_folded = np.sum(q_vals >= q_threshold)
+            n_unfolded = total - n_folded
+
+            if n_folded == 0 or n_unfolded == 0:
+                dG = np.nan  # cannot compute log(0)
+            else:
+                P_folded = n_folded / total
+                P_unfolded = n_unfolded / total
+                dG = -R * temperature * np.log(P_folded / P_unfolded)
+
+                data.append({
+                    'Model': model,
+                    'ΔG_f (kcal/mol)': dG,
+                    'P_folded': P_folded,
+                    'P_unfolded': P_unfolded
+                })
+
+        df_dG = pd.DataFrame(data).set_index('Model')
+        return df_dG
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
                           cpus=40, version="5.71-102.0", max_bin_size=10000):
