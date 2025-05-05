@@ -17,6 +17,7 @@ import seaborn as sns
 from tqdm import tqdm
 import ipywidgets as widgets
 from ipywidgets import interact
+from collections import defaultdict
 
 class sequenceModels:
 
@@ -94,8 +95,8 @@ class sequenceModels:
             if remove_msas:
                 command += f'rm -r $Path/output_models/{model}/msas\n'
 
-            command += 'cd ..\n'
-
+            depth = len(os.path.normpath(job_folder).split(os.sep))
+            command += 'cd '+'../'*depth+'\n'
             jobs.append(command)
 
         return jobs
@@ -245,7 +246,7 @@ class sequenceModels:
 
     def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
                     verbose=True, models=None, skip_finished=False, return_finished=False,
-                    filter_samples=True,
+                    filter_samples=True, alphafold_folder=None,
                     bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
         """
         Set up and optionally execute BioEmu commands for each model sequence.
@@ -275,6 +276,50 @@ class sequenceModels:
 
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
+
+        local_af = False
+        external_af = False
+        af_jobs = None
+        if alphafold_folder and os.path.exists(alphafold_folder):
+
+            if not os.path.exists(alphafold_folder+'/output_models'):
+                raise ValueError(f'AF folder exists {alphafold_folder} but has an incorrect format!')
+
+            msa_file = {}
+            for model in os.listdir(alphafold_folder+'/output_models'):
+                model_folder = os.path.join(alphafold_folder+'/output_models', model)
+                if not os.path.exists(model_folder):
+                    raise ValueError(f'AF folder exists {alphafold_folder} but model {model_folder} has no output!')
+                for f in os.listdir(model_folder+'/msas/'):
+                    if f.endswith('.a3m'):
+                        msa_file[model] = model_folder+'/msas/'+f
+                if model not in msa_file:
+                    raise ValueError(f'The given AF folder {alphafold_folder} exists but does not contain an MSA for model {model}.\
+                    Please consider running the AF calculation first and get the MSAs or use a local AF folder inside bioemu\
+                    Just give a folder that do no exist and the function will do the rest.')
+            external_af = True
+
+        elif alphafold_folder and os.path.exists(job_folder+'/'+alphafold_folder):
+            local_af = True
+            with_msa = []
+            af_jobs = {}
+            for model in os.listdir(job_folder+'/'+alphafold_folder+'/output_models'):
+                model_folder = os.path.join(job_folder+'/'+alphafold_folder+'/output_models', model)
+                if not os.path.exsits(model_folder):
+                    af_jobs[model] = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, only_model=model)
+                else:
+                    for f in os.listdir(model_folder+'/msas/'):
+                        if f.endswith('.a3m'):
+                            with_msa.append(model)
+                    if model not in with_msa:
+                        af_jobs[model] = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, only_model=model)
+
+            if len(list(os.listdir(job_folder+'/'+alphafold_folder+'/output_models'))) == 0:
+                af_jobs = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, exclude_finished=False)
+
+        elif alphafold_folder and not os.path.exists(job_folder+'/'+alphafold_folder):
+            local_af = True
+            af_jobs = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, exclude_finished=False)
 
         jobs = []
         finished = []
@@ -324,6 +369,11 @@ class sequenceModels:
                         print(f"Setting input files for model {model}")
                     result = subprocess.run(["bash", "-i", "-c", command], capture_output=True, text=True)
 
+            if external_af:
+                msa_folder = os.path.join(model_folder, 'msa')
+                os.makedirs(msa_folder, exist_ok=True)
+                shutil.copyfile(msa_file[model], msa_folder+'/'+model+'.a3m')
+
             command = 'RUN_SAMPLES='+str(num_samples)+'\n'
             if filter_samples:
                 command += 'while true; do\n'
@@ -331,11 +381,18 @@ class sequenceModels:
             if gpu_local:
                 command += 'CUDA_VISIBLE_DEVICES=GPUID '
             command += 'python -m bioemu.sample '
-            command += f'--sequence {self.sequences[model]} '
+            if external_af:
+                msaf = msa_folder+'/'+model+'.a3m'
+                command += f'--sequence {msaf} '
+            elif local_af:
+                msaf = job_folder+'/'+alphafold_folder+'/output_models/'+model+'/msas/bfd_uniref_hits.a3m '
+                command += f'--sequence {msaf} '
+            else:
+                command += f'--sequence {self.sequences[model]} '
             command += f'--num_samples $RUN_SAMPLES '
             command += f'--batch_size_100 {batch_size_100} '
             command += f'--cache_embeds_dir {cache_embeds_dir} '
-            if filter_samples:
+            if not filter_samples:
                 command += f'--filter_samples 0 '
             command += f'--output_dir {model_folder}\n'
             if filter_samples:
@@ -347,10 +404,17 @@ class sequenceModels:
                 command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
                 command += 'done \n'
 
+            if isinstance(af_jobs, dict):
+                command = af_jobs[model]+command
             jobs.append(command)
+
+        # Combine jobs if AF folder was not found
+        if isinstance(af_jobs, list):
+            jobs = [a+b for a,b in zip(af_jobs,jobs)]
 
         if return_finished:
             return finished
+
         return jobs
 
     def clusterBioEmuSamples(self, job_folder, bioemu_folder, models=None, stderr=True, stdout=True,
@@ -1050,7 +1114,8 @@ class sequenceModels:
         Parameters:
         - job_folder (str): Path where temporary SMOG files will be stored.
         - bioemu_folder (str): Path to BioEmu output folders, one per model (should include topology and trajectory).
-        - native_models_folder (str): Path to PDB files of native models, one per model.
+        - native_models_folder (str, dict): Path to PDB folder containg the files of native models, one per model. Alternatively,
+                                            a dictionary containing the paths to each native PDB file.
 
         Returns:
         - df_distances (dict): Dictionary with model names as keys and DataFrames as values.
@@ -1085,10 +1150,15 @@ class sequenceModels:
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        native_models = {
-            m.replace('.pdb', ''): os.path.join(native_models_folder, m)
-            for m in os.listdir(native_models_folder) if m.endswith('.pdb')
-        }
+        if isinstance(native_models_folder, str) and os.path.isdir(native_models_folder):
+            native_models = {
+                m.replace('.pdb', ''): os.path.join(native_models_folder, m)
+                for m in os.listdir(native_models_folder) if m.endswith('.pdb')
+            }
+        elif isinstance(native_models_folder, dict):
+            native_models = native_models_folder
+        else:
+            raise ValueError('native_models_folder should  be a existing path or a dictionary!')
 
         df_distances = {}
 
@@ -1332,7 +1402,7 @@ class sequenceModels:
         return df_dG
 
     def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
-                          cpus=40, version="5.71-102.0", max_bin_size=10000):
+                          cpus=40, version="5.74-105.0", max_bin_size=10000):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
 
@@ -1481,6 +1551,110 @@ class sequenceModels:
             return missing
 
         return folds
+
+    def plotInterProScanFoldDistributions(self, ips, top_n=10):
+        """
+        Plots the top N most frequent folds from an InterProScan result dictionary,
+        excluding the fold named '-'.
+
+        Parameters:
+        -----------
+        ips : dict
+            Dictionary where keys are model identifiers and values are lists of fold names.
+        top_n : int, optional
+            Number of top folds to display. Default is 10.
+        """
+        # Dictionary to store fold counts
+        fold_counts = defaultdict(int)
+
+        # Count occurrences of each fold
+        for model in ips:
+            for fold in ips[model]:
+                fold_counts[fold] += 1
+
+        # Exclude the fold named '-'
+        filtered_fold_counts = {fold: count for fold, count in fold_counts.items() if fold != '-'}
+
+        # Sort folds by frequency and select the top N
+        sorted_folds = sorted(filtered_fold_counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+
+        # Extract fold names and counts
+        fold_names, counts = zip(*sorted_folds) if sorted_folds else ([], [])
+
+        # Plot the results
+        plt.figure(figsize=(10, 6))
+        plt.bar(fold_names, counts)
+        plt.xlabel("Fold")
+        plt.ylabel("Frequency")
+        plt.title(f"Top {top_n} Most Frequent Folds in InterProScan Search (Excluding '-')")
+        plt.xticks(rotation=90)
+        plt.tight_layout()
+        plt.show()
+
+    def plotInterProScanSingleSegmentCountsVsMaxGap(self, ips, fold, vertical_line=None, max_gap_cap=100):
+        """
+        Analyzes the effect of max_gap on fold stitching and plots the number
+        of models resulting in a single stitched segment.
+
+        Parameters:
+        -----------
+        ips : dict
+            InterProScan results. {model_id: {fold_name: [(start, end), ...]}}.
+        fold : str
+            Fold name to analyze.
+        max_gap_cap : int
+            Optional cap on max_gap range (default 100).
+        """
+
+        def merge_intervals(intervals, max_gap):
+            if not intervals:
+                return []
+            intervals = sorted(intervals, key=lambda x: x[0])
+            merged = [intervals[0]]
+            for start, end in intervals[1:]:
+                last_start, last_end = merged[-1]
+                if start - last_end <= max_gap:
+                    merged[-1] = (last_start, max(last_end, end))
+                else:
+                    merged.append((start, end))
+            return merged
+
+        # Precompute relevant models and gaps
+        model_intervals = []
+        max_gap_found = 0
+
+        for model, annotations in ips.items():
+            if fold in annotations:
+                intervals = sorted(annotations[fold], key=lambda x: x[0])
+                model_intervals.append(intervals)
+                for i in range(1, len(intervals)):
+                    gap = intervals[i][0] - intervals[i-1][1]
+                    if gap > 0:
+                        max_gap_found = max(max_gap_found, gap)
+
+        max_gap = min(max_gap_found, max_gap_cap)
+
+        # Count single-segment models for each gap
+        gap_list, count_list = [], []
+
+        for gap in range(max_gap + 1):
+            count = sum(1 for intervals in model_intervals if len(merge_intervals(intervals, gap)) == 1)
+            gap_list.append(gap)
+            count_list.append(count)
+
+        # Plot
+        plt.figure(figsize=(8, 5))
+
+        if vertical_line:
+            plt.axvline(vertical_line, c='k', ls='--', lw=0.5)
+
+        plt.plot(gap_list, count_list, marker='o')
+        plt.xlabel('max_gap (residues)')
+        plt.ylabel('Number of Single-Segment Models')
+        plt.title(f"Effect of max_gap on Fold Stitching: {fold}")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
 
     def __iter__(self):
         #returning __iter__ object
