@@ -10948,6 +10948,103 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder + "/output_models/" + model + "/" + model + ".pdb"
             self.readModelFromPDB(model, pdb_path)
 
+    def setUpRFDiffusion(
+        self,
+        job_folder,
+        num_designs=100,
+        num_batches=1,
+        diffuser_T=None,
+        contig=None,              # e.g., 'A1-218/30-30'
+        partial_T=None,           # e.g., 10
+        provide_seq=None,         # e.g., [218, 247]
+        script_path=None,
+        additional_args=None,      # dict of other overrides
+        gpu_local=False
+    ):
+        """
+        Create shell commands for RFdiffusion jobs, splitting each model into N batches.
+        You’ll get len(models) * num_batches commands in `jobs`.
+
+        Parameters:
+        - self.models_paths: dict model_name -> path_to_pdb
+        - job_folder (str): Base folder for inputs/outputs
+        - num_designs (int): Number of designs per batch
+        - num_batches (int): How many independent batches per model
+        - contig (str): contigmap.contigs value, e.g. 'A1-218/30-30'
+        - partial_T (int): diffuser.partial_T value
+        - provide_seq (list[int] or str): contigmap.provide_seq value
+        - script_path (str): path to run_inference.py
+        - additional_args (dict): any other key: value RFdiffusion overrides
+        - gpu_local (bool): If True, sets the CUDA_VISIBLE_DEVICES variable for
+                            running GPUs in local computer with multiple GPUS.
+
+        Returns:
+        - jobs (list[str]): one shell-command string per batch per model
+        """
+
+        # ensure folders exist
+        os.makedirs(job_folder, exist_ok=True)
+        input_folder = os.path.join(job_folder, 'input_models')
+        os.makedirs(input_folder, exist_ok=True)
+        output_folder = os.path.join(job_folder, 'output_models')
+        os.makedirs(output_folder, exist_ok=True)
+
+        if not script_path:
+            script_path = 'SCRIPT_PATH/run_inference.py'
+
+        # Convert contig into a per model dictionary
+        if isinstance(contig, str):
+            contig_dict = {}
+            for model in self:
+                contig_dict[model] = contig
+            contig = contig_dict
+
+        jobs = []
+        for model, pdb_path in self.models_paths.items():
+            # copy once per model
+            shutil.copyfile(pdb_path, os.path.join(input_folder, f"{model}.pdb"))
+
+            # create num_batches commands for this model
+            for batch_id in range(num_batches):
+
+                batch_folder = os.path.join(output_folder, f"batch_{batch_id}")
+                os.makedirs(batch_folder, exist_ok=True)
+
+                # include batch in output_prefix
+                output_prefix = f"designs/{model}"
+
+                cmd = []
+                cmd.append('cd '+batch_folder+';')
+                if gpu_local:
+                    cmd.append('CUDA_VISIBLE_DEVICES=GPUID')
+                cmd.append(script_path)
+                cmd.append(f"inference.input_pdb=../../input_models/{model}.pdb")
+                cmd.append(f"inference.output_prefix={output_prefix}")
+                cmd.append(f"inference.num_designs={num_designs}")
+                if diffuser_T:
+                    cmd.append(f"diffuser.T={diffuser_T}")
+                if contig:
+                    cmd.append(f"contigmap.contigs=[{contig[model]}]")
+                if partial_T is not None:
+                    cmd.append(f"diffuser.partial_T={partial_T}")
+                if provide_seq is not None:
+                    if isinstance(provide_seq, (list, tuple)) and len(provide_seq) == 2:
+                        cmd.append(f"contigmap.provide_seq=[{provide_seq[0]}-{provide_seq[1]}]")
+                    else:
+                        cmd.append(f"contigmap.provide_seq={provide_seq}")
+
+                if additional_args:
+                    for key, value in additional_args.items():
+                        if isinstance(value, bool):
+                            value = str(value).lower()
+                        cmd.append(f"{key}={value}")
+                cmd.append('; cd ../../../')
+
+                # join with backslashes for readability
+                jobs.append(" \\\n  ".join(cmd))
+
+        return jobs
+
     def saveModels(
         self,
         output_folder,
