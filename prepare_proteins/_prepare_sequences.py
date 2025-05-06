@@ -345,24 +345,25 @@ class sequenceModels:
                         finished.append(model)
                         continue
 
-            cache_embeds_dir = os.path.join(model_folder, 'cache')
-            if not os.path.exists(cache_embeds_dir):
-                os.mkdir(cache_embeds_dir)
+            cache_dir = os.path.join(model_folder, 'cache')
+            if not os.path.exists(cache_dir):
+                os.mkdir(cache_dir)
 
             if bioemu_env:
 
-                cached_files = [f for f in os.listdir(cache_embeds_dir)]
+                cached_files = [f for f in os.listdir(cache_dir)]
                 fasta_cached_file = [f for f in cached_files if f.endswith('.fasta')]
                 npy_cached_files = [f for f in cached_files if f.endswith('.npy')]
+                npz_cached_files = [f for f in cached_files if f.endswith('.npz')]
 
-                if len(fasta_cached_file) == 1 and len(npy_cached_files) == 2:
+                if len(fasta_cached_file) == 1 and len(npy_cached_files) == 2 and len(npz_cached_files) == 3:
                     if verbose:
                         print(f'Input files for model {model} were found.')
                 else:
                     command = f"""
                     source {conda_sh}
                     conda activate {bioemu_env}
-                    python -m bioemu.sample --sequence {self.sequences[model]} --num_samples 1 --batch_size_100 {batch_size_100} --cache_embeds_dir {cache_embeds_dir} --output_dir {model_folder}
+                    python -m bioemu.sample --sequence {self.sequences[model]} --num_samples 1 --batch_size_100 {batch_size_100} --cache_embeds_dir {cache_dir} --cache_so3_dir {cache_dir} --output_dir {model_folder}
                     conda deactivate
                     """
                     if verbose:
@@ -391,7 +392,8 @@ class sequenceModels:
                 command += f'--sequence {self.sequences[model]} '
             command += f'--num_samples $RUN_SAMPLES '
             command += f'--batch_size_100 {batch_size_100} '
-            command += f'--cache_embeds_dir {cache_embeds_dir} '
+            command += f'--cache_embeds_dir {cache_dir} '
+            command += f'--cache_so3_dir {cache_dir} '
             if not filter_samples:
                 command += f'--filter_samples 0 '
             command += f'--output_dir {model_folder}\n'
