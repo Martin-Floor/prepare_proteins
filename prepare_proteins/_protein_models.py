@@ -11333,9 +11333,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         Parameters:
         - diffusion_samples: int. The number of diffusion samples to use for prediction.
         - use_msa_server: Bool. Whether to use the MSA server for sampling, it auto-generate the MSA using the mmseqs2 server (not for MN5) because no internet.
-        - msa_path: str. path to the folder with the .a3m files.  It should contain the pre-computed MSA for the proteins. The name of the .a3m files should be the name of the model. 
+        - msa_path: str. Path to the folder with the .a3m files.  It should contain the pre-computed MSA for the proteins. You need to run AF3 first (or something else) to generate the MSA
+            The name of the .a3m files should be the name of the model. 
             To run single sequence mode input "empty" for msa_path.
-            !!You need to run AF3 first (or something else) to generate the MSA!!
+            !!Not tested!!
         - sampling_steps: int. The number of sampling steps to use for prediction. 
         - recycling_steps: int. The number of recycling steps to use for prediction. 
             AF3 uses by default 25 diffusion_samples and 10 recycling_steps. 
