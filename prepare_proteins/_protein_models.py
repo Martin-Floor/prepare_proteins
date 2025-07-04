@@ -11308,6 +11308,121 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
+    def setUpBoltz2Calculation(
+        self,
+        job_folder,
+        diffusion_samples=1,
+        use_msa_server=True,
+        msa_path=None,
+        sampling_steps=200,
+        recycling_steps=3,
+        output_format="pdb",
+        use_potentials=False,
+        ligands=None,
+        binder=None
+    ):
+        """
+        Run Boltz2 structure prediction and afinity.
+
+        It can be use to predict ligand binding with multiple ligands.
+        Additionally, it can be used to predict ligand binding affinity, but for just 1 ligand
+        Ligand/s should be given in SMILEs format.
+        
+        To run in MN5 you need to precompute the MSA with AF3 or some other method!!!
+
+        Parameters:
+        - diffusion_samples: int. The number of diffusion samples to use for prediction.
+        - use_msa_server: Bool. Whether to use the MSA server for sampling, it auto-generate the MSA using the mmseqs2 server (not for MN5) because no internet.
+        - msa_path: str. path to the folder with the .a3m files.  It should contain the pre-computed MSA for the proteins. The name of the .a3m files should be the name of the model. 
+            To run single sequence mode input "empty" for msa_path.
+            !!You need to run AF3 first (or something else) to generate the MSA!!
+        - sampling_steps: int. The number of sampling steps to use for prediction. 
+        - recycling_steps: int. The number of recycling steps to use for prediction. 
+            AF3 uses by default 25 diffusion_samples and 10 recycling_steps. 
+        - use_potentials: bool. Whether to use the potentials for prediction. Set to True should improve performance, but uses more memmory.   
+        - ligands (list[str]): list of ligands SMILEs 
+        - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed 
+
+        Returns:
+        - jobs (list[str]): command string per batch per model
+        """
+
+        # Need to write yaml, and then need to write jobs 
+        os.makedirs(job_folder, exist_ok=True)
+        
+        for model in self.models_names:
+            if not os.path.exists(job_folder + "/" +model):
+                os.mkdir(job_folder+"/"+model)
+
+        for model, value in self.sequences.items():
+            chain = None
+            sequence = None
+
+            if isinstance(value, dict):
+        # Case with multiple chains
+                for chain_id, seq in value.items():
+                    if seq is not None:
+                        chain = chain_id
+                        sequence = seq
+                        break  # Stop at the first valid chain
+            elif isinstance(value, str):
+        # Case with single chain, no explicit chain ID
+                chain = 'A'  # Assume 'A' if not specified
+                sequence = value
+
+        # Write the YAML file
+            with open(job_folder+"/"+model +"/" + "boltz.yaml", "w") as iyf:
+                iyf.write('version: 1\n')
+                iyf.write('sequences:\n')
+                iyf.write('  - protein:\n')
+                iyf.write(f'      id: [{chain}]\n')
+                iyf.write(f'      sequence: {sequence}\n')
+                
+                if use_msa_server == False:
+                    iyf.write(f'      msa: {msa_path}+{model}.a3m\n')
+
+                if ligands != None:
+                    for i, ligand in enumerate(ligands):
+                        ligand_chain = chr(ord('B') + i)  # Assign chains starting from 'B'
+                        iyf.write('  - ligand:\n')
+                        iyf.write(f'      id: [{ligand_chain}]\n')
+                        iyf.write(f"      smiles: '{ligand}'\n")
+
+                if binder != None:
+                    iyf.write('properties:\n')
+                    iyf.write('    - affinity:\n')
+                    iyf.write(f'        binder: {binder}\n')
+
+
+        jobs = []
+        for model in self.models_names:
+            pdb_name = f"{model}.pdb"
+            pdb_path = job_folder+"/"+model
+
+            command = f"cd {pdb_path} \n"
+            command +=  "boltz predict boltz.yaml " 
+            
+            if use_msa_server == True:
+                command += "--use_msa_server "
+            else:
+                if msa_path is None:
+                    raise ValueError("msa_path must be provided if use_msa_server is False")
+            if use_potentials:
+                command += "--use_potentials "
+            if diffusion_samples:
+                command += f"--diffusion_samples {diffusion_samples} "
+            if recycling_steps:
+                command += f"--recycling_steps {recycling_steps} "
+            if sampling_steps:
+                command += f"--sampling_steps {sampling_steps} "
+            if output_format:
+                command += f"--output_format {output_format} "
+
+            jobs.append(command)
+
+        return jobs
+
+            
     def saveModels(
         self,
         output_folder,
