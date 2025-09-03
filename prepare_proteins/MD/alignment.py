@@ -3,31 +3,20 @@ import mdtraj as md
 
 def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
                                        chain_indexes=None, trajectory_chain_indexes=None,
-                                       reference_chain_indexes=None, aligment_mode='aligned',
+                                       reference_chain_indexes=None, alignment_mode='aligned',
                                        reference_residues=None):
     """
-    Align two trajectories based on a sequence alignment of specific chains. The
-    chains are specified using their indexes. When the trajectories have corresponding
-    chains use the option chain_indexes to specify the list of chains to align.
-    Otherwise, specify the chains with trajectory_chain_indexes and reference_chain_indexes
-    options. Note that the list of chain indexes must be corresponding.
+    Align a trajectory to a reference trajectory using sequence alignment of specific chains.
+    Chains can be specified using either `chain_indexes` (if chains correspond) or
+    separately using `trajectory_chain_indexes` and `reference_chain_indexes`.
 
     Example:
+    --------
+    trajectory_chain_indexes = [0, 1]
+    reference_chain_indexes = [2, 3]
 
-    trajectory_chain_indexes = [0,1]
-    reference_chain_indexes = [2,3]
-
-    This input will align the sequence of chain 2 from the reference topology against
-    the sequence of chain 0 from the target topology to find common alpha carbon
-    atoms. Then the alignment is carried out for the sequence of chain 2 of the
-    reference trajectory against the sequence of chain 1 in the target trajectory
-    to find common alpha carbon atoms. All matched atoms will be used to align the
-    target trajectory against the specified frame of the reference trajectory.
-
-    The input chain_indexes = [0,1] is equivalent to inputting:
-
-    trajectory_chain_indexes = [0,1]
-    reference_chain_indexes = [0,1]
+    This aligns chain 0 of the trajectory to chain 2 of the reference, and chain 1
+    to chain 3, using common alpha-carbon atoms identified via sequence alignment.
 
     Parameters
     ----------
@@ -35,108 +24,94 @@ def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
         Trajectory to align.
     reference : mdtraj.Trajectory
         Reference trajectory.
-    reference_frame : int (0)
-        Index of the frame in the reference trajectory to use as reference for the
-        alignment.
-    chain_indexes : int or list
-        Chain indexes to use for the alignment. Use this option when the trajectories
-        have corresponding chains in their topologies.
-    trajectory_chain_indexes : int
-        Chain indexes of the target trajectory to use in the alignment.
-    reference_chain_indexes : int
-        Chain indexes of the reference trajectory to use in the alignment.
-    aligment_mode : str
-        The mode defines how sequences are aligned. 'exact' for structurally
-        aligning positions with exactly the same aminoacids after the sequence
-        alignemnt or 'aligned' for structurally aligining sequences using all
-        positions aligned in the sequence alignment.
+    reference_frame : int, default=0
+        Frame of the reference trajectory to align to.
+    chain_indexes : int or list of int, optional
+        If provided, these are used for both trajectory and reference chains.
+    trajectory_chain_indexes : int or list of int, optional
+        Chain indexes in the trajectory to align.
+    reference_chain_indexes : int or list of int, optional
+        Chain indexes in the reference trajectory to align.
+    alignment_mode : str, default='aligned'
+        'exact' to align only residues with identical amino acids.
+        'aligned' to align all residues matched in the sequence alignment.
+
+    Returns
+    -------
+    rmsd : float
+        RMSD (in Ångströms) after alignment.
+    n_atoms : int
+        Number of atoms used in the alignment.
     """
 
-    # Check for correct input
-    if chain_indexes == None:
-        if trajectory_chain_indexes == None or reference_chain_indexes == None:
-            raise ValueError('You must enter the chain index(es) to align against.')
-        elif trajectory_chain_indexes != None and reference_chain_indexes == None:
-            raise ValueError('If you give the chain index(es) for the target topology\
-            with the option trajectory_chain_indexes you also need to specify the\
-            chain index(es) for the reference topology with the option reference_chain_indexes')
-        elif trajectory_chain_indexes == None and reference_chain_indexes != None:
-            raise ValueError('If you give the chain index(es) for the reference\
-            topology with the option reference_chain_indexes you also need to specify the\
-            chain index(es) for the target topology with the option trajectory_chain_index')
-        else:
-            if isinstance(trajectory_chain_indexes, int):
-                 trajectory_chain_indexes = [trajectory_chain_indexes]
-            elif not isinstance(trajectory_chain_indexes, list):
-                raise ValueError('Trajectory chain indexes must be given as a integer or as a list of\
-                integers.')
-            if isinstance(reference_chain_indexes, int):
-                 reference_chain_indexes = [reference_chain_indexes]
-            elif not isinstance(reference_chain_indexes, list):
-                raise ValueError('Reference chain indexes must be given as a integer or as a list of\
-                integers.')
-    elif chain_indexes != None and (trajectory_chain_indexes != None or reference_chain_indexes != None):
-        raise ValueError('If you use the chain_indexes option. Please do not specify\
-        with the options trajectory_chain_indexes or reference_chain_indexes.')
+    # Validate chain input
+    if chain_indexes is None:
+        if trajectory_chain_indexes is None or reference_chain_indexes is None:
+            raise ValueError("Specify either `chain_indexes` or both `trajectory_chain_indexes` and `reference_chain_indexes`.")
+
+        if isinstance(trajectory_chain_indexes, int):
+            trajectory_chain_indexes = [trajectory_chain_indexes]
+        elif not isinstance(trajectory_chain_indexes, list):
+            raise ValueError("`trajectory_chain_indexes` must be an int or a list of ints.")
+
+        if isinstance(reference_chain_indexes, int):
+            reference_chain_indexes = [reference_chain_indexes]
+        elif not isinstance(reference_chain_indexes, list):
+            raise ValueError("`reference_chain_indexes` must be an int or a list of ints.")
     else:
+        if trajectory_chain_indexes is not None or reference_chain_indexes is not None:
+            raise ValueError("Use `chain_indexes` OR (`trajectory_chain_indexes` and `reference_chain_indexes`), not both.")
+
         if isinstance(chain_indexes, int):
-             chain_indexes = [chain_indexes]
+            chain_indexes = [chain_indexes]
         elif not isinstance(chain_indexes, list):
-            raise ValueError('Chain indexes must be given as a integer or as a list of\
-            integers.')
+            raise ValueError("`chain_indexes` must be an int or a list of ints.")
+
         trajectory_chain_indexes = chain_indexes
         reference_chain_indexes = chain_indexes
 
     if len(trajectory_chain_indexes) != len(reference_chain_indexes):
-        raise ValueError('You must input the same number of chains to align the\
-        target trajectory with the reference trajectory.')
+        raise ValueError("Trajectory and reference must have the same number of chain indexes.")
 
-    # Get dictionaries linking sequence positions to residue chain_indexes
+    # Get residue indexes per chain
     trajectory_indexes = getChainIndexesToResidueIndexes(trajectory.topology)
     reference_indexes = getChainIndexesToResidueIndexes(reference.topology)
 
-    # Align sequences and store common residues
+    # Align sequences and get matched residues
     trajectory_residues = []
     reference_residues = []
-    for i in range(len(trajectory_chain_indexes)):
-        sequences = {}
-        # Get corresponding chain ids
-        tci = trajectory_chain_indexes[i]
-        rci = reference_chain_indexes[i]
 
-        # Store sequences into a dictionary
-        sequences['target'] = getTopologySequence(trajectory.topology, tci)
-        sequences['reference'] = getTopologySequence(reference.topology, rci)
+    for tci, rci in zip(trajectory_chain_indexes, reference_chain_indexes):
+        sequences = {
+            'target': getTopologySequence(trajectory.topology, tci),
+            'reference': getTopologySequence(reference.topology, rci)
+        }
 
-        # Align sequences
         alignment = mafft.multipleSequenceAlignment(sequences, stdout=False, stderr=False)
 
-        # Get coincident positions in the alignment
-        positions = getCommonPositions(alignment[0].seq, alignment[1].seq,
-                                       mode=aligment_mode)
+        positions = getCommonPositions(alignment[0].seq, alignment[1].seq, mode=alignment_mode)
 
-        # Store common residues
         for p in positions:
             trajectory_residues.append(trajectory_indexes[tci][p[0]])
             reference_residues.append(reference_indexes[rci][p[1]])
 
-    # Store common alpha-carbon atoms
-    for p in zip(trajectory_residues, reference_residues):
-        trj_ca = trajectory.topology.residue(p[0])
-        ref_ca = trajectory.topology.residue(p[0])
+    # Get CA atom indices from matched residues
+    trajectory_atoms = [a.index for a in trajectory.topology.atoms
+                        if a.name == 'CA' and a.residue.index in trajectory_residues]
 
-    trajectory_atoms = [ a.index for a in trajectory.topology.atoms if a.name == 'CA'\
-                         and a.residue.index in trajectory_residues ]
-    reference_atoms = [ a.index for a in reference.topology.atoms if a.name == 'CA' \
-                        and a.residue.index in reference_residues ]
+    reference_atoms = [a.index for a in reference.topology.atoms
+                       if a.name == 'CA' and a.residue.index in reference_residues]
 
-    assert len(trajectory_atoms) == len(reference_atoms)
+    if len(trajectory_atoms) != len(reference_atoms):
+        raise ValueError("Mismatch in number of aligned alpha-carbon atoms.")
 
-    # Align trajectory
-    trajectory.superpose(reference, frame=reference_frame, atom_indices=trajectory_atoms,
-                         ref_atom_indices=reference_atoms)
+    # Superpose and compute RMSD
+    trajectory.superpose(reference, frame=reference_frame,
+                         atom_indices=trajectory_atoms, ref_atom_indices=reference_atoms)
 
-    rmsd = md.rmsd(trajectory, reference, atom_indices=trajectory_atoms, ref_atom_indices=reference_atoms)[0]*10.0
+    rmsd = md.rmsd(trajectory, reference,
+                   atom_indices=trajectory_atoms,
+                   ref_atom_indices=reference_atoms)[0] * 10.0  # Convert nm to Å
 
     return rmsd, len(trajectory_atoms)
 
