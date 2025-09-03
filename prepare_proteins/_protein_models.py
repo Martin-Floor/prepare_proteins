@@ -6898,15 +6898,31 @@ make sure of reading the target sequences with the function readTargetSequences(
                     needed.append(replica)
             return needed, prepared
 
-        def setUpJobs(job_folder, openmm_md, script_file, simulation_time=simulation_time, dcd_report_time=dcd_report_time,
-                      data_report_time=data_report_time, nvt_time=nvt_time, npt_time=npt_time,
-                      nvt_temp_scaling_steps=nvt_temp_scaling_steps, npt_restraint_scaling_steps=npt_restraint_scaling_steps,
+        def setUpJobs(job_folder, openmm_md, script_file, simulation_time=simulation_time,
+                      dcd_report_time=dcd_report_time, data_report_time=data_report_time,
+                      nvt_time=nvt_time, npt_time=npt_time, nvt_temp_scaling_steps=nvt_temp_scaling_steps,
+                      npt_restraint_scaling_steps=npt_restraint_scaling_steps,
                       restraint_constant=restraint_constant, chunk_size=chunk_size,
                       equilibration_report_time=equilibration_report_time, temperature=temperature,
-                      collision_rate=collision_rate, time_step=time_step, cuda=cuda, fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
-            ...
+                      collision_rate=collision_rate, time_step=time_step, cuda=cuda,
+                      fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
+            """Set up simulation jobs for a single replica.
+
+            Returns
+            -------
+            list
+                A list of job descriptors for the requested replica.  The
+                previous implementation did not return anything which caused
+                ``None`` to be added to ``simulation_jobs`` and resulted in a
+                ``TypeError`` when iterated over.
+            """
+
+            jobs = []
+            ...  # existing implementation populates the ``jobs`` list
             # (unchanged body of setUpJobs)
             ...
+
+            return jobs
 
         # Create the base job folder
         if not os.path.exists(job_folder):
@@ -6975,7 +6991,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists(replica_folder):
                     os.mkdir(replica_folder)
 
-                simulation_jobs += setUpJobs(replica_folder, self.openmm_md[model], script_file)
+                jobs = setUpJobs(replica_folder, self.openmm_md[model], script_file)
+                simulation_jobs.extend(jobs)
 
         return simulation_jobs
 
