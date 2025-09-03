@@ -2868,6 +2868,269 @@ make sure of reading the target sequences with the function readTargetSequences(
                 jobs.append(command)
 
         return jobs
+    
+    def setUprDockGrid(
+        self,
+        grid_folder,
+        center=(10,10,10),
+        mol2_input=True,
+        models=None,
+        exclude_models=None,
+    ):
+        """
+        Setup grid calculation for each model.
+
+        Parameters
+        ==========
+        grid_folder : str
+            Path to grid calculation folder
+        center_atoms : tuple
+            Atoms to center the grid box.
+        cst_positions : dict
+            atom and radius for cst position for each model:
+            cst_positions = {
+            model : ((chain_id, residue_index, atom_name), radius), ...
+            }
+        """
+
+        # Create grid job folders
+        if not os.path.exists(grid_folder):
+            os.mkdir(grid_folder)
+
+        if not os.path.exists(grid_folder + "/input_models"):
+            os.mkdir(grid_folder + "/input_models")
+
+        if not os.path.exists(grid_folder + "/output_models"):
+            os.mkdir(grid_folder + "/output_models")
+        
+        for model in self.models_names:
+            if not os.path.exists(grid_folder + "/output_models/" + model):
+                os.mkdir(grid_folder + "/output_models/"+model)
+        
+        if isinstance(models, str):
+            models = [models]
+
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+        
+        center_string = str(center)
+        strip_center = center_string.replace(" ", "")
+
+        # Save all input models
+        self.saveModels(grid_folder + "/input_models", convert_to_mol2=mol2_input, models=models)
+
+        # Create grid input files
+        jobs = []
+        for model in self.models_names:
+
+            if models and model not in models:
+                continue
+
+            if exclude_models and model in exclude_models:
+                continue
+            # Write grid input file
+            with open(grid_folder + "/output_models/"+model+"/" + model + ".prm", "w") as gif:
+                
+                gif.write("RBT_PARAMETER_FILE_V1.00 \n")
+                gif.write("TITLE rdock \n")
+                gif.write(" \n")
+                gif.write("RECEPTOR_FILE "+"../../input_models/"+model+".mol2 \n")
+                gif.write("RECEPTOR_FLEX 3.0 \n")
+                gif.write(" \n")
+                gif.write("##################################################################\n")
+                gif.write("### CAVITY DEFINITION:\n")
+                gif.write("##################################################################\n")
+                gif.write("SECTION MAPPER\n")
+                gif.write("    SITE_MAPPER RbtSphereSiteMapper\n")
+                gif.write("    CENTER "+strip_center+" \n")
+                gif.write("    RADIUS 10\n")
+                gif.write("    SMALL_SPHERE 1.0\n")
+                gif.write("    MIN_VOLUME 100\n")
+                gif.write("    MAX_CAVITIES 1\n")
+                gif.write("    VOL_INCR 0.0\n")
+                gif.write("    GRIDSTEP 0.5\n")
+                gif.write("END_SECTION\n")
+                gif.write("\n")
+                gif.write("#################################\n")
+                gif.write("#CAVITY RESTRAINT PENALTY\n")
+                gif.write("#################################\n")
+                gif.write("SECTION CAVITY\n")
+                gif.write("    SCORING_FUNCTION RbtCavityGridSF\n")
+                gif.write("    WEIGHT 1.0\n")
+                gif.write("END_SECTION\n")
+
+
+            command = 'module load rdock \n'    
+            command += "cd " + grid_folder + "/output_models/"+model+"\n"
+
+            # Add grid generation command
+
+            command += "rbcavity -was -d -r " + model + ".prm > " + model+".log \n"
+            command += "cd ../../.. \n"
+            jobs.append(command)
+
+        return jobs
+    
+    def setUprDockDocking(
+        self,
+        grid_folder,
+        ligand_folder,
+        n=100,
+        models=None,
+        exclude_models=None,
+    ):
+        """
+        Setup rdock calculation for each model.
+        First you need to run the grid calculation (setUprDockGrid)
+        You need to upload the folder where you have your ligands in .sd format to the place you want to run the docking
+
+        Parameters
+        ==========
+        grid_folder : str
+            Path to grid calculation folder
+        ligand_folder : str
+            Path to the ligand folder where ligands in .sd format are stored.
+        n : int
+            Number of poses to generate
+        """
+       
+        if isinstance(models, str):
+            models = [models]
+
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+        
+        #Get the ligand in the ligand folder
+        ### ADD to get only .sd 
+        folder_path = str(ligand_folder)  
+        ligand_files = [f for f in os.listdir(folder_path) if f.endswith(".sd")]
+
+        # Create grid input files
+        jobs = []
+        for model in self.models_names:
+            for ligand in ligand_files:
+
+                command = 'module load rdock \n'    
+                command += "cd " + grid_folder + "/output_models/"+model+"\n"
+
+                # Add docking command
+                command += "rbdock -i ../../../" + ligand_folder+"/"+ligand+ " -o "+ model + "_results.out -r " + model+".prm " + "-p dock.prm -n " + str(n) + " -allH \n"
+                command += "cd ../../.. \n"
+                jobs.append(command)
+
+        return jobs
+    
+    def analyseRdockDockings(self, docking_folder,protocol="score"):
+        """
+        Analyse rDock calculations. Only protocol "score" works for now
+        It generates a folder with all the .csv files
+        Parameters
+        ==========
+        docking_folder : str
+            Path to rdock calculation folder
+        protocol : str
+            Protocol to use
+        """
+
+        import csv
+        if protocol == 'dock':
+
+            # Folder path containing the files
+            folder_path = str(docking_folder)
+            storage_path = str(docking_folder)+"results"
+            # Create grid job folders
+            if not os.path.exists(storage_path):
+                os.mkdir(storage_path)
+            
+            data = []
+            for model in self.models_names:
+                
+                for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
+                    folder_path_model = docking_folder +"output_models/" + model 
+                    file_path = os.path.join(folder_path_model, filename)
+                    
+                    counter = 1
+                    score_bool = False
+                    conformer_bool = False
+
+                    # Open the file
+                    with open(file_path, 'r') as file:
+                        for line in file:
+                            if score_bool:
+                                score = line.split()[0]
+                            if conformer_bool:
+                                ligand, conformer = line.split('-')
+                                data.append(
+                                    [filename, counter, ligand, conformer, score])
+                            if '$$$$' in line:
+                                counter += 1
+                            if '>  <SCORE>' in line:
+                                score_bool = True
+                            else:
+                                score_bool = False
+                            if '>  <s_lp_Variant>' in line:
+                                conformer_bool = True
+                            else:
+                                conformer_bool = False
+                # Write the extracted data to a CSV file
+                output_file = '{}_rDock_data.csv'.format(model)
+                #print(storage_path, output_file)
+                with open(os.path.join(storage_path, output_file), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(['file_name', 'file_entry', 'ligand',
+                                 'conformer', 'rdock_score'])
+                    writer.writerows(data)
+
+                print(' - rDock data extraction completed.')
+                print(' - Data saved in {}'.format(os.path.join(storage_path, output_file)))
+
+        elif protocol == 'score':
+
+            # Folder path containing the files
+            folder_path = str(docking_folder)
+            storage_path = str(docking_folder)+"results"
+            # Create grid job folders
+            if not os.path.exists(storage_path):
+                os.mkdir(storage_path)
+            
+            
+            for model in self.models_names:
+                for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
+                    folder_path_model = docking_folder +"output_models/" + model 
+                    file_path = os.path.join(folder_path_model, filename)
+
+                    ligand = filename
+
+                    counter = 1
+                    score_bool = False
+                    conformer_bool = False
+
+                # Open the file
+                    data = []
+                    with open(file_path, 'r') as file:
+                        for line in file:
+                            if score_bool:
+                                score = line.split()[0]
+                                data.append(
+                                [filename, counter, ligand, score])
+                            if '$$$$' in line:
+                                counter += 1
+                            if '>  <SCORE>' in line:
+                                score_bool = True
+                            else:
+                                score_bool = False
+
+                # Write the extracted data to a CSV file
+                output_file = '{}_rDock_data.csv'.format(model)
+                with open(os.path.join(storage_path, output_file), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(
+                        ['file_name', 'file_entry', 'ligand', 'rdock_score'])
+                    writer.writerows(data)
+
+                print(' - rDock data extraction completed.')
+                print(' - Data saved in {}'.format(os.path.join(storage_path, output_file)))
+
 
     def setUpRosettaDocking(self, docking_folder, ligands_pdb_folder=None, ligands_sdf_folder=None,
                             param_files=None,
@@ -10667,12 +10930,129 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
+    def setUpBoltz2Calculation(
+        self,
+        job_folder,
+        diffusion_samples=1,
+        use_msa_server=True,
+        msa_path=None,
+        sampling_steps=200,
+        recycling_steps=3,
+        output_format="pdb",
+        use_potentials=False,
+        ligands=None,
+        binder=None
+    ):
+        """
+        Run Boltz2 structure prediction and afinity.
+
+        It can be use to predict ligand binding with multiple ligands.
+        Additionally, it can be used to predict ligand binding affinity, but for just 1 ligand
+        Ligand/s should be given in SMILEs format.
+        
+        To run in MN5 you need to precompute the MSA with AF3 or some other method!!!
+
+        Parameters:
+        - diffusion_samples: int. The number of diffusion samples to use for prediction.
+        - use_msa_server: Bool. Whether to use the MSA server for sampling, it auto-generate the MSA using the mmseqs2 server (not for MN5) because no internet.
+        - msa_path: str. Path to the folder with the .a3m files.  It should contain the pre-computed MSA for the proteins. You need to run AF3 first (or something else) to generate the MSA
+            The name of the .a3m files should be the name of the model. 
+            To run single sequence mode input "empty" for msa_path.
+            !!Not tested!!
+        - sampling_steps: int. The number of sampling steps to use for prediction. 
+        - recycling_steps: int. The number of recycling steps to use for prediction. 
+            AF3 uses by default 25 diffusion_samples and 10 recycling_steps. 
+        - use_potentials: bool. Whether to use the potentials for prediction. Set to True should improve performance, but uses more memmory.   
+        - ligands (list[str]): list of ligands SMILEs 
+        - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed 
+
+        Returns:
+        - jobs (list[str]): command string per batch per model
+        """
+
+        # Need to write yaml, and then need to write jobs 
+        os.makedirs(job_folder, exist_ok=True)
+        
+        for model in self.models_names:
+            if not os.path.exists(job_folder + "/" +model):
+                os.mkdir(job_folder+"/"+model)
+
+        for model, value in self.sequences.items():
+            chain = None
+            sequence = None
+
+            if isinstance(value, dict):
+        # Case with multiple chains
+                for chain_id, seq in value.items():
+                    if seq is not None:
+                        chain = chain_id
+                        sequence = seq
+                        break  # Stop at the first valid chain
+            elif isinstance(value, str):
+        # Case with single chain, no explicit chain ID
+                chain = 'A'  # Assume 'A' if not specified
+                sequence = value
+
+        # Write the YAML file
+            with open(job_folder+"/"+model +"/" + "boltz.yaml", "w") as iyf:
+                iyf.write('version: 1\n')
+                iyf.write('sequences:\n')
+                iyf.write('  - protein:\n')
+                iyf.write(f'      id: [{chain}]\n')
+                iyf.write(f'      sequence: {sequence}\n')
+                
+                if use_msa_server == False:
+                    iyf.write(f'      msa: {msa_path}+{model}.a3m\n')
+
+                if ligands != None:
+                    for i, ligand in enumerate(ligands):
+                        ligand_chain = chr(ord('B') + i)  # Assign chains starting from 'B'
+                        iyf.write('  - ligand:\n')
+                        iyf.write(f'      id: [{ligand_chain}]\n')
+                        iyf.write(f"      smiles: '{ligand}'\n")
+
+                if binder != None:
+                    iyf.write('properties:\n')
+                    iyf.write('    - affinity:\n')
+                    iyf.write(f'        binder: {binder}\n')
+
+
+        jobs = []
+        for model in self.models_names:
+            pdb_name = f"{model}.pdb"
+            pdb_path = job_folder+"/"+model
+
+            command = f"cd {pdb_path} \n"
+            command +=  "boltz predict boltz.yaml " 
+            
+            if use_msa_server == True:
+                command += "--use_msa_server "
+            else:
+                if msa_path is None:
+                    raise ValueError("msa_path must be provided if use_msa_server is False")
+            if use_potentials:
+                command += "--use_potentials "
+            if diffusion_samples:
+                command += f"--diffusion_samples {diffusion_samples} "
+            if recycling_steps:
+                command += f"--recycling_steps {recycling_steps} "
+            if sampling_steps:
+                command += f"--sampling_steps {sampling_steps} "
+            if output_format:
+                command += f"--output_format {output_format} "
+
+            jobs.append(command)
+
+        return jobs
+
+            
     def saveModels(
         self,
         output_folder,
         keep_residues={},
         models=None,
         convert_to_mae=False,
+        convert_to_mol2=False,
         write_conect_lines=True,
         replace_symbol=None,
         **keywords,
@@ -10691,6 +11071,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if convert_to_mae:
             _copyScriptFile(output_folder, "PDBtoMAE.py")
             script_name = "._PDBtoMAE.py"
+        if convert_to_mol2:
+            _copyScriptFile(output_folder, "PDBtoMOL2.py")
+            script_name = "._PDBtoMOL2.py"
 
         if replace_symbol:
             if not isinstance(replace_symbol, tuple) or len(replace_symbol) != 2:
@@ -10745,6 +11128,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         if convert_to_mae:
             command = "cd " + output_folder + "\n"
             command += "run ._PDBtoMAE.py\n"
+            command += "cd ../\n"
+            os.system(command)
+        if convert_to_mol2:
+            command = "cd " + output_folder + "\n"
+            command += "run ._PDBtoMOL2.py\n"
             command += "cd ../\n"
             os.system(command)
 
