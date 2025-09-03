@@ -500,15 +500,14 @@ def getCoordinates(pose, residues=None, bb_only=False, sc_only=False):
     return coordinates
 
 def _calculateBE(arguments):
-
-    tag, chain, silent_file, params = arguments
+    # Compute binding energies for ALL requested chains for this tag
+    tag, chains, silent_file, params = arguments
     pose = getPoseFromTag(tag, silent_file, params_dir=params)
 
     be = {}
     be['Model'], be['Pose'] = '_'.join(tag.split('_')[:-1]), tag.split('_')[-1]
-    interface_score = calculateInterfaceScore(pose, chain)
-    be['interface_score_'+chain] = interface_score
-
+    for chain in chains:
+        be['interface_score_' + chain] = calculateInterfaceScore(pose, chain)
     return be
 
 def _calculateDistances(arguments):
@@ -863,8 +862,8 @@ for model in silent_file:
 
         # Calculate binding energy
         if binding_energy and not file_exists['be']:
-            for chain in binding_energy_chains:
-                be_jobs.append([tag, chain, silent_file[model], params])
+            # one job per tag covering all chains
+            be_jobs.append([tag, binding_energy_chains, silent_file[model], params])
 
         # Calculate distances
         if atom_pairs != None and not file_exists['distances']:
