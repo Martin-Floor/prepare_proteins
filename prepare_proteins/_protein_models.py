@@ -6854,7 +6854,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
-                               extra_script_options=None, add_counterionsRand=False, skip_prepared=False,
+                               extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
                                only_models=None, skip_models=None):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
@@ -6862,7 +6862,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         Parameters:
         ...
-        - skip_prepared (bool, optional): If True, skip models where all required replicas already contain input files.
+        - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
+          but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
         - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
         - skip_models (list of str, optional): If provided, skip setup for these models.
         """
@@ -6908,19 +6909,78 @@ make sure of reading the target sequences with the function readTargetSequences(
                       fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
             """Set up simulation jobs for a single replica.
 
+            This prepares the replica folder with an `input_files/` directory containing
+            the required AMBER inputs (`.prmtop` and `.inpcrd`/`.rst7`) and returns a list
+            with the command to run the OpenMM simulation script.
+
             Returns
             -------
-            list
-                A list of job descriptors for the requested replica.  The
-                previous implementation did not return anything which caused
-                ``None`` to be added to ``simulation_jobs`` and resulted in a
-                ``TypeError`` when iterated over.
+            list[str]
+                Shell command(s) to run for this replica.
             """
 
-            jobs = []
-            ...  # existing implementation populates the ``jobs`` list
-            # (unchanged body of setUpJobs)
-            ...
+            import glob
+
+            jobs: list[str] = []
+
+            # Ensure replica folder and inputs folder exist
+            os.makedirs(job_folder, exist_ok=True)
+            input_dir = os.path.join(job_folder, 'input_files')
+            os.makedirs(input_dir, exist_ok=True)
+
+            # Try to locate or copy input files
+            prmtop_path = None
+            inpcrd_path = None
+
+            # 1) Prefer inputs generated on this run (if present on the object)
+            prmtop_src = getattr(openmm_md, 'prmtop_file', None)
+            inpcrd_src = getattr(openmm_md, 'inpcrd_file', None)
+            if prmtop_src and os.path.exists(prmtop_src):
+                dst = os.path.join(input_dir, os.path.basename(prmtop_src))
+                if not os.path.exists(dst):
+                    shutil.copyfile(prmtop_src, dst)
+                prmtop_path = dst
+            if inpcrd_src and os.path.exists(inpcrd_src):
+                dst = os.path.join(input_dir, os.path.basename(inpcrd_src))
+                if not os.path.exists(dst):
+                    shutil.copyfile(inpcrd_src, dst)
+                inpcrd_path = dst
+
+            # 2) Otherwise, try to find any existing inputs in the replica folder
+            if prmtop_path is None:
+                hits = glob.glob(os.path.join(input_dir, '*.prmtop'))
+                if hits:
+                    prmtop_path = hits[0]
+            if inpcrd_path is None:
+                hits = glob.glob(os.path.join(input_dir, '*.inpcrd')) or glob.glob(os.path.join(input_dir, '*.rst7'))
+                if hits:
+                    inpcrd_path = hits[0]
+
+            # Build the command regardless; execution-time checks will fail fast if inputs are missing
+            cmd = []
+            cmd.append(f"cd {job_folder}")
+            cmd.append(
+                "python "
+                + f"{script_file} "
+                + f"{prmtop_path if prmtop_path else 'input_files/input.prmtop'} "
+                + f"{inpcrd_path if inpcrd_path else 'input_files/input.inpcrd'} "
+                + f"{simulation_time} "
+                + f"--chunk_size {chunk_size} "
+                + f"--temperature {temperature} "
+                + f"--collision_rate {collision_rate} "
+                + f"--time_step {time_step} "
+                + f"--dcd_report_time {dcd_report_time} "
+                + f"--data_report_time {data_report_time} "
+                + f"--nvt_time {nvt_time} "
+                + f"--npt_time {npt_time} "
+                + f"--nvt_temp_scaling_steps {nvt_temp_scaling_steps} "
+                + f"--npt_restraint_scaling_steps {npt_restraint_scaling_steps} "
+                + f"--restraint_constant {restraint_constant} "
+                + f"--equilibration_report_time {equilibration_report_time}"
+            )
+            if fixed_seed is not None:
+                cmd[-1] += f" --seed {int(fixed_seed)}"
+            jobs.append("\n".join(cmd))
 
             return jobs
 
@@ -6956,18 +7016,18 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             needed_replicas, prepared_replicas = _replicas_needed(model_folder, replicas, skip_replicas)
 
-            if skip_prepared and len(needed_replicas) == 0:
-                continue
-
+            # Set up OpenMM object. Keep lightweight setup even when skipping preparation
             self.openmm_md[model] = prepare_proteins.MD.openmm_md(self.models_paths[model])
-            self.openmm_md[model].setUpFF(ff)
+            if not skip_preparation:
+                self.openmm_md[model].setUpFF(ff)
 
-            if add_hydrogens:
-                variants = self.openmm_md[model].getProtonationStates()
-                self.openmm_md[model].removeHydrogens()
-                self.openmm_md[model].addHydrogens(variants=variants)
+                if add_hydrogens:
+                    variants = self.openmm_md[model].getProtonationStates()
+                    self.openmm_md[model].removeHydrogens()
+                    self.openmm_md[model].addHydrogens(variants=variants)
 
-            if len(needed_replicas) > 0:
+            # Only generate parameters when preparation is not skipped and replicas need inputs
+            if (not skip_preparation) and (len(needed_replicas) > 0):
                 _ = self.openmm_md[model].parameterizePDBLigands(
                     ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
                     add_bonds=add_bonds.get(model) if add_bonds else None,
@@ -6982,8 +7042,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             zfill = max(len(str(replicas)), 2)
             for replica in range(1, replicas + 1):
                 if skip_replicas and replica in skip_replicas:
-                    continue
-                if skip_prepared and replica in prepared_replicas:
                     continue
 
                 replica_str = str(replica).zfill(zfill)
