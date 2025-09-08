@@ -6984,8 +6984,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 + f"--restraint_constant {restraint_constant} "
                 + f"--equilibration_report_time {equilibration_report_time}"
             )
-            if fixed_seed is not None:
-                cmd[-1] += f" --seed {int(fixed_seed)}"
+            # Always provide a seed for the simulation. Use the given fixed seed
+            # when supplied; otherwise generate a random one so the OpenMM
+            # script, which requires the flag, always receives a value.
+            seed = int(fixed_seed) if fixed_seed is not None else int(np.random.randint(0, 2**31 - 1))
+            cmd[-1] += f" --seed {seed}"
             jobs.append("\n".join(cmd))
 
             return jobs
