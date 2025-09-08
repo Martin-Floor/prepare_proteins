@@ -6959,9 +6959,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Build the command regardless; execution-time checks will fail fast if inputs are missing
             cmd = []
             cmd.append(f"cd {job_folder}")
+
+            # Use a path to the script relative to the replica folder so the
+            # simulation script can be located regardless of the submission
+            # working directory.
+            rel_script = os.path.relpath(script_file, job_folder)
+
             cmd.append(
                 "python "
-                + f"{script_file} "
+                + f"{rel_script} "
                 + f"{prmtop_path if prmtop_path else 'input_files/input.prmtop'} "
                 + f"{inpcrd_path if inpcrd_path else 'input_files/input.inpcrd'} "
                 + f"{simulation_time} "
