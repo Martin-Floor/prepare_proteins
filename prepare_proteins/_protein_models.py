@@ -161,7 +161,7 @@ class proteinModels:
         self.distance_data = {}
         self.models_data = {}
 
-        # Read PDB structures into Biopython
+        # Read PDB structures into Biopython (serial loading)
         collect_memory = False
         for i, model in enumerate(sorted(self.models_paths)):
 
@@ -594,17 +594,22 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == "WAT":
                     residue.resname = "HOH"
 
-        if model not in self.conects or self.conects[model] == [] and conect_update:
-            # Read conect lines
-            self.conects[model] = self._readPDBConectLines(pdb_file, model, only_hetatoms=only_hetatoms)
+        # Read conect lines (avoid double read if covalent_check may rewrite PDB)
+        if conect_update and not covalent_check:
+            if model not in self.conects or self.conects[model] == []:
+                self.conects[model] = self._readPDBConectLines(
+                    pdb_file, model, only_hetatoms=only_hetatoms
+                )
 
         # Check covalent ligands
         if covalent_check:
             self._checkCovalentLigands(model, pdb_file, atom_mapping=atom_mapping)
 
-        # Update conect lines
+        # Update conect lines once after potential covalent sorting
         if conect_update:
-            self.conects[model] = self._readPDBConectLines(pdb_file, model, only_hetatoms=only_hetatoms)
+            self.conects[model] = self._readPDBConectLines(
+                pdb_file, model, only_hetatoms=only_hetatoms
+            )
 
         if add_to_path:
             self.models_paths[model] = pdb_file
@@ -6855,6 +6860,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
                                extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
+                               ligand_parameters_source=None,
                                only_models=None, skip_models=None):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
@@ -6864,11 +6870,16 @@ make sure of reading the target sequences with the function readTargetSequences(
         ...
         - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
           but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
+        - ligand_parameters_source (str, optional): Path to a folder containing per-ligand parameter packs named
+          like `<RESNAME>_parameters` (e.g., `NAD_parameters`). You can pass either the folder that directly
+          contains these packs, or a parent folder with a `parameters/` subfolder. Only ligands present in the
+          system are considered; for those found, the full pack is copied into the job `parameters/` and
+          parameterization for that ligand is skipped via `metal_parameters`.
         - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
         - skip_models (list of str, optional): If provided, skip setup for these models.
         """
 
-        import os, shutil, glob
+        import os, shutil
 
         # Normalize model filters
         if isinstance(only_models, str):
@@ -6919,8 +6930,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 Shell command(s) to run for this replica.
             """
 
-            import glob
-
             jobs: list[str] = []
 
             # Ensure replica folder and inputs folder exist
@@ -6928,33 +6937,25 @@ make sure of reading the target sequences with the function readTargetSequences(
             input_dir = os.path.join(job_folder, 'input_files')
             os.makedirs(input_dir, exist_ok=True)
 
-            # Try to locate or copy input files
-            prmtop_path = None
-            inpcrd_path = None
-
-            # 1) Prefer inputs generated on this run (if present on the object)
+            # Base filename for input files (model basename + extension)
+            base_name = getattr(openmm_md, 'pdb_name', 'input')
             prmtop_src = getattr(openmm_md, 'prmtop_file', None)
             inpcrd_src = getattr(openmm_md, 'inpcrd_file', None)
-            if prmtop_src and os.path.exists(prmtop_src):
-                dst = os.path.join(input_dir, os.path.basename(prmtop_src))
-                if not os.path.exists(dst):
-                    shutil.copyfile(prmtop_src, dst)
-                prmtop_path = dst
-            if inpcrd_src and os.path.exists(inpcrd_src):
-                dst = os.path.join(input_dir, os.path.basename(inpcrd_src))
-                if not os.path.exists(dst):
-                    shutil.copyfile(inpcrd_src, dst)
-                inpcrd_path = dst
 
-            # 2) Otherwise, try to find any existing inputs in the replica folder
-            if prmtop_path is None:
-                hits = glob.glob(os.path.join(input_dir, '*.prmtop'))
-                if hits:
-                    prmtop_path = hits[0]
-            if inpcrd_path is None:
-                hits = glob.glob(os.path.join(input_dir, '*.inpcrd')) or glob.glob(os.path.join(input_dir, '*.rst7'))
-                if hits:
-                    inpcrd_path = hits[0]
+            prmtop_ext = os.path.splitext(prmtop_src)[1] if prmtop_src else '.prmtop'
+            inpcrd_ext = os.path.splitext(inpcrd_src)[1] if inpcrd_src else '.inpcrd'
+
+            prmtop_name = f"{base_name}{prmtop_ext}"
+            inpcrd_name = f"{base_name}{inpcrd_ext}"
+
+            prmtop_path = os.path.join(input_dir, prmtop_name)
+            inpcrd_path = os.path.join(input_dir, inpcrd_name)
+
+            # Copy source files into input directory using the model's basename
+            if prmtop_src and os.path.exists(prmtop_src) and not os.path.exists(prmtop_path):
+                shutil.copyfile(prmtop_src, prmtop_path)
+            if inpcrd_src and os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_path):
+                shutil.copyfile(inpcrd_src, inpcrd_path)
 
             # Build the command regardless; execution-time checks will fail fast if inputs are missing
             cmd = []
@@ -6968,8 +6969,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             cmd.append(
                 "python "
                 + f"{rel_script} "
-                + f"{prmtop_path if prmtop_path else 'input_files/input.prmtop'} "
-                + f"{inpcrd_path if inpcrd_path else 'input_files/input.inpcrd'} "
+                + f"{os.path.join('input_files', prmtop_name)} "
+                + f"{os.path.join('input_files', inpcrd_name)} "
                 + f"{simulation_time} "
                 + f"--chunk_size {chunk_size} "
                 + f"--temperature {temperature} "
@@ -7003,6 +7004,35 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(ligand_parameters_folder):
             os.mkdir(ligand_parameters_folder)
 
+        if ligand_parameters_source is not None and not os.path.exists(ligand_parameters_source):
+            raise ValueError(f"ligand_parameters_source not found: {ligand_parameters_source}")
+
+        # Resolve the actual source directory that contains `<RES>_parameters` packs.
+        def _resolve_ligand_pack_root(path):
+            if path is None:
+                return None
+            # Prefer a direct folder with *_parameters entries
+            try:
+                entries = os.listdir(path)
+            except Exception:
+                return None
+            has_packs = any(name.endswith('_parameters') and os.path.isdir(os.path.join(path, name)) for name in entries)
+            if has_packs:
+                return path
+            # Otherwise, look for a common `parameters/` subfolder
+            sub = os.path.join(path, 'parameters')
+            if os.path.isdir(sub):
+                try:
+                    sub_entries = os.listdir(sub)
+                except Exception:
+                    return None
+                has_packs = any(name.endswith('_parameters') and os.path.isdir(os.path.join(sub, name)) for name in sub_entries)
+                if has_packs:
+                    return sub
+            return None
+
+        resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source)
+
         script_folder = os.path.join(job_folder, 'scripts')
         if not os.path.exists(script_folder):
             os.mkdir(script_folder)
@@ -7035,12 +7065,49 @@ make sure of reading the target sequences with the function readTargetSequences(
                     self.openmm_md[model].removeHydrogens()
                     self.openmm_md[model].addHydrogens(variants=variants)
 
+            # Try to reuse already prepared system inputs if available, avoiding recomputation.
+            base_name = getattr(self.openmm_md[model], 'pdb_name', 'input')
+            # 1) Prefer system-level parameters in the job parameters folder
+            job_prmtop = os.path.join(ligand_parameters_folder, f"{base_name}.prmtop")
+            job_inpcrd = None
+            for ext in ('.inpcrd', '.rst7'):
+                candidate = os.path.join(ligand_parameters_folder, f"{base_name}{ext}")
+                if os.path.exists(candidate):
+                    job_inpcrd = candidate
+                    break
+            if os.path.exists(job_prmtop) and job_inpcrd:
+                self.openmm_md[model].prmtop_file = job_prmtop
+                self.openmm_md[model].inpcrd_file = job_inpcrd
+
+            # 2) Otherwise, if some replicas are already prepared, point to their inputs
+            if not getattr(self.openmm_md[model], 'prmtop_file', None) or not getattr(self.openmm_md[model], 'inpcrd_file', None):
+                if prepared_replicas:
+                    zfill_pre = max(len(str(replicas)), 2)
+                    first_prepared = prepared_replicas[0]
+                    rep_name = f"replica_{str(first_prepared).zfill(zfill_pre)}"
+                    rep_input = os.path.join(model_folder, rep_name, 'input_files')
+                    if os.path.isdir(rep_input):
+                        prmtops = [f for f in os.listdir(rep_input) if f.endswith('.prmtop')]
+                        inpcrds = [f for f in os.listdir(rep_input) if f.endswith('.inpcrd') or f.endswith('.rst7')]
+                        if prmtops and inpcrds:
+                            self.openmm_md[model].prmtop_file = os.path.join(rep_input, prmtops[0])
+                            self.openmm_md[model].inpcrd_file = os.path.join(rep_input, inpcrds[0])
+
             # Only generate parameters when preparation is not skipped and replicas need inputs
-            if (not skip_preparation) and (len(needed_replicas) > 0):
+            # and no reusable inputs were found from parameters/ or an existing replica.
+            has_prmtop = bool(getattr(self.openmm_md[model], 'prmtop_file', None))
+            has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
+            if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
+                # Use external ligand parameter packs if provided (either `metal_parameters`
+                # or a resolved `ligand_parameters_source`). `parameterizePDBLigands` will
+                # detect `<RES>_parameters` subfolders from `metal_parameters` and skip any
+                # re-parameterization for those residues, only copying the packs for ligands
+                # actually present in the system.
+                external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
                 _ = self.openmm_md[model].parameterizePDBLigands(
                     ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
                     add_bonds=add_bonds.get(model) if add_bonds else None,
-                    skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
+                    skip_ligands=skip_ligands, overwrite=False, metal_parameters=external_params,
                     extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
                     extra_force_field=extra_force_field,
                     force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,
@@ -11762,9 +11829,14 @@ def _readPDB(name, pdb_file):
     """
     Read PDB file to a structure object
     """
-    parser = PDB.PDBParser()
+    parser = PDB.PDBParser(QUIET=True)
     structure = parser.get_structure(name, pdb_file)
     return structure
+
+
+# Note: parallel loading was explored but removed as it did not
+# provide speedups in practice for typical workloads and added
+# complexity. Serial loading plus reduced I/O proved more robust.
 
 def _saveStructureToPDB(
     structure,
@@ -11838,6 +11910,121 @@ def _copyScriptFile(
     with open(output_path, "w") as sof:
         for l in script_file:
             sof.write(l)
+
+
+def make_model_path_batches(
+    models,
+    batch_size=None,
+    n_batches=None,
+    only_models=None,
+    exclude_models=None,
+    shuffle=False,
+    seed=None,
+):
+    """
+    Create batches of model paths without loading structures.
+
+    Parameters
+    ==========
+    models : str | dict | list
+        - str: folder containing PDB files
+        - dict: mapping {model_name: pdb_path}
+        - list/tuple: list of PDB file paths
+    batch_size : int, optional
+        Number of models per batch. If None, `n_batches` must be provided.
+    n_batches : int, optional
+        Number of batches to split into. Ignored if `batch_size` is provided.
+    only_models : list|tuple|set|str, optional
+        Subset of model names to include.
+    exclude_models : list|tuple|set|str, optional
+        Subset of model names to exclude.
+    shuffle : bool, default False
+        Randomize model order before batching.
+    seed : int, optional
+        Random seed when `shuffle=True`.
+
+    Returns
+    =======
+    dict
+        Mapping of batch_index -> {model_name: pdb_path}
+    """
+
+    # Collect paths {name: path}
+    if isinstance(models, str):
+        if not os.path.isdir(models):
+            raise ValueError("models path must be a directory when a string is provided")
+        paths = {}
+        for d in os.listdir(models):
+            if d.endswith(".pdb"):
+                name = ".".join(d.split(".")[:-1])
+                paths[name] = os.path.join(models, d)
+    elif isinstance(models, dict):
+        paths = dict(models)
+    elif isinstance(models, (list, tuple)):
+        paths = {}
+        for p in models:
+            if not isinstance(p, str) or not p.endswith(".pdb"):
+                raise ValueError("All items in models list must be PDB file paths")
+            name = os.path.basename(p)
+            name = ".".join(name.split(".")[:-1])
+            paths[name] = p
+    else:
+        raise ValueError("models must be a folder path, dict, or list of PDB paths")
+
+    # Filters
+    if only_models is None:
+        only_models = []
+    elif isinstance(only_models, str):
+        only_models = [only_models]
+
+    if exclude_models is None:
+        exclude_models = []
+    elif isinstance(exclude_models, str):
+        exclude_models = [exclude_models]
+
+    names = list(paths.keys())
+
+    # Apply include/exclude
+    if only_models:
+        names = [n for n in names if n in set(only_models)]
+    if exclude_models:
+        names = [n for n in names if n not in set(exclude_models)]
+
+    # Order or shuffle
+    if shuffle:
+        import random
+
+        rng = random.Random(seed)
+        rng.shuffle(names)
+    else:
+        names = sorted(names)
+
+    total = len(names)
+    if total == 0:
+        return {}
+
+    # Determine batching
+    if batch_size is not None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        n_batches_calc = (total + batch_size - 1) // batch_size
+    else:
+        if not n_batches or n_batches <= 0:
+            raise ValueError("Provide batch_size or a positive n_batches")
+        n_batches_calc = n_batches
+        batch_size = (total + n_batches_calc - 1) // n_batches_calc
+
+    # Build batches
+    batches = {}
+    for i in range(n_batches_calc):
+        start = i * batch_size
+        end = min(start + batch_size, total)
+        if start >= end:
+            break
+        batch_names = names[start:end]
+        batches[i] = {n: paths[n] for n in batch_names}
+
+    return batches
 
 def _computeCartesianFromInternal(coord2, coord3, coord4, distance, angle, torsion):
     """
