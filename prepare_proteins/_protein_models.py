@@ -1170,6 +1170,83 @@ chain to use for each model with the chains option."
 
         self.getModelsSequences()
 
+    def trimByRanges(self, ranges, renumber=False, verbose=True):
+        """
+        Trim models strictly by provided residue ID ranges.
+
+        Parameters
+        ==========
+        ranges : dict
+            Mapping of model name -> list of (start, end) tuples specifying
+            inclusive residue ID ranges to KEEP. Residue IDs are the PDB
+            numbering (r.id[1]) and are typically one-based. A single
+            (start, end) tuple is also accepted instead of a list.
+        renumber : bool
+            If True, renumber residues in each chain sequentially starting at 1
+            after trimming.
+        verbose : bool
+            If True, print basic warnings/info.
+        """
+
+        if not isinstance(ranges, dict):
+            raise ValueError("ranges must be a dict: {model: [(start, end), ...]}")
+
+        for model in list(self.models_names):
+            if model not in ranges:
+                if verbose:
+                    print(f"trimByRanges: skipping model '{model}' (no ranges provided)")
+                continue
+
+            model_ranges = ranges[model]
+            # Accept a single tuple as shorthand
+            if isinstance(model_ranges, tuple) and len(model_ranges) == 2:
+                model_ranges = [model_ranges]
+
+            if not isinstance(model_ranges, (list, tuple)) or not all(
+                isinstance(x, (list, tuple)) and len(x) == 2 for x in model_ranges
+            ):
+                raise ValueError(
+                    f"ranges['{model}'] must be a list of (start, end) tuples or a single tuple"
+                )
+
+            # Normalize and sanity-check intervals (inclusive)
+            keep_intervals = []
+            for start, end in model_ranges:
+                try:
+                    s = int(start)
+                    e = int(end)
+                except Exception:
+                    raise ValueError(
+                        f"ranges['{model}'] contains non-integer bounds: {(start, end)}"
+                    )
+                if s > e:
+                    s, e = e, s
+                keep_intervals.append((s, e))
+
+            # Perform trimming
+            for c in self.structures[model].get_chains():
+                to_remove = []
+                for r in c.get_residues():
+                    resid = r.id[1]
+                    # Keep if resid within any interval
+                    keep = False
+                    for s, e in keep_intervals:
+                        if s <= resid <= e:
+                            keep = True
+                            break
+                    if not keep:
+                        to_remove.append(r)
+
+                for r in to_remove:
+                    c.detach_child(r.id)
+
+                if renumber:
+                    for i, r in enumerate(c):
+                        r.id = (r.id[0], i + 1, r.id[2])
+
+        # Update sequences after modifications
+        self.getModelsSequences()
+
     def alignModelsToReferencePDB(
         self,
         reference,
