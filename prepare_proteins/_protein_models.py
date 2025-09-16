@@ -32,6 +32,26 @@ import prepare_proteins
 from . import MD, _atom_selectors, alignment, rosettaScripts
 
 
+try:
+    _BIOPYTHON_THREE_TO_ONE = PDB.Polypeptide.three_to_one
+
+    def _three_to_one(resname):
+        return _BIOPYTHON_THREE_TO_ONE(resname)
+
+except AttributeError:
+    from Bio.Data.PDBData import protein_letters_3to1_extended as _protein_letters_3to1_extended
+
+    def _three_to_one(resname):
+        """Biopython>=1.83 compatibility: map three-letter codes to one letter."""
+        key = f"{resname}".strip().upper()
+        if not key:
+            raise KeyError(resname)
+        key = f"{key:<3s}"[:3]
+        if key in _protein_letters_3to1_extended:
+            return _protein_letters_3to1_extended[key]
+        raise KeyError(resname)
+
+
 class proteinModels:
     """
     Attributes
@@ -11614,7 +11634,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if not filter:  # Non heteroatom filter
                 try:
-                    sequence += PDB.Polypeptide.three_to_one(resname)
+                    sequence += _three_to_one(resname)
                 except:
                     sequence += "X"
 
@@ -12307,14 +12327,14 @@ def _getAlignedResiduesBasedOnStructuralAlignment(
     # Get sequences
     r_sequence = "".join(
         [
-            PDB.Polypeptide.three_to_one(r.resname)
+            _three_to_one(r.resname)
             for r in ref_struct.get_residues()
             if r.id[0] == " "
         ]
     )
     t_sequence = "".join(
         [
-            PDB.Polypeptide.three_to_one(r.resname)
+            _three_to_one(r.resname)
             for r in target_struct.get_residues()
             if r.id[0] == " "
         ]
