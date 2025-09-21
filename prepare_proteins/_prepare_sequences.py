@@ -1,43 +1,58 @@
-from . import alignment
-import os
-import shutil
 import bz2
+import io
+import json
+import math
+import os
 import pickle
-import pandas as pd
+import re
+import shutil
+import subprocess
+from collections import defaultdict
+from datetime import date
+
+import ipywidgets as widgets
+import matplotlib.pyplot as plt
 import mdtraj as md
 import numpy as np
-import json
-import subprocess
-import io
-from pkg_resources import Requirement, resource_listdir, resource_stream
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
-from scipy.optimize import curve_fit
+import pandas as pd
 import seaborn as sns
-from tqdm import tqdm
-import ipywidgets as widgets
+from Bio.PDB import PDBIO, MMCIFParser
 from ipywidgets import interact
-from collections import defaultdict
-import re
-import math
-from datetime import date
-from Bio.PDB import MMCIFParser, PDBIO
+from matplotlib.lines import Line2D
+from pkg_resources import Requirement, resource_listdir, resource_stream
+from scipy.optimize import curve_fit
+from tqdm import tqdm
+
+from . import alignment
+
 
 class sequenceModels:
 
     def __init__(self, sequences_fasta):
 
         if isinstance(sequences_fasta, str):
-            self.sequences = alignment.readFastaFile(sequences_fasta, replace_slash=True)
+            self.sequences = alignment.readFastaFile(
+                sequences_fasta, replace_slash=True
+            )
         elif isinstance(sequences_fasta, dict):
             self.sequences = sequences_fasta
         else:
-            raise ValueError('sequences_fasta must be a string or a dictionary containing the sequences!')
+            raise ValueError(
+                "sequences_fasta must be a string or a dictionary containing the sequences!"
+            )
 
         self.sequences_names = list(self.sequences.keys())
 
-    def setUpAlphaFold(self, job_folder, model_preset='monomer_ptm', exclude_finished=True,
-                       remove_extras=False, remove_msas=False, only_models=None, gpu_relax=True):
+    def setUpAlphaFold(
+        self,
+        job_folder,
+        model_preset="monomer_ptm",
+        exclude_finished=True,
+        remove_extras=False,
+        remove_msas=False,
+        only_models=None,
+        gpu_relax=True,
+    ):
         """
         Set up AlphaFold predictions for the loaded sequneces
         """
@@ -49,23 +64,23 @@ class sequenceModels:
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        if not os.path.exists(job_folder+'/input_sequences'):
-            os.mkdir(job_folder+'/input_sequences')
+        if not os.path.exists(job_folder + "/input_sequences"):
+            os.mkdir(job_folder + "/input_sequences")
 
-        if not os.path.exists(job_folder+'/output_models'):
-            os.mkdir(job_folder+'/output_models')
+        if not os.path.exists(job_folder + "/output_models"):
+            os.mkdir(job_folder + "/output_models")
 
         # Check for finished models
         excluded = []
         if exclude_finished:
-            for model in os.listdir(job_folder+'/output_models'):
+            for model in os.listdir(job_folder + "/output_models"):
 
                 if not isinstance(only_models, type(None)):
                     if model not in only_models:
                         continue
 
-                for f in os.listdir(job_folder+'/output_models/'+model):
-                    if f == 'ranked_0.pdb' or f == 'ranked__0.pdb.bz2':
+                for f in os.listdir(job_folder + "/output_models/" + model):
+                    if f == "ranked_0.pdb" or f == "ranked__0.pdb.bz2":
                         excluded.append(model)
 
         jobs = []
@@ -80,33 +95,38 @@ class sequenceModels:
 
             sequence = {}
             sequence[model] = self.sequences[model]
-            alignment.writeFastaFile(sequence, job_folder+'/input_sequences/'+model+'.fasta')
-            command = 'cd '+job_folder+'\n'
-            command += 'Path=$(pwd)\n'
-            command += 'bsc_alphafold --fasta_paths $Path/input_sequences/'+model+'.fasta'
-            command += ' --output_dir=$Path/output_models'
-            command += ' --model_preset='+model_preset
-            command += ' --max_template_date=2022-01-01'
+            alignment.writeFastaFile(
+                sequence, job_folder + "/input_sequences/" + model + ".fasta"
+            )
+            command = "cd " + job_folder + "\n"
+            command += "Path=$(pwd)\n"
+            command += (
+                "bsc_alphafold --fasta_paths $Path/input_sequences/" + model + ".fasta"
+            )
+            command += " --output_dir=$Path/output_models"
+            command += " --model_preset=" + model_preset
+            command += " --max_template_date=2022-01-01"
             if gpu_relax:
-                command += ' --use_gpu_relax=True'
+                command += " --use_gpu_relax=True"
             else:
-                command += ' --use_gpu_relax=False'
-            command += ' --random_seed 1\n'
+                command += " --use_gpu_relax=False"
+            command += " --random_seed 1\n"
             if remove_extras:
-                command += f'rm -r $Path/output_models/{model}/msas\n'
-                command += f'rm -r $Path/output_models/{model}/*.pkl\n'
+                command += f"rm -r $Path/output_models/{model}/msas\n"
+                command += f"rm -r $Path/output_models/{model}/*.pkl\n"
 
             if remove_msas:
-                command += f'rm -r $Path/output_models/{model}/msas\n'
+                command += f"rm -r $Path/output_models/{model}/msas\n"
 
             depth = len(os.path.normpath(job_folder).split(os.sep))
-            command += 'cd '+'../'*depth+'\n'
+            command += "cd " + "../" * depth + "\n"
             jobs.append(command)
 
         return jobs
 
-    def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='',
-                                           return_missing=False, copy_all=False):
+    def copyModelsFromAlphaFoldCalculation(
+        self, af_folder, output_folder, prefix="", return_missing=False, copy_all=False
+    ):
         """
         Copy models from an AlphaFold calculation to an specfied output folder.
 
@@ -122,13 +142,13 @@ class sequenceModels:
 
         # Get paths to models in alphafold folder
         models_paths = {}
-        for d in os.listdir(af_folder+'/output_models'):
-            mdir = af_folder+'/output_models/'+d
+        for d in os.listdir(af_folder + "/output_models"):
+            mdir = af_folder + "/output_models/" + d
             for f in os.listdir(mdir):
-                if f.startswith('relaxed_model_1_ptm'):
-                    models_paths[d] = mdir+'/'+f
-                elif f.startswith('ranked_0'):
-                    models_paths[d] = mdir+'/'+f
+                if f.startswith("relaxed_model_1_ptm"):
+                    models_paths[d] = mdir + "/" + f
+                elif f.startswith("ranked_0"):
+                    models_paths[d] = mdir + "/" + f
 
         # Create output folder
         if not os.path.exists(output_folder):
@@ -146,14 +166,19 @@ class sequenceModels:
                     af_models.append(m)
                 elif return_missing:
                     missing.append(m)
-                    print('Alphafold model for sequence %s was not found in folder %s' % (m, af_folder))
+                    print(
+                        "Alphafold model for sequence %s was not found in folder %s"
+                        % (m, af_folder)
+                    )
 
         for m in af_models:
-            if models_paths[m].endswith('.pdb'):
-                shutil.copyfile(models_paths[m], output_folder+'/'+prefix+m+'.pdb')
-            elif models_paths[m].endswith('.bz2'):
-                file = bz2.BZ2File(models_paths[m], 'rb')
-                pdbfile = open(output_folder+'/'+prefix+m+'.pdb', 'wb')
+            if models_paths[m].endswith(".pdb"):
+                shutil.copyfile(
+                    models_paths[m], output_folder + "/" + prefix + m + ".pdb"
+                )
+            elif models_paths[m].endswith(".bz2"):
+                file = bz2.BZ2File(models_paths[m], "rb")
+                pdbfile = open(output_folder + "/" + prefix + m + ".pdb", "wb")
                 shutil.copyfileobj(file, pdbfile)
 
         if return_missing:
@@ -176,60 +201,76 @@ class sequenceModels:
             if isinstance(only_indexes, int):
                 only_indexes = [only_indexes]
             if not isinstance(only_indexes, list):
-                raise ValueError('only_indexes must be a list or a integer!')
+                raise ValueError("only_indexes must be a list or a integer!")
 
         af_data = {}
-        af_data['Model'] = []
-        af_data['Index'] = []
-        af_data['ptm'] = []
+        af_data["Model"] = []
+        af_data["Index"] = []
+        af_data["ptm"] = []
 
-        for f in sorted(os.listdir(af_folder+'/output_models')):
+        for f in sorted(os.listdir(af_folder + "/output_models")):
             model = f
-            model_folder = af_folder+'/output_models/'+f
+            model_folder = af_folder + "/output_models/" + f
             if not os.path.isdir(model_folder):
                 continue
 
             for g in sorted(os.listdir(model_folder)):
-                if not g.endswith('.pkl') or not g.startswith('result_model'):
+                if not g.endswith(".pkl") or not g.startswith("result_model"):
                     continue
 
-                index = int(g.split('_')[2])
+                index = int(g.split("_")[2])
 
                 if only_indexes and index not in only_indexes:
                     continue
 
-                with open(model_folder+'/'+g, "rb") as pkl:
+                with open(model_folder + "/" + g, "rb") as pkl:
                     pkl_object = pickle.load(pkl)
 
-                af_data['Model'].append(model)
-                af_data['Index'].append(index)
-                af_data['ptm'].append(pkl_object['ptm'])
+                af_data["Model"].append(model)
+                af_data["Index"].append(index)
+                af_data["ptm"].append(pkl_object["ptm"])
 
-        af_data = pd.DataFrame(af_data).set_index(['Model', 'Index'])
+        af_data = pd.DataFrame(af_data).set_index(["Model", "Index"])
 
         return af_data
 
     def generateAlphaFoldServerJSONFiles(
-            self,
-            json_path,
-            max_jobs_per_file=100,
-            only_models=None,
-            exclude_models=None,
-            num_chains=None,
-            use_templates=False,
-            max_template_date=None,
-            ligands=None,
-            ions=None  # <-- New argument
-        ):
+        self,
+        json_path,
+        max_jobs_per_file=100,
+        only_models=None,
+        exclude_models=None,
+        num_chains=None,
+        use_templates=False,
+        max_template_date=None,
+        ligands=None,
+        ions=None,  # <-- New argument
+    ):
         """
         Generate JSON batch files for alphafoldserver.com, including optional ligands and ions.
         """
 
         # Allowed ligands from AlphaFold Server documentation
         allowed_ligands = {
-            "CCD_ADP", "CCD_ATP", "CCD_AMP", "CCD_GTP", "CCD_GDP", "CCD_FAD",
-            "CCD_NAD", "CCD_NAP", "CCD_NDP", "CCD_HEM", "CCD_HEC", "CCD_PLM",
-            "CCD_OLA", "CCD_MYR", "CCD_CIT", "CCD_CLA", "CCD_CHL", "CCD_BCL", "CCD_BCB"
+            "CCD_ADP",
+            "CCD_ATP",
+            "CCD_AMP",
+            "CCD_GTP",
+            "CCD_GDP",
+            "CCD_FAD",
+            "CCD_NAD",
+            "CCD_NAP",
+            "CCD_NDP",
+            "CCD_HEM",
+            "CCD_HEC",
+            "CCD_PLM",
+            "CCD_OLA",
+            "CCD_MYR",
+            "CCD_CIT",
+            "CCD_CLA",
+            "CCD_CHL",
+            "CCD_BCL",
+            "CCD_BCB",
         }
 
         # Normalize model lists
@@ -259,59 +300,35 @@ class sequenceModels:
             if isinstance(ligands, dict):
                 for lig, cnt in ligands.items():
                     if lig not in allowed_ligands:
-                        raise ValueError(f"Ligand '{lig}' is not allowed: {allowed_ligands}")
-                    ligand_entries.append({
-                        "ligand": {
-                            "ligand": lig,
-                            "count": cnt
-                        }
-                    })
+                        raise ValueError(
+                            f"Ligand '{lig}' is not allowed: {allowed_ligands}"
+                        )
+                    ligand_entries.append({"ligand": {"ligand": lig, "count": cnt}})
             elif isinstance(ligands, (list, tuple)):
                 for lig in ligands:
                     if lig not in allowed_ligands:
-                        raise ValueError(f"Ligand '{lig}' is not allowed: {allowed_ligands}")
-                    ligand_entries.append({
-                        "ligand": {
-                            "ligand": lig,
-                            "count": 1
-                        }
-                    })
+                        raise ValueError(
+                            f"Ligand '{lig}' is not allowed: {allowed_ligands}"
+                        )
+                    ligand_entries.append({"ligand": {"ligand": lig, "count": 1}})
             else:
                 if ligands not in allowed_ligands:
-                    raise ValueError(f"Ligand '{ligands}' is not allowed: {allowed_ligands}")
-                ligand_entries.append({
-                    "ligand": {
-                        "ligand": ligands,
-                        "count": 1
-                    }
-                })
+                    raise ValueError(
+                        f"Ligand '{ligands}' is not allowed: {allowed_ligands}"
+                    )
+                ligand_entries.append({"ligand": {"ligand": ligands, "count": 1}})
 
         # Prepare ion entries
         ion_entries = []
         if ions:
             if isinstance(ions, dict):
                 for ion, cnt in ions.items():
-                    ion_entries.append({
-                        "ion": {
-                            "ion": ion,
-                            "count": cnt
-                        }
-                    })
+                    ion_entries.append({"ion": {"ion": ion, "count": cnt}})
             elif isinstance(ions, (list, tuple)):
                 for ion in ions:
-                    ion_entries.append({
-                        "ion": {
-                            "ion": ion,
-                            "count": 1
-                        }
-                    })
+                    ion_entries.append({"ion": {"ion": ion, "count": 1}})
             else:
-                ion_entries.append({
-                    "ion": {
-                        "ion": ions,
-                        "count": 1
-                    }
-                })
+                ion_entries.append({"ion": {"ion": ions, "count": 1}})
 
         # Build jobs
         jobs = []
@@ -324,12 +341,7 @@ class sequenceModels:
             n = chain_dict.get(name, default_n)
             seq_entries = []
             for i in range(n):
-                entry = {
-                    "proteinChain": {
-                        "sequence": seq,
-                        "count": 1
-                    }
-                }
+                entry = {"proteinChain": {"sequence": seq, "count": 1}}
                 if n > 1:
                     entry["proteinChain"]["name"] = f"{name}_chain{i+1}"
                 if use_templates:
@@ -347,7 +359,7 @@ class sequenceModels:
                 "modelSeeds": [],
                 "sequences": seq_entries,
                 "dialect": "alphafoldserver",
-                "version": 1
+                "version": 1,
             }
             jobs.append(job)
 
@@ -357,7 +369,7 @@ class sequenceModels:
         batches = []
 
         for idx in range(n_chunks):
-            chunk = jobs[idx * max_jobs_per_file: (idx + 1) * max_jobs_per_file]
+            chunk = jobs[idx * max_jobs_per_file : (idx + 1) * max_jobs_per_file]
             batches.append(chunk)
 
             # File naming
@@ -377,10 +389,10 @@ class sequenceModels:
         self,
         af_folder,
         output_folder,
-        prefix='',
+        prefix="",
         return_missing=False,
         copy_all=False,
-        verbose=False
+        verbose=False,
     ):
         """
         Convert AlphaFold server CIF models to PDB files when server outputs are organized in lowercase-named subfolders.
@@ -405,9 +417,10 @@ class sequenceModels:
         missing : list, optional
             List of model names not found if return_missing is True.
         """
+
         # Normalize function: lowercase and replace hyphens with underscores
         def normalize(name):
-            return name.lower().replace('-', '_')
+            return name.lower().replace("-", "_")
 
         # Map normalized folder names to CIF file paths
         cif_map = {}
@@ -416,7 +429,7 @@ class sequenceModels:
             if not os.path.isdir(folder_path):
                 continue
             for fname in os.listdir(folder_path):
-                if fname.startswith('fold_') and fname.endswith('_model_0.cif'):
+                if fname.startswith("fold_") and fname.endswith("_model_0.cif"):
                     key = normalize(folder)
                     cif_map[key] = os.path.join(folder_path, fname)
                     break
@@ -438,7 +451,9 @@ class sequenceModels:
             # Identify CIF entries with no matching request
             unmatched_cifs = set(cif_map.keys()) - set(normalized_req)
             if unmatched_cifs:
-                print(f"[DEBUG] CIF files with no matching sequence key ({len(unmatched_cifs)}): {sorted(unmatched_cifs)}")
+                print(
+                    f"[DEBUG] CIF files with no matching sequence key ({len(unmatched_cifs)}): {sorted(unmatched_cifs)}"
+                )
 
         # Prepare output directory
         os.makedirs(output_folder, exist_ok=True)
@@ -473,7 +488,9 @@ class sequenceModels:
                     missing.append(name)
 
         if verbose:
-            print(f"[DEBUG] Completed: {len(converted)} converted, {len(missing)} missing or failed.")
+            print(
+                f"[DEBUG] Completed: {len(converted)} converted, {len(missing)} missing or failed."
+            )
 
         if return_missing:
             return missing
@@ -513,7 +530,7 @@ class sequenceModels:
                     )
                     seq_list[pos] = new_res
 
-                mutant_seq = ''.join(seq_list)
+                mutant_seq = "".join(seq_list)
                 assert len(mutant_seq) == len(seq), "Mutation altered sequence length."
 
                 # Add the mutant sequence
@@ -521,10 +538,24 @@ class sequenceModels:
                 self.sequences[new_seq_id] = mutant_seq
                 self.sequences_names.append(new_seq_id)
 
-    def setUpBioEmu(self, job_folder, num_samples=10000, batch_size_100=20, gpu_local=False,
-                    verbose=True, models=None, skip_finished=False, return_finished=False,
-                    filter_samples=True, alphafold_folder=None, skip_models=None,
-                    bioemu_env=None, conda_sh='~/miniconda3/etc/profile.d/conda.sh'):
+    def setUpBioEmu(
+        self,
+        job_folder,
+        num_samples=10000,
+        batch_size_100=20,
+        gpu_local=False,
+        verbose=True,
+        models=None,
+        skip_finished=False,
+        return_finished=False,
+        filter_samples=True,
+        msa_calculation=False,
+        bioemu_env=None,
+        conda_sh="~/miniconda3/etc/profile.d/conda.sh",
+        msa_folder="msas",
+        mseqs="/apps/ACC/MMSEQS2/17-b804f/GCC/OPENMPI/bin/mmseqs",
+        db="/gpfs/apps/MN5/ACC/COLABFOLD/SRC/database/FULL",
+    ):
         """
         Set up and optionally execute BioEmu commands for each model sequence.
 
@@ -554,49 +585,13 @@ class sequenceModels:
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        local_af = False
-        external_af = False
-        af_jobs = None
-        if alphafold_folder and os.path.exists(alphafold_folder):
+        msa_folder = os.path.join(job_folder, msa_folder)
+        if not os.path.exists(msa_folder):
+            os.mkdir(msa_folder)
 
-            if not os.path.exists(alphafold_folder+'/output_models'):
-                raise ValueError(f'AF folder exists {alphafold_folder} but has an incorrect format!')
-
-            msa_file = {}
-            for model in os.listdir(alphafold_folder+'/output_models'):
-                model_folder = os.path.join(alphafold_folder+'/output_models', model)
-                if not os.path.exists(model_folder):
-                    raise ValueError(f'AF folder exists {alphafold_folder} but model {model_folder} has no output!')
-                for f in os.listdir(model_folder+'/msas/'):
-                    if f.endswith('.a3m'):
-                        msa_file[model] = model_folder+'/msas/'+f
-                if model not in msa_file:
-                    raise ValueError(f'The given AF folder {alphafold_folder} exists but does not contain an MSA for model {model}.\
-                    Please consider running the AF calculation first and get the MSAs or use a local AF folder inside bioemu\
-                    Just give a folder that do no exist and the function will do the rest.')
-            external_af = True
-
-        elif alphafold_folder and os.path.exists(job_folder+'/'+alphafold_folder):
-            local_af = True
-            with_msa = []
-            af_jobs = {}
-            for model in os.listdir(job_folder+'/'+alphafold_folder+'/output_models'):
-                model_folder = os.path.join(job_folder+'/'+alphafold_folder+'/output_models', model)
-                if not os.path.exsits(model_folder):
-                    af_jobs[model] = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, only_model=model)
-                else:
-                    for f in os.listdir(model_folder+'/msas/'):
-                        if f.endswith('.a3m'):
-                            with_msa.append(model)
-                    if model not in with_msa:
-                        af_jobs[model] = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, only_model=model)
-
-            if len(list(os.listdir(job_folder+'/'+alphafold_folder+'/output_models'))) == 0:
-                af_jobs = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, exclude_finished=False)
-
-        elif alphafold_folder and not os.path.exists(job_folder+'/'+alphafold_folder):
-            local_af = True
-            af_jobs = self.setUpAlphaFold(job_folder+'/'+alphafold_folder, exclude_finished=False)
+        fastas_folder = os.path.join(job_folder, "fastas")
+        if not os.path.exists(fastas_folder):
+            os.mkdir(fastas_folder)
 
         jobs = []
         finished = []
@@ -605,8 +600,9 @@ class sequenceModels:
             if models and model not in models:
                 continue
 
-            if skip_models and model in skip_models:
-                continue
+            alignment.writeFastaFile(
+                {model: self.sequences[model]}, fastas_folder + "/" + model + ".fasta"
+            )
 
             model_folder = os.path.join(job_folder, model)
             if not os.path.exists(model_folder):
@@ -614,31 +610,37 @@ class sequenceModels:
 
             if skip_finished:
 
-                sample_file = os.path.join(model_folder, 'samples.xtc')
-                topology_file = os.path.join(model_folder, 'topology.pdb')
+                sample_file = os.path.join(model_folder, "samples.xtc")
+                topology_file = os.path.join(model_folder, "topology.pdb")
 
                 if os.path.exists(sample_file) and os.path.exists(topology_file):
                     traj = md.load(sample_file, top=topology_file)
 
                     if traj.n_frames >= num_samples:
-                        print(f'{model} has already sampled {num_samples} poses. Skipping it.')
+                        print(
+                            f"{model} has already sampled {num_samples} poses. Skipping it."
+                        )
                         finished.append(model)
                         continue
 
-            cache_dir = os.path.join(model_folder, 'cache')
+            cache_dir = os.path.join(model_folder, "cache")
             if not os.path.exists(cache_dir):
                 os.mkdir(cache_dir)
 
             if bioemu_env:
 
                 cached_files = [f for f in os.listdir(cache_dir)]
-                fasta_cached_file = [f for f in cached_files if f.endswith('.fasta')]
-                npy_cached_files = [f for f in cached_files if f.endswith('.npy')]
-                npz_cached_files = [f for f in cached_files if f.endswith('.npz')]
+                fasta_cached_file = [f for f in cached_files if f.endswith(".fasta")]
+                npy_cached_files = [f for f in cached_files if f.endswith(".npy")]
+                npz_cached_files = [f for f in cached_files if f.endswith(".npz")]
 
-                if len(fasta_cached_file) == 1 and len(npy_cached_files) == 2 and len(npz_cached_files) == 3:
+                if (
+                    len(fasta_cached_file) == 1
+                    and len(npy_cached_files) == 2
+                    and len(npz_cached_files) == 3
+                ):
                     if verbose:
-                        print(f'Input files for model {model} were found.')
+                        print(f"Input files for model {model} were found.")
                 else:
                     command = f"""
                     source {conda_sh}
@@ -648,61 +650,76 @@ class sequenceModels:
                     """
                     if verbose:
                         print(f"Setting input files for model {model}")
-                    result = subprocess.run(["bash", "-i", "-c", command], capture_output=True, text=True)
+                    result = subprocess.run(
+                        ["bash", "-i", "-c", command], capture_output=True, text=True
+                    )
 
-            if external_af:
-                msa_folder = os.path.join(model_folder, 'msa')
-                os.makedirs(msa_folder, exist_ok=True)
-                shutil.copyfile(msa_file[model], msa_folder+'/'+model+'.a3m')
-
-            command = 'RUN_SAMPLES='+str(num_samples)+'\n'
-            if filter_samples:
-                command += 'while true; do\n'
-            #command += 'FILE_COUNT=$(find "'+job_folder+'/'+model+'/batch*'+'" -type f | wc -l)\n'
-            if gpu_local:
-                command += 'CUDA_VISIBLE_DEVICES=GPUID '
-            command += 'python -m bioemu.sample '
-            if external_af:
-                msaf = msa_folder+'/'+model+'.a3m'
-                command += f'--sequence {msaf} '
-            elif local_af:
-                msaf = job_folder+'/'+alphafold_folder+'/output_models/'+model+'/msas/bfd_uniref_hits.a3m '
-                command += f'--sequence {msaf} '
+            if msa_calculation:
+                command = f"colabfold_search --mmseqs {mseqs} {fastas_folder}/{model}.fasta {db} {msa_folder}/{model}"
+                command += "RUN_SAMPLES=" + str(num_samples) + "\n"
             else:
-                command += f'--sequence {self.sequences[model]} '
-            command += f'--num_samples $RUN_SAMPLES '
-            command += f'--batch_size_100 {batch_size_100} '
-            command += f'--cache_embeds_dir {cache_dir} '
-            command += f'--cache_so3_dir {cache_dir} '
-            if not filter_samples:
-                command += f'--filter_samples 0 '
-            command += f'--output_dir {model_folder}\n'
+                command = "RUN_SAMPLES=" + str(num_samples) + "\n"
             if filter_samples:
-                command += 'NUM_SAMPLES=$(python -c "import mdtraj as md; traj = md.load_xtc(\''+job_folder+'/'+model+'/samples.xtc\', top=\''+job_folder+'/'+model+'/topology.pdb\'); print(traj.n_frames)")\n'
-                command += 'if [ "$NUM_SAMPLES" -ge '+str(num_samples)+' ]; then\n'
+                command += "while true; do\n"
+            # command += 'FILE_COUNT=$(find "'+job_folder+'/'+model+'/batch*'+'" -type f | wc -l)\n'
+            if gpu_local:
+                command += "CUDA_VISIBLE_DEVICES=GPUID "
+            command += "python -m bioemu.sample "
+            if msa_calculation:
+                msaf = msa_folder + "/" + model + ".a3m"
+                command += f"--sequence {msaf} "
+            else:
+                command += f"--sequence {self.sequences[model]} "
+            command += f"--num_samples $RUN_SAMPLES "
+            command += f"--batch_size_100 {batch_size_100} "
+            command += f"--cache_embeds_dir {cache_dir} "
+            command += f"--cache_so3_dir {cache_dir} "
+            if not filter_samples:
+                command += f"--filter_samples 0 "
+            command += f"--output_dir {model_folder}\n"
+            if filter_samples:
+                command += (
+                    "NUM_SAMPLES=$(python -c \"import mdtraj as md; traj = md.load_xtc('"
+                    + job_folder
+                    + "/"
+                    + model
+                    + "/samples.xtc', top='"
+                    + job_folder
+                    + "/"
+                    + model
+                    + "/topology.pdb'); print(traj.n_frames)\")\n"
+                )
+                command += 'if [ "$NUM_SAMPLES" -ge ' + str(num_samples) + " ]; then\n"
                 command += 'echo "All samples computed. Exiting."\n'
-                command += 'break \n'
-                command += 'fi\n'
-                command += 'RUN_SAMPLES=$(($RUN_SAMPLES+'+str(num_samples)+'-$NUM_SAMPLES))\n'
-                command += 'done \n'
+                command += "break \n"
+                command += "fi\n"
+                command += (
+                    "RUN_SAMPLES=$(($RUN_SAMPLES+"
+                    + str(num_samples)
+                    + "-$NUM_SAMPLES))\n"
+                )
+                command += "done \n"
 
-            if isinstance(af_jobs, dict):
-                command = af_jobs[model]+command
             jobs.append(command)
-
-        # Combine jobs if AF folder was not found
-        if isinstance(af_jobs, list):
-            jobs = [a+b for a,b in zip(af_jobs,jobs)]
 
         if return_finished:
             return finished
 
         return jobs
 
-    def applyBioEmuFiltersInbatch(self, bioemu_folder, batch_size, bioemu_env='bioemu',
-                              merge_trajectories=False, remove_batch_samples=False,
-                              skip_models=None, skip_finished_models=False, return_jobs=False,
-                              conda_sh='~/miniconda3/etc/profile.d/conda.sh', verbose=False):
+    def applyBioEmuFiltersInbatch(
+        self,
+        bioemu_folder,
+        batch_size,
+        bioemu_env="bioemu",
+        merge_trajectories=False,
+        remove_batch_samples=False,
+        skip_models=None,
+        skip_finished_models=False,
+        return_jobs=False,
+        conda_sh="~/miniconda3/etc/profile.d/conda.sh",
+        verbose=False,
+    ):
         """
         Process models in batches applying BioEmu filters.
 
@@ -720,7 +737,7 @@ class sequenceModels:
 
         if return_jobs:
             _copyScriptFile(bioemu_folder, "bioemuBatchFilter.py")
-            script_name = bioemu_folder+'/._bioemuBatchFilter.py'
+            script_name = bioemu_folder + "/._bioemuBatchFilter.py"
             jobs = []
 
         for model in self:
@@ -731,11 +748,13 @@ class sequenceModels:
 
             model_folder = os.path.join(bioemu_folder, model)
             if not os.path.isdir(model_folder):
-                print(f'WARNING: BioEmu folder for model {model} not found!')
+                print(f"WARNING: BioEmu folder for model {model} not found!")
                 continue
 
             # collect all .npz
-            npz_files = sorted(f for f in os.listdir(model_folder) if f.endswith('.npz'))
+            npz_files = sorted(
+                f for f in os.listdir(model_folder) if f.endswith(".npz")
+            )
             if verbose:
                 print(f"Model {model}: found {len(npz_files)} npz files")
 
@@ -745,10 +764,10 @@ class sequenceModels:
                 load = 0
                 for fn in npz_files:
                     try:
-                        parts = fn.split('_')
+                        parts = fn.split("_")
                         start = int(parts[1])
-                        end = int(parts[2].split('.')[0])
-                        load += (end - start)
+                        end = int(parts[2].split(".")[0])
+                        load += end - start
                     except Exception:
                         continue
                     if load >= batch_size:
@@ -756,7 +775,7 @@ class sequenceModels:
                         load = 0
 
                 # find existing samples_XXXX.xtc and their indices
-                pattern = re.compile(r'^samples_(\d{4})\.xtc$')
+                pattern = re.compile(r"^samples_(\d{4})\.xtc$")
                 existing_idxs = []
                 for fn in os.listdir(model_folder):
                     m = pattern.match(fn)
@@ -766,16 +785,20 @@ class sequenceModels:
 
                 if max_idx >= expected_batches:
                     if verbose:
-                        print(f"Skipping {model}: found {max_idx} existing batches ≥ expected {expected_batches}")
+                        print(
+                            f"Skipping {model}: found {max_idx} existing batches ≥ expected {expected_batches}"
+                        )
                     continue
 
             if return_jobs:
                 cmd = [
-                'python3',
-                script_name,
-                model_folder,
-                "--batch-size", str(batch_size),
-                "--sequence", self.sequences[model]
+                    "python3",
+                    script_name,
+                    model_folder,
+                    "--batch-size",
+                    str(batch_size),
+                    "--sequence",
+                    self.sequences[model],
                 ]
                 if merge_trajectories:
                     cmd.append("--merge-trajectories")
@@ -796,28 +819,31 @@ class sequenceModels:
 
             for npz_file in npz_files:
                 try:
-                    parts = npz_file.split('_')
-                    start = int(parts[1]); end = int(parts[2].split('.')[0])
+                    parts = npz_file.split("_")
+                    start = int(parts[1])
+                    end = int(parts[2].split(".")[0])
                 except Exception:
                     print(f"WARNING: Unexpected file name {npz_file}, skipping")
                     continue
 
-                batch_load += (end - start)
+                batch_load += end - start
                 batch_files.append(npz_file)
 
                 if batch_load >= batch_size:
                     batch_index += 1
                     if verbose:
-                        print(f"Model {model}, batch {batch_index}: processing {len(batch_files)} files")
+                        print(
+                            f"Model {model}, batch {batch_index}: processing {len(batch_files)} files"
+                        )
 
                     # create tmp, move files in
-                    tmp = os.path.join(model_folder, 'tmp')
+                    tmp = os.path.join(model_folder, "tmp")
                     os.makedirs(tmp, exist_ok=True)
                     for f in batch_files:
                         shutil.move(os.path.join(model_folder, f), os.path.join(tmp, f))
 
                     # run bioemu.sample
-                    cache_dir = os.path.join(model_folder, 'cache')
+                    cache_dir = os.path.join(model_folder, "cache")
                     cmd = f"""
                         cd tmp
                         source {conda_sh}
@@ -828,12 +854,18 @@ class sequenceModels:
                         conda deactivate
                         cd ..
                     """
-                    result = subprocess.run(["bash","-i","-c", cmd], capture_output=True, text=True)
-                    if 'MemoryError' in result.stderr:
-                        print(f"WARNING: MemoryError on {model} batch_size={batch_size}")
+                    result = subprocess.run(
+                        ["bash", "-i", "-c", cmd], capture_output=True, text=True
+                    )
+                    if "MemoryError" in result.stderr:
+                        print(
+                            f"WARNING: MemoryError on {model} batch_size={batch_size}"
+                        )
                         # roll back
                         for f in batch_files:
-                            shutil.move(os.path.join(tmp, f), os.path.join(model_folder, f))
+                            shutil.move(
+                                os.path.join(tmp, f), os.path.join(model_folder, f)
+                            )
                         shutil.rmtree(tmp)
                         return
 
@@ -842,13 +874,17 @@ class sequenceModels:
                         shutil.move(os.path.join(tmp, f), os.path.join(model_folder, f))
 
                     # copy out samples.xtc → samples_XXXX.xtc
-                    out_xtc = os.path.join(model_folder, f'samples_{str(batch_index).zfill(4)}.xtc')
-                    src_xtc = os.path.join(tmp, 'samples.xtc')
+                    out_xtc = os.path.join(
+                        model_folder, f"samples_{str(batch_index).zfill(4)}.xtc"
+                    )
+                    src_xtc = os.path.join(tmp, "samples.xtc")
                     if os.path.exists(src_xtc):
                         shutil.copy2(src_xtc, out_xtc)
                         # also copy topology once
-                        shutil.copy2(os.path.join(tmp, 'topology.pdb'),
-                                     os.path.join(model_folder, 'topology.pdb'))
+                        shutil.copy2(
+                            os.path.join(tmp, "topology.pdb"),
+                            os.path.join(model_folder, "topology.pdb"),
+                        )
                         sample_files.append(out_xtc)
                     else:
                         shutil.rmtree(tmp)
@@ -858,15 +894,16 @@ class sequenceModels:
                     batch_load = 0
                     batch_files = []
 
-
             if verbose:
-                print(f"Model {model}: finished batching, {len(sample_files)} sample files generated")
+                print(
+                    f"Model {model}: finished batching, {len(sample_files)} sample files generated"
+                )
 
             if merge_trajectories and sample_files:
-                topo = os.path.join(model_folder, 'topology.pdb')
+                topo = os.path.join(model_folder, "topology.pdb")
                 traj = md.load(sample_files, top=topo)
                 traj.superpose(md.load(topo))
-                traj.save(os.path.join(model_folder, 'samples.xtc'))
+                traj.save(os.path.join(model_folder, "samples.xtc"))
                 if verbose:
                     print(f"Model {model}: merged trajectory saved")
 
@@ -879,9 +916,23 @@ class sequenceModels:
         if return_jobs:
             return jobs
 
-    def clusterBioEmuSamples(self, job_folder, bioemu_folder, models=None, stderr=True, stdout=True,
-                             output_dcd=False, output_pdb=False, c=0.9, cov_mode=0, verbose=True,
-                             evalue=10.0, overwrite=False, remove_input_pdb=True, min_sampled_points=None):
+    def clusterBioEmuSamples(
+        self,
+        job_folder,
+        bioemu_folder,
+        models=None,
+        stderr=True,
+        stdout=True,
+        output_dcd=False,
+        output_pdb=False,
+        c=0.9,
+        cov_mode=0,
+        verbose=True,
+        evalue=10.0,
+        overwrite=False,
+        remove_input_pdb=True,
+        min_sampled_points=None,
+    ):
         """
         Process BioEmu models by extracting trajectory frames (saved as PDBs) and clustering them.
         Each model’s clustering results are cached in its model folder (clusters.json) and then
@@ -955,7 +1006,7 @@ class sequenceModels:
             if overwrite and os.path.exists(model_folder):
                 for item in os.listdir(model_folder):
                     item_path = os.path.join(model_folder, item)
-                    if item == 'input_models':
+                    if item == "input_models":
                         if remove_input_pdb and os.path.exists(item_path):
                             shutil.rmtree(item_path)
                     else:
@@ -964,24 +1015,27 @@ class sequenceModels:
                         else:
                             os.remove(item_path)
 
-
             if not os.path.exists(model_folder):
                 os.mkdir(model_folder)
 
-            input_models_folder = os.path.join(model_folder, 'input_models')
+            input_models_folder = os.path.join(model_folder, "input_models")
             if not os.path.exists(input_models_folder):
                 os.mkdir(input_models_folder)
 
             # Define file paths for topology and trajectory.
-            top_file = os.path.join(bioemu_folder, model, 'topology.pdb')
-            traj_file = os.path.join(bioemu_folder, model, 'samples.xtc')
+            top_file = os.path.join(bioemu_folder, model, "topology.pdb")
+            traj_file = os.path.join(bioemu_folder, model, "samples.xtc")
 
             if not os.path.exists(top_file):
-                print(f'WARNING: No topology file was found for model {model}. Skipping it.')
+                print(
+                    f"WARNING: No topology file was found for model {model}. Skipping it."
+                )
                 continue
 
             if not os.path.exists(traj_file):
-                print(f'WARNING: No trajectory file was found for model {model}. Skipping it.')
+                print(
+                    f"WARNING: No trajectory file was found for model {model}. Skipping it."
+                )
                 continue
 
             # Load the topology and trajectory; superpose the trajectory.
@@ -989,7 +1043,9 @@ class sequenceModels:
             traj = md.load(traj_file, top=top_file)
 
             if min_sampled_points and traj.n_frames < min_sampled_points:
-                print(f'WARNING: trajectory file for {model} has only {traj.n_frames} poses. Skipping it.')
+                print(
+                    f"WARNING: trajectory file for {model} has only {traj.n_frames} poses. Skipping it."
+                )
                 continue
 
             traj.superpose(traj_top[0])
@@ -1018,7 +1074,7 @@ class sequenceModels:
                 overwrite=overwrite,
                 stderr=stderr,
                 stdout=stdout,
-                verbose=verbose
+                verbose=verbose,
             )
             overall_clusters[model] = clusters
             if verbose:
@@ -1037,9 +1093,21 @@ class sequenceModels:
 
         return overall_clusters
 
-    def setUpBioEmuClustering(self, job_folder, bioemu_folder, evalues, sensitivity=7.5 , models=None, c=0.9, cov_mode=0,
-                              overwrite=False, min_sampled_points=None, skip_finished=True, verbose=True,
-                              cluster_reassign=True):
+    def setUpBioEmuClustering(
+        self,
+        job_folder,
+        bioemu_folder,
+        evalues,
+        sensitivity=7.5,
+        models=None,
+        c=0.9,
+        cov_mode=0,
+        overwrite=False,
+        min_sampled_points=None,
+        skip_finished=True,
+        verbose=True,
+        cluster_reassign=True,
+    ):
         """
         Set up clustering jobs by copying a Python script into the job folder, extracting trajectory frames,
         and generating execution commands.
@@ -1083,7 +1151,7 @@ class sequenceModels:
             # Compute the exponent: for 1e-30, log10(x) is -30.
             exponent = -int(round(np.log10(x)))
             # Compute the coefficient: x * 10**exponent gives 1.0 or 0.5.
-            coefficient = x * (10 ** exponent)
+            coefficient = x * (10**exponent)
             return f"e_{coefficient:.1f}e-{exponent}"
 
         # Convert single evalue to a list if necessary
@@ -1110,17 +1178,21 @@ class sequenceModels:
             os.makedirs(model_folder, exist_ok=True)
 
             # Extraction step: create input_models folder and extract frames if needed.
-            input_models_folder = os.path.join(model_folder, 'input_models')
+            input_models_folder = os.path.join(model_folder, "input_models")
             os.makedirs(input_models_folder, exist_ok=True)
 
             # Locate topology and trajectory files in the BioEmu model folder.
-            top_file = os.path.join(model_path, 'topology.pdb')
-            traj_file = os.path.join(model_path, 'samples.xtc')
+            top_file = os.path.join(model_path, "topology.pdb")
+            traj_file = os.path.join(model_path, "samples.xtc")
             if not os.path.exists(top_file):
-                print(f"WARNING: No topology file found for model {model}. Skipping it.")
+                print(
+                    f"WARNING: No topology file found for model {model}. Skipping it."
+                )
                 continue
             if not os.path.exists(traj_file):
-                print(f"WARNING: No trajectory file found for model {model}. Skipping it.")
+                print(
+                    f"WARNING: No trajectory file found for model {model}. Skipping it."
+                )
                 continue
 
             # Load the trajectory using mdtraj.
@@ -1129,11 +1201,15 @@ class sequenceModels:
 
             # If a minimum number of frames is specified, check against trajectory length.
             if min_sampled_points and traj.n_frames < min_sampled_points:
-                print(f"WARNING: Model {model} has only {traj.n_frames} frames (min required is {min_sampled_points}). Skipping.")
+                print(
+                    f"WARNING: Model {model} has only {traj.n_frames} frames (min required is {min_sampled_points}). Skipping."
+                )
                 continue
 
             # Check if the number of extracted PDB files equals the number of frames.
-            existing_pdbs = [f for f in os.listdir(input_models_folder) if f.endswith('.pdb')]
+            existing_pdbs = [
+                f for f in os.listdir(input_models_folder) if f.endswith(".pdb")
+            ]
             if len(existing_pdbs) != traj.n_frames:
                 if verbose:
                     print(f"Extracting {traj.n_frames} frames for model {model}...")
@@ -1146,7 +1222,9 @@ class sequenceModels:
                     print(f"Saved {traj.n_frames} frames for model {model}.")
             else:
                 if verbose:
-                    print(f"Skipping extraction for model {model} (found {len(existing_pdbs)} PDBs).")
+                    print(
+                        f"Skipping extraction for model {model} (found {len(existing_pdbs)} PDBs)."
+                    )
 
             # Generate clustering commands for each evalue.
             for evalue in evalues:
@@ -1159,24 +1237,30 @@ class sequenceModels:
                 clusters_file = os.path.join(evalue_folder, "result", "clusters.json")
                 if skip_finished and os.path.exists(clusters_file):
                     if verbose:
-                        print(f"Skipping clustering for model {model}, evalue {evalue} "
-                              f"(results already exist in {clusters_file}).")
+                        print(
+                            f"Skipping clustering for model {model}, evalue {evalue} "
+                            f"(results already exist in {clusters_file})."
+                        )
                     continue
 
                 # Generate command using relative paths.
                 # From evalue_folder, the foldseekClustering.py script is at ../../foldseekClustering.py,
                 # and the input_models folder is at ../../input_models.
                 command = f"cd {evalue_folder}\n"
-                command += f"python ../../._foldseekClustering.py ../input_models result tmp "
+                command += (
+                    f"python ../../._foldseekClustering.py ../input_models result tmp "
+                )
                 command += f"--cov_mode {cov_mode} --evalue {evalue} --c {c}  --sensitivity {sensitivity} "
                 if cluster_reassign:
                     command += f"--cluster-reassign"
-                command += '\n'
+                command += "\n"
                 command += f"cd ../../..\n"
                 jobs.append(command)
 
                 if verbose:
-                    print(f"Prepared command for model {model}, evalue {evalue} → Folder: {formatted_evalue}")
+                    print(
+                        f"Prepared command for model {model}, evalue {evalue} → Folder: {formatted_evalue}"
+                    )
 
         return jobs
 
@@ -1250,18 +1334,29 @@ class sequenceModels:
                             clusters = json.load(f)
                         results[model][item] = clusters
                         if verbose:
-                            print(f"Read clustering results for model '{model}', folder '{item}'.")
+                            print(
+                                f"Read clustering results for model '{model}', folder '{item}'."
+                            )
                     except Exception as e:
                         if verbose:
                             print(f"Error reading {clusters_file}: {e}")
                 else:
                     if verbose:
-                        print(f"Warning: {clusters_file} not found for model '{model}', folder '{item}'.")
+                        print(
+                            f"Warning: {clusters_file} not found for model '{model}', folder '{item}'."
+                        )
 
         return results
 
-    def fitBioEmuClusteringToHillEquation(self, clustering_data, plot=True, plot_fits_only=False, verbose=False,
-                                          plot_only=None, plot_legend=True):
+    def fitBioEmuClusteringToHillEquation(
+        self,
+        clustering_data,
+        plot=True,
+        plot_fits_only=False,
+        verbose=False,
+        plot_only=None,
+        plot_legend=True,
+    ):
         """
         Analyze clustering data from readBioEmuClusteringResults.
 
@@ -1276,7 +1371,7 @@ class sequenceModels:
         """
 
         def hill_equation(e, y_min, y_max, e_half, n):
-            return y_min + (y_max - y_min) / (1 + (e_half / e)**n)
+            return y_min + (y_max - y_min) / (1 + (e_half / e) ** n)
 
         # Dictionaries to store fitted E_half values and Hill slopes for each model
         model_half_evalues = {}
@@ -1288,7 +1383,9 @@ class sequenceModels:
             e_vals, counts = [], []
             for folder, clusters in evalue_dict.items():
                 try:
-                    e_val = float(folder[2:])  # Extract numeric e-value from folder name
+                    e_val = float(
+                        folder[2:]
+                    )  # Extract numeric e-value from folder name
                     e_vals.append(e_val)
                     counts.append(len(clusters))
                 except ValueError:
@@ -1302,8 +1399,10 @@ class sequenceModels:
             fig, ax = plt.subplots(figsize=(8, 6))
 
             # Handles for the first legend
-            data_handle = Line2D([], [], color='black', marker='o', linestyle='-', label='Data')
-            fit_handle  = Line2D([], [], color='black', linestyle='--', label='Fit')
+            data_handle = Line2D(
+                [], [], color="black", marker="o", linestyle="-", label="Data"
+            )
+            fit_handle = Line2D([], [], color="black", linestyle="--", label="Fit")
 
             # Handles for the model-specific legend
             model_handles = []
@@ -1319,12 +1418,21 @@ class sequenceModels:
 
                 if not plot_fits_only:
                     # Plot the data
-                    ax.plot(e_vals, clusters, marker='o', linestyle='-', color=color, alpha=0.8)
+                    ax.plot(
+                        e_vals,
+                        clusters,
+                        marker="o",
+                        linestyle="-",
+                        color=color,
+                        alpha=0.8,
+                    )
                     # Create a model legend handle
-                    model_handle = Line2D([], [], color=color, marker='o', linestyle='-', label=model)
+                    model_handle = Line2D(
+                        [], [], color=color, marker="o", linestyle="-", label=model
+                    )
                     model_handles.append(model_handle)
             else:
-                color = 'blue'  # Default color when not plotting
+                color = "blue"  # Default color when not plotting
 
             # Fit the data if there are enough points
             if len(e_vals) >= 4:
@@ -1345,8 +1453,8 @@ class sequenceModels:
                     i = np.where(above)[0][-1]
                     # Guard: if it’s not the very last point, interpolate
                     if i < len(e_vals) - 1:
-                        y1, y2 = clusters[i], clusters[i+1]
-                        x1, x2 = log_e[i], log_e[i+1]
+                        y1, y2 = clusters[i], clusters[i + 1]
+                        x1, x2 = log_e[i], log_e[i + 1]
                         frac = (y1 - half_y) / (y1 - y2)
                         log10_e_half_guess = x1 + frac * (x2 - x1)
                         e_half_guess = 10**log10_e_half_guess
@@ -1354,14 +1462,14 @@ class sequenceModels:
                         e_half_guess = e_vals[i]
                 else:
                     # No crossing (flat region at one end) → geometric median
-                    e_half_guess = 10**np.median(log_e)
+                    e_half_guess = 10 ** np.median(log_e)
 
                 try:
                     popt, _ = curve_fit(
                         hill_equation,
                         e_vals,
                         clusters,
-                        p0=[y_min_guess, y_max_guess, e_half_guess, slope_guess]
+                        p0=[y_min_guess, y_max_guess, e_half_guess, slope_guess],
                     )
                     y_min_fit, y_max_fit, e_half_fit, n_fit = popt
 
@@ -1375,10 +1483,14 @@ class sequenceModels:
                             continue
 
                         # Generate a smooth range for the fit curve
-                        e_fine = np.logspace(np.log10(e_vals.min()), np.log10(e_vals.max()), 300)
-                        fit_curve = hill_equation(e_fine, y_min_fit, y_max_fit, e_half_fit, n_fit)
+                        e_fine = np.logspace(
+                            np.log10(e_vals.min()), np.log10(e_vals.max()), 300
+                        )
+                        fit_curve = hill_equation(
+                            e_fine, y_min_fit, y_max_fit, e_half_fit, n_fit
+                        )
                         # Plot the fit as a dashed line
-                        ax.plot(e_fine, fit_curve, '--', color=color, alpha=0.8)
+                        ax.plot(e_fine, fit_curve, "--", color=color, alpha=0.8)
 
                 except Exception as ex:
                     print(f"Error fitting {model}: {ex}")
@@ -1387,17 +1499,31 @@ class sequenceModels:
 
         if plot:
             # Configure the first plot
-            ax.set_xscale('log')
+            ax.set_xscale("log")
             ax.set_xlabel("E-value", fontsize=12)
             ax.set_ylabel("Number of Clusters", fontsize=12)
-            ax.set_title("E-value vs. Number of Clusters (Hill Fit)", fontsize=14, fontweight='bold')
+            ax.set_title(
+                "E-value vs. Number of Clusters (Hill Fit)",
+                fontsize=14,
+                fontweight="bold",
+            )
 
             # Add legends
             if plot_legend:
-                legend1 = ax.legend(handles=[data_handle, fit_handle], loc='upper left', title="Plot Types")
+                legend1 = ax.legend(
+                    handles=[data_handle, fit_handle],
+                    loc="upper left",
+                    title="Plot Types",
+                )
                 ax.add_artist(legend1)
-                legend2 = ax.legend(handles=model_handles, loc='lower left', bbox_to_anchor=(0.02, 0.02),
-                                    title="Models", ncol=1, frameon=False)
+                legend2 = ax.legend(
+                    handles=model_handles,
+                    loc="lower left",
+                    bbox_to_anchor=(0.02, 0.02),
+                    title="Models",
+                    ncol=1,
+                    frameon=False,
+                )
                 ax.add_artist(legend2)
 
             plt.subplots_adjust(left=0.2, bottom=0.15)
@@ -1407,11 +1533,15 @@ class sequenceModels:
         if verbose:
             print("Fitted E_half values and Hill slopes:")
             for m in model_half_evalues:
-                print(f"  {m}: E_half = {model_half_evalues[m]:.4g}, slope = {model_slopes[m]:.4g}")
+                print(
+                    f"  {m}: E_half = {model_half_evalues[m]:.4g}, slope = {model_slopes[m]:.4g}"
+                )
 
         return model_half_evalues, model_slopes
 
-    def computeBioEmuRMSF(self, bioemu_folder, ref_pdb=None, plot=False, ylim=None, plot_legend=True):
+    def computeBioEmuRMSF(
+        self, bioemu_folder, ref_pdb=None, plot=False, ylim=None, plot_legend=True
+    ):
         """
         Computes RMSF values for all models in the specified folder and optionally plots RMSF by residue.
 
@@ -1432,7 +1562,9 @@ class sequenceModels:
                 ref_pdb[model] = unique_ref
 
         if not ref_pdb:
-            print('No reference PDBs given. Computing RMSF relative to the average positions')
+            print(
+                "No reference PDBs given. Computing RMSF relative to the average positions"
+            )
 
         # Dictionary to store RMSF values for each model
         rmsf = {}
@@ -1440,33 +1572,37 @@ class sequenceModels:
         # Iterate through each model folder
         for model in os.listdir(bioemu_folder):
 
-            if not os.path.isdir(f'{bioemu_folder}/{model}/'):
+            if not os.path.isdir(f"{bioemu_folder}/{model}/"):
                 continue
 
             # Load reference structure
             if ref_pdb and model in ref_pdb:
                 ref = md.load(ref_pdb[model])
-                ref_bb_atoms = ref.topology.select('name CA')
+                ref_bb_atoms = ref.topology.select("name CA")
 
             traj_files = []
-            for xtc in sorted(os.listdir(f'{bioemu_folder}/{model}/')):
-                if not xtc.endswith('.xtc'):
+            for xtc in sorted(os.listdir(f"{bioemu_folder}/{model}/")):
+                if not xtc.endswith(".xtc"):
                     continue
-                if xtc.startswith('samples_'):
-                    traj_files.append(f'{bioemu_folder}/{model}/'+xtc)
-            if not traj_files and os.path.exists(f'{bioemu_folder}/{model}/samples.xtc'):
-                traj_files = f'{bioemu_folder}/{model}/samples.xtc'
+                if xtc.startswith("samples_"):
+                    traj_files.append(f"{bioemu_folder}/{model}/" + xtc)
+            if not traj_files and os.path.exists(
+                f"{bioemu_folder}/{model}/samples.xtc"
+            ):
+                traj_files = f"{bioemu_folder}/{model}/samples.xtc"
 
             if not traj_files:
                 continue
 
-            top_file = f'{bioemu_folder}/{model}/topology.pdb'
+            top_file = f"{bioemu_folder}/{model}/topology.pdb"
             traj = md.load(traj_files, top=top_file)
-            traj_bb_atoms = traj.topology.select('name CA')
+            traj_bb_atoms = traj.topology.select("name CA")
 
             if not ref_pdb:
                 ref = md.load(top_file)
-                ref.xyz = np.mean(ref.xyz, axis=0) # Set reference to the average positions
+                ref.xyz = np.mean(
+                    ref.xyz, axis=0
+                )  # Set reference to the average positions
 
             # Compute RMSF for the selected atoms (per-residue fluctuations)
             rmsf[model] = md.rmsf(traj, ref, atom_indices=traj_bb_atoms)
@@ -1484,7 +1620,7 @@ class sequenceModels:
                 plt.ylim(ylim)
             plt.xlabel("Residue Number", fontsize=12)
             plt.ylabel("RMSF (nm)", fontsize=12)
-            plt.title("RMSF by Residue", fontsize=14, fontweight='bold')
+            plt.title("RMSF by Residue", fontsize=14, fontweight="bold")
             if plot_legend:
                 plt.legend()
             plt.tight_layout()
@@ -1516,7 +1652,7 @@ class sequenceModels:
         # Iterate through each model folder
         for model in os.listdir(bioemu_folder):
 
-            if not os.path.isdir(f'{bioemu_folder}/{model}/'):
+            if not os.path.isdir(f"{bioemu_folder}/{model}/"):
                 continue
 
             # Load reference structure
@@ -1527,23 +1663,25 @@ class sequenceModels:
                 if residues and residue.resSeq not in residues:
                     continue
                 for atom in residue.atoms:
-                    if atom.name == 'CA':
+                    if atom.name == "CA":
                         ref_bb_atoms.append(atom.index)
             ref_bb_atoms = np.array(ref_bb_atoms)
 
             traj_files = []
-            for xtc in sorted(os.listdir(f'{bioemu_folder}/{model}/')):
-                if not xtc.endswith('.xtc'):
+            for xtc in sorted(os.listdir(f"{bioemu_folder}/{model}/")):
+                if not xtc.endswith(".xtc"):
                     continue
-                if xtc.startswith('samples_'):
-                    traj_files.append(f'{bioemu_folder}/{model}/'+xtc)
-            if not traj_files and os.path.exists(f'{bioemu_folder}/{model}/samples.xtc'):
-                traj_files = f'{bioemu_folder}/{model}/samples.xtc'
+                if xtc.startswith("samples_"):
+                    traj_files.append(f"{bioemu_folder}/{model}/" + xtc)
+            if not traj_files and os.path.exists(
+                f"{bioemu_folder}/{model}/samples.xtc"
+            ):
+                traj_files = f"{bioemu_folder}/{model}/samples.xtc"
 
             if not traj_files:
                 continue
 
-            top_file = f'{bioemu_folder}/{model}/topology.pdb'
+            top_file = f"{bioemu_folder}/{model}/topology.pdb"
             traj = md.load(traj_files, top=top_file)
 
             traj_bb_atoms = []
@@ -1551,11 +1689,13 @@ class sequenceModels:
                 if residues and residue.resSeq not in residues:
                     continue
                 for atom in residue.atoms:
-                    if atom.name == 'CA':
+                    if atom.name == "CA":
                         traj_bb_atoms.append(atom.index)
             traj_bb_atoms = np.array(traj_bb_atoms)
 
-            rmsd[model] = md.rmsd(traj, ref, atom_indices=traj_bb_atoms, ref_atom_indices=ref_bb_atoms)
+            rmsd[model] = md.rmsd(
+                traj, ref, atom_indices=traj_bb_atoms, ref_atom_indices=ref_bb_atoms
+            )
 
         if plot:
             # Compute average RMSD for each model and order models by average value
@@ -1566,12 +1706,14 @@ class sequenceModels:
             data = []
             for model, values in rmsd.items():
                 for value in values:
-                    data.append({'Model': model, 'RMSD': value})
+                    data.append({"Model": model, "RMSD": value})
             df = pd.DataFrame(data)
 
             # Create a violin plot using seaborn
             plt.figure(figsize=(10, 6))
-            sns.violinplot(x='Model', y='RMSD', data=df, order=ordered_models, inner="quartile")
+            sns.violinplot(
+                x="Model", y="RMSD", data=df, order=ordered_models, inner="quartile"
+            )
 
             plt.xticks(rotation=45)
             plt.title("RMSD Distributions Ordered by Average RMSD")
@@ -1580,7 +1722,9 @@ class sequenceModels:
 
         return rmsd
 
-    def computeNativeContacts(self, job_folder, bioemu_folder, native_models_folder, only_models=None):
+    def computeNativeContacts(
+        self, job_folder, bioemu_folder, native_models_folder, only_models=None
+    ):
         """
         Compute the distances between native contacts across frames for each model in the dataset.
 
@@ -1606,7 +1750,7 @@ class sequenceModels:
 
         def remove_hydrogens_and_oxt(pdb_path, output_path):
             """Removes all hydrogen atoms and OXT atoms from a PDB file."""
-            with open(pdb_path) as f_in, open(output_path, 'w') as f_out:
+            with open(pdb_path) as f_in, open(output_path, "w") as f_out:
                 for line in f_in:
                     if line.startswith("TER") or line.startswith("END"):
                         continue
@@ -1616,11 +1760,15 @@ class sequenceModels:
 
                     atom_name = line[12:16].strip()
                     element = line[76:78].strip()
-                    if element == 'H' or atom_name.startswith('H') or atom_name == 'OXT':
+                    if (
+                        element == "H"
+                        or atom_name.startswith("H")
+                        or atom_name == "OXT"
+                    ):
                         continue
 
                     f_out.write(line)
-                f_out.write('END\n')
+                f_out.write("END\n")
 
         def readNC(nc_file):
             """Reads a .contacts.CG file and returns a list of (res1, res2) tuples."""
@@ -1635,60 +1783,71 @@ class sequenceModels:
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        if isinstance(native_models_folder, str) and os.path.isdir(native_models_folder):
+        if isinstance(native_models_folder, str) and os.path.isdir(
+            native_models_folder
+        ):
             native_models = {
-                m.replace('.pdb', ''): os.path.join(native_models_folder, m)
-                for m in os.listdir(native_models_folder) if m.endswith('.pdb')
+                m.replace(".pdb", ""): os.path.join(native_models_folder, m)
+                for m in os.listdir(native_models_folder)
+                if m.endswith(".pdb")
             }
         elif isinstance(native_models_folder, dict):
             native_models = native_models_folder
         else:
-            raise ValueError('native_models_folder should  be a existing path or a dictionary!')
+            raise ValueError(
+                "native_models_folder should  be a existing path or a dictionary!"
+            )
 
         df_distances = {}
 
         models = list(self)  # Ensures tqdm knows the total number of items
         for model in tqdm(models, desc="Computing native contacts", ncols=100):
 
-            if not os.path.isdir(f'{bioemu_folder}/{model}/'):
+            if not os.path.isdir(f"{bioemu_folder}/{model}/"):
                 continue
 
             if only_models and model not in only_models:
                 continue
 
             if model not in native_models:
-                raise ValueError(f'Model "{model}" not found in native_models_folder: {native_models_folder}')
+                raise ValueError(
+                    f'Model "{model}" not found in native_models_folder: {native_models_folder}'
+                )
 
             model_folder = os.path.join(job_folder, model)
             if not os.path.exists(model_folder):
                 os.mkdir(model_folder)
 
-            contacts_file = os.path.join(model_folder, f'{model}.contacts.CG')
-            contacts_pdb = os.path.join(model_folder, f'{model}.pdb')
+            contacts_file = os.path.join(model_folder, f"{model}.contacts.CG")
+            contacts_pdb = os.path.join(model_folder, f"{model}.pdb")
 
             # Generate native contacts with SMOG2 if not already done
             if not os.path.exists(contacts_file):
-                filtered_pdb = os.path.join(model_folder, f'{model}.pdb')
+                filtered_pdb = os.path.join(model_folder, f"{model}.pdb")
                 remove_hydrogens_and_oxt(native_models[model], filtered_pdb)
-                command = f'cd {model_folder} && smog2 -i {model}.pdb -s {model} -CA'
+                command = f"cd {model_folder} && smog2 -i {model}.pdb -s {model} -CA"
                 os.system(command)
 
             native_contacts = readNC(contacts_file)
 
             # Load topology and Cα atom indices
-            top_file = os.path.join(bioemu_folder, model, 'topology.pdb')
+            top_file = os.path.join(bioemu_folder, model, "topology.pdb")
             top_traj = md.load(top_file)
-            ca_atoms = [a.index for a in top_traj.topology.atoms if a.name == 'CA']
-            native_pairs = [(ca_atoms[c[0]-1], ca_atoms[c[1]-1]) for c in native_contacts]
+            ca_atoms = [a.index for a in top_traj.topology.atoms if a.name == "CA"]
+            native_pairs = [
+                (ca_atoms[c[0] - 1], ca_atoms[c[1] - 1]) for c in native_contacts
+            ]
 
             traj_files = []
-            for xtc in sorted(os.listdir(f'{bioemu_folder}/{model}/')):
-                if not xtc.endswith('.xtc'):
+            for xtc in sorted(os.listdir(f"{bioemu_folder}/{model}/")):
+                if not xtc.endswith(".xtc"):
                     continue
-                if xtc.startswith('samples_'):
-                    traj_files.append(f'{bioemu_folder}/{model}/'+xtc)
-            if not traj_files and os.path.exists(f'{bioemu_folder}/{model}/samples.xtc'):
-                traj_files = f'{bioemu_folder}/{model}/samples.xtc'
+                if xtc.startswith("samples_"):
+                    traj_files.append(f"{bioemu_folder}/{model}/" + xtc)
+            if not traj_files and os.path.exists(
+                f"{bioemu_folder}/{model}/samples.xtc"
+            ):
+                traj_files = f"{bioemu_folder}/{model}/samples.xtc"
 
             if not traj_files:
                 continue
@@ -1701,29 +1860,34 @@ class sequenceModels:
 
             # Compute Frame 0 (native contact distances) from the filtered native structure
             native_traj = md.load(contacts_pdb)
-            ca_atoms = [a.index for a in native_traj.topology.atoms if a.name == 'CA']
-            native_pairs = [(ca_atoms[c[0]-1], ca_atoms[c[1]-1]) for c in native_contacts]
+            ca_atoms = [a.index for a in native_traj.topology.atoms if a.name == "CA"]
+            native_pairs = [
+                (ca_atoms[c[0] - 1], ca_atoms[c[1] - 1]) for c in native_contacts
+            ]
             native_distances = md.compute_distances(native_traj, native_pairs)
 
             # Combine native distances with trajectory distances
-            D_all = np.vstack([native_distances, D])  # shape: (n_frames + 1, n_contacts)
+            D_all = np.vstack(
+                [native_distances, D]
+            )  # shape: (n_frames + 1, n_contacts)
 
             # Create labels like "resA-resB"
             contact_labels = [
-                f'{native_contacts[i][0]}-{native_contacts[i][1]}'
+                f"{native_contacts[i][0]}-{native_contacts[i][1]}"
                 for i in range(len(native_contacts))
             ]
 
             # Build DataFrame with Frame 0 included
             df = pd.DataFrame(D_all, columns=contact_labels)
-            df['Frame'] = range(D_all.shape[0])  # Frame 0 = native
-            df = df.set_index('Frame')
+            df["Frame"] = range(D_all.shape[0])  # Frame 0 = native
+            df = df.set_index("Frame")
             df_distances[model] = df
 
         return df_distances
 
-    def computeFractionOfNativeContacts(self, df_distances, method="hard",
-                                        inflation=1.2, rel_tolerance=0.2):
+    def computeFractionOfNativeContacts(
+        self, df_distances, method="hard", inflation=1.2, rel_tolerance=0.2
+    ):
         """
         Compute the fraction of native contacts (Q) per frame and per model, using either a
         hard cutoff or a relative tolerance.
@@ -1804,15 +1968,17 @@ class sequenceModels:
                 raise ValueError(f"Unsupported method: {method}")
 
             # 4) Build temporary DataFrame with Q values for each frame
-            tmp_df = pd.DataFrame({
-                "Model": model,
-                "Frame": sim_df.index,  # original frame numbers
-                "Q": q_vals
-            })
+            tmp_df = pd.DataFrame(
+                {
+                    "Model": model,
+                    "Frame": sim_df.index,  # original frame numbers
+                    "Q": q_vals,
+                }
+            )
             records.append(tmp_df)
 
         # Combine results for all models into a single DataFrame with a MultiIndex
-        df_q = pd.concat(records, ignore_index=True).set_index(['Model', 'Frame'])
+        df_q = pd.concat(records, ignore_index=True).set_index(["Model", "Frame"])
         return df_q
 
     def plotNativeContactsDistribution(self, q_df):
@@ -1838,9 +2004,9 @@ class sequenceModels:
             """
             Inner function: filters the Q dataframe for the selected model and plots its KDE.
             """
-            df_model = q_reset[q_reset['Model'] == model]
+            df_model = q_reset[q_reset["Model"] == model]
             plt.figure(figsize=(8, 6))
-            sns.kdeplot(df_model['Q'], shade=True, color="skyblue", bw_adjust=1)
+            sns.kdeplot(df_model["Q"], shade=True, color="skyblue", bw_adjust=1)
             plt.title(f"KDE of Q for model: {model}", fontsize=16)
             plt.xlabel("Fraction of Native Contacts (Q)", fontsize=12)
             plt.ylabel("Density", fontsize=12)
@@ -1848,7 +2014,9 @@ class sequenceModels:
             plt.show()
 
         # Create a dropdown widget and link it to the plotting function.
-        model_dropdown = widgets.Dropdown(options=sorted(models), description='Select Model:')
+        model_dropdown = widgets.Dropdown(
+            options=sorted(models), description="Select Model:"
+        )
         interact(plot_model_q, model=model_dropdown)
 
     def computeFoldingFreeEnergy(self, df_q, q_threshold=0.8, temperature=300.0):
@@ -1880,8 +2048,8 @@ class sequenceModels:
         R = 0.001987  # kcal/mol·K
 
         data = []
-        for model in df_q.index.get_level_values('Model').unique():
-            q_vals = df_q.loc[model, 'Q'].values
+        for model in df_q.index.get_level_values("Model").unique():
+            q_vals = df_q.loc[model, "Q"].values
             total = len(q_vals)
             n_folded = np.sum(q_vals >= q_threshold)
             n_unfolded = total - n_folded
@@ -1893,18 +2061,28 @@ class sequenceModels:
                 P_unfolded = n_unfolded / total
                 dG = -R * temperature * np.log(P_folded / P_unfolded)
 
-                data.append({
-                    'Model': model,
-                    'ΔG_f (kcal/mol)': dG,
-                    'P_folded': P_folded,
-                    'P_unfolded': P_unfolded
-                })
+                data.append(
+                    {
+                        "Model": model,
+                        "ΔG_f (kcal/mol)": dG,
+                        "P_folded": P_folded,
+                        "P_unfolded": P_unfolded,
+                    }
+                )
 
-        df_dG = pd.DataFrame(data).set_index('Model')
+        df_dG = pd.DataFrame(data).set_index("Model")
         return df_dG
 
-    def setUpInterProScan(self, job_folder, not_exclude=['Gene3D'], output_format='tsv',
-                          cpus=40, version="5.74-105.0", max_bin_size=10000, run_at='bubbles'):
+    def setUpInterProScan(
+        self,
+        job_folder,
+        not_exclude=["Gene3D"],
+        output_format="tsv",
+        cpus=40,
+        version="5.74-105.0",
+        max_bin_size=10000,
+        run_at="bubbles",
+    ):
         """
         Set up InterProScan analysis to search for domains in a set of proteins
 
@@ -1919,9 +2097,9 @@ class sequenceModels:
             https://www.ebi.ac.uk/interpro/about/interproscan/
         """
 
-        available_at = ['bubbles', 'mn5']
+        available_at = ["bubbles", "mn5"]
         if run_at not in available_at:
-            raise ValueError(f'InterProScan is only installed at {available_at}.')
+            raise ValueError(f"InterProScan is only installed at {available_at}.")
 
         if isinstance(not_exclude, str):
             not_exclude = [not_exclude]
@@ -1929,11 +2107,11 @@ class sequenceModels:
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        if not os.path.exists(job_folder+'/input_fasta'):
-            os.mkdir(job_folder+'/input_fasta')
+        if not os.path.exists(job_folder + "/input_fasta"):
+            os.mkdir(job_folder + "/input_fasta")
 
-        if not os.path.exists(job_folder+'/output'):
-            os.mkdir(job_folder+'/output')
+        if not os.path.exists(job_folder + "/output"):
+            os.mkdir(job_folder + "/output")
 
         # Define number of bins to execute interproscan
         n_bins = len(self.sequences) // max_bin_size
@@ -1950,53 +2128,86 @@ class sequenceModels:
 
             bin_index = str(i).zfill(zf)
 
-            input_file = 'input_fasta/input_'+bin_index+'.fasta'
+            input_file = "input_fasta/input_" + bin_index + ".fasta"
 
-            bin_sequences = {s:self.sequences[s] for s in all_sequences[i*max_bin_size:(i+1)*max_bin_size]}
+            bin_sequences = {
+                s: self.sequences[s]
+                for s in all_sequences[i * max_bin_size : (i + 1) * max_bin_size]
+            }
 
-            alignment.writeFastaFile(bin_sequences, job_folder+'/'+input_file)
+            alignment.writeFastaFile(bin_sequences, job_folder + "/" + input_file)
 
-            appl_list_all = ["Gene3D","PANTHER","Pfam","Coils","SUPERFAMILY","SFLD","Hamap",
-                             "ProSiteProfiles","SMART","CDD","PRINTS","PIRSR","ProSitePatterns","AntiFam",
-                             "MobiDBLite","PIRSF","FunFam","NCBIfam"]
+            appl_list_all = [
+                "Gene3D",
+                "PANTHER",
+                "Pfam",
+                "Coils",
+                "SUPERFAMILY",
+                "SFLD",
+                "Hamap",
+                "ProSiteProfiles",
+                "SMART",
+                "CDD",
+                "PRINTS",
+                "PIRSR",
+                "ProSitePatterns",
+                "AntiFam",
+                "MobiDBLite",
+                "PIRSF",
+                "FunFam",
+                "NCBIfam",
+            ]
 
             for appl in not_exclude:
                 if appl not in appl_list_all:
-                    raise ValueError('Application not found. Available applications: '+' ,'.join(appl_list_all))
+                    raise ValueError(
+                        "Application not found. Available applications: "
+                        + " ,".join(appl_list_all)
+                    )
 
             appl_list = []
             for appl in appl_list_all:
                 if appl not in not_exclude:
                     appl_list.append(appl)
 
-            output_file = 'output/interproscan_output_'+bin_index+'.tsv'
+            output_file = "output/interproscan_output_" + bin_index + ".tsv"
 
-            command = "cd "+job_folder+"\n"
+            command = "cd " + job_folder + "\n"
             command += "Path=$(pwd)\n"
-            if run_at == 'bubbles':
-                command += "bash /home/bubbles/Programs/interproscan-"+version+"/interproscan.sh"
-            elif run_at == 'mn5':
-                command += "bash /gpfs/projects/bsc72/Programs/interproscan-"+version+"/interproscan.sh"
-            command += " -i $Path/"+input_file
-            command += " -f "+output_format
-            command += " -o $Path/"+output_file
-            command += " -cpu "+str(cpus)
-            for n,appl in enumerate(appl_list):
+            if run_at == "bubbles":
+                command += (
+                    "bash /home/bubbles/Programs/interproscan-"
+                    + version
+                    + "/interproscan.sh"
+                )
+            elif run_at == "mn5":
+                command += (
+                    "bash /gpfs/projects/bsc72/Programs/interproscan-"
+                    + version
+                    + "/interproscan.sh"
+                )
+            command += " -i $Path/" + input_file
+            command += " -f " + output_format
+            command += " -o $Path/" + output_file
+            command += " -cpu " + str(cpus)
+            for n, appl in enumerate(appl_list):
                 if n == 0:
-                    command += " -exclappl "+appl
+                    command += " -exclappl " + appl
                 else:
-                    command += ","+appl
+                    command += "," + appl
             command += "\n"
 
             command += "cd ..\n"
 
             jobs.append(command)
 
-        print(f'Remember, your are running Interproscan at {run_at}.')
+        print(f"Remember, your are running Interproscan at {run_at}.")
 
         return jobs
 
-    def readInterProScanFoldDefinitions(self, job_folder, return_missing=False, verbose=True):
+    def readInterProScanFoldDefinitions(
+        self, job_folder, return_missing=False, verbose=True
+    ):
         """
         Reads the output generated by the setUpInterProScan calculation.
         """
@@ -2004,35 +2215,35 @@ class sequenceModels:
         # Check code in input files
         input_codes = set()
         batch_input_codes = {}
-        for f in sorted(os.listdir(job_folder+'/input_fasta')):
-            batch = f.split('.')[0].split('_')[-1]
+        for f in sorted(os.listdir(job_folder + "/input_fasta")):
+            batch = f.split(".")[0].split("_")[-1]
             batch_input_codes[batch] = set()
-            if not f.endswith('.fasta'):
+            if not f.endswith(".fasta"):
                 continue
 
-            with open(job_folder+'/input_fasta/'+f) as ff:
+            with open(job_folder + "/input_fasta/" + f) as ff:
                 for l in ff:
-                    if l.startswith('>'):
+                    if l.startswith(">"):
                         code = l[1:].strip()
                         input_codes.add(code)
                         batch_input_codes[batch].add(code)
 
         folds = {}
         batch_folds = {}
-        for f in sorted(os.listdir(job_folder+'/output')):
+        for f in sorted(os.listdir(job_folder + "/output")):
 
-            batch = f.split('.')[0].split('_')[-1]
+            batch = f.split(".")[0].split("_")[-1]
             batch_folds[batch] = set()
 
-            if not f.endswith('.tsv'):
+            if not f.endswith(".tsv"):
                 continue
 
-            with open(job_folder+'/output/'+f) as tsv:
+            with open(job_folder + "/output/" + f) as tsv:
                 for l in tsv:
-                    code = l.split('\t')[0]
-                    fold = l.split('\t')[12]
-                    lr = int(l.split('\t')[6])
-                    ur = int(l.split('\t')[7])
+                    code = l.split("\t")[0]
+                    fold = l.split("\t")[12]
+                    lr = int(l.split("\t")[6])
+                    ur = int(l.split("\t")[7])
                     folds.setdefault(code, {})
                     folds[code].setdefault(fold, [])
                     folds[code][fold].append((lr, ur))
@@ -2040,16 +2251,18 @@ class sequenceModels:
 
         diff = len(input_codes) - len(folds)
         if diff > 0 and verbose:
-            m  = f'There are {diff} missing codes from the output. '
-            m += f'Give return_missing=True to return them as a list.'
+            m = f"There are {diff} missing codes from the output. "
+            m += f"Give return_missing=True to return them as a list."
             print(m)
             for batch in batch_input_codes:
                 if batch not in batch_folds:
-                    print(f'\tBatch {batch} has no output')
+                    print(f"\tBatch {batch} has no output")
                 else:
-                    batch_diff = len(batch_input_codes[batch])-len(batch_folds[batch])
+                    batch_diff = len(batch_input_codes[batch]) - len(batch_folds[batch])
                     if batch_diff > 0:
-                        print(f'\tThere are {batch_diff} missing codes from the output of batch {batch}.')
+                        print(
+                            f"\tThere are {batch_diff} missing codes from the output of batch {batch}."
+                        )
 
         if return_missing:
             missing = []
@@ -2082,10 +2295,14 @@ class sequenceModels:
                 fold_counts[fold] += 1
 
         # Exclude the fold named '-'
-        filtered_fold_counts = {fold: count for fold, count in fold_counts.items() if fold != '-'}
+        filtered_fold_counts = {
+            fold: count for fold, count in fold_counts.items() if fold != "-"
+        }
 
         # Sort folds by frequency and select the top N
-        sorted_folds = sorted(filtered_fold_counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
+        sorted_folds = sorted(
+            filtered_fold_counts.items(), key=lambda x: x[1], reverse=True
+        )[:top_n]
 
         # Extract fold names and counts
         fold_names, counts = zip(*sorted_folds) if sorted_folds else ([], [])
@@ -2100,7 +2317,9 @@ class sequenceModels:
         plt.tight_layout()
         plt.show()
 
-    def plotInterProScanSingleSegmentCountsVsMaxGap(self, ips, fold, vertical_line=None, max_gap_cap=100):
+    def plotInterProScanSingleSegmentCountsVsMaxGap(
+        self, ips, fold, vertical_line=None, max_gap_cap=100
+    ):
         """
         Analyzes the effect of max_gap on fold stitching and plots the number
         of models resulting in a single stitched segment.
@@ -2137,7 +2356,7 @@ class sequenceModels:
                 intervals = sorted(annotations[fold], key=lambda x: x[0])
                 model_intervals.append(intervals)
                 for i in range(1, len(intervals)):
-                    gap = intervals[i][0] - intervals[i-1][1]
+                    gap = intervals[i][0] - intervals[i - 1][1]
                     if gap > 0:
                         max_gap_found = max(max_gap_found, gap)
 
@@ -2147,7 +2366,11 @@ class sequenceModels:
         gap_list, count_list = [], []
 
         for gap in range(max_gap + 1):
-            count = sum(1 for intervals in model_intervals if len(merge_intervals(intervals, gap)) == 1)
+            count = sum(
+                1
+                for intervals in model_intervals
+                if len(merge_intervals(intervals, gap)) == 1
+            )
             gap_list.append(gap)
             count_list.append(count)
 
@@ -2155,18 +2378,18 @@ class sequenceModels:
         plt.figure(figsize=(8, 5))
 
         if vertical_line:
-            plt.axvline(vertical_line, c='k', ls='--', lw=0.5)
+            plt.axvline(vertical_line, c="k", ls="--", lw=0.5)
 
-        plt.plot(gap_list, count_list, marker='o')
-        plt.xlabel('max_gap (residues)')
-        plt.ylabel('Number of Single-Segment Models')
+        plt.plot(gap_list, count_list, marker="o")
+        plt.xlabel("max_gap (residues)")
+        plt.ylabel("Number of Single-Segment Models")
         plt.title(f"Effect of max_gap on Fold Stitching: {fold}")
         plt.grid(True)
         plt.tight_layout()
         plt.show()
 
     def __iter__(self):
-        #returning __iter__ object
+        # returning __iter__ object
         self._iter_n = -1
         self._stop_inter = len(self.sequences_names)
         return self
@@ -2178,9 +2401,21 @@ class sequenceModels:
         else:
             raise StopIteration
 
-def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pdb=False,
-                          model_prefix=None, c=0.9, cov_mode=0, evalue=10.0, overwrite=False,
-                          stderr=True, stdout=True, verbose=True):
+
+def _structuralClustering(
+    job_folder,
+    models_folder,
+    output_dcd=True,
+    save_as_pdb=False,
+    model_prefix=None,
+    c=0.9,
+    cov_mode=0,
+    evalue=10.0,
+    overwrite=False,
+    stderr=True,
+    stdout=True,
+    verbose=True,
+):
     """
     Perform structural clustering on the PDB files in models_folder using foldseek.
     Clusters are renamed as cluster_01, cluster_02, etc.
@@ -2263,7 +2498,7 @@ def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pd
         return renamed_clusters
 
     # Create temporary folder for foldseek.
-    tmp_folder = os.path.join(job_folder, 'tmp')
+    tmp_folder = os.path.join(job_folder, "tmp")
     if overwrite and os.path.exists(tmp_folder):
         shutil.rmtree(tmp_folder)
     if not os.path.exists(tmp_folder):
@@ -2275,41 +2510,47 @@ def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pd
     if os.path.exists(cluster_output_file) and not overwrite:
         if verbose:
             print("Existing foldseek clustering output found. Reading clusters...")
-        with open(cluster_output_file, 'r') as f:
+        with open(cluster_output_file, "r") as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) < 2:
                     continue
-                centroid = parts[0].replace('.pdb', '')
-                member = parts[1].replace('.pdb', '')
+                centroid = parts[0].replace(".pdb", "")
+                member = parts[1].replace(".pdb", "")
                 clusters_temp.setdefault(centroid, []).append(member)
         print(f"Found {len(clusters_temp)} clusters from foldseek output.")
     else:
         # Build and run the foldseek easy-cluster command.
         command = f"cd {job_folder}\n"
-        command += (f"foldseek easy-cluster {models_folder} result tmp "
-                    f"--cov-mode {cov_mode} -e {evalue} -c {c}\n")
+        command += (
+            f"foldseek easy-cluster {models_folder} result tmp "
+            f"--cov-mode {cov_mode} -e {evalue} -c {c}\n"
+        )
         command += f"cd {'../'*len(job_folder.split(os.sep))}\n"
         if verbose:
             print("Running foldseek clustering...")
         subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
 
         if not os.path.exists(cluster_output_file):
-            raise FileNotFoundError(f"Clustering output file not found: {cluster_output_file}")
+            raise FileNotFoundError(
+                f"Clustering output file not found: {cluster_output_file}"
+            )
 
-        with open(cluster_output_file, 'r') as f:
+        with open(cluster_output_file, "r") as f:
             for line in f:
                 parts = line.strip().split()
                 if len(parts) < 2:
                     continue
-                centroid = parts[0].replace('.pdb', '')
-                member = parts[1].replace('.pdb', '')
+                centroid = parts[0].replace(".pdb", "")
+                member = parts[1].replace(".pdb", "")
                 clusters_temp.setdefault(centroid, []).append(member)
         if verbose:
             print(f"Clustering complete. Found {len(clusters_temp)} clusters.")
 
     # Sort clusters by size and rename them as cluster_01, cluster_02, etc.
-    clusters_sorted = sorted(clusters_temp.items(), key=lambda x: len(x[1]), reverse=True)
+    clusters_sorted = sorted(
+        clusters_temp.items(), key=lambda x: len(x[1]), reverse=True
+    )
     renamed_clusters = {}
     for i, (centroid, members) in enumerate(clusters_sorted, start=1):
         cluster_name = f"cluster_{i:02d}"
@@ -2324,7 +2565,9 @@ def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pd
             centroid = data["centroid"]
             members = data["members"]
             pdb_names = [centroid] + members
-            pdb_files = [os.path.join(models_folder, f"{name}.pdb") for name in pdb_names]
+            pdb_files = [
+                os.path.join(models_folder, f"{name}.pdb") for name in pdb_names
+            ]
 
             traj_list = []
             for pdb in pdb_files:
@@ -2337,10 +2580,14 @@ def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pd
                 else:
                     print(f"Warning: {pdb} not found.")
             if not traj_list:
-                print(f"No valid PDB files found for {cluster_name}. Skipping DCD generation.")
+                print(
+                    f"No valid PDB files found for {cluster_name}. Skipping DCD generation."
+                )
                 continue
             try:
-                combined_traj = traj_list[0] if len(traj_list) == 1 else md.join(traj_list)
+                combined_traj = (
+                    traj_list[0] if len(traj_list) == 1 else md.join(traj_list)
+                )
             except Exception as e:
                 print(f"Error joining trajectories for {cluster_name}: {e}")
                 continue
@@ -2356,12 +2603,18 @@ def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pd
             shutil.rmtree(pdb_folder)
         os.mkdir(pdb_folder)
         # Use model_prefix if provided; otherwise derive it from the basename of models_folder.
-        prefix = model_prefix if model_prefix is not None else os.path.basename(models_folder)
+        prefix = (
+            model_prefix
+            if model_prefix is not None
+            else os.path.basename(models_folder)
+        )
         for cluster_name, data in renamed_clusters.items():
             for member in [data["centroid"]] + data["members"]:
                 source_file = os.path.join(models_folder, f"{member}.pdb")
                 if os.path.exists(source_file):
-                    target_file = os.path.join(pdb_folder, f"{prefix}_{cluster_name}_{member}.pdb")
+                    target_file = os.path.join(
+                        pdb_folder, f"{prefix}_{cluster_name}_{member}.pdb"
+                    )
                     shutil.copyfile(source_file, target_file)
                     if verbose:
                         print(f"Copied {source_file} to {target_file}")
@@ -2380,8 +2633,14 @@ def _structuralClustering(job_folder, models_folder, output_dcd=True, save_as_pd
 
     return renamed_clusters
 
+
 def _copyScriptFile(
-    output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
+    output_folder,
+    script_name,
+    no_py=False,
+    subfolder=None,
+    hidden=True,
+    path="prepare_proteins/scripts",
 ):
     """
     Copy a script file from the prepare_proteins package.
