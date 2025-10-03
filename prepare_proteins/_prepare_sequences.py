@@ -29,6 +29,7 @@ from matplotlib.lines import Line2D
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.optimize import curve_fit
 from tqdm import tqdm
+import pandas as pd
 
 from . import alignment
 
@@ -138,7 +139,8 @@ class sequenceModels:
         exclude_models=None,
         model_seeds=None,
         runner_name='runner',
-        ligands=None
+        ligands=None,
+        skip_finished=False
     ):
         """Create AF3 job folders, per-model JSONs and sbatch commands.
 
@@ -174,6 +176,10 @@ class sequenceModels:
             * dict mapping model name (or ``"default"``/``"*"``) to any of the
               previous formats to override the default specification for that
               model.
+        skip_finished : bool, optional
+            When ``True`` models that already contain completed AF3 outputs
+            (detected via an existing ``ranking_scores.csv`` under the model
+            ``output`` directory) are skipped and no new job is prepared.
 
         Notes
         -----
@@ -258,98 +264,100 @@ class sequenceModels:
 
             raise ValueError('Unsupported sequence format for AlphaFold3 JSON generation')
 
-        def _coerce_ligands(lig_spec):
+        def _coerce_ligands(lig_spec, occupied_ids):
             if not lig_spec:
                 return []
 
-            def _next_chain_id(used_ids):
-                for ascii_code in range(ord('A'), ord('Z') + 1):
-                    candidate = chr(ascii_code)
-                    if candidate not in used_ids:
-                        return candidate
-                raise ValueError('Exhausted ligand chain identifiers; only 26 unique ligands are supported.')
+            used_ids = set(occupied_ids)
+            counts_by_code = defaultdict(int)
 
-            def _expand_code(code, count, used_ids):
-                code = re.sub(r"[^0-9A-Za-z]+", "", str(code).upper())
-                if not code:
+            def _sanitize_code(code):
+                base = re.sub(r"[^0-9A-Za-z]+", "", str(code).upper())
+                if not base:
                     raise ValueError('Ligand CCD code must contain alphanumeric characters.')
-                if count < 1:
-                    raise ValueError(f'Ligand count for {code} must be positive.')
-                items = []
-                for idx in range(count):
-                    ligand_id = _next_chain_id(used_ids)
-                    used_ids.add(ligand_id)
-                    items.append({
-                        "id": ligand_id,
-                        "ccdCodes": [code]
-                    })
-                return items
+                return base
 
-            if isinstance(lig_spec, dict):
-                entries = []
-                used_ids = set()
+            def _generate_id(code):
+                base = _sanitize_code(code)
+                idx = counts_by_code[base]
+                while True:
+                    if idx < 26:
+                        suffix = chr(ord('A') + idx)
+                    else:
+                        suffix = str(idx - 25)
+                    candidate = f"{base}{suffix}"
+                    idx += 1
+                    if candidate not in used_ids:
+                        counts_by_code[base] = idx
+                        used_ids.add(candidate)
+                        return candidate
+
+            def _entry(code):
+                return {
+                    "id": _generate_id(code),
+                    "ccdCodes": [_sanitize_code(code)]
+                }
+
+            entries = []
+
+            if isinstance(lig_spec, dict) and all(isinstance(v, int) for v in lig_spec.values()):
                 for code, count in lig_spec.items():
-                    if not isinstance(count, int):
-                        raise TypeError('Ligand count dictionary must map CCD codes to integers.')
-                    entries.extend(_expand_code(code, count, used_ids))
+                    if count < 1:
+                        raise ValueError(f'Ligand count for {code} must be positive.')
+                    for _ in range(count):
+                        entries.append(_entry(code))
+                occupied_ids.update(entry["id"] for entry in entries)
                 return entries
 
             if isinstance(lig_spec, (list, tuple)):
                 if all(isinstance(item, dict) for item in lig_spec):
-                    required_keys = {"id", "ccdCodes"}
-                    normalised = []
-                    used_ids = set()
                     for item in lig_spec:
                         if "ccdCodes" not in item and "ccdCode" in item:
                             item = dict(item)
                             item["ccdCodes"] = item.pop("ccdCode")
+                        required_keys = {"id", "ccdCodes"}
                         missing = required_keys - set(item)
                         if missing:
                             raise ValueError(f'Ligand entry {item} missing keys: {missing}')
-                        ligand_id = re.sub(r"[^0-9A-Z]+", "", str(item["id"]).upper())
-                        if len(ligand_id) != 1:
-                            raise ValueError(
-                                f"Ligand id '{item['id']}' must be a single uppercase alphanumeric character."
-                            )
+                        ligand_id = str(item["id"]).upper()
                         if ligand_id in used_ids:
-                            raise ValueError('Ligand IDs must be unique single characters.')
+                            raise ValueError('Ligand IDs must be unique and distinct from protein chains.')
                         used_ids.add(ligand_id)
                         codes = item["ccdCodes"]
                         if isinstance(codes, str):
                             codes = [codes]
-                        codes = [re.sub(r"[^0-9A-Za-z]+", "", str(code).upper()) for code in codes]
-                        normalised.append({
+                        codes = [_sanitize_code(code) for code in codes]
+                        entries.append({
                             "id": ligand_id,
                             "ccdCodes": codes
                         })
-                    return normalised
+                    occupied_ids.update(entry["id"] for entry in entries)
+                    return entries
                 if all(isinstance(item, str) for item in lig_spec):
-                    used_ids = set()
-                    entries = []
                     for code in lig_spec:
-                        clean_code = re.sub(r"[^0-9A-Za-z]+", "", str(code).upper())
-                        if not clean_code:
-                            raise ValueError(f"Ligand code '{code}' must be alphanumeric.")
-                        entries.extend(_expand_code(clean_code, 1, used_ids))
+                        entries.append(_entry(code))
+                    occupied_ids.update(entry["id"] for entry in entries)
                     return entries
                 raise TypeError('Ligands list must contain either CCD codes or dictionaries matching the AF3 schema.')
 
             if isinstance(lig_spec, str):
-                return _expand_code(lig_spec, 1, set())
+                entry = _entry(lig_spec)
+                occupied_ids.add(entry["id"])
+                return [entry]
 
             raise TypeError('Unsupported ligand specification format.')
 
-        def _ligands_for_model(model_name):
+        def _ligands_for_model(model_name, occupied_ids):
             if isinstance(ligands, dict):
                 if model_name in ligands:
-                    return _coerce_ligands(ligands[model_name])
+                    return _coerce_ligands(ligands[model_name], occupied_ids)
                 for alias in ('default', '*'):
                     if alias in ligands:
-                        return _coerce_ligands(ligands[alias])
+                        return _coerce_ligands(ligands[alias], occupied_ids)
                 if all(isinstance(v, int) for v in ligands.values()):
-                    return _coerce_ligands(ligands)
+                    return _coerce_ligands(ligands, occupied_ids)
                 return []
-            return _coerce_ligands(ligands)
+            return _coerce_ligands(ligands, occupied_ids)
 
         if isinstance(only_models, str):
             only_models = [only_models]
@@ -362,6 +370,14 @@ class sequenceModels:
             exclude_models = []
 
         os.makedirs(job_folder, exist_ok=True)
+
+        def _is_finished(output_dir):
+            if not os.path.isdir(output_dir):
+                return False
+            for root, _, files in os.walk(output_dir):
+                if "ranking_scores.csv" in files:
+                    return True
+            return False
 
         selected_models = []
         for model_name in self.sequences_names:
@@ -385,14 +401,25 @@ class sequenceModels:
             os.makedirs(input_dir, exist_ok=True)
             os.makedirs(output_dir, exist_ok=True)
 
+            if skip_finished and _is_finished(output_dir):
+                continue
+
             entries = _sequence_entries(self.sequences[model_name])
+            occupied_chain_ids = set()
+            for entry in entries:
+                protein_id = entry["protein"]["id"]
+                if isinstance(protein_id, str):
+                    occupied_chain_ids.add(protein_id.upper())
+                else:
+                    for pid in protein_id:
+                        occupied_chain_ids.add(str(pid).upper())
             payload = {
                 "name": model_name,
                 "modelSeeds": _seeds_for_model(model_name),
                 "dialect": "alphafold3",
                 "version": 1
             }
-            lig_spec = _ligands_for_model(model_name)
+            lig_spec = _ligands_for_model(model_name, occupied_chain_ids)
             if lig_spec:
                 for ligand in lig_spec:
                     entries.append({"ligand": ligand})
@@ -656,6 +683,36 @@ class sequenceModels:
                                 return {}
             return {}
 
+        def _normalise_chain_ids(structure):
+            """Merge ligand chains with multi-character IDs into their partner chain.
+
+            AF3 marks cofactors/ions with identifiers such as ``MGA`` where the
+            trailing character refers to the partner protein chain.  PDB output
+            only supports one-character chain IDs, so we remap these ligands onto
+            the final character, merging them into the existing protein chain when
+            present. This keeps the ligand associated with the correct chain while
+            satisfying the format limitation.
+            """
+
+            for model in structure:
+                chains = list(model.child_dict.values())
+                for chain in chains:
+                    chain_id = chain.id
+                    if len(chain_id) <= 1:
+                        continue
+
+                    target_id = chain_id[-1].upper()
+                    if len(target_id) != 1:
+                        target_id = target_id[0]
+
+                    if target_id in model.child_dict and model.child_dict[target_id] is not chain:
+                        target_chain = model.child_dict[target_id]
+                        for residue in list(chain):
+                            target_chain.add(residue)
+                        model.detach_child(chain_id)
+                    else:
+                        chain.id = target_id
+
         if isinstance(only_models, str):
             only_models = [only_models]
 
@@ -776,6 +833,7 @@ class sequenceModels:
                     try:
                         parser = MMCIFParser(QUIET=True)
                         structure = parser.get_structure(safe_name, cif_path)
+                        _normalise_chain_ids(structure)
                         io = PDBIO()
                         io.set_structure(structure)
                         io.save(target_path)
