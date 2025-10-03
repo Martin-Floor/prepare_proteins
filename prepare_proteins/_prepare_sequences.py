@@ -7,6 +7,8 @@ import pandas as pd
 import mdtraj as md
 import numpy as np
 import json
+import csv
+import warnings
 import subprocess
 import io
 from pkg_resources import Requirement, resource_listdir, resource_stream
@@ -105,6 +107,287 @@ class sequenceModels:
 
         return jobs
 
+    def setUpAlphaFold3(
+        self,
+        job_folder,
+        only_models=None,
+        exclude_models=None,
+        model_seeds=None,
+        runner_name='runner',
+        ligands=None
+    ):
+        """Create AF3 job folders, per-model JSONs and sbatch commands.
+
+        This helper mirrors :meth:`setUpAlphaFold` but adapts the workflow to the
+        AlphaFold 3 runner deployed at MN5.  It writes the json inputs expected by
+        ``bsc_alphafold`` and returns the list of commands that can be launched (or
+        further processed by the ``bsc_calculations`` utilities).
+
+        Parameters
+        ----------
+        job_folder : str
+            Root folder that will contain the AF3 inputs.
+        only_models : str or iterable, optional
+            Restrict the setup to the provided model name(s).
+        exclude_models : str or iterable, optional
+            Skip the provided model name(s).
+        model_seeds : int, iterable, or dict, optional
+            Seed(s) to use per model.  If a dictionary is supplied it should map
+            model name to seed (or list of seeds).  If a single value is supplied
+            it will be applied to every model.  Defaults to ``[1]``.
+        runner_name : str, optional
+            File name for the sbatch runner script expected inside each model folder.
+        ligands : optional
+            Ligand specification applied to every model (unless a per-model entry
+            is provided). Accepts one of the following forms:
+
+            * list of dicts already matching the expected AlphaFold 3 schema,
+              e.g. ``[{"id": "A", "ccdCodes": ["HEM"]}]``;
+            * list/tuple of CCD codes (strings), each producing one entry with a
+              unique single-letter ID;
+            * dict mapping CCD code to a count, e.g. ``{"HEM": 2, "MG": 2}``,
+              which will auto-generate unique single-letter IDs;
+            * dict mapping model name (or ``"default"``/``"*"``) to any of the
+              previous formats to override the default specification for that
+              model.
+
+        Notes
+        -----
+        The generated commands assume that an environment variable named
+        ``WEIGHTS`` already points to the AlphaFold 3 parameters, and that a
+        runnable ``runner`` script is available inside each per-model folder.
+
+        Returns
+        -------
+        list[str]
+            One multi-line command per model that can be used to submit the jobs.
+        """
+
+        def _normalise_to_list(value):
+            if value is None:
+                return [1]
+            if isinstance(value, int):
+                return [int(value)]
+            if isinstance(value, (list, tuple, set)):
+                if not value:
+                    return [1]
+                return [int(v) for v in value]
+            raise TypeError(
+                'model_seeds must be an int, iterable of ints or a dictionary mapping models to seeds'
+            )
+
+        def _seeds_for_model(model_name):
+            if isinstance(model_seeds, dict):
+                if model_name in model_seeds:
+                    return _normalise_to_list(model_seeds[model_name])
+                # Allow usage of generic entries such as "default" or "*"
+                for generic_key in ('default', '*'):
+                    if generic_key in model_seeds:
+                        return _normalise_to_list(model_seeds[generic_key])
+                return _normalise_to_list(None)
+            return _normalise_to_list(model_seeds)
+
+        def _ensure_id_list(chain_id, fallback_index):
+            if isinstance(chain_id, (list, tuple)):
+                return [str(i) for i in chain_id]
+            if chain_id is None:
+                return [chr(ord('A') + fallback_index)]
+            chain_str = str(chain_id)
+            if not chain_str:
+                return [chr(ord('A') + fallback_index)]
+            return [chain_str]
+
+        def _sequence_entries(seq_obj):
+            if isinstance(seq_obj, str):
+                return [{"protein": {"id": "A", "sequence": seq_obj}}]
+
+            if isinstance(seq_obj, dict):
+                entries = []
+                for idx, (chain_id, chain_seq) in enumerate(seq_obj.items()):
+                    if chain_seq is None:
+                        continue
+                    ids = _ensure_id_list(chain_id, idx)
+                    protein_id = ids[0] if len(ids) == 1 else ids
+                    entries.append({
+                        "protein": {
+                            "id": protein_id,
+                            "sequence": str(chain_seq)
+                        }
+                    })
+                if entries:
+                    return entries
+
+            if isinstance(seq_obj, (list, tuple)):
+                entries = []
+                for idx, chain_seq in enumerate(seq_obj):
+                    if chain_seq is None:
+                        continue
+                    chain_id = chr(ord('A') + idx)
+                    entries.append({
+                        "protein": {
+                            "id": chain_id,
+                            "sequence": str(chain_seq)
+                        }
+                    })
+                if entries:
+                    return entries
+
+            raise ValueError('Unsupported sequence format for AlphaFold3 JSON generation')
+
+        def _coerce_ligands(lig_spec):
+            if not lig_spec:
+                return []
+
+            def _next_chain_id(used_ids):
+                for ascii_code in range(ord('A'), ord('Z') + 1):
+                    candidate = chr(ascii_code)
+                    if candidate not in used_ids:
+                        return candidate
+                raise ValueError('Exhausted ligand chain identifiers; only 26 unique ligands are supported.')
+
+            def _expand_code(code, count, used_ids):
+                code = re.sub(r"[^0-9A-Za-z]+", "", str(code).upper())
+                if not code:
+                    raise ValueError('Ligand CCD code must contain alphanumeric characters.')
+                if count < 1:
+                    raise ValueError(f'Ligand count for {code} must be positive.')
+                items = []
+                for idx in range(count):
+                    ligand_id = _next_chain_id(used_ids)
+                    used_ids.add(ligand_id)
+                    items.append({
+                        "id": ligand_id,
+                        "ccdCodes": [code]
+                    })
+                return items
+
+            if isinstance(lig_spec, dict):
+                entries = []
+                used_ids = set()
+                for code, count in lig_spec.items():
+                    if not isinstance(count, int):
+                        raise TypeError('Ligand count dictionary must map CCD codes to integers.')
+                    entries.extend(_expand_code(code, count, used_ids))
+                return entries
+
+            if isinstance(lig_spec, (list, tuple)):
+                if all(isinstance(item, dict) for item in lig_spec):
+                    required_keys = {"id", "ccdCodes"}
+                    normalised = []
+                    used_ids = set()
+                    for item in lig_spec:
+                        if "ccdCodes" not in item and "ccdCode" in item:
+                            item = dict(item)
+                            item["ccdCodes"] = item.pop("ccdCode")
+                        missing = required_keys - set(item)
+                        if missing:
+                            raise ValueError(f'Ligand entry {item} missing keys: {missing}')
+                        ligand_id = re.sub(r"[^0-9A-Z]+", "", str(item["id"]).upper())
+                        if len(ligand_id) != 1:
+                            raise ValueError(
+                                f"Ligand id '{item['id']}' must be a single uppercase alphanumeric character."
+                            )
+                        if ligand_id in used_ids:
+                            raise ValueError('Ligand IDs must be unique single characters.')
+                        used_ids.add(ligand_id)
+                        codes = item["ccdCodes"]
+                        if isinstance(codes, str):
+                            codes = [codes]
+                        codes = [re.sub(r"[^0-9A-Za-z]+", "", str(code).upper()) for code in codes]
+                        normalised.append({
+                            "id": ligand_id,
+                            "ccdCodes": codes
+                        })
+                    return normalised
+                if all(isinstance(item, str) for item in lig_spec):
+                    used_ids = set()
+                    entries = []
+                    for code in lig_spec:
+                        clean_code = re.sub(r"[^0-9A-Za-z]+", "", str(code).upper())
+                        if not clean_code:
+                            raise ValueError(f"Ligand code '{code}' must be alphanumeric.")
+                        entries.extend(_expand_code(clean_code, 1, used_ids))
+                    return entries
+                raise TypeError('Ligands list must contain either CCD codes or dictionaries matching the AF3 schema.')
+
+            if isinstance(lig_spec, str):
+                return _expand_code(lig_spec, 1, set())
+
+            raise TypeError('Unsupported ligand specification format.')
+
+        def _ligands_for_model(model_name):
+            if isinstance(ligands, dict):
+                if model_name in ligands:
+                    return _coerce_ligands(ligands[model_name])
+                for alias in ('default', '*'):
+                    if alias in ligands:
+                        return _coerce_ligands(ligands[alias])
+                if all(isinstance(v, int) for v in ligands.values()):
+                    return _coerce_ligands(ligands)
+                return []
+            return _coerce_ligands(ligands)
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        if exclude_models:
+            if isinstance(exclude_models, str):
+                exclude_models = [exclude_models]
+            else:
+                exclude_models = list(exclude_models)
+        else:
+            exclude_models = []
+
+        os.makedirs(job_folder, exist_ok=True)
+
+        selected_models = []
+        for model_name in self.sequences_names:
+            if only_models and model_name not in only_models:
+                continue
+            if model_name in exclude_models:
+                continue
+            selected_models.append(model_name)
+
+        if not selected_models:
+            return []
+
+        commands = []
+
+        for model_name in selected_models:
+            model_dir = os.path.join(job_folder, model_name)
+            os.makedirs(model_dir, exist_ok=True)
+
+            input_dir = os.path.join(model_dir, 'input')
+            output_dir = os.path.join(model_dir, 'output')
+            os.makedirs(input_dir, exist_ok=True)
+            os.makedirs(output_dir, exist_ok=True)
+
+            entries = _sequence_entries(self.sequences[model_name])
+            payload = {
+                "name": model_name,
+                "modelSeeds": _seeds_for_model(model_name),
+                "dialect": "alphafold3",
+                "version": 1
+            }
+            lig_spec = _ligands_for_model(model_name)
+            if lig_spec:
+                for ligand in lig_spec:
+                    entries.append({"ligand": ligand})
+            payload["sequences"] = entries
+            json_path = os.path.join(input_dir, f"{model_name}.json")
+            with open(json_path, 'w') as json_fd:
+                json.dump(payload, json_fd, indent=2)
+                json_fd.write('\n')
+
+            command_lines = [
+                f"cd {model_dir}",
+                "bsc_alphafold input output $WEIGHTS",
+                f"sbatch {runner_name} input",
+                "cd ../..",
+            ]
+            commands.append("\n".join(command_lines) + "\n")
+
+        return commands
+
     def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='',
                                            return_missing=False, copy_all=False):
         """
@@ -158,6 +441,345 @@ class sequenceModels:
 
         if return_missing:
             return missing
+
+    def collectAlphaFold3Results(
+        self,
+        af_folder,
+        output_folder=None,
+        metric="ranking_score",
+        top_models=1,
+        only_models=None,
+        ascending=False,
+        best_only=False,
+        return_selected=False
+    ):
+        """Collect AlphaFold 3 scores and copy top-ranking predictions as PDBs.
+
+        Parameters
+        ----------
+        af_folder : str
+            Path to the AlphaFold 3 job folder created by :meth:`setUpAlphaFold3`
+            or to a directory containing job subfolders with AlphaFold 3
+            outputs (each with a ``ranking_scores.csv`` file).
+        output_folder : str, optional
+            Destination directory where the selected PDB files will be written.
+            If ``None`` (default) no structural files are generated and the
+            function only returns the scores table.
+        metric : str, optional
+            Column in ``ranking_scores.csv`` used to rank predictions. Defaults
+            to ``"ranking_score"`` which combines ipTM, pTM and disorder.
+        top_models : int, optional
+            Number of top predictions per model to export when ``output_folder``
+            is provided. Defaults to ``1`` (best ``ranking_score``).
+        only_models : iterable or str, optional
+            Restrict the analysis to specific model names.
+        ascending : bool, optional
+            Whether to rank in ascending order. Defaults to ``False`` so that
+            larger scores are better.
+        best_only : bool, optional
+            When ``True`` the returned dataframe contains only the top-scoring
+            prediction per model. This option does not affect the number of
+            structures exported.
+        return_selected : bool, optional
+            If ``True`` the function returns a tuple ``(scores_df,
+            selected_df)``. Otherwise only the full scores dataframe is
+            returned. In both cases a dictionary mapping model name to copied
+            file paths is returned in the second position of the tuple.
+
+        Returns
+        -------
+        pandas.DataFrame or tuple
+            If ``return_selected`` is ``False`` (default) a dataframe with all
+            parsed scores (or only the best per model when ``best_only`` is
+            ``True``) is returned. When ``return_selected`` is ``True`` the
+            function returns ``(scores_df, selected_df, copied_paths)`` where
+            ``selected_df`` contains the subset chosen for export and
+            ``copied_paths`` maps each model to the generated PDB/CIF files (if
+            ``output_folder`` was provided).
+        """
+
+        def _sanitize(name):
+            return re.sub(r"[^0-9A-Za-z_.-]+", "_", name)
+
+        def _auto_type(value):
+            if value is None:
+                return None
+            if isinstance(value, (int, float, bool)):
+                return value
+            value = value.strip()
+            if value == "":
+                return None
+            lower = value.lower()
+            if lower in {"true", "false"}:
+                return lower == "true"
+            try:
+                if any(char in value for char in (".", "e", "E")):
+                    return float(value)
+                return int(value)
+            except ValueError:
+                return value
+
+        def _find_job_dirs(base_dir):
+            matches = []
+            for root, dirs, files in os.walk(base_dir):
+                rel_depth = os.path.relpath(root, base_dir).count(os.sep)
+                if rel_depth > 4:
+                    dirs[:] = []
+                    continue
+                if "ranking_scores.csv" in files:
+                    matches.append(root)
+                    dirs[:] = []
+            return matches
+
+        def _locate_model_dirs(model_name):
+            candidates = []
+            model_root = os.path.join(af_folder, model_name)
+            if os.path.isdir(model_root):
+                # Look into model/output first, then model/ itself
+                output_root = os.path.join(model_root, "output")
+                search_roots = []
+                if os.path.isdir(output_root):
+                    search_roots.append(output_root)
+                search_roots.append(model_root)
+                for base in search_roots:
+                    candidates.extend(_find_job_dirs(base))
+            # As a fallback, search directly under the provided af_folder
+            if not candidates and os.path.isdir(af_folder):
+                candidates.extend(
+                    d for d in _find_job_dirs(af_folder)
+                    if os.path.basename(os.path.dirname(d)) == model_name
+                    or os.path.basename(d).startswith(model_name)
+                )
+            return list(dict.fromkeys(candidates))
+
+        def _prediction_to_cif(job_dir, prediction_name, seed=None, sample=None):
+            candidate_paths = []
+            if prediction_name:
+                expected_dir = os.path.join(job_dir, prediction_name)
+                candidate_paths.append(
+                    os.path.join(expected_dir, f"{prediction_name}_model.cif")
+                )
+            if seed is not None and sample is not None:
+                try:
+                    seed_val = int(seed)
+                    sample_val = int(sample)
+                    folder = f"seed-{seed_val}_sample-{sample_val}"
+                    candidate_paths.append(
+                        os.path.join(job_dir, folder, f"{folder}_model.cif")
+                    )
+                    candidate_paths.append(
+                        os.path.join(job_dir, folder, "model.cif")
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+            for cif_path in candidate_paths:
+                if cif_path and os.path.exists(cif_path):
+                    return cif_path
+
+            # Fallback: search by prediction name if available
+            if prediction_name:
+                for root, _, files in os.walk(job_dir):
+                    for fname in files:
+                        if fname.endswith(".cif") and prediction_name in fname:
+                            return os.path.join(root, fname)
+            return None
+
+        def _prediction_summary(job_dir, prediction_name, seed=None, sample=None):
+            candidate_paths = []
+            if prediction_name:
+                expected_dir = os.path.join(job_dir, prediction_name)
+                candidate_paths.append(
+                    os.path.join(expected_dir, f"{prediction_name}_summary_confidences.json")
+                )
+            if seed is not None and sample is not None:
+                try:
+                    seed_val = int(seed)
+                    sample_val = int(sample)
+                    candidate_paths.append(
+                        os.path.join(
+                            job_dir,
+                            f"seed-{seed_val}_sample-{sample_val}",
+                            "summary_confidences.json"
+                        )
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+            for summary_path in candidate_paths:
+                if not summary_path or not os.path.exists(summary_path):
+                    continue
+                try:
+                    with open(summary_path) as summary_handle:
+                        return json.load(summary_handle)
+                except Exception:
+                    continue
+
+            # Fallback: search by prediction name if provided
+            if prediction_name:
+                for root, _, files in os.walk(job_dir):
+                    for fname in files:
+                        if fname.endswith("summary_confidences.json") and prediction_name in fname:
+                            try:
+                                with open(os.path.join(root, fname)) as summary_handle:
+                                    return json.load(summary_handle)
+                            except Exception:
+                                return {}
+            return {}
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        copy_outputs = output_folder is not None
+        if copy_outputs:
+            os.makedirs(output_folder, exist_ok=True)
+
+        scores_rows = []
+        for model_name in self.sequences_names:
+            if only_models and model_name not in only_models:
+                continue
+
+            job_dirs = _locate_model_dirs(model_name)
+            if not job_dirs:
+                warnings.warn(
+                    f"No AlphaFold 3 output found for model '{model_name}' in {af_folder}"
+                )
+                continue
+
+            for job_dir in job_dirs:
+                ranking_csv = os.path.join(job_dir, "ranking_scores.csv")
+                try:
+                    with open(ranking_csv, newline="") as handle:
+                        reader = csv.DictReader(handle)
+                        for row in reader:
+                            clean_row = {k: _auto_type(v) for k, v in row.items()}
+                            clean_row["model"] = model_name
+                            clean_row["job_dir"] = job_dir
+                            clean_row["job_name"] = os.path.basename(job_dir)
+                            # Normalise prediction identifier key
+                            prediction_key = None
+                            for key_candidate in ("prediction_name", "prediction", "name"):
+                                if key_candidate in clean_row and clean_row[key_candidate]:
+                                    prediction_key = key_candidate
+                                    break
+                            clean_row["prediction_name"] = clean_row.get(prediction_key)
+                            summary_values = _prediction_summary(
+                                job_dir,
+                                clean_row["prediction_name"],
+                                clean_row.get("seed"),
+                                clean_row.get("sample")
+                            )
+                            for key, value in summary_values.items():
+                                clean_row[f"summary_{key}"] = value
+                            scores_rows.append(clean_row)
+                except FileNotFoundError:
+                    warnings.warn(f"ranking_scores.csv not found in {job_dir}")
+
+        if not scores_rows:
+            raise ValueError(
+                f"No ranking scores were found under {af_folder}. "
+                "Please ensure the AlphaFold 3 jobs finished successfully."
+            )
+
+        scores_df = pd.DataFrame(scores_rows)
+
+        if metric not in scores_df.columns:
+            raise ValueError(
+                f"Requested metric '{metric}' not found in ranking scores. "
+                f"Available columns: {list(scores_df.columns)}"
+            )
+
+        scores_df[metric] = pd.to_numeric(scores_df[metric], errors="coerce")
+        if scores_df[metric].isna().all():
+            raise ValueError(
+                f"Metric '{metric}' could not be converted to numeric values for ranking."
+            )
+
+        copied_paths = defaultdict(list)
+
+        required_index_cols = []
+        for candidate in ("model", "seed", "sample"):
+            if candidate not in scores_df.columns:
+                warnings.warn(
+                    f"Column '{candidate}' missing from ranking scores; results will use the default index."
+                )
+                required_index_cols = []
+                break
+            required_index_cols.append(candidate)
+
+        selected_frames = []
+        best_frames = []
+        for model_name, model_scores in scores_df.groupby("model"):
+            valid_scores = model_scores.dropna(subset=[metric])
+            if valid_scores.empty:
+                warnings.warn(
+                    f"No valid scores for model '{model_name}' using metric '{metric}'."
+                )
+                continue
+            sorted_scores = valid_scores.sort_values(metric, ascending=ascending)
+            top_df = sorted_scores.head(top_models)
+            selected_frames.append(top_df)
+            best_frames.append(sorted_scores.head(1))
+
+            if copy_outputs:
+                for _, row in top_df.iterrows():
+                    prediction = row.get("prediction_name")
+                    cif_path = _prediction_to_cif(
+                        row["job_dir"],
+                        prediction,
+                        row.get("seed"),
+                        row.get("sample")
+                    )
+                    if not cif_path or not os.path.exists(cif_path):
+                        warnings.warn(
+                            f"Could not locate CIF file for prediction '{prediction}' in {row['job_dir']}"
+                        )
+                        continue
+
+                    base_name = _sanitize(model_name)
+                    copy_index = len(copied_paths[model_name])
+                    while True:
+                        safe_name = base_name if copy_index == 0 else f"{base_name}_{copy_index + 1}"
+                        target_path = os.path.join(output_folder, f"{safe_name}.pdb")
+                        if not os.path.exists(target_path):
+                            break
+                        copy_index += 1
+                    try:
+                        parser = MMCIFParser(QUIET=True)
+                        structure = parser.get_structure(safe_name, cif_path)
+                        io = PDBIO()
+                        io.set_structure(structure)
+                        io.save(target_path)
+                    except Exception as exc:
+                        warnings.warn(
+                            f"Failed to convert {cif_path} to PDB ({exc}). Copying CIF instead."
+                        )
+                        target_path = os.path.join(output_folder, f"{safe_name}.cif")
+                        shutil.copyfile(cif_path, target_path)
+
+                    copied_paths[model_name].append(target_path)
+
+        selected_df = pd.concat(selected_frames).reset_index(drop=True) if selected_frames else pd.DataFrame()
+        best_df = pd.concat(best_frames).reset_index(drop=True) if best_frames else pd.DataFrame()
+
+        if required_index_cols:
+            scores_df = scores_df.set_index(required_index_cols)
+            if not selected_df.empty and all(col in selected_df.columns for col in required_index_cols):
+                selected_df = selected_df.set_index(required_index_cols)
+            if not best_df.empty and all(col in best_df.columns for col in required_index_cols):
+                best_df = best_df.set_index(required_index_cols)
+
+        if best_only:
+            scores_df = best_df
+
+        drop_columns = ["job_dir", "job_name", "prediction_name"]
+        return_columns = [col for col in drop_columns if col in scores_df.columns]
+        scores_df = scores_df.drop(columns=return_columns, errors="ignore")
+        if return_selected:
+            selected_df = selected_df.drop(columns=return_columns, errors="ignore") if not selected_df.empty else selected_df
+            return scores_df, selected_df, dict(copied_paths)
+
+        return scores_df
 
     def loadAFScores(self, af_folder, only_indexes=None):
         """
