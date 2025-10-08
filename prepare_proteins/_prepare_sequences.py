@@ -2763,7 +2763,7 @@ class sequenceModels:
         not_exclude=["Gene3D"],
         output_format="tsv",
         cpus=40,
-        version="5.74-105.0",
+        version="5.75-106.0",
         max_bin_size=10000,
         run_at="bubbles",
     ):
