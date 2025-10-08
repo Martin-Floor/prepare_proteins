@@ -1887,6 +1887,8 @@ chain to use for each model with the chains option."
         relax_folder,
         nstruct=1000,
         relax_cycles=5,
+        idealize_before_relax=False,
+        idealize_only=False,
         cst_files=None,
         mutations=False,
         models=None,
@@ -1917,6 +1919,10 @@ chain to use for each model with the chains option."
         ==========
         relax_folder : str
             Folder path where to place the relax job.
+        idealize_before_relax : bool, optional
+            Insert an Idealize mover before FastRelax.
+        idealize_only : bool, optional
+            Run only the Idealize mover and skip FastRelax entirely (mutually exclusive with idealize_before_relax).
         """
 
         # Create minimization job folders
@@ -1944,7 +1950,12 @@ chain to use for each model with the chains option."
                 "CPUs can only be set up when using mpirun parallelisation!"
             )
 
-        if cst_optimization and nstruct > 100:
+        if idealize_only and idealize_before_relax:
+            raise ValueError(
+                "idealize_only already skips FastRelax; do not combine it with idealize_before_relax."
+            )
+
+        if not idealize_only and cst_optimization and nstruct > 100:
             print(
                 "WARNING: A large number of structures (%s) is not necessary when running constrained optimizations!"
                 % nstruct
@@ -2158,12 +2169,22 @@ has been carried out. Please run compareSequences() function before setting muta
                 xml.addMover(init_membrane)
                 protocol.append(init_membrane)
 
-            # Create fastrelax mover
-            relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
-            xml.addMover(relax)
+            if idealize_before_relax or idealize_only:
+                idealize_mover = rosettaScripts.movers.idealize()
+                xml.addMover(idealize_mover)
+                if not null:
+                    protocol.append(idealize_mover)
 
-            if not null:
-                protocol.append(relax)
+            relax = None
+            if not idealize_only:
+                # Create fastrelax mover
+                relax = rosettaScripts.movers.fastRelax(
+                    repeats=relax_cycles, scorefxn=sfxn
+                )
+                xml.addMover(relax)
+
+                if not null:
+                    protocol.append(relax)
 
             # Set protocol
             xml.setProtocol(protocol)
@@ -2201,10 +2222,11 @@ has been carried out. Please run compareSequences() function before setting muta
                         flags.addOption(o)
 
             # Add relaxation with constraints options and write flags file
-            if cst_optimization:
-                flags.add_relax_cst_options()
-            else:
-                flags.add_relax_options()
+            if not idealize_only:
+                if cst_optimization:
+                    flags.add_relax_cst_options()
+                else:
+                    flags.add_relax_options()
 
             # Add path to params files
             if param_files != None:
@@ -2232,7 +2254,8 @@ has been carried out. Please run compareSequences() function before setting muta
 
             if membrane:
                 flags.addOption("mp::setup::spans_from_structure", "true")
-                flags.addOption("relax:constrain_relax_to_start_coords")
+                if not idealize_only:
+                    flags.addOption("relax:constrain_relax_to_start_coords")
 
             if sugars:
                 flags.addOption("include_sugars")
