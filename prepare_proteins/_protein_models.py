@@ -158,11 +158,14 @@ class proteinModels:
             )
         self.models_names = []  # Store model names
         self.structures = {}  # structures are stored here
-        self.sequences = {}  # sequences are stored here
+        self.sequences = {}  # sequences are stored here (single-chain legacy access)
+        self.chain_sequences = {}  # per-chain sequences for each model
         self.target_sequences = {}  # Final sequences are stored here
         self.msa = None  # multiple sequence alignment
+        self.msa_chain_selection = {}  # chain mapping used for latest MSA
         self.multi_chain = False
-        self.ss = {}  # secondary structure strings are stored here
+        self.ss = {}  # secondary structure strings are stored here (legacy access)
+        self.chain_secondary_structure = {}  # per-chain secondary structure strings
         self.docking_data = None  # secondary structure strings are stored here
         self.docking_distances = {}
         self.docking_angles = {}
@@ -650,20 +653,109 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Contains the sequences of all models.
         """
         self.multi_chain = False
-        # Add sequence information
+        self.chain_sequences = {}
+
         for model in self.models_names:
             chains = [c for c in self.structures[model].get_chains()]
-            if len(chains) == 1:
-                for c in chains:
-                    self.sequences[model] = self._getChainSequence(c)
+            per_chain_sequences = {}
+            for c in chains:
+                per_chain_sequences[c.id] = self._getChainSequence(c)
+
+            self.chain_sequences[model] = per_chain_sequences
+
+            if len(per_chain_sequences) == 1:
+                self.sequences[model] = next(iter(per_chain_sequences.values()))
             else:
-                self.sequences[model] = {}
-                for c in chains:
-                    self.sequences[model][c.id] = self._getChainSequence(c)
-                # If any model has more than one chain set multi_chain to True.
+                self.sequences[model] = per_chain_sequences
+
+            valid_sequences = [
+                seq for seq in per_chain_sequences.values() if seq not in (None, "")
+            ]
+            if len(valid_sequences) > 1:
+                # If any model has more than one polymeric chain set multi_chain to True.
                 self.multi_chain = True
 
         return self.sequences
+
+    def _resolve_chain_selection(self, chains=None, models=None, require_single=False):
+        """
+        Normalize user-provided chain selections.
+
+        Parameters
+        ----------
+        chains : None, str, iterable, or dict
+            Chain selector. When dict, keys are model names and values can be single
+            chain IDs or iterables of chain IDs.
+        models : iterable, optional
+            Subset of models to consider. Defaults to all loaded models.
+        require_single : bool, optional
+            When True, ensure a single chain ID is returned per model.
+
+        Returns
+        -------
+        dict
+            Mapping of model -> list of chain IDs (require_single=False) or
+            model -> single chain ID (require_single=True).
+        """
+        if models is None:
+            models = self.models_names
+
+        # Ensure sequence information is populated
+        if self.chain_sequences == {} and self.structures:
+            self.getModelsSequences()
+
+        selection = {}
+
+        def _normalize_value(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple, set)):
+                return list(dict.fromkeys(value))
+            raise TypeError(
+                "Chain selectors must be strings, iterables, or dictionaries mapping to them."
+            )
+
+        for model in models:
+            available_sequences = self.chain_sequences.get(model, {})
+            polymer_chains = [
+                chain_id
+                for chain_id, seq in available_sequences.items()
+                if seq not in (None, "")
+            ]
+            if polymer_chains:
+                available = list(polymer_chains)
+            elif available_sequences:
+                available = list(available_sequences.keys())
+            else:
+                available = [c.id for c in self.structures[model].get_chains()]
+
+            if isinstance(chains, dict):
+                requested = _normalize_value(chains.get(model))
+            else:
+                requested = _normalize_value(chains)
+
+            if requested is None:
+                requested = available
+
+            missing = [c for c in requested if c not in available]
+            if missing:
+                raise ValueError(
+                    f"Requested chain(s) {missing} not found in model {model}. "
+                    f"Available chains: {available}"
+                )
+
+            if require_single:
+                if len(requested) != 1:
+                    raise ValueError(
+                        f"Model {model} requires a single chain selection but received {requested}."
+                    )
+                selection[model] = requested[0]
+            else:
+                selection[model] = requested
+
+        return selection
 
     def renumberModels(self, by_chain=True):
         """
@@ -703,40 +795,30 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Dictionary specifying which chain to use for each model
         """
 
-        # If only a single ID is given use it for all models
-        if isinstance(chains, str):
-            cd = {}
-            for model in self:
-                cd[model] = chains
-            chains = cd
+        # Normalize chain selection (requires a single chain per model)
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=True
+        )
 
-        for model in self:
-            if isinstance(self.sequences[model], dict) and chains == None:
+        sequences = {}
+        for model in self.models_names:
+            chain_id = chain_selection.get(model)
+            if chain_id is None:
+                continue
+
+            seq = self.chain_sequences.get(model, {}).get(chain_id)
+            if seq in (None, ""):
                 raise ValueError(
-                    "There are multiple chains in model %s. Specify which \
-chain to use for each model with the chains option."
-                    % model
+                    f"Selected chain {chain_id} in model {model} does not contain a protein sequence."
                 )
 
-        if chains != None:
-            sequences = {}
-            for model in self.models_names:
-                if isinstance(self.sequences[model], dict):
-                    sequences[model] = self.sequences[model][chains[model]]
-                else:
-                    sequences[model] = self.sequences[model]
-
-            if isinstance(extra_sequences, dict):
-                for s in extra_sequences:
-                    sequences[s] = extra_sequences[s]
-        else:
-            sequences = self.sequences.copy()
+            sequences[model] = seq
 
         if isinstance(extra_sequences, dict):
-            for s in extra_sequences:
-                sequences[s] = extra_sequences[s]
+            sequences.update(extra_sequences)
 
         self.msa = alignment.mafft.multipleSequenceAlignment(sequences, stderr=False)
+        self.msa_chain_selection = chain_selection
 
         return self.msa
 
@@ -831,7 +913,7 @@ chain to use for each model with the chains option."
 
     import mdtraj as md
 
-    def calculateSecondaryStructure(self, simplified=True):
+    def calculateSecondaryStructure(self, simplified=True, chains=None, _save_structure=False):
         """
         Calculate secondary structure information for each model using MDTraj.
 
@@ -842,6 +924,11 @@ chain to use for each model with the chains option."
             - H (helix) → "H"
             - E (sheet) → "E"
             - Everything else → "C" (coil)
+        chains : None, str, iterable or dict, optional
+            Chain selector to limit the calculation. When None, all chains per
+            model are processed.
+        _save_structure : bool, optional
+            Unused legacy argument retained for backwards compatibility.
 
         frame : int, default=0
             Frame index to extract the secondary structure from (MD simulations).
@@ -858,13 +945,38 @@ chain to use for each model with the chains option."
             Contains the secondary structure strings for each model.
         """
 
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=False
+        )
+
+        self.ss = {}
+        self.chain_secondary_structure = {}
+
         for model in self.models_names:
 
             # Load structure into MDTraj
             traj = md.load(self.models_paths[model])
 
             # Compute secondary structure
-            self.ss[model] = md.compute_dssp(traj, simplified=simplified)[0]
+            assignments = md.compute_dssp(traj, simplified=simplified)[0]
+            per_chain_ss = {}
+
+            for residue, code in zip(traj.topology.residues, assignments):
+                chain_id = residue.chain.chain_id
+                per_chain_ss.setdefault(chain_id, []).append(code)
+
+            normalized = {}
+            for chain_id in chain_selection.get(model, []):
+                codes = per_chain_ss.get(chain_id, [])
+                normalized[chain_id] = "".join(codes)
+
+            # Keep a record for downstream multi-chain aware operations
+            self.chain_secondary_structure[model] = normalized
+
+            if len(normalized) == 1:
+                self.ss[model] = next(iter(normalized.values()))
+            else:
+                self.ss[model] = normalized
 
         return self.ss
 
@@ -894,7 +1006,7 @@ chain to use for each model with the chains option."
 
         self.getModelsSequences()
 
-    def removeTerminalUnstructuredRegions(self, n_hanging=3):
+    def removeTerminalUnstructuredRegions(self, n_hanging=3, chains=None):
         """
         Remove unstructured terminal regions from models.
 
@@ -902,61 +1014,109 @@ chain to use for each model with the chains option."
         ==========
         n_hangin : int
             Maximum unstructured number of residues to keep at the unstructured terminal regions.
+        chains : None, str, iterable or dict
+            Chain selector identifying which chains should be processed.
         """
 
-        if self.multi_chain:
-            raise ValueError(
-                "removeTerminalUnstructuredRegions() function only supports single chain models"
-            )
+        if not self.chain_secondary_structure:
+            self.calculateSecondaryStructure()
+
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=False
+        )
+
+        def _resolve_n_hanging(model, chain_id):
+            if isinstance(n_hanging, dict):
+                model_value = n_hanging.get(model)
+                if isinstance(model_value, dict):
+                    if chain_id in model_value:
+                        return model_value[chain_id]
+                elif isinstance(model_value, int):
+                    return model_value
+
+                chain_value = n_hanging.get(chain_id)
+                if isinstance(chain_value, int):
+                    return chain_value
+
+                default_value = n_hanging.get("default")
+                if isinstance(default_value, int):
+                    return default_value
+
+                raise ValueError(
+                    f"Could not resolve n_hanging for model {model} chain {chain_id}."
+                )
+            return int(n_hanging)
+
+        def _is_unstructured(code):
+            return code not in ("H", "E")
 
         # Calculate residues to be removed
         for model in self.models_names:
 
-            # Get N-terminal residues to remove based on secondary structure.
-            remove_indexes = []
-            for i, r in enumerate(self.ss[model]):
-                if r == "-":
-                    remove_indexes.append(i)
+            model_selection = chain_selection.get(model, [])
+            model_ss = self.chain_secondary_structure.get(model, {})
+            if not model_selection:
+                continue
+
+            # Fetch chain objects once for reuse
+            chains_map = {c.id: c for c in self.structures[model].get_chains()}
+
+            for chain_id in model_selection:
+                chain_obj = chains_map.get(chain_id)
+                if chain_obj is None:
+                    continue
+
+                ss_string = model_ss.get(chain_id, "")
+                if not ss_string:
+                    continue
+
+                limit = _resolve_n_hanging(model, chain_id)
+
+                # N-terminus
+                leading = []
+                for idx, code in enumerate(ss_string):
+                    if _is_unstructured(code):
+                        leading.append(idx)
+                    else:
+                        break
+
+                if limit < len(leading):
+                    leading = leading[: len(leading) - limit]
                 else:
-                    break
+                    leading = []
 
-            if len(remove_indexes) > n_hanging:
-                remove_indexes = remove_indexes[:-n_hanging]
-            else:
-                remove_indexes = []
-
-            # Get C-terminal residues to remove based on secondary structure.
-            remove_C = []
-            for i, r in enumerate(self.ss[model][::-1]):
-                if r == "-":
-                    remove_C.append(i)
+                # C-terminus
+                trailing = []
+                for offset, code in enumerate(reversed(ss_string)):
+                    if _is_unstructured(code):
+                        trailing.append(len(ss_string) - 1 - offset)
+                    else:
+                        break
+                trailing = list(reversed(trailing))
+                if limit < len(trailing):
+                    trailing = trailing[: len(trailing) - limit]
                 else:
-                    break
-            if len(remove_C) > n_hanging:
-                remove_C = remove_C[:-n_hanging]
-            else:
-                remove_C = []
+                    trailing = []
 
-            for x in remove_C:
-                remove_indexes.append(len(self.ss[model]) - 1 - x)
+                remove_indexes = sorted(set(leading + trailing))
 
-            # Sort indexes
-            remove_indexes = sorted(remove_indexes)
+                if not remove_indexes:
+                    continue
 
-            # Get residues to remove from models structures
-            remove_this = []
-            for c in self.structures[model].get_chains():
-                for i, r in enumerate(c.get_residues()):
-                    if i in remove_indexes:
-                        remove_this.append(r)
-                chain = c
+                polymer_residues = [
+                    r for r in chain_obj.get_residues() if r.id[0] == " "
+                ]
+                to_remove = [
+                    polymer_residues[i]
+                    for i in remove_indexes
+                    if i < len(polymer_residues)
+                ]
 
-            # Remove residues
-            for r in remove_this:
-                chain.detach_child(r.id)
+                for residue in to_remove:
+                    chain_obj.detach_child(residue.id)
 
         self.getModelsSequences()
-        self.calculateSecondaryStructure(_save_structure=True)
+        self.calculateSecondaryStructure()
 
     def removeTerminiByConfidenceScore(
         self,
@@ -11212,7 +11372,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         output_format="pdb",
         use_potentials=False,
         ligands=None,
-        binder=None
+        binder=None,
+        chains=None
     ):
         """
         Run Boltz2 structure prediction and afinity.
@@ -11237,6 +11398,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         - ligands (list[str]): list of ligands SMILEs 
         - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed 
 
+        chains : None, str, iterable or dict, optional
+            Chain selector per model used to pick the sequence for the Boltz2
+            input. Defaults to the first polymer chain per model.
+
         Returns:
         - jobs (list[str]): command string per batch per model
         """
@@ -11248,28 +11413,30 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not os.path.exists(job_folder + "/" +model):
                 os.mkdir(job_folder+"/"+model)
 
-        for model, value in self.sequences.items():
-            chain = None
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=True
+        )
+
+        for model in self.models_names:
+            chain_id = chain_selection.get(model)
             sequence = None
 
-            if isinstance(value, dict):
-        # Case with multiple chains
-                for chain_id, seq in value.items():
-                    if seq is not None:
-                        chain = chain_id
-                        sequence = seq
-                        break  # Stop at the first valid chain
-            elif isinstance(value, str):
-        # Case with single chain, no explicit chain ID
-                chain = 'A'  # Assume 'A' if not specified
-                sequence = value
+            if chain_id is not None:
+                sequence = self.chain_sequences.get(model, {}).get(chain_id)
+            else:
+                sequence = self.sequences.get(model)
+
+            if sequence in (None, ""):
+                raise ValueError(
+                    f"No protein sequence found for model {model} (chain {chain_id})."
+                )
 
         # Write the YAML file
             with open(job_folder+"/"+model +"/" + "boltz.yaml", "w") as iyf:
                 iyf.write('version: 1\n')
                 iyf.write('sequences:\n')
                 iyf.write('  - protein:\n')
-                iyf.write(f'      id: [{chain}]\n')
+                iyf.write(f'      id: [{chain_id}]\n')
                 iyf.write(f'      sequence: {sequence}\n')
                 
                 if use_msa_server == False:
