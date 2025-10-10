@@ -394,12 +394,23 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         """
         Remove a group of residues from the model structure.
 
-        Paramters
-        =========
+        Parameters
+        ==========
         model : str
-            model ID
-        residues_list : list
-            Specifies the list of resdiues to delete for the particular model.
+            Identifier of the model whose residues should be removed. Must exist in
+            `self.structures`.
+        residues_list : iterable of tuple[str, int]
+            Residues to delete, provided as `(chain_id, resseq)` pairs where `chain_id`
+            matches the PDB chain identifier and `resseq` is the integer component of
+            Biopython's `Residue.id` (`residue.id[1]`). Insertion codes and alternate
+            locations are ignored when matching residues.
+        verbose : bool, optional
+            If True (default) log each atom removal.
+
+        Raises
+        ======
+        ValueError
+            Raised when none of the requested residues are found in the structure.
         """
 
         # Get all atoms for residues to remove them
