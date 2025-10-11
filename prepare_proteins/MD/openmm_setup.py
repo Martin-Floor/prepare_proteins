@@ -24,6 +24,17 @@ ions = ['MG', 'NA', 'CL', 'CU']
 aa3 += ions
 
 
+def _copyfile_if_needed(src, dst):
+    """Copy `src` to `dst` unless they resolve to the same file."""
+    try:
+        if os.path.samefile(src, dst):
+            return
+    except FileNotFoundError:
+        # Destination does not exist yet, fall back to regular copy.
+        pass
+    shutil.copyfile(src, dst)
+
+
 class openmm_md:
 
     def __init__(self, input_pdb):
@@ -431,21 +442,21 @@ class openmm_md:
 
             if residue in parameters_folders:
                 for d in os.listdir(parameters_folders[residue]):
-                    shutil.copyfile(parameters_folders[residue]+'/'+d,
-                                    par_folder[residue]+'/'+d)
+                    _copyfile_if_needed(parameters_folders[residue]+'/'+d,
+                                        par_folder[residue]+'/'+d)
 
             if residue in parameters_mol2:
-                shutil.copyfile(parameters_mol2[residue],
-                                parameters_folder+'/'+residue+'.mol2')
+                _copyfile_if_needed(parameters_mol2[residue],
+                                    parameters_folder+'/'+residue+'.mol2')
 
         if extra_frcmod:
             for residue in extra_frcmod:
                 if os.path.exists(residue):
-                    shutil.copyfile(residue,
-                                    parameters_folder+'/'+residue.split('/')[-1])
+                    _copyfile_if_needed(residue,
+                                        parameters_folder+'/'+residue.split('/')[-1])
                 elif residue in parameters_frcmod:
-                    shutil.copyfile(parameters_frcmod[residue],
-                                    parameters_folder+'/'+residue+'.frcmod')
+                    _copyfile_if_needed(parameters_frcmod[residue],
+                                        parameters_folder+'/'+residue+'.frcmod')
                 elif not os.path.exists(residue) and residue not in parameters_frcmod:
                     raise ValueError(f'Frcmod file {residue} was not found.')
                 else:
@@ -455,17 +466,17 @@ class openmm_md:
             for residue in extra_mol2:
                 if isinstance(extra_mol2, dict):
                     if os.path.exists(extra_mol2[residue]):
-                        shutil.copyfile(extra_mol2[residue],
-                                        parameters_folder+'/'+extra_mol2[residue].split('/')[-1])
+                        _copyfile_if_needed(extra_mol2[residue],
+                                            parameters_folder+'/'+extra_mol2[residue].split('/')[-1])
                     else:
                         raise ValueError(f'Mol2 file for {residue} {extra_mol2[residue]} was not found.')
                 else:
                     if os.path.exists(residue):
-                        shutil.copyfile(residue,
-                                        parameters_folder+'/'+residue.split('/')[-1])
+                        _copyfile_if_needed(residue,
+                                            parameters_folder+'/'+residue.split('/')[-1])
                     elif residue in parameters_mol2:
-                        shutil.copyfile(parameters_mol2[residue],
-                                        parameters_folder+'/'+residue+'.mol2')
+                        _copyfile_if_needed(parameters_mol2[residue],
+                                            parameters_folder+'/'+residue+'.mol2')
                     elif not os.path.exists(residue) and residue not in parameters_mol2:
                         raise ValueError(f'Mol2 file {residue} was not found.')
                     else:
@@ -519,8 +530,8 @@ class openmm_md:
 
             # Copy frcmmod file from previous optimization
             if metal_parameters:
-                shutil.copyfile(parameters_folders['mcpbpy.frcmod'],
-                                parameters_folder+'/'+self.pdb_name+'_mcpbpy.frcmod')
+                _copyfile_if_needed(parameters_folders['mcpbpy.frcmod'],
+                                    parameters_folder+'/'+self.pdb_name+'_mcpbpy.frcmod')
 
             # Get ion ID
             metal_pdb = PDBFile(renum_pdb)
@@ -545,13 +556,13 @@ class openmm_md:
                 # Copy metal ions files
                 if residue in metal_ligand:
                     for m in metal_ligand[residue]:
-                        shutil.copyfile(par_folder[residue]+'/'+m+'.mol2',
-                                        parameters_folder+'/'+m+'.mol2')
+                        _copyfile_if_needed(par_folder[residue]+'/'+m+'.mol2',
+                                            parameters_folder+'/'+m+'.mol2')
 
-                shutil.copyfile(par_folder[residue]+'/'+residue+'.mol2',
-                                parameters_folder+'/'+residue+'.mol2')
-                shutil.copyfile(par_folder[residue]+'/'+residue+'.frcmod',
-                                parameters_folder+'/'+residue+'.frcmod')
+                _copyfile_if_needed(par_folder[residue]+'/'+residue+'.mol2',
+                                    parameters_folder+'/'+residue+'.mol2')
+                _copyfile_if_needed(par_folder[residue]+'/'+residue+'.frcmod',
+                                    parameters_folder+'/'+residue+'.frcmod')
 
             if not metal_parameters:
 
