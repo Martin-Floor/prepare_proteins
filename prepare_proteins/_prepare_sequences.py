@@ -9,6 +9,7 @@ import shutil
 import subprocess
 from collections import defaultdict
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import ipywidgets as widgets
 import matplotlib.pyplot as plt
@@ -721,6 +722,7 @@ class sequenceModels:
             os.makedirs(output_folder, exist_ok=True)
 
         scores_rows = []
+        tasks = []
         for model_name in self.sequences_names:
             if only_models and model_name not in only_models:
                 continue
@@ -733,33 +735,89 @@ class sequenceModels:
                 continue
 
             for job_dir in job_dirs:
-                ranking_csv = os.path.join(job_dir, "ranking_scores.csv")
+                tasks.append((model_name, job_dir))
+
+        def _process_job(model_name, job_dir):
+            rows = []
+            ranking_csv = os.path.join(job_dir, "ranking_scores.csv")
+            try:
+                with open(ranking_csv, newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    for row in reader:
+                        clean_row = {k: _auto_type(v) for k, v in row.items()}
+                        clean_row["model"] = model_name
+                        clean_row["job_dir"] = job_dir
+                        clean_row["job_name"] = os.path.basename(job_dir)
+                        # Normalise prediction identifier key
+                        prediction_key = None
+                        for key_candidate in ("prediction_name", "prediction", "name"):
+                            if key_candidate in clean_row and clean_row[key_candidate]:
+                                prediction_key = key_candidate
+                                break
+                        clean_row["prediction_name"] = clean_row.get(prediction_key)
+                        summary_values = _prediction_summary(
+                            job_dir,
+                            clean_row["prediction_name"],
+                            clean_row.get("seed"),
+                            clean_row.get("sample")
+                        )
+                        for key, value in summary_values.items():
+                            clean_row[f"summary_{key}"] = value
+                        rows.append(clean_row)
+            except FileNotFoundError:
+                return [], [f"ranking_scores.csv not found in {job_dir}"]
+            return rows, []
+
+        def _export_prediction(task):
+            warnings_local = []
+            model_name = task["model"]
+            job_dir = task["job_dir"]
+            prediction = task["prediction"]
+            seed = task["seed"]
+            sample = task["sample"]
+            safe_name = task["safe_name"]
+            target_path = task["target_path"]
+
+            cif_path = _prediction_to_cif(job_dir, prediction, seed, sample)
+            if not cif_path or not os.path.exists(cif_path):
+                warnings_local.append(
+                    f"Could not locate CIF file for prediction '{prediction}' in {job_dir}"
+                )
+                return model_name, None, warnings_local
+
+            try:
+                parser = MMCIFParser(QUIET=True)
+                structure = parser.get_structure(safe_name, cif_path)
+                _normalise_chain_ids(structure)
+                io_obj = PDBIO()
+                io_obj.set_structure(structure)
+                io_obj.save(target_path)
+                return model_name, target_path, warnings_local
+            except Exception as exc:
+                warnings_local.append(
+                    f"Failed to convert {cif_path} to PDB ({exc}). Copying CIF instead."
+                )
+                fallback_path = os.path.splitext(target_path)[0] + ".cif"
                 try:
-                    with open(ranking_csv, newline="") as handle:
-                        reader = csv.DictReader(handle)
-                        for row in reader:
-                            clean_row = {k: _auto_type(v) for k, v in row.items()}
-                            clean_row["model"] = model_name
-                            clean_row["job_dir"] = job_dir
-                            clean_row["job_name"] = os.path.basename(job_dir)
-                            # Normalise prediction identifier key
-                            prediction_key = None
-                            for key_candidate in ("prediction_name", "prediction", "name"):
-                                if key_candidate in clean_row and clean_row[key_candidate]:
-                                    prediction_key = key_candidate
-                                    break
-                            clean_row["prediction_name"] = clean_row.get(prediction_key)
-                            summary_values = _prediction_summary(
-                                job_dir,
-                                clean_row["prediction_name"],
-                                clean_row.get("seed"),
-                                clean_row.get("sample")
-                            )
-                            for key, value in summary_values.items():
-                                clean_row[f"summary_{key}"] = value
-                            scores_rows.append(clean_row)
-                except FileNotFoundError:
-                    warnings.warn(f"ranking_scores.csv not found in {job_dir}")
+                    shutil.copyfile(cif_path, fallback_path)
+                    return model_name, fallback_path, warnings_local
+                except Exception as fallback_exc:
+                    warnings_local.append(
+                        f"Failed to copy CIF fallback from {cif_path} ({fallback_exc})."
+                    )
+                    return model_name, None, warnings_local
+
+        warning_messages = []
+        if tasks:
+            with ThreadPoolExecutor() as executor:
+                futures = {
+                    executor.submit(_process_job, model_name, job_dir): (model_name, job_dir)
+                    for model_name, job_dir in tasks
+                }
+                for future in as_completed(futures):
+                    rows, warn_msgs = future.result()
+                    scores_rows.extend(rows)
+                    warning_messages.extend(warn_msgs)
 
         if not scores_rows:
             raise ValueError(
@@ -782,6 +840,9 @@ class sequenceModels:
             )
 
         copied_paths = defaultdict(list)
+        copy_tasks = []
+        reserved_paths = defaultdict(set)
+        copy_warning_messages = []
 
         required_index_cols = []
         for candidate in ("model", "seed", "sample"):
@@ -808,43 +869,48 @@ class sequenceModels:
             best_frames.append(sorted_scores.head(1))
 
             if copy_outputs:
+                base_name = _sanitize(model_name)
                 for _, row in top_df.iterrows():
+                    job_dir = row["job_dir"]
                     prediction = row.get("prediction_name")
-                    cif_path = _prediction_to_cif(
-                        row["job_dir"],
-                        prediction,
-                        row.get("seed"),
-                        row.get("sample")
-                    )
-                    if not cif_path or not os.path.exists(cif_path):
-                        warnings.warn(
-                            f"Could not locate CIF file for prediction '{prediction}' in {row['job_dir']}"
-                        )
-                        continue
-
-                    base_name = _sanitize(model_name)
-                    copy_index = len(copied_paths[model_name])
+                    copy_index = len(reserved_paths[model_name])
                     while True:
                         safe_name = base_name if copy_index == 0 else f"{base_name}_{copy_index + 1}"
                         target_path = os.path.join(output_folder, f"{safe_name}.pdb")
-                        if not os.path.exists(target_path):
+                        if (
+                            target_path not in reserved_paths[model_name]
+                            and not os.path.exists(target_path)
+                        ):
                             break
                         copy_index += 1
-                    try:
-                        parser = MMCIFParser(QUIET=True)
-                        structure = parser.get_structure(safe_name, cif_path)
-                        _normalise_chain_ids(structure)
-                        io = PDBIO()
-                        io.set_structure(structure)
-                        io.save(target_path)
-                    except Exception as exc:
-                        warnings.warn(
-                            f"Failed to convert {cif_path} to PDB ({exc}). Copying CIF instead."
-                        )
-                        target_path = os.path.join(output_folder, f"{safe_name}.cif")
-                        shutil.copyfile(cif_path, target_path)
+                    reserved_paths[model_name].add(target_path)
+                    copy_tasks.append(
+                        {
+                            "model": model_name,
+                            "job_dir": job_dir,
+                            "prediction": prediction,
+                            "seed": row.get("seed"),
+                            "sample": row.get("sample"),
+                            "safe_name": safe_name,
+                            "target_path": target_path,
+                        }
+                    )
 
-                    copied_paths[model_name].append(target_path)
+        if copy_tasks:
+            with ThreadPoolExecutor() as executor:
+                futures = {
+                    executor.submit(_export_prediction, task): task for task in copy_tasks
+                }
+                for future in as_completed(futures):
+                    model_name, exported_path, warn_msgs = future.result()
+                    if exported_path:
+                        copied_paths[model_name].append(exported_path)
+                    copy_warning_messages.extend(warn_msgs)
+
+        all_warnings = warning_messages + copy_warning_messages
+        if all_warnings:
+            for message in all_warnings:
+                warnings.warn(message)
 
         selected_df = pd.concat(selected_frames).reset_index(drop=True) if selected_frames else pd.DataFrame()
         best_df = pd.concat(best_frames).reset_index(drop=True) if best_frames else pd.DataFrame()
