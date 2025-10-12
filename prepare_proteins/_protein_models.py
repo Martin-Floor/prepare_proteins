@@ -13,6 +13,8 @@ import warnings
 import copy
 import re
 import pkg_resources
+from pathlib import Path
+from types import SimpleNamespace
 
 import ipywidgets as widgets
 import matplotlib as mpl
@@ -7144,7 +7146,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     )
 
     def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
-                               add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
+                               add_bonds=None, skip_ligands=None, ligand_only=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
                                extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
                                non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
@@ -7161,6 +7163,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         ...
         - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
           but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
+        - ligand_only (bool or str or list of str, optional): If set, skip protein + ligand simulations and instead
+          prepare solvated ligand-only systems. Use True to process every ligand detected in each model, a single
+          residue name to limit the run to that ligand, or a list of residue names for multiple ligands.
         - ligand_parameters_source (str, optional): Path to a folder containing per-ligand parameter packs named
           like `<RESNAME>_parameters` (e.g., `NAD_parameters`). You can pass either the folder that directly
           contains these packs, or a parent folder with a `parameters/` subfolder. Only ligands present in the
@@ -7332,12 +7337,226 @@ make sure of reading the target sequences with the function readTargetSequences(
             _copyScriptFile(script_folder, "openmm_simulation.py", subfolder='md/openmm', hidden=False)
             script_file = script_folder + '/openmm_simulation.py'
 
+        aa3_residues = set(MD.openmm_setup.aa3)
+        ALL_LIGANDS = "__ALL__"
+
+        def _normalize_ligand_only_option(option):
+            if option in (None, False):
+                return None
+            if option is True:
+                return ALL_LIGANDS
+            if isinstance(option, str):
+                value = option.strip()
+                if not value:
+                    return None
+                if value.lower() == "all":
+                    return ALL_LIGANDS
+                return {value.upper()}
+            if isinstance(option, (list, tuple, set)):
+                normalized = {str(item).strip().upper() for item in option if str(item).strip()}
+                if not normalized:
+                    return None
+                if "ALL" in normalized:
+                    return ALL_LIGANDS
+                return normalized
+            raise TypeError("ligand_only must be True, False, a string, or an iterable of strings.")
+
+        ligand_only_selector = _normalize_ligand_only_option(ligand_only)
+        ligand_only_active = ligand_only_selector is not None
+
+        skip_ligands_upper = set()
+        if skip_ligands:
+            if isinstance(skip_ligands, str):
+                skip_ligands_upper = {skip_ligands.strip().upper()}
+            else:
+                skip_ligands_upper = {str(item).strip().upper() for item in skip_ligands}
+
+        def _detect_model_ligands(model_name):
+            structure = self.structures.get(model_name)
+            if structure is None:
+                return []
+            ligands = []
+            for residue in structure.get_residues():
+                resname = getattr(residue, 'resname', '').strip().upper()
+                if not resname or resname in ('HOH', 'WAT'):
+                    continue
+                if resname in aa3_residues or resname in skip_ligands_upper:
+                    continue
+                if resname not in ligands:
+                    ligands.append(resname)
+            return ligands
+
+        def _collect_ligand_packs(parameters_folder):
+            packs = {}
+            if not os.path.isdir(parameters_folder):
+                return packs
+            for entry in os.listdir(parameters_folder):
+                if entry.endswith('_parameters'):
+                    residue = entry[: -len('_parameters')]
+                    packs[residue.upper()] = os.path.join(parameters_folder, entry)
+            return packs
+
+        def _posix_path(path):
+            return Path(path).expanduser().absolute().as_posix()
+
+        def _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate):
+            ligand_key = ligand_name.upper()
+            base_tag = f"{model_name}_{ligand_key}"
+            prmtop_path = os.path.join(ligand_parameters_folder, f"{base_tag}.prmtop")
+            inpcrd_path = os.path.join(ligand_parameters_folder, f"{base_tag}.inpcrd")
+            inpcrd_candidates = [inpcrd_path, os.path.join(ligand_parameters_folder, f"{base_tag}.rst7")]
+            existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
+            if os.path.exists(prmtop_path) and existing_inpcrd:
+                return prmtop_path, existing_inpcrd
+
+            if not allow_generate:
+                raise FileNotFoundError(
+                    f"Missing ligand-only inputs for {ligand_key} in model {model_name}. "
+                    f"Enable preparation or place the AMBER files in {ligand_parameters_folder}."
+                )
+
+            pack_dir = packs.get(ligand_key)
+            if not pack_dir or not os.path.isdir(pack_dir):
+                packs.update(_collect_ligand_packs(ligand_parameters_folder))
+                pack_dir = packs.get(ligand_key)
+            if not pack_dir or not os.path.isdir(pack_dir):
+                raise ValueError(
+                    f"Parameter pack for ligand {ligand_key} not found in {ligand_parameters_folder}. "
+                    "Run preparation without skip_preparation or provide ligand_parameters_source."
+                )
+
+            ligand_pdb = os.path.join(pack_dir, f"{ligand_key}.pdb")
+            if not os.path.exists(ligand_pdb):
+                raise FileNotFoundError(f"Ligand PDB for {ligand_key} not found at {ligand_pdb}.")
+
+            mol2_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2")
+            if not os.path.exists(mol2_path):
+                alt_mol2 = os.path.join(pack_dir, f"{ligand_key}.mol2")
+                if os.path.exists(alt_mol2):
+                    shutil.copyfile(alt_mol2, mol2_path)
+                else:
+                    raise FileNotFoundError(f"Mol2 file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+
+            frcmod_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod")
+            if not os.path.exists(frcmod_path):
+                alt_frcmod = os.path.join(pack_dir, f"{ligand_key}.frcmod")
+                if os.path.exists(alt_frcmod):
+                    shutil.copyfile(alt_frcmod, frcmod_path)
+                else:
+                    raise FileNotFoundError(f"Frcmod file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+
+            tleap_script = os.path.join(ligand_parameters_folder, f"{base_tag}_ligand_only.leap")
+            with open(tleap_script, 'w') as tlf:
+                tlf.write('source leaprc.gaff\n')
+                tlf.write('source leaprc.water.tip3p\n')
+                tlf.write(f'loadamberparams "{_posix_path(frcmod_path)}"\n')
+                tlf.write(f'{ligand_key} = loadmol2 "{_posix_path(mol2_path)}"\n')
+                tlf.write(f'mol = loadpdb "{_posix_path(ligand_pdb)}"\n')
+                tlf.write('solvatebox mol TIP3PBOX 12\n')
+                if add_counterionsRand:
+                    tlf.write('addIonsRand mol Na+ 0\n')
+                    tlf.write('addIonsRand mol Cl- 0\n')
+                else:
+                    tlf.write('addIons2 mol Na+ 0\n')
+                    tlf.write('addIons2 mol Cl- 0\n')
+                tlf.write(f'saveamberparm mol "{_posix_path(prmtop_path)}" "{_posix_path(inpcrd_path)}"\n')
+                tlf.write('quit\n')
+
+            ret = os.system(f'tleap -s -f "{tleap_script}"')
+            if ret != 0:
+                raise RuntimeError(f"tleap failed while preparing ligand-only inputs for {ligand_key} in model {model_name}.")
+
+            existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
+            if not (os.path.exists(prmtop_path) and existing_inpcrd):
+                raise RuntimeError(f"Failed to generate prmtop/inpcrd for ligand {ligand_key} in model {model_name}.")
+
+            return prmtop_path, existing_inpcrd
+
+        def _prepare_ligand_only_jobs(model_name, selected_ligands, packs):
+            jobs = []
+            allow_generate = not skip_preparation
+            zfill = max(len(str(replicas)), 2)
+
+            for ligand_name in selected_ligands:
+                prmtop_src, inpcrd_src = _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate)
+
+                ligand_root = os.path.join(job_folder, ligand_name)
+                os.makedirs(ligand_root, exist_ok=True)
+
+                model_root = os.path.join(ligand_root, model_name)
+                os.makedirs(model_root, exist_ok=True)
+
+                ligand_md = SimpleNamespace(
+                    pdb_name=f"{model_name}_{ligand_name.upper()}",
+                    prmtop_file=prmtop_src,
+                    inpcrd_file=inpcrd_src,
+                )
+
+                for replica in range(1, replicas + 1):
+                    if skip_replicas and replica in skip_replicas:
+                        continue
+                    replica_folder = os.path.join(model_root, f"replica_{str(replica).zfill(zfill)}")
+                    jobs.extend(setUpJobs(replica_folder, ligand_md, script_file))
+
+            return jobs
+
         simulation_jobs = []
+        ligand_simulation_jobs = []
+
         for model in self:
-            # Filter models by only_models / skip_models
             if only_models and model not in only_models:
                 continue
             if model in skip_models:
+                continue
+
+            model_ligands = _detect_model_ligands(model)
+
+            self.openmm_md[model] = prepare_proteins.MD.openmm_md(self.models_paths[model])
+            if not skip_preparation:
+                self.openmm_md[model].setUpFF(ff)
+                if add_hydrogens:
+                    variants = self.openmm_md[model].getProtonationStates()
+                    self.openmm_md[model].removeHydrogens()
+                    self.openmm_md[model].addHydrogens(variants=variants)
+
+            if ligand_only_active:
+                if ligand_only_selector == ALL_LIGANDS:
+                    selected_ligands = model_ligands
+                else:
+                    selected_ligands = [lig for lig in model_ligands if lig in ligand_only_selector]
+                    missing = ligand_only_selector - set(selected_ligands)
+                    if missing:
+                        raise ValueError(
+                            f"Requested ligand(s) {sorted(missing)} not found in model {model}. "
+                            f"Available ligands: {model_ligands or 'none'}"
+                        )
+
+                if not selected_ligands:
+                    continue
+
+                packs = _collect_ligand_packs(ligand_parameters_folder)
+                missing_packs = [lig for lig in selected_ligands if lig.upper() not in packs]
+                if missing_packs and skip_preparation:
+                    raise FileNotFoundError(
+                        f"Ligand parameter packs missing for {missing_packs} in model {model}. "
+                        "Disable skip_preparation or provide pre-generated packs."
+                    )
+
+                if missing_packs and not skip_preparation:
+                    external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
+                    _ = self.openmm_md[model].parameterizePDBLigands(
+                        ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
+                        add_bonds=add_bonds.get(model) if add_bonds else None,
+                        skip_ligands=skip_ligands, overwrite=False, metal_parameters=external_params,
+                        extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
+                        extra_force_field=extra_force_field,
+                        force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,
+                        add_counterions=True, add_counterionsRand=add_counterionsRand, save_amber_pdb=True, solvate=True,
+                        regenerate_amber_files=True, non_standard_residues=non_standard_residues
+                    )
+                    packs = _collect_ligand_packs(ligand_parameters_folder)
+
+                ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
                 continue
 
             model_folder = os.path.join(job_folder, model)
@@ -7346,19 +7565,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             needed_replicas, prepared_replicas = _replicas_needed(model_folder, replicas, skip_replicas)
 
-            # Set up OpenMM object. Keep lightweight setup even when skipping preparation
-            self.openmm_md[model] = prepare_proteins.MD.openmm_md(self.models_paths[model])
-            if not skip_preparation:
-                self.openmm_md[model].setUpFF(ff)
-
-                if add_hydrogens:
-                    variants = self.openmm_md[model].getProtonationStates()
-                    self.openmm_md[model].removeHydrogens()
-                    self.openmm_md[model].addHydrogens(variants=variants)
-
-            # Try to reuse already prepared system inputs if available, avoiding recomputation.
             base_name = getattr(self.openmm_md[model], 'pdb_name', 'input')
-            # 1) Prefer system-level parameters in the job parameters folder
             job_prmtop = os.path.join(ligand_parameters_folder, f"{base_name}.prmtop")
             job_inpcrd = None
             for ext in ('.inpcrd', '.rst7'):
@@ -7370,7 +7577,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 self.openmm_md[model].prmtop_file = job_prmtop
                 self.openmm_md[model].inpcrd_file = job_inpcrd
 
-            # 2) Otherwise, if some replicas are already prepared, point to their inputs
             if not getattr(self.openmm_md[model], 'prmtop_file', None) or not getattr(self.openmm_md[model], 'inpcrd_file', None):
                 if prepared_replicas:
                     zfill_pre = max(len(str(replicas)), 2)
@@ -7384,16 +7590,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             self.openmm_md[model].prmtop_file = os.path.join(rep_input, prmtops[0])
                             self.openmm_md[model].inpcrd_file = os.path.join(rep_input, inpcrds[0])
 
-            # Only generate parameters when preparation is not skipped and replicas need inputs
-            # and no reusable inputs were found from parameters/ or an existing replica.
             has_prmtop = bool(getattr(self.openmm_md[model], 'prmtop_file', None))
             has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
             if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
-                # Use external ligand parameter packs if provided (either `metal_parameters`
-                # or a resolved `ligand_parameters_source`). `parameterizePDBLigands` will
-                # detect `<RES>_parameters` subfolders from `metal_parameters` and skip any
-                # re-parameterization for those residues, only copying the packs for ligands
-                # actually present in the system.
                 external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
                 _ = self.openmm_md[model].parameterizePDBLigands(
                     ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
@@ -7418,6 +7617,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 jobs = setUpJobs(replica_folder, self.openmm_md[model], script_file)
                 simulation_jobs.extend(jobs)
+
+        if ligand_only_active:
+            return ligand_simulation_jobs
 
         return simulation_jobs
 
