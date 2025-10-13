@@ -428,6 +428,218 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         self.removeModelAtoms(model, atoms_to_remove, verbose=verbose)
 
+    def changeResidueAtomNames(
+        self,
+        residue_name,
+        atom_names,
+        models=None,
+        verbose=False,
+    ):
+        """
+        Rename atoms for residues matching ``residue_name`` across stored models.
+
+        Parameters
+        ----------
+        residue_name : str
+            Residue name (e.g. ligand three-letter code) to target.
+        atom_names : dict
+            Mapping from original atom names to their replacements.
+        models : iterable or str, optional
+            Specific model name(s) to modify. Defaults to all loaded models.
+        verbose : bool, optional
+            Print each replacement as it occurs.
+
+        Returns
+        -------
+        int
+            Total number of atom names updated.
+        """
+
+        if not isinstance(residue_name, str) or not residue_name.strip():
+            raise ValueError("residue_name must be a non-empty string.")
+
+        if not isinstance(atom_names, dict) or not atom_names:
+            raise ValueError("atom_names must be a non-empty dictionary.")
+
+        normalized_map = {}
+        found_map = {}
+        for old_name, new_name in atom_names.items():
+            if not isinstance(old_name, str) or not isinstance(new_name, str):
+                raise ValueError("Atom name mappings must use strings as keys and values.")
+
+            stripped_old = old_name.strip()
+            stripped_new = new_name.strip()
+
+            if not stripped_old:
+                raise ValueError("Atom name mapping keys cannot be empty.")
+            if not stripped_new:
+                raise ValueError("Atom name mapping values cannot be empty.")
+            if len(stripped_old) > 4:
+                raise ValueError(f'Atom name "{old_name}" exceeds four characters.')
+            if len(stripped_new) > 4:
+                raise ValueError(f'New atom name "{new_name}" exceeds four characters.')
+
+            if stripped_old in normalized_map and normalized_map[stripped_old] != stripped_new:
+                raise ValueError(
+                    f'Conflicting mappings supplied for atom "{stripped_old}".'
+                )
+
+            normalized_map[stripped_old] = stripped_new
+            found_map[stripped_old] = False
+
+        if isinstance(models, str):
+            target_models = [models]
+        elif models is None:
+            target_models = list(self.structures.keys())
+        else:
+            target_models = list(models)
+
+        if not target_models:
+            return 0
+
+        target_models = list(dict.fromkeys(target_models))
+
+        missing_models = [m for m in target_models if m not in self.structures]
+        if missing_models:
+            raise KeyError(
+                "Requested models are not loaded: %s" % ", ".join(sorted(missing_models))
+            )
+
+        total_replacements = 0
+        target_resname = residue_name.strip().upper()
+
+        for model_name in target_models:
+            structure = self.structures[model_name]
+            for stored_model in structure.get_models():
+                for chain in stored_model.get_chains():
+                    for residue in chain.get_residues():
+                        if residue.get_resname().strip().upper() != target_resname:
+                            continue
+
+                        residue_id = residue.id[1]
+
+                        atoms = list(residue.get_atoms())
+                        atoms_by_name = {a.get_name().strip(): a for a in atoms}
+                        target_names = [
+                            old_name for old_name in normalized_map if old_name in atoms_by_name
+                        ]
+                        if not target_names:
+                            continue
+
+                        residue_child_dict = getattr(residue, "child_dict", None)
+                        if residue_child_dict is None:
+                            raise ValueError(
+                                "Residue object is missing child_dict; cannot rename atoms."
+                            )
+
+                        non_target_names = set(atoms_by_name).difference(target_names)
+                        for old_name in target_names:
+                            new_atom_name = normalized_map[old_name]
+                            if (
+                                new_atom_name in non_target_names
+                                and new_atom_name not in target_names
+                            ):
+                                raise ValueError(
+                                    f'Renaming atom "{old_name}" to "{new_atom_name}" '
+                                    f'would overwrite an existing atom in residue {chain.id}:{residue_id} '
+                                    f'of model "{model_name}".'
+                                )
+
+                        new_names_for_targets = [normalized_map[name] for name in target_names]
+                        if len(new_names_for_targets) != len(set(new_names_for_targets)):
+                            raise ValueError(
+                                f"Atom name mapping produces duplicates for residue {chain.id}:{residue_id} "
+                                f'of model "{model_name}".'
+                            )
+
+                        reserved_names = set(atoms_by_name)
+                        reserved_names.update(normalized_map.values())
+
+                        temp_assignments = {}
+                        residue_name_updates = {}
+
+                        def _generate_temp_name(counter: int) -> str:
+                            attempt = counter
+                            while True:
+                                candidate = f"T{attempt:03d}"
+                                if candidate not in reserved_names:
+                                    reserved_names.add(candidate)
+                                    return candidate
+                                attempt += 1
+
+                        # First pass: move targeted atoms to unique temporary names to avoid clashes
+                        for idx, old_name in enumerate(target_names):
+                            atom = atoms_by_name[old_name]
+                            temp_name = _generate_temp_name(idx)
+
+                            residue_child_dict.pop(atom.id, None)
+                            atom.name = temp_name
+                            atom.id = temp_name
+                            atom.fullname = f"{temp_name:>4s}"
+                            atom.full_id = atom.get_full_id()
+                            residue_child_dict[temp_name] = atom
+
+                            temp_assignments[old_name] = (atom, temp_name)
+                            atoms_by_name[temp_name] = atom
+                            atoms_by_name.pop(old_name, None)
+
+                        # Second pass: assign the requested final names
+                        for old_name in target_names:
+                            atom, temp_name = temp_assignments[old_name]
+                            new_atom_name = normalized_map[old_name]
+
+                            residue_child_dict.pop(temp_name, None)
+                            if verbose:
+                                print(
+                                    f'[{model_name}] chain {chain.id} residue {residue_id}: '
+                                    f'{old_name} -> {new_atom_name}'
+                                )
+
+                            atom.name = new_atom_name
+                            atom.id = new_atom_name
+                            atom.fullname = f"{new_atom_name:>4s}"
+                            atom.full_id = atom.get_full_id()
+                            residue_child_dict[new_atom_name] = atom
+
+                            atoms_by_name[new_atom_name] = atom
+                            atoms_by_name.pop(temp_name, None)
+
+                            found_map[old_name] = True
+                            total_replacements += 1
+                            residue_name_updates[old_name] = new_atom_name
+
+                        if residue_name_updates and model_name in self.conects:
+                            updated_conects = []
+                            for conect in self.conects[model_name]:
+                                updated_conect = []
+                                for entry_chain, entry_resid, entry_atom in conect:
+                                    if (
+                                        entry_chain == chain.id
+                                        and entry_resid == residue_id
+                                        and entry_atom in residue_name_updates
+                                    ):
+                                        updated_conect.append(
+                                            (
+                                                entry_chain,
+                                                entry_resid,
+                                                residue_name_updates[entry_atom],
+                                            )
+                                        )
+                                    else:
+                                        updated_conect.append(
+                                            (entry_chain, entry_resid, entry_atom)
+                                        )
+                                updated_conects.append(updated_conect)
+                            self.conects[model_name] = updated_conects
+
+        for atom_key, was_found in found_map.items():
+            if not was_found:
+                print(
+                    f'Atom name "{atom_key}" was not found in residues named "{target_resname}".'
+                )
+
+        return total_replacements
+
     def removeAtomFromConectLines(self, residue_name, atom_name, verbose=True):
         """
         Remove the given (atom_name) atoms from all the connect lines involving
