@@ -1384,22 +1384,50 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 remove_models.add(model)
                 continue
 
-            n_terminus = set()
             something = False
-            for a in atoms:
-                if a.bfactor < confidence_threshold:
-                    n_terminus.add(a.get_parent().id[1])
-                else:
-                    something = True
-                    break
+            n_terminus = {}
+            c_terminus = {}
 
-            c_terminus = set()
-            for a in reversed(atoms):
-                if a.bfactor < confidence_threshold:
-                    c_terminus.add(a.get_parent().id[1])
-                else:
-                    something = True
-                    break
+            for chain in self.structures[model].get_chains():
+                chain_id = chain.get_id()
+                polymer_atoms = [
+                    atom
+                    for atom in chain.get_atoms()
+                    if atom.get_parent().id[0] == " "
+                ]
+
+                if not polymer_atoms:
+                    continue
+
+                chain_n = []
+                for atom in polymer_atoms:
+                    if atom.bfactor < confidence_threshold:
+                        residue_id = atom.get_parent().id
+                        if residue_id not in chain_n:
+                            chain_n.append(residue_id)
+                    else:
+                        something = True
+                        break
+
+                chain_c = []
+                for atom in reversed(polymer_atoms):
+                    if atom.bfactor < confidence_threshold:
+                        residue_id = atom.get_parent().id
+                        if residue_id not in chain_c:
+                            chain_c.append(residue_id)
+                    else:
+                        something = True
+                        break
+
+                if keep_up_to is not None and len(chain_n) <= keep_up_to:
+                    chain_n = []
+                if keep_up_to is not None and len(chain_c) <= keep_up_to:
+                    chain_c = []
+
+                if chain_n:
+                    n_terminus[chain_id] = set(chain_n)
+                if chain_c:
+                    c_terminus[chain_id] = set(chain_c)
 
             if not something:
                 if verbose and model not in remove_models:
@@ -1409,23 +1437,19 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 remove_models.add(model)
                 continue
 
-            n_terminus = sorted(list(n_terminus))
-            c_terminus = sorted(list(c_terminus))
-
-            if len(n_terminus) <= keep_up_to:
-                n_terminus = []
-            if len(c_terminus) <= keep_up_to:
-                c_terminus = []
-
             model_lr = lr.get(model, None) if lr else None
             model_ur = ur.get(model, None) if ur else None
 
             for c in self.structures[model].get_chains():
+                chain_id = c.get_id()
                 remove_this = []
+                chain_n_ids = n_terminus.get(chain_id, set())
+                chain_c_ids = c_terminus.get(chain_id, set())
+
                 for r in c.get_residues():
                     if (
-                        r.id[1] in n_terminus
-                        or r.id[1] in c_terminus
+                        r.id in chain_n_ids
+                        or r.id in chain_c_ids
                         or (
                             model_lr is not None
                             and model_ur is not None
