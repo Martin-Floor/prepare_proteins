@@ -1632,6 +1632,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             for c in self.structures[model].get_chains():
                 to_remove = []
                 for r in c.get_residues():
+                    if r.id[0] != " ":
+                        # Keep hetero residues (cofactors, ions, waters) untouched
+                        continue
                     resid = r.id[1]
                     # Keep if resid within any interval
                     keep = False
@@ -1646,8 +1649,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     c.detach_child(r.id)
 
                 if renumber:
-                    for i, r in enumerate(c):
-                        r.id = (r.id[0], i + 1, r.id[2])
+                    new_resseq = 1
+                    for r in c.get_residues():
+                        if r.id[0] != " ":
+                            continue
+                        r.id = (r.id[0], new_resseq, r.id[2])
+                        new_resseq += 1
 
         # Update sequences after modifications
         self.getModelsSequences()
