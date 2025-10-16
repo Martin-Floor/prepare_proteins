@@ -434,6 +434,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         atom_names,
         models=None,
         verbose=False,
+        summary=False,
     ):
         """
         Rename atoms for residues matching ``residue_name`` across stored models.
@@ -443,11 +444,14 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         residue_name : str
             Residue name (e.g. ligand three-letter code) to target.
         atom_names : dict
-            Mapping from original atom names to their replacements.
+            Mapping from original four-character (including padding) atom names to
+            their four-character replacements.
         models : iterable or str, optional
             Specific model name(s) to modify. Defaults to all loaded models.
         verbose : bool, optional
             Print each replacement as it occurs.
+        summary : bool, optional
+            Print a summary of replacements once processing finishes.
 
         Returns
         -------
@@ -467,6 +471,17 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if not isinstance(old_name, str) or not isinstance(new_name, str):
                 raise ValueError("Atom name mappings must use strings as keys and values.")
 
+            if len(old_name) != 4:
+                raise ValueError(
+                    f'Atom name mapping keys must be exactly four characters long (including padding); '
+                    f'received "{old_name}".'
+                )
+            if len(new_name) != 4:
+                raise ValueError(
+                    f'Atom name mapping values must be exactly four characters long (including padding); '
+                    f'received "{new_name}".'
+                )
+
             stripped_old = old_name.strip()
             stripped_new = new_name.strip()
 
@@ -474,10 +489,6 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 raise ValueError("Atom name mapping keys cannot be empty.")
             if not stripped_new:
                 raise ValueError("Atom name mapping values cannot be empty.")
-            if len(stripped_old) > 4:
-                raise ValueError(f'Atom name "{old_name}" exceeds four characters.')
-            if len(stripped_new) > 4:
-                raise ValueError(f'New atom name "{new_name}" exceeds four characters.')
 
             if stripped_old in normalized_map and normalized_map[stripped_old] != stripped_new:
                 raise ValueError(
@@ -506,6 +517,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             )
 
         total_replacements = 0
+        summary_records = {}
         target_resname = residue_name.strip().upper()
 
         for model_name in target_models:
@@ -607,6 +619,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                             found_map[old_name] = True
                             total_replacements += 1
                             residue_name_updates[old_name] = new_atom_name
+                            if summary:
+                                key = (model_name, chain.id, residue_id)
+                                summary_records[key] = summary_records.get(key, 0) + 1
 
                         if residue_name_updates and model_name in self.conects:
                             updated_conects = []
@@ -637,6 +652,19 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 print(
                     f'Atom name "{atom_key}" was not found in residues named "{target_resname}".'
                 )
+
+        if summary:
+            if total_replacements:
+                print(
+                    f'Renamed {total_replacements} atom(s) across {len(summary_records)} residue(s).'
+                )
+                for key, count in sorted(summary_records.items()):
+                    model_name, chain_id, residue_id = key
+                    print(
+                        f'  [{model_name}] chain {chain_id} residue {residue_id}: {count} atom(s) renamed.'
+                    )
+            else:
+                print("No atom names were updated.")
 
         return total_replacements
 
