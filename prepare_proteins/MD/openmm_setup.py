@@ -18,6 +18,7 @@ import shutil
 import os
 import fileinput
 from multiprocessing import cpu_count
+import shlex
 import warnings
 
 aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX', 'ACE', 'NME']
@@ -525,6 +526,26 @@ class openmm_md:
                 _copyfile_if_needed(parameters_mol2[residue],
                                     parameters_folder+'/'+residue+'.mol2')
 
+        def _stage_external_mol2(residue_name, source_path):
+            """Place a provided MOL2 inside the working folder so antechamber can reuse it."""
+            res_upper = residue_name.upper()
+            if res_upper not in par_folder:
+                return
+            if not os.path.exists(source_path):
+                raise ValueError(f'Mol2 file for {residue_name} at {source_path} was not found.')
+            workdir = par_folder[res_upper]
+            dest_path = os.path.join(workdir, f'{res_upper}.mol2')
+            try:
+                if os.path.exists(dest_path) and os.path.samefile(source_path, dest_path):
+                    return
+            except FileNotFoundError:
+                pass
+            shutil.copyfile(source_path, dest_path)
+
+        for residue_name in par_folder:
+            if residue_name in parameters_mol2:
+                _stage_external_mol2(residue_name, parameters_mol2[residue_name])
+
         if extra_frcmod:
             for residue in extra_frcmod:
                 if os.path.exists(residue):
@@ -544,6 +565,7 @@ class openmm_md:
                     if os.path.exists(extra_mol2[residue]):
                         _copyfile_if_needed(extra_mol2[residue],
                                             parameters_folder+'/'+extra_mol2[residue].split('/')[-1])
+                        _stage_external_mol2(residue, extra_mol2[residue])
                         candidate_pdb = os.path.splitext(extra_mol2[residue])[0] + '.pdb'
                         generated_path = generated_pdb_paths.get(residue)
                         if generated_path and os.path.exists(candidate_pdb):
@@ -560,6 +582,8 @@ class openmm_md:
                         destination = parameters_folder+'/'+residue.split('/')[-1]
                         _copyfile_if_needed(residue, destination)
                         resname_candidate = os.path.splitext(os.path.basename(residue))[0].upper()
+                        _stage_external_mol2(resname_candidate, residue)
+                        resname_candidate = os.path.splitext(os.path.basename(residue))[0].upper()
                         generated_path = generated_pdb_paths.get(resname_candidate)
                         candidate_pdb = os.path.splitext(residue)[0] + '.pdb'
                         if generated_path and os.path.exists(candidate_pdb):
@@ -572,6 +596,7 @@ class openmm_md:
                     elif residue in parameters_mol2:
                         _copyfile_if_needed(parameters_mol2[residue],
                                             parameters_folder+'/'+residue+'.mol2')
+                        _stage_external_mol2(residue, parameters_mol2[residue])
                         generated_path = generated_pdb_paths.get(residue.upper())
                         pack_pdb = os.path.join(os.path.dirname(parameters_mol2[residue]), residue+'.pdb')
                         if generated_path and os.path.exists(pack_pdb):
@@ -973,6 +998,23 @@ class ligandParameters:
             raise ValueError('A PDB with a single residue must be given for parameterization!')
 
     def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False):
+        def _run_acdoctor_on_mol2(mol2_file):
+            if not os.path.exists(mol2_file):
+                raise FileNotFoundError(f'acdoctor input {mol2_file} not found.')
+            command = (
+                'antechamber '
+                f'-i {shlex.quote(mol2_file)} '
+                '-fi mol2 '
+                '-o /dev/null '
+                '-fo mol2 '
+                '-j 0 '
+                '-dr y '
+                '-s 2 '
+                '-pf y\n'
+            )
+            ret_code = _run_command(command, self.command_log)
+            if ret_code != 0:
+                raise RuntimeError(f'acdoctor (antechamber) failed for {mol2_file} with exit code {ret_code}.')
 
         # Execute pdb4amber to generate a renumbered PDB
         if not os.path.exists(self.resname+'_renum.pdb') or overwrite:
@@ -982,7 +1024,9 @@ class ligandParameters:
             _run_command(command, self.command_log)
 
         # Run antechamber to create a mol2 file with the atomic charges
-        if not os.path.exists(self.resname+'.mol2') or overwrite:
+        mol2_path = self.resname+'.mol2'
+        mol2_generated = False
+        if not os.path.exists(mol2_path) or overwrite:
             command = 'antechamber '
             command += '-i '+self.resname+'_renum.pdb '
             command += '-fi pdb '
@@ -993,6 +1037,7 @@ class ligandParameters:
             command += '-nc '+str(ligand_charge)+' '
             command += '-s 2\n'
             _run_command(command, self.command_log)
+            mol2_generated = True
 
         # Run antechamber to create a prepi file with the atomic charges
         if not os.path.exists(self.resname+'.prepi') or overwrite:
@@ -1007,11 +1052,15 @@ class ligandParameters:
             command += '-s 2\n'
             _run_command(command, self.command_log)
 
-        # Run parmchk to check with forcefield parameters will be used
-        if not os.path.exists(self.resname+'.frcmod') or overwrite:
+        # Run parmchk to check which forcefield parameters will be used
+        frcmod_path = self.resname+'.frcmod'
+        need_parmchk = overwrite or not os.path.exists(frcmod_path)
+        if need_parmchk and not mol2_generated:
+            _run_acdoctor_on_mol2(mol2_path)
+        if need_parmchk:
             command  = 'parmchk2 '
-            command += '-i '+self.resname+'.mol2 '
-            command += '-o '+self.resname+'.frcmod '
+            command += '-i '+mol2_path+' '
+            command += '-o '+frcmod_path+' '
             command += '-f mol2\n'
             _run_command(command, self.command_log)
 
