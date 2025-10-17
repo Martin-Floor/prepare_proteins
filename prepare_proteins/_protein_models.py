@@ -7485,6 +7485,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
                                extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
+                               strict_ligand_atom_check=True,
                                ligand_parameters_source=None,
                                only_models=None, skip_models=None):
         """
@@ -7495,6 +7496,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         ...
         - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
           but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
+        - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
+          same atom-name set as the ligand extracted from the PDB; mismatches raise an error. Disable to downgrade to warnings.
         - ligand_only (bool or str or list of str, optional): If set, skip protein + ligand simulations and instead
           prepare solvated ligand-only systems. Use True to process every ligand detected in each model, a single
           residue name to limit the run to that ligand, or a list of residue names for multiple ligands.
@@ -7738,6 +7741,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             inpcrd_path = os.path.join(ligand_parameters_folder, f"{base_tag}.inpcrd")
             inpcrd_candidates = [inpcrd_path, os.path.join(ligand_parameters_folder, f"{base_tag}.rst7")]
             existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
+            model_ligand_pdb = os.path.join(ligand_parameters_folder, f"{base_tag}.pdb")
             if os.path.exists(prmtop_path) and existing_inpcrd:
                 return prmtop_path, existing_inpcrd
 
@@ -7758,24 +7762,27 @@ make sure of reading the target sequences with the function readTargetSequences(
                 )
 
             ligand_pdb = os.path.join(pack_dir, f"{ligand_key}.pdb")
-            if not os.path.exists(ligand_pdb):
-                raise FileNotFoundError(f"Ligand PDB for {ligand_key} not found at {ligand_pdb}.")
+            if os.path.exists(model_ligand_pdb):
+                ligand_pdb = model_ligand_pdb
+            else:
+                if not os.path.exists(ligand_pdb):
+                    raise FileNotFoundError(f"Ligand PDB for {ligand_key} not found at {ligand_pdb}.")
+                shutil.copyfile(ligand_pdb, model_ligand_pdb)
+                ligand_pdb = model_ligand_pdb
 
             mol2_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2")
-            if not os.path.exists(mol2_path):
-                alt_mol2 = os.path.join(pack_dir, f"{ligand_key}.mol2")
-                if os.path.exists(alt_mol2):
-                    shutil.copyfile(alt_mol2, mol2_path)
-                else:
-                    raise FileNotFoundError(f"Mol2 file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+            alt_mol2 = os.path.join(pack_dir, f"{ligand_key}.mol2")
+            if os.path.exists(alt_mol2):
+                shutil.copyfile(alt_mol2, mol2_path)
+            elif not os.path.exists(mol2_path):
+                raise FileNotFoundError(f"Mol2 file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
 
             frcmod_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod")
-            if not os.path.exists(frcmod_path):
-                alt_frcmod = os.path.join(pack_dir, f"{ligand_key}.frcmod")
-                if os.path.exists(alt_frcmod):
-                    shutil.copyfile(alt_frcmod, frcmod_path)
-                else:
-                    raise FileNotFoundError(f"Frcmod file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+            alt_frcmod = os.path.join(pack_dir, f"{ligand_key}.frcmod")
+            if os.path.exists(alt_frcmod):
+                shutil.copyfile(alt_frcmod, frcmod_path)
+            elif not os.path.exists(frcmod_path):
+                raise FileNotFoundError(f"Frcmod file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
 
             tleap_script = os.path.join(ligand_parameters_folder, f"{base_tag}_ligand_only.leap")
             with open(tleap_script, 'w') as tlf:
@@ -7834,12 +7841,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         simulation_jobs = []
         ligand_simulation_jobs = []
+        ligand_setup_completed = False
 
         for model in self:
             if only_models and model not in only_models:
                 continue
             if model in skip_models:
                 continue
+            if ligand_only_active and ligand_setup_completed:
+                break
 
             model_ligands = _detect_model_ligands(model)
 
@@ -7866,8 +7876,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not selected_ligands:
                     continue
 
+                selected_ligands = [lig.upper() for lig in selected_ligands]
+                selected_ligands_set = set(selected_ligands)
+
                 packs = _collect_ligand_packs(ligand_parameters_folder)
-                missing_packs = [lig for lig in selected_ligands if lig.upper() not in packs]
+                missing_packs = [lig for lig in selected_ligands if lig not in packs]
                 if missing_packs and skip_preparation:
                     raise FileNotFoundError(
                         f"Ligand parameter packs missing for {missing_packs} in model {model}. "
@@ -7876,19 +7889,29 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if missing_packs and not skip_preparation:
                     external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
+                    skip_for_param = set(skip_ligands_upper)
+                    if ligand_only_selector != ALL_LIGANDS:
+                        skip_for_param.update(
+                            lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
+                        )
+                    skip_argument = list(skip_for_param) if skip_for_param else None
                     _ = self.openmm_md[model].parameterizePDBLigands(
                         ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
                         add_bonds=add_bonds.get(model) if add_bonds else None,
-                        skip_ligands=skip_ligands, overwrite=False, metal_parameters=external_params,
+                        skip_ligands=skip_argument, overwrite=False, metal_parameters=external_params,
                         extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
                         extra_force_field=extra_force_field,
                         force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,
                         add_counterions=True, add_counterionsRand=add_counterionsRand, save_amber_pdb=True, solvate=True,
-                        regenerate_amber_files=True, non_standard_residues=non_standard_residues
+                        regenerate_amber_files=True, non_standard_residues=non_standard_residues,
+                        strict_atom_name_check=strict_ligand_atom_check,
+                        only_residues=selected_ligands_set,
+                        build_full_system=False
                     )
                     packs = _collect_ligand_packs(ligand_parameters_folder)
 
                 ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
+                ligand_setup_completed = True
                 continue
 
             model_folder = os.path.join(job_folder, model)
@@ -7934,7 +7957,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     extra_force_field=extra_force_field,
                     force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,
                     add_counterions=True, add_counterionsRand=add_counterionsRand, save_amber_pdb=True, solvate=True,
-                    regenerate_amber_files=True, non_standard_residues=non_standard_residues
+                    regenerate_amber_files=True, non_standard_residues=non_standard_residues,
+                    strict_atom_name_check=strict_ligand_atom_check
                 )
 
             zfill = max(len(str(replicas)), 2)

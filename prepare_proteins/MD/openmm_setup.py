@@ -18,6 +18,7 @@ import shutil
 import os
 import fileinput
 from multiprocessing import cpu_count
+import warnings
 
 aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX', 'ACE', 'NME']
 ions = ['MG', 'NA', 'CL', 'CU']
@@ -160,7 +161,8 @@ class openmm_md:
                                extra_force_field=None,
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
                                extra_mol2=None, add_counterions=True, add_counterionsRand=False, save_amber_pdb=False, solvate=True,
-                               regenerate_amber_files=False, non_standard_residues=None):
+                               regenerate_amber_files=False, non_standard_residues=None, strict_atom_name_check=True,
+                               only_residues=None, build_full_system=True):
 
         def topologyFromResidue(residue, topol, positions):
             top = topology.Topology()
@@ -270,6 +272,52 @@ class openmm_md:
                         else:
                             atom_types[l.split()[0]] = l.split()[4]
             return atom_types
+
+        def _extract_pdb_atom_names(pdb_path):
+            atom_names = set()
+            if not os.path.exists(pdb_path):
+                return atom_names
+            with open(pdb_path) as handle:
+                for line in handle:
+                    if line.startswith(('ATOM', 'HETATM')):
+                        name = line[12:16].strip()
+                        if name:
+                            atom_names.add(name.upper())
+            return atom_names
+
+        def _validate_ligand_pdb_atoms(generated_path, reference_path, residue_name, source_label):
+            if not os.path.exists(generated_path) or not os.path.exists(reference_path):
+                return
+            generated_atoms = _extract_pdb_atom_names(generated_path)
+            reference_atoms = _extract_pdb_atom_names(reference_path)
+            if not generated_atoms and not reference_atoms:
+                return
+            missing = reference_atoms - generated_atoms
+            extra = generated_atoms - reference_atoms
+            if missing or extra:
+                mismatch = []
+                if missing:
+                    mismatch.append(f"missing atoms {sorted(missing)}")
+                if extra:
+                    mismatch.append(f"extra atoms {sorted(extra)}")
+                message = (
+                    f"Atom name mismatch for ligand {residue_name}: generated PDB "
+                    f"({generated_path}) differs from {source_label} ({reference_path}); "
+                    + ", ".join(mismatch)
+                )
+                if strict_atom_name_check:
+                    raise ValueError(message)
+                warnings.warn(message, UserWarning)
+
+        if only_residues:
+            if isinstance(only_residues, str):
+                only_residue_set = {only_residues.strip().upper()} if only_residues.strip() else set()
+            else:
+                only_residue_set = {str(res).strip().upper() for res in only_residues if str(res).strip()}
+            if not only_residue_set:
+                only_residue_set = None
+        else:
+            only_residue_set = None
 
         if regenerate_amber_files:
             if os.path.exists(parameters_folder+'/'+self.pdb_name+'.prmtop'):
@@ -423,10 +471,13 @@ class openmm_md:
 
         # Get molecules that need parameterization
         par_folder = {}
+        generated_pdb_paths = {}
 
         for r in getNonProteinResidues(self.modeller.topology, skip_residues=skip_ligands):
 
             residue = r.name.upper()
+            if only_residue_set and residue not in only_residue_set:
+                continue
 
             # Create PDB for each ligand molecule
             lig_top, lig_pos = topologyFromResidue(r, self.modeller.topology,
@@ -437,10 +488,22 @@ class openmm_md:
             if not os.path.exists(par_folder[residue]):
                 os.mkdir(par_folder[residue])
 
-            with open(par_folder[residue]+'/'+residue+'.pdb', 'w') as rf:
+            generated_ligand_pdb = par_folder[residue]+'/'+residue+'.pdb'
+            with open(generated_ligand_pdb, 'w') as rf:
                 PDBFile.writeFile(lig_top, lig_pos, rf)
+            generated_pdb_paths[residue] = generated_ligand_pdb
+            model_specific_pdb = os.path.join(parameters_folder, f"{self.pdb_name}_{residue}.pdb")
+            shutil.copyfile(generated_ligand_pdb, model_specific_pdb)
 
             if residue in parameters_folders:
+                provided_pack = parameters_folders[residue]
+                pack_pdb = os.path.join(provided_pack, residue+'.pdb')
+                _validate_ligand_pdb_atoms(
+                    generated_ligand_pdb,
+                    pack_pdb,
+                    residue,
+                    f"parameter pack in {provided_pack}"
+                )
                 for d in os.listdir(parameters_folders[residue]):
                     _copyfile_if_needed(parameters_folders[residue]+'/'+d,
                                         par_folder[residue]+'/'+d)
@@ -468,15 +531,43 @@ class openmm_md:
                     if os.path.exists(extra_mol2[residue]):
                         _copyfile_if_needed(extra_mol2[residue],
                                             parameters_folder+'/'+extra_mol2[residue].split('/')[-1])
+                        candidate_pdb = os.path.splitext(extra_mol2[residue])[0] + '.pdb'
+                        generated_path = generated_pdb_paths.get(residue)
+                        if generated_path and os.path.exists(candidate_pdb):
+                            _validate_ligand_pdb_atoms(
+                                generated_path,
+                                candidate_pdb,
+                                residue,
+                                f"extra_mol2 source {extra_mol2[residue]}"
+                            )
                     else:
                         raise ValueError(f'Mol2 file for {residue} {extra_mol2[residue]} was not found.')
                 else:
                     if os.path.exists(residue):
-                        _copyfile_if_needed(residue,
-                                            parameters_folder+'/'+residue.split('/')[-1])
+                        destination = parameters_folder+'/'+residue.split('/')[-1]
+                        _copyfile_if_needed(residue, destination)
+                        resname_candidate = os.path.splitext(os.path.basename(residue))[0].upper()
+                        generated_path = generated_pdb_paths.get(resname_candidate)
+                        candidate_pdb = os.path.splitext(residue)[0] + '.pdb'
+                        if generated_path and os.path.exists(candidate_pdb):
+                            _validate_ligand_pdb_atoms(
+                                generated_path,
+                                candidate_pdb,
+                                resname_candidate,
+                                f"extra_mol2 source {residue}"
+                            )
                     elif residue in parameters_mol2:
                         _copyfile_if_needed(parameters_mol2[residue],
                                             parameters_folder+'/'+residue+'.mol2')
+                        generated_path = generated_pdb_paths.get(residue.upper())
+                        pack_pdb = os.path.join(os.path.dirname(parameters_mol2[residue]), residue+'.pdb')
+                        if generated_path and os.path.exists(pack_pdb):
+                            _validate_ligand_pdb_atoms(
+                                generated_path,
+                                pack_pdb,
+                                residue,
+                                f"extra_mol2 metal_parameters source {parameters_mol2[residue]}"
+                            )
                     elif not os.path.exists(residue) and residue not in parameters_mol2:
                         raise ValueError(f'Mol2 file {residue} was not found.')
                     else:
@@ -516,6 +607,15 @@ class openmm_md:
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
                                        metal_charge=metal_charge)
             os.chdir('../'*len(par_folder[residue].split('/')))
+
+        # Copy newly generated parameters to the root folder so they can be reused directly.
+        for residue, folder in par_folder.items():
+            gen_mol2 = os.path.join(folder, f"{residue}.mol2")
+            gen_frcmod = os.path.join(folder, f"{residue}.frcmod")
+            if os.path.exists(gen_mol2):
+                shutil.copyfile(gen_mol2, os.path.join(parameters_folder, f"{residue}.mol2"))
+            if os.path.exists(gen_frcmod):
+                shutil.copyfile(gen_frcmod, os.path.join(parameters_folder, f"{residue}.frcmod"))
 
         # Renumber PDB
         renum_pdb = pdb_file.replace('.pdb', '_renum.pdb')
@@ -669,6 +769,9 @@ class openmm_md:
                 command += '-s 4\n'
                 os.system(command)
                 os.chdir('../'*len(parameters_folder.split('/')))
+
+        if not build_full_system:
+            return
 
         # Generate set of metal ligand values
         metal_ligand_values = []
