@@ -1,3 +1,4 @@
+import ast
 import bz2
 import io
 import json
@@ -19,7 +20,6 @@ import json
 import csv
 import warnings
 import io
-from pkg_resources import Requirement, resource_listdir, resource_stream
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from scipy.optimize import curve_fit
@@ -28,9 +28,9 @@ from Bio.PDB import PDBIO, MMCIFParser
 from ipywidgets import interact
 from matplotlib.lines import Line2D
 from pkg_resources import Requirement, resource_listdir, resource_stream
-from scipy.optimize import curve_fit
-from tqdm import tqdm
 import pandas as pd
+
+from typing import Any, Dict
 
 from . import alignment
 
@@ -499,6 +499,287 @@ class sequenceModels:
         if return_missing:
             return missing
 
+    @staticmethod
+    def filter_af3_models(
+        af3_scores: pd.DataFrame,
+        *,
+        coerce_nested: bool = True,
+        use_best_rank: bool = True,
+        apply_per_chain_guards: bool = True,
+        no_clash: float = 0.0,
+        max_disorder: float = 0.05,
+        min_rank: float = 0.85,
+        min_iptm_overall: float = 0.75,
+        min_ptm_prot: float = 0.75,
+        min_pair_iptm_prot_heme: float = 0.80,
+        max_pae_prot_heme: float = 1.5,
+        min_pair_iptm_prot_mg: float = 0.70,
+        max_pae_prot_mg: float = 3.0,
+        min_prot_iptm: float = 0.70,
+        min_heme_iptm: float = 0.70,
+        min_mg_iptm: float = 0.60,
+        enable_interface_override: bool = False,
+        elite_prot_heme_ipTM: float = 0.90,
+        elite_prot_heme_PAE: float = 1.5,
+        elite_prot_mg_ipTM: float = 0.80,
+        elite_prot_mg_PAE: float = 2.5,
+    ) -> Dict[str, Any]:
+        """
+        Filter AlphaFold 3 complex models (PROT–HEME–MG) using stringent confidence gates.
+
+        Parameters
+        ----------
+        af3_scores : DataFrame
+            DataFrame produced by :meth:`collectAlphaFold3Results`.
+        coerce_nested : bool, optional
+            Convert list-like string columns into numeric lists/matrices.
+        use_best_rank : bool, optional
+            Use the better of ``ranking_score`` and ``summary_ranking_score``.
+        apply_per_chain_guards : bool, optional
+            Enforce minimum ipTM thresholds per chain.
+        enable_interface_override : bool, optional
+            Allow models with elite interfaces to pass even if ``min_rank`` is missed.
+
+        Returns
+        -------
+        dict
+            Keys: ``df_good``, ``df_bad``, ``good_mask``, ``counts``, ``reasons``, ``derived_cols``.
+        """
+        df = af3_scores.copy()
+
+        def parse_listish(value):
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped.startswith('[') and stripped.endswith(']'):
+                    try:
+                        return ast.literal_eval(stripped)
+                    except Exception:
+                        return value
+            return value
+
+        def to_float(value):
+            if value is None:
+                return np.nan
+            if isinstance(value, (float, int)):
+                return float(value)
+            if isinstance(value, str):
+                stripped = value.strip()
+                if stripped == "" or stripped.lower() in {"none", "nan"}:
+                    return np.nan
+                try:
+                    return float(stripped)
+                except Exception:
+                    return np.nan
+            return np.nan
+
+        def coerce_list(value):
+            value = parse_listish(value)
+            if isinstance(value, (list, tuple)):
+                return [to_float(v) for v in value]
+            return np.nan
+
+        def coerce_matrix(value):
+            value = parse_listish(value)
+            if isinstance(value, (list, tuple)):
+                rows = []
+                for row in value:
+                    row = parse_listish(row)
+                    if isinstance(row, (list, tuple)):
+                        rows.append([to_float(v) for v in row])
+                    else:
+                        rows.append([np.nan])
+                return rows
+            return np.nan
+
+        def safe_get_list(lst, idx):
+            if isinstance(lst, (list, tuple)) and 0 <= idx < len(lst):
+                return to_float(lst[idx])
+            return np.nan
+
+        def safe_get_mat(mat, i, j):
+            if isinstance(mat, (list, tuple)) and 0 <= i < len(mat):
+                row = mat[i]
+                if isinstance(row, (list, tuple)) and 0 <= j < len(row):
+                    return to_float(row[j])
+            return np.nan
+
+        def ge(series, threshold):
+            return (pd.notna(series)) & (series >= threshold)
+
+        def le(series, threshold):
+            return (pd.notna(series)) & (series <= threshold)
+
+        scalar_columns = [
+            "ranking_score",
+            "summary_fraction_disordered",
+            "summary_has_clash",
+            "summary_iptm",
+            "summary_ptm",
+            "summary_ranking_score",
+        ]
+        for column in scalar_columns:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+
+        if coerce_nested:
+            cols_1d = ["summary_chain_iptm", "summary_chain_ptm"]
+            cols_2d = ["summary_chain_pair_iptm", "summary_chain_pair_pae_min"]
+            for column in cols_1d:
+                if column in df.columns:
+                    df[column] = df[column].apply(coerce_list)
+            for column in cols_2d:
+                if column in df.columns:
+                    df[column] = df[column].apply(coerce_matrix)
+
+        PROT, HEME, MG = 0, 1, 2
+        derived_cols = []
+
+        def add_col(name, series):
+            df[name] = series
+            derived_cols.append(name)
+
+        if "summary_chain_ptm" in df.columns:
+            add_col("prot_ptm", df["summary_chain_ptm"].apply(lambda x: safe_get_list(x, PROT)))
+        else:
+            df["prot_ptm"] = np.nan
+            derived_cols.append("prot_ptm")
+
+        if "summary_chain_iptm" in df.columns:
+            add_col("prot_iptm", df["summary_chain_iptm"].apply(lambda x: safe_get_list(x, PROT)))
+            add_col("heme_iptm", df["summary_chain_iptm"].apply(lambda x: safe_get_list(x, HEME)))
+            add_col("mg_iptm", df["summary_chain_iptm"].apply(lambda x: safe_get_list(x, MG)))
+        else:
+            for col_name in ("prot_iptm", "heme_iptm", "mg_iptm"):
+                df[col_name] = np.nan
+                derived_cols.append(col_name)
+
+        if "summary_chain_pair_iptm" in df.columns:
+            add_col(
+                "pair_iptm_prot_heme",
+                df["summary_chain_pair_iptm"].apply(lambda m: safe_get_mat(m, PROT, HEME)),
+            )
+            add_col(
+                "pair_iptm_prot_mg",
+                df["summary_chain_pair_iptm"].apply(lambda m: safe_get_mat(m, PROT, MG)),
+            )
+        else:
+            for col_name in ("pair_iptm_prot_heme", "pair_iptm_prot_mg"):
+                df[col_name] = np.nan
+                derived_cols.append(col_name)
+
+        if "summary_chain_pair_pae_min" in df.columns:
+            add_col(
+                "pae_min_prot_heme",
+                df["summary_chain_pair_pae_min"].apply(lambda m: safe_get_mat(m, PROT, HEME)),
+            )
+            add_col(
+                "pae_min_prot_mg",
+                df["summary_chain_pair_pae_min"].apply(lambda m: safe_get_mat(m, PROT, MG)),
+            )
+        else:
+            for col_name in ("pae_min_prot_heme", "pae_min_prot_mg"):
+                df[col_name] = np.nan
+                derived_cols.append(col_name)
+
+        if use_best_rank and {"ranking_score", "summary_ranking_score"}.issubset(df.columns):
+            rank_series = df[["ranking_score", "summary_ranking_score"]].max(axis=1)
+        else:
+            if "ranking_score" in df.columns:
+                rank_series = df["ranking_score"]
+            else:
+                rank_series = df.get(
+                    "summary_ranking_score", pd.Series(index=df.index, dtype=float)
+                )
+
+        ok_no_clash = (pd.notna(df["summary_has_clash"])) & (
+            df["summary_has_clash"].astype(float) == float(no_clash)
+        )
+        ok_disorder = le(df["summary_fraction_disordered"], max_disorder)
+        ok_rank = ge(rank_series, min_rank)
+        ok_iptm_all = ge(df["summary_iptm"], min_iptm_overall)
+        ok_prot_ptm = ge(df["prot_ptm"], min_ptm_prot)
+
+        ok_heme_if = ge(df["pair_iptm_prot_heme"], min_pair_iptm_prot_heme) & le(
+            df["pae_min_prot_heme"], max_pae_prot_heme
+        )
+        ok_mg_if = ge(df["pair_iptm_prot_mg"], min_pair_iptm_prot_mg) & le(
+            df["pae_min_prot_mg"], max_pae_prot_mg
+        )
+
+        guards = []
+        if apply_per_chain_guards:
+            guards.append(ge(df["prot_iptm"], min_prot_iptm))
+            guards.append(ge(df["heme_iptm"], min_heme_iptm))
+            guards.append(ge(df["mg_iptm"], min_mg_iptm))
+
+        if enable_interface_override:
+            elite_if = ge(df["pair_iptm_prot_heme"], elite_prot_heme_ipTM) & le(
+                df["pae_min_prot_heme"], elite_prot_heme_PAE
+            )
+            elite_if &= ge(df["pair_iptm_prot_mg"], elite_prot_mg_ipTM)
+            elite_if &= le(df["pae_min_prot_mg"], elite_prot_mg_PAE)
+            ok_rank = ok_rank | elite_if
+
+        good_mask = ok_no_clash & ok_disorder & ok_rank & ok_iptm_all & ok_prot_ptm & ok_heme_if & ok_mg_if
+        for guard in guards:
+            good_mask &= guard
+
+        def why_bad_row(row) -> str:
+            reasons = []
+            if not (pd.notna(row["summary_has_clash"]) and float(row["summary_has_clash"]) == float(no_clash)):
+                reasons.append("clash")
+            if not (pd.notna(row["summary_fraction_disordered"]) and row["summary_fraction_disordered"] <= max_disorder):
+                reasons.append("disorder")
+            if not (pd.notna(rank_series[row.name]) and rank_series[row.name] >= min_rank) and not enable_interface_override:
+                reasons.append("low_rank")
+            if not (pd.notna(row["summary_iptm"]) and row["summary_iptm"] >= min_iptm_overall):
+                reasons.append("low_iptm_overall")
+            if not (pd.notna(row["prot_ptm"]) and row["prot_ptm"] >= min_ptm_prot):
+                reasons.append("low_protein_ptm")
+            if not (
+                pd.notna(row["pair_iptm_prot_heme"])
+                and row["pair_iptm_prot_heme"] >= min_pair_iptm_prot_heme
+                and pd.notna(row["pae_min_prot_heme"])
+                and row["pae_min_prot_heme"] <= max_pae_prot_heme
+            ):
+                reasons.append("heme_interface_weak")
+            if not (
+                pd.notna(row["pair_iptm_prot_mg"])
+                and row["pair_iptm_prot_mg"] >= min_pair_iptm_prot_mg
+                and pd.notna(row["pae_min_prot_mg"])
+                and row["pae_min_prot_mg"] <= max_pae_prot_mg
+            ):
+                reasons.append("mg_interface_weak")
+            if apply_per_chain_guards:
+                if pd.notna(row["prot_iptm"]) and row["prot_iptm"] < min_prot_iptm:
+                    reasons.append("low_prot_chain_iptm")
+                if pd.notna(row["heme_iptm"]) and row["heme_iptm"] < min_heme_iptm:
+                    reasons.append("low_heme_chain_iptm")
+                if pd.notna(row["mg_iptm"]) and row["mg_iptm"] < min_mg_iptm:
+                    reasons.append("low_mg_chain_iptm")
+            return ",".join(reasons) or "ok"
+
+        df_bad = df[~good_mask].copy()
+        df_good = df[good_mask].copy()
+        if not df_bad.empty:
+            df_bad["why_flagged"] = df_bad.apply(why_bad_row, axis=1)
+
+        reasons = (
+            df_bad["why_flagged"].value_counts(dropna=False)
+            if "why_flagged" in df_bad.columns
+            else pd.Series(dtype=int)
+        )
+        counts = {"kept": int(good_mask.sum()), "dropped": int((~good_mask).sum())}
+
+        return {
+            "df_good": df_good,
+            "df_bad": df_bad,
+            "good_mask": good_mask,
+            "counts": counts,
+            "reasons": reasons,
+            "derived_cols": derived_cols,
+        }
+
     def collectAlphaFold3Results(
         self,
         af_folder,
@@ -508,7 +789,10 @@ class sequenceModels:
         only_models=None,
         ascending=False,
         best_only=False,
-        return_selected=False
+        return_selected=False,
+        filter_strict=False,
+        filter_kwargs=None,
+        return_filter=False,
     ):
         """Collect AlphaFold 3 scores and copy top-ranking predictions as PDBs.
 
@@ -542,17 +826,26 @@ class sequenceModels:
             selected_df)``. Otherwise only the full scores dataframe is
             returned. In both cases a dictionary mapping model name to copied
             file paths is returned in the second position of the tuple.
+        filter_strict : bool, optional
+            When ``True`` applies :meth:`filter_af3_models` to the assembled
+            scores and adds ``af3_strict_pass`` / ``af3_strict_reason``
+            annotation columns before ranking.
+        filter_kwargs : dict, optional
+            Extra keyword arguments forwarded to :meth:`filter_af3_models`.
+        return_filter : bool, optional
+            When ``True`` and strict filtering is enabled, include the filter
+            summary dictionary as the last element of the returned tuple.
 
         Returns
         -------
         pandas.DataFrame or tuple
-            If ``return_selected`` is ``False`` (default) a dataframe with all
-            parsed scores (or only the best per model when ``best_only`` is
-            ``True``) is returned. When ``return_selected`` is ``True`` the
-            function returns ``(scores_df, selected_df, copied_paths)`` where
-            ``selected_df`` contains the subset chosen for export and
-            ``copied_paths`` maps each model to the generated PDB/CIF files (if
-            ``output_folder`` was provided).
+            If ``return_selected`` is ``False`` and ``return_filter`` is
+            ``False`` (default) a dataframe with all parsed scores (or only the
+            best per model when ``best_only`` is ``True``) is returned. When
+            ``return_selected`` is ``True`` the function returns ``(scores_df,
+            selected_df, copied_paths)``. If strict filtering is requested and
+            ``return_filter`` is ``True``, the filter summary is appended as the
+            final element of the returned tuple.
         """
 
         def _sanitize(name):
@@ -717,6 +1010,9 @@ class sequenceModels:
         if isinstance(only_models, str):
             only_models = [only_models]
 
+        if return_filter and not filter_strict:
+            raise ValueError("return_filter=True requires filter_strict=True.")
+
         copy_outputs = output_folder is not None
         if copy_outputs:
             os.makedirs(output_folder, exist_ok=True)
@@ -839,6 +1135,18 @@ class sequenceModels:
                 f"Metric '{metric}' could not be converted to numeric values for ranking."
             )
 
+        filter_result = None
+        if filter_strict:
+            filter_options = dict(filter_kwargs or {})
+            filter_result = self.filter_af3_models(scores_df, **filter_options)
+            good_mask = filter_result["good_mask"].reindex(scores_df.index, fill_value=False)
+            scores_df["af3_strict_pass"] = good_mask.astype(bool)
+            reason_series = pd.Series("ok", index=scores_df.index, dtype="object")
+            df_bad = filter_result.get("df_bad")
+            if isinstance(df_bad, pd.DataFrame) and not df_bad.empty and "why_flagged" in df_bad.columns:
+                reason_series.loc[df_bad.index] = df_bad["why_flagged"]
+            scores_df["af3_strict_reason"] = reason_series
+
         copied_paths = defaultdict(list)
         copy_tasks = []
         reserved_paths = defaultdict(set)
@@ -915,6 +1223,13 @@ class sequenceModels:
         selected_df = pd.concat(selected_frames).reset_index(drop=True) if selected_frames else pd.DataFrame()
         best_df = pd.concat(best_frames).reset_index(drop=True) if best_frames else pd.DataFrame()
 
+        if filter_result is not None:
+            scores_df.attrs["af3_filter"] = filter_result
+            if not selected_df.empty:
+                selected_df.attrs["af3_filter"] = filter_result
+            if not best_df.empty:
+                best_df.attrs["af3_filter"] = filter_result
+
         if required_index_cols:
             scores_df = scores_df.set_index(required_index_cols)
             if not selected_df.empty and all(col in selected_df.columns for col in required_index_cols):
@@ -928,9 +1243,20 @@ class sequenceModels:
         drop_columns = ["job_dir", "job_name", "prediction_name"]
         return_columns = [col for col in drop_columns if col in scores_df.columns]
         scores_df = scores_df.drop(columns=return_columns, errors="ignore")
+        if filter_result is not None:
+            scores_df.attrs["af3_filter"] = filter_result
         if return_selected:
-            selected_df = selected_df.drop(columns=return_columns, errors="ignore") if not selected_df.empty else selected_df
-            return scores_df, selected_df, dict(copied_paths)
+            if not selected_df.empty:
+                selected_df = selected_df.drop(columns=return_columns, errors="ignore")
+                if filter_result is not None:
+                    selected_df.attrs["af3_filter"] = filter_result
+            result_tuple = (scores_df, selected_df, dict(copied_paths))
+            if filter_result is not None and return_filter:
+                return result_tuple + (filter_result,)
+            return result_tuple
+
+        if filter_result is not None and return_filter:
+            return scores_df, filter_result
 
         return scores_df
 
