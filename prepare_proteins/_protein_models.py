@@ -18,6 +18,15 @@ from types import SimpleNamespace
 
 _MISSING = object()
 
+
+class _OpenMMSimulationRegistry(dict):
+    """Dictionary storing per-model openmm_md objects plus a command log registry."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.openmm_command_logs = {}
+
+
 import ipywidgets as widgets
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -7629,7 +7638,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        self.openmm_md = {}
+        self.openmm_md = _OpenMMSimulationRegistry()
 
         ligand_parameters_folder = os.path.join(job_folder, 'parameters')
         if not os.path.exists(ligand_parameters_folder):
@@ -7734,6 +7743,20 @@ make sure of reading the target sequences with the function readTargetSequences(
         def _posix_path(path):
             return Path(path).expanduser().absolute().as_posix()
 
+        def _execute_with_logging(command, model_key=None):
+            entry = None
+            if model_key is not None:
+                md_obj = self.openmm_md.get(model_key)
+                if md_obj is not None:
+                    log = getattr(md_obj, "command_log", None)
+                    if log is not None:
+                        entry = {"command": command.rstrip(), "returncode": None}
+                        log.append(entry)
+            ret = os.system(command)
+            if entry is not None:
+                entry["returncode"] = ret
+            return ret
+
         def _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate):
             ligand_key = ligand_name.upper()
             base_tag = f"{model_name}_{ligand_key}"
@@ -7801,7 +7824,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 tlf.write(f'saveamberparm mol "{_posix_path(prmtop_path)}" "{_posix_path(inpcrd_path)}"\n')
                 tlf.write('quit\n')
 
-            ret = os.system(f'tleap -s -f "{tleap_script}"')
+            command = f'tleap -s -f "{tleap_script}"'
+            ret = _execute_with_logging(command, model_name)
             if ret != 0:
                 raise RuntimeError(f"tleap failed while preparing ligand-only inputs for {ligand_key} in model {model_name}.")
 
@@ -7973,6 +7997,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 jobs = setUpJobs(replica_folder, self.openmm_md[model], script_file)
                 simulation_jobs.extend(jobs)
+
+        self.openmm_md.openmm_command_logs.clear()
+        for model_name, md_obj in self.openmm_md.items():
+            self.openmm_md.openmm_command_logs[model_name] = list(getattr(md_obj, "command_log", []))
 
         if ligand_only_active:
             return ligand_simulation_jobs

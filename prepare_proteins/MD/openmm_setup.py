@@ -36,6 +36,18 @@ def _copyfile_if_needed(src, dst):
     shutil.copyfile(src, dst)
 
 
+def _run_command(command, command_log=None):
+    """Execute `command` via `os.system` while optionally recording the call."""
+    entry = None
+    if command_log is not None:
+        entry = {"command": command.rstrip(), "returncode": None}
+        command_log.append(entry)
+    ret = os.system(command)
+    if entry is not None:
+        entry["returncode"] = ret
+    return ret
+
+
 class openmm_md:
 
     def __init__(self, input_pdb):
@@ -46,6 +58,7 @@ class openmm_md:
         self.pdb = pdb = PDBFile(self.input_pdb)
         self.modeller = Modeller(pdb.topology, pdb.positions)
         self.positions = np.array([c.value_in_unit(nanometer) for c in self.modeller.positions])
+        self.command_log = []
 
     def setUpFF(self, ff_name):
 
@@ -603,7 +616,7 @@ class openmm_md:
                 print(f'\t\t{metal_ligand[residue]}')
             os.chdir(par_folder[residue])
 
-            lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb)
+            lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb, command_log=self.command_log)
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
                                        metal_charge=metal_charge)
             os.chdir('../'*len(par_folder[residue].split('/')))
@@ -623,7 +636,7 @@ class openmm_md:
             command =  'pdb4amber -i '
             command += pdb_file+' '
             command += '-o '+renum_pdb+'\n'
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Parameterize metal complex with MCPB.py
         if metal_ligand:
@@ -702,7 +715,7 @@ class openmm_md:
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 1\n'
-                os.system(command)
+                _run_command(command, self.command_log)
 
                 # Set gaussian calculations for small
                 commands = []
@@ -742,7 +755,7 @@ class openmm_md:
                     else:
                         print('Computing QM parameters')
                         for command in commands:
-                            os.system(command)
+                            _run_command(command, self.command_log)
 
                 print('QM calculations finished.')
 
@@ -751,7 +764,7 @@ class openmm_md:
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 2\n'
-                os.system(command)
+                _run_command(command, self.command_log)
                 os.chdir('../'*len(parameters_folder.split('/')))
 
                 # Run step 3 of the MCPB protocol
@@ -759,7 +772,7 @@ class openmm_md:
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 3\n'
-                os.system(command)
+                _run_command(command, self.command_log)
                 os.chdir('../'*len(parameters_folder.split('/')))
 
                 # Run step 4 of the MCPB protocol
@@ -767,7 +780,7 @@ class openmm_md:
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 4\n'
-                os.system(command)
+                _run_command(command, self.command_log)
                 os.chdir('../'*len(parameters_folder.split('/')))
 
         if not build_full_system:
@@ -912,7 +925,7 @@ class openmm_md:
 
             tlf.write('saveamberparm mol '+parameters_folder+'/'+self.pdb_name+'.prmtop '+parameters_folder+'/'+self.pdb_name+'.inpcrd\n')
 
-        os.system('tleap -s -f '+parameters_folder+'/tleap.in')
+        _run_command('tleap -s -f '+parameters_folder+'/tleap.in', self.command_log)
 
         # Define prmtop and inpcrd file paths
         self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
@@ -936,15 +949,20 @@ class openmm_md:
         self.positions = self.positions-com
         self.modeller.positions = _getPositionsArrayAsVector(self.positions)
 
+    def get_command_log(self):
+        """Return a copy of the recorded external command log."""
+        return list(self.command_log)
+
 class ligandParameters:
 
-    def __init__(self, ligand_pdb, metal_pdb=None):
+    def __init__(self, ligand_pdb, metal_pdb=None, command_log=None):
 
         self.ligand_pdb = ligand_pdb
         self.pdb = PDBFile(self.ligand_pdb)
         self.pdb_name = ligand_pdb.split('/')[-1].replace('.pdb', '')
         self.metal_pdb = metal_pdb
         self.metal = bool(metal_pdb)
+        self.command_log = command_log
 
         res_count = 0
         for residue in self.pdb.topology.residues():
@@ -961,7 +979,7 @@ class ligandParameters:
             command  = 'pdb4amber '
             command += '-i '+self.ligand_pdb+' '
             command += '-o '+self.resname+'_renum.pdb '
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Run antechamber to create a mol2 file with the atomic charges
         if not os.path.exists(self.resname+'.mol2') or overwrite:
@@ -974,7 +992,7 @@ class ligandParameters:
             command += '-c '+charge_model+' '
             command += '-nc '+str(ligand_charge)+' '
             command += '-s 2\n'
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Run antechamber to create a prepi file with the atomic charges
         if not os.path.exists(self.resname+'.prepi') or overwrite:
@@ -987,7 +1005,7 @@ class ligandParameters:
             command += '-c '+charge_model+' '
             command += '-nc '+str(ligand_charge)+' '
             command += '-s 2\n'
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Run parmchk to check with forcefield parameters will be used
         if not os.path.exists(self.resname+'.frcmod') or overwrite:
@@ -995,7 +1013,7 @@ class ligandParameters:
             command += '-i '+self.resname+'.mol2 '
             command += '-o '+self.resname+'.frcmod '
             command += '-f mol2\n'
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Parameterize metal pdb if given
         if self.metal_pdb:
@@ -1011,7 +1029,7 @@ class ligandParameters:
                     command += '-i '+self.metal_pdb[m]+' '
                     command += '-o '+metal_mol2+' '
                     command += '-c '+str(self.metal_charge[m])+'\n'
-                    os.system(command)
+                    _run_command(command, self.command_log)
 
 def _getPositionsArrayAsVector(positions):
     v3_positions = []
