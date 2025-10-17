@@ -2462,6 +2462,54 @@ has been carried out. Please run compareSequences() function before setting muta
             if not cst_files:
                 cst_files = {}
 
+        # Reset Rosetta ligand bookkeeping for this run
+        self.rosetta_docking_ligands = {}
+
+        # Prepare params folder bookkeeping if needed
+        params_output_dir = None
+        param_files_list = None
+        param_directory_mode = False
+        if param_files is not None:
+            params_output_dir = Path(relax_folder) / "params"
+            params_output_dir.mkdir(exist_ok=True)
+
+            def _read_ligand_name(params_path):
+                """Extract ligand residue name from a Rosetta params file."""
+                with open(params_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        stripped = line.strip()
+                        if stripped.startswith("NAME"):
+                            parts = stripped.split()
+                            if len(parts) >= 2:
+                                return parts[1]
+                            break
+                raise ValueError(
+                    f"Could not determine ligand name from params file: {params_path}"
+                )
+
+            if isinstance(param_files, (str, os.PathLike)) and Path(
+                param_files
+            ).is_dir():
+                param_directory_mode = True
+                param_dir = Path(param_files)
+                param_paths = sorted(param_dir.glob("*.params"))
+                if not param_paths:
+                    raise ValueError(
+                        f"No .params files found in directory {param_dir}"
+                    )
+                for params_path in param_paths:
+                    ligand_name = _read_ligand_name(params_path)
+                    destination = params_output_dir / f"{ligand_name}.params"
+                    shutil.copyfile(params_path, destination)
+                    self.rosetta_docking_ligands[ligand_name] = (
+                        f"params/{destination.name}"
+                    )
+            else:
+                if isinstance(param_files, (str, os.PathLike)):
+                    param_files_list = [param_files]
+                else:
+                    param_files_list = list(param_files)
+
         # Create flags files
         jobs = []
         for model in self.models_names:
@@ -2675,26 +2723,25 @@ has been carried out. Please run compareSequences() function before setting muta
             # Add path to params files
             if param_files != None:
 
-                if not os.path.exists(relax_folder + "/params"):
-                    os.mkdir(relax_folder + "/params")
-
                 for r in self.structures[model].get_residues():
                     if r.resname == 'NMA':
                         _copyScriptFile(relax_folder+"/params", 'NMA.params', subfolder='rosetta_params', path='prepare_proteins', hidden=False)
 
-                if isinstance(param_files, str):
-                    param_files = [param_files]
-
-                patch_line = ""
-                for param in param_files:
-                    param_name = param.split("/")[-1]
-                    shutil.copyfile(param, relax_folder + "/params/" + param_name)
-                    if not param_name.endswith(".params"):
-                        patch_line += "../../params/" + param_name + " "
+                patch_entries = []
+                if param_directory_mode:
+                    pass
+                else:
+                    for param in param_files_list:
+                        param_path = Path(param)
+                        destination = params_output_dir / param_path.name
+                        if not destination.exists():
+                            shutil.copyfile(param_path, destination)
+                        if not param_path.name.endswith(".params"):
+                            patch_entries.append("../../params/" + param_path.name)
 
                 flags.addOption("in:file:extra_res_path", "../../params")
-                if patch_line != "":
-                    flags.addOption("in:file:extra_patch_fa", patch_line)
+                if patch_entries:
+                    flags.addOption("in:file:extra_patch_fa", " ".join(patch_entries))
 
             if membrane:
                 flags.addOption("mp::setup::spans_from_structure", "true")
