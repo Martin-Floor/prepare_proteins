@@ -16,6 +16,8 @@ import pkg_resources
 from pathlib import Path
 from types import SimpleNamespace
 
+_MISSING = object()
+
 import ipywidgets as widgets
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -2329,7 +2331,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
     def setUpRosettaOptimization(
         self,
         relax_folder,
-        nstruct=1000,
+        nstruct=_MISSING,
         relax_cycles=5,
         idealize_before_relax=False,
         idealize_only=False,
@@ -2394,10 +2396,22 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 "CPUs can only be set up when using mpirun parallelisation!"
             )
 
+        nstruct_provided = nstruct is not _MISSING
+        if not nstruct_provided:
+            nstruct = 1000
+
         if idealize_only and idealize_before_relax:
             raise ValueError(
                 "idealize_only already skips FastRelax; do not combine it with idealize_before_relax."
             )
+
+        if null:
+            if nstruct != 1:
+                if nstruct_provided:
+                    print(
+                        f"WARNING: null optimization forces nstruct=1; overriding provided value ({nstruct})."
+                    )
+            nstruct = 1
 
         if not idealize_only and cst_optimization and nstruct > 100:
             print(
