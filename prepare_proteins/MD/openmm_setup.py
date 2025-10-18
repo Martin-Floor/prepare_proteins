@@ -526,7 +526,9 @@ class openmm_md:
                 _copyfile_if_needed(parameters_mol2[residue],
                                     parameters_folder+'/'+residue+'.mol2')
 
-        def _stage_external_mol2(residue_name, source_path):
+        mol2_conversion_targets = set()
+
+        def _stage_external_mol2(residue_name, source_path, mark_for_conversion=False):
             """Place a provided MOL2 inside the working folder so antechamber can reuse it."""
             res_upper = residue_name.upper()
             if res_upper not in par_folder:
@@ -541,6 +543,8 @@ class openmm_md:
             except FileNotFoundError:
                 pass
             shutil.copyfile(source_path, dest_path)
+            if mark_for_conversion:
+                mol2_conversion_targets.add(res_upper)
 
         for residue_name in par_folder:
             if residue_name in parameters_mol2:
@@ -563,9 +567,9 @@ class openmm_md:
             for residue in extra_mol2:
                 if isinstance(extra_mol2, dict):
                     if os.path.exists(extra_mol2[residue]):
-                        _copyfile_if_needed(extra_mol2[residue],
-                                            parameters_folder+'/'+extra_mol2[residue].split('/')[-1])
-                        _stage_external_mol2(residue, extra_mol2[residue])
+                        dest_root_mol2 = os.path.join(parameters_folder, f'{residue}.mol2')
+                        _copyfile_if_needed(extra_mol2[residue], dest_root_mol2)
+                        _stage_external_mol2(residue, dest_root_mol2, mark_for_conversion=True)
                         candidate_pdb = os.path.splitext(extra_mol2[residue])[0] + '.pdb'
                         generated_path = generated_pdb_paths.get(residue)
                         if generated_path and os.path.exists(candidate_pdb):
@@ -579,10 +583,11 @@ class openmm_md:
                         raise ValueError(f'Mol2 file for {residue} {extra_mol2[residue]} was not found.')
                 else:
                     if os.path.exists(residue):
-                        destination = parameters_folder+'/'+residue.split('/')[-1]
+                        resname_candidate = os.path.splitext(os.path.basename(residue))[0].upper()
+                        destination = os.path.join(parameters_folder, f'{resname_candidate}.mol2')
                         _copyfile_if_needed(residue, destination)
                         resname_candidate = os.path.splitext(os.path.basename(residue))[0].upper()
-                        _stage_external_mol2(resname_candidate, residue)
+                        _stage_external_mol2(resname_candidate, destination, mark_for_conversion=True)
                         resname_candidate = os.path.splitext(os.path.basename(residue))[0].upper()
                         generated_path = generated_pdb_paths.get(resname_candidate)
                         candidate_pdb = os.path.splitext(residue)[0] + '.pdb'
@@ -612,6 +617,37 @@ class openmm_md:
                         raise ValueError(f'Mol2 file for residue {residue} was not found in {metal_parameters}')
 
         # Create parameters for each molecule
+        def _convert_staged_mol2(residue_name, ligand_charge):
+            res_upper = residue_name.upper()
+            if res_upper not in mol2_conversion_targets:
+                return
+            mol2_path = os.path.join(par_folder[res_upper], f"{res_upper}.mol2")
+            if not os.path.exists(mol2_path):
+                return
+            temp_output = mol2_path + '.tmp'
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            charge_value = ligand_charge if ligand_charge is not None else 0
+            command = (
+                'antechamber '
+                f'-i {shlex.quote(mol2_path)} '
+                '-fi mol2 '
+                f'-o {shlex.quote(temp_output)} '
+                '-fo mol2 '
+                '-c bcc '
+                f'-nc {charge_value} '
+                f'-rn {res_upper} '
+                '-s 2 '
+                '-pf y\n'
+            )
+            ret = _run_command(command, self.command_log)
+            if ret != 0:
+                raise RuntimeError(
+                    f'antechamber conversion to GAFF failed for {mol2_path} with exit code {ret}.'
+                )
+            shutil.move(temp_output, mol2_path)
+            mol2_conversion_targets.discard(res_upper)
+
         for residue in par_folder:
 
             # Skip metal ions to be processed together with other ligands
@@ -631,6 +667,8 @@ class openmm_md:
                 charge = charges[residue]
             else:
                 charge = 0
+
+            _convert_staged_mol2(residue, charge)
 
             if metal_parameters and residue in parameters_folders:
                 continue
@@ -863,13 +901,19 @@ class openmm_md:
             if extra_mol2:
                 for residue in extra_mol2:
                     if isinstance(extra_mol2, dict):
-                        if os.path.exists(extra_mol2[residue]):
-                            tlf.write(residue+' = loadmol2 '+parameters_folder+'/'+extra_mol2[residue].split('/')[-1]+'\n')
+                        mol2_path = os.path.join(parameters_folder, f'{residue}.mol2')
+                        if os.path.exists(mol2_path):
+                            tlf.write(residue+' = loadmol2 '+mol2_path+'\n')
                     else:
                         if os.path.exists(residue):
-                            tlf.write(residue.split('/')[-1].replace('.mol2', '')+' = loadmol2 '+parameters_folder+'/'+residue.split('/')[-1]+'\n')
+                            resname_candidate = os.path.splitext(os.path.basename(residue))[0].upper()
+                            mol2_path = os.path.join(parameters_folder, f'{resname_candidate}.mol2')
+                            if os.path.exists(mol2_path):
+                                tlf.write(resname_candidate+' = loadmol2 '+mol2_path+'\n')
                         else:
-                            tlf.write(residue+' = loadmol2 '+parameters_folder+'/'+residue+'.mol2\n')
+                            mol2_path = os.path.join(parameters_folder, f'{residue}.mol2')
+                            if os.path.exists(mol2_path):
+                                tlf.write(residue+' = loadmol2 '+mol2_path+'\n')
 
             for residue in par_folder:
                 if residue in metal_ligand_values:
