@@ -14,7 +14,9 @@ from Bio.PDB.Polypeptide import aa3
 
 import numpy as np
 from sys import stdout
+from collections import defaultdict
 from collections.abc import Mapping
+from filecmp import cmp
 import shutil
 import os
 import fileinput
@@ -524,22 +526,44 @@ class openmm_md:
                                         par_folder[residue]+'/'+d)
 
             if residue in parameters_mol2:
-                _copyfile_if_needed(parameters_mol2[residue],
-                                    parameters_folder+'/'+residue+'.mol2')
+                canonical_mol2 = os.path.join(parameters_folder, f'{residue}.mol2')
+                _copyfile_if_needed(parameters_mol2[residue], canonical_mol2)
 
         mol2_conversion_targets = set()
         provided_frcmod_residues = set()
         provided_mol2_residues = set()
+        residue_frcmod_files = defaultdict(list)
+        residue_mol2_files = defaultdict(list)
 
-        def _copy_into_par_folder(residue_name, source_path, extension):
-            """Duplicate a provided parameter file into the residue-specific workspace."""
-            if not source_path or not os.path.exists(source_path):
+        def _register_frcmod_file(residue_name, path):
+            if not path:
                 return
             res_upper = residue_name.upper()
+            files = residue_frcmod_files[res_upper]
+            if path not in files:
+                files.append(path)
+            return files
+
+        def _register_mol2_file(residue_name, path):
+            if not path:
+                return None
+            res_upper = residue_name.upper()
+            files = residue_mol2_files[res_upper]
+            if path not in files:
+                files.append(path)
+            return files
+
+        def _copy_into_par_folder(residue_name, source_path):
+            """Duplicate a provided parameter file into the residue-specific workspace."""
+            if not source_path or not os.path.exists(source_path):
+                return None
+            res_upper = residue_name.upper()
             if res_upper not in par_folder:
-                return
-            destination = os.path.join(par_folder[res_upper], f'{res_upper}.{extension}')
+                return None
+            basename = os.path.basename(os.fspath(source_path))
+            destination = os.path.join(par_folder[res_upper], basename)
             _copyfile_if_needed(source_path, destination)
+            return destination
 
         def _get_case_insensitive(mapping, key):
             """Return a value from `mapping` regardless of key casing."""
@@ -558,19 +582,32 @@ class openmm_md:
             """Place a provided MOL2 inside the working folder so antechamber can reuse it."""
             res_upper = residue_name.upper()
             if res_upper not in par_folder:
-                return
+                return None
             if not os.path.exists(source_path):
                 raise ValueError(f'Mol2 file for {residue_name} at {source_path} was not found.')
             workdir = par_folder[res_upper]
-            dest_path = os.path.join(workdir, f'{res_upper}.mol2')
+            basename = os.path.basename(os.fspath(source_path))
+            dest_path = os.path.join(workdir, basename)
             try:
                 if os.path.exists(dest_path) and os.path.samefile(source_path, dest_path):
-                    return
+                    return dest_path
             except FileNotFoundError:
                 pass
             shutil.copyfile(source_path, dest_path)
+            canonical = os.path.join(workdir, f'{res_upper}.mol2')
+            if os.path.normpath(dest_path) != os.path.normpath(canonical) and not os.path.exists(canonical):
+                try:
+                    shutil.copyfile(dest_path, canonical)
+                except OSError:
+                    pass
             if mark_for_conversion:
                 mol2_conversion_targets.add(res_upper)
+            return dest_path
+
+        for residue_name in par_folder:
+            canonical_mol2 = os.path.join(parameters_folder, f"{residue_name}.mol2")
+            if os.path.exists(canonical_mol2):
+                _register_mol2_file(residue_name, canonical_mol2)
 
         for residue_name in par_folder:
             if residue_name in parameters_mol2:
@@ -578,167 +615,205 @@ class openmm_md:
 
         if extra_frcmod:
             def _iter_extra_frcmod_sources(values):
-                """Yield (residue, source) pairs from user-provided extras."""
+                """Yield (residue, source_entry) pairs preserving the user-provided order."""
                 if isinstance(values, Mapping):
-                    for res_name, src in values.items():
-                        yield res_name, src
+                    for res_name, src_values in values.items():
+                        if isinstance(src_values, (list, tuple)):
+                            for item in src_values:
+                                yield res_name, item
+                        else:
+                            yield res_name, src_values
                 else:
-                    if isinstance(values, (str, os.PathLike)):
-                        values_iterable = [values]
+                    if isinstance(values, (list, tuple)):
+                        iterable = values
+                    elif isinstance(values, (str, os.PathLike)):
+                        iterable = [values]
                     else:
-                        values_iterable = values
-                    for src in values_iterable:
-                        yield None, src
+                        iterable = [values]
+                    for item in iterable:
+                        yield None, item
+
+            def _resolve_frcmod_source(residue_hint, entry):
+                """Return (res_upper, source_path) for a user entry."""
+                if entry is None:
+                    raise ValueError('Frcmod file None was not found.')
+                entry_path = os.fspath(entry) if isinstance(entry, os.PathLike) else entry
+                source_path = None
+                res_upper = None
+
+                if residue_hint is not None:
+                    res_upper = str(residue_hint).upper()
+
+                if isinstance(entry, (str, os.PathLike)) and os.path.exists(entry_path):
+                    source_path = entry_path
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(entry_path))[0].upper()
+                else:
+                    lookup_key = entry_path
+                    if residue_hint is not None:
+                        source_path = _get_case_insensitive(parameters_frcmod, residue_hint)
+                        if not source_path:
+                            fallback = os.path.splitext(str(residue_hint))[0]
+                            source_path = _get_case_insensitive(parameters_frcmod, fallback)
+                    if not source_path:
+                        source_path = _get_case_insensitive(parameters_frcmod, lookup_key)
+                    if not source_path:
+                        fallback = os.path.splitext(os.path.basename(lookup_key))[0]
+                        source_path = _get_case_insensitive(parameters_frcmod, fallback)
+                    if not source_path or not os.path.exists(source_path):
+                        location_msg = f' at {entry_path}' if isinstance(entry, (str, os.PathLike)) and not os.path.exists(entry_path) else ''
+                        if metal_parameters:
+                            raise ValueError(f'Frcmod file for residue {residue_hint or entry_path} was not found in {metal_parameters}{location_msg}.')
+                        raise ValueError(f'Frcmod file for residue {residue_hint or entry_path}{location_msg} was not found.')
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(source_path))[0].upper()
+
+                return res_upper, source_path
 
             for residue_key, source in _iter_extra_frcmod_sources(extra_frcmod):
-                if residue_key is not None:
-                    res_upper = str(residue_key).upper()
-                    destination = os.path.join(parameters_folder, f"{res_upper}.frcmod")
-                    source_path = None
-                    if source and os.path.exists(source):
-                        source_path = os.fspath(source)
+                res_upper, source_path = _resolve_frcmod_source(residue_key, source)
+                basename = os.path.basename(source_path)
+                dest_root = os.path.join(parameters_folder, basename)
+                copy_required = True
+                if os.path.exists(dest_root):
+                    same_file = False
+                    try:
+                        same_file = os.path.samefile(source_path, dest_root)
+                    except FileNotFoundError:
+                        same_file = False
+                    if same_file:
+                        copy_required = False
                     else:
-                        source_path = _get_case_insensitive(parameters_frcmod, residue_key)
-                        if not source_path:
-                            fallback_key = os.path.splitext(str(residue_key))[0]
-                            source_path = _get_case_insensitive(parameters_frcmod, fallback_key)
-                    if not source_path or not os.path.exists(source_path):
-                        if source and not os.path.exists(source):
-                            raise ValueError(f'Frcmod file for residue {residue_key} at {source} was not found.')
-                        if metal_parameters:
-                            raise ValueError(f'Frcmod file for residue {residue_key} was not found in {metal_parameters}.')
-                        raise ValueError(f'Frcmod file for residue {residue_key} was not found.')
-                    _copyfile_if_needed(source_path, destination)
-                    _copy_into_par_folder(res_upper, destination, 'frcmod')
-                    provided_frcmod_residues.add(res_upper)
-                    continue
-
-                candidate = source
-                if candidate is None:
-                    raise ValueError('Frcmod file None was not found.')
-                candidate_str = os.fspath(candidate) if isinstance(candidate, os.PathLike) else str(candidate)
-                if os.path.exists(candidate_str):
-                    res_upper = os.path.splitext(os.path.basename(candidate_str))[0].upper()
-                    destination = os.path.join(parameters_folder, f"{res_upper}.frcmod")
-                    _copyfile_if_needed(candidate_str, destination)
-                    _copy_into_par_folder(res_upper, destination, 'frcmod')
-                    provided_frcmod_residues.add(res_upper)
-                else:
-                    pack_source = _get_case_insensitive(parameters_frcmod, candidate_str)
-                    if not pack_source:
-                        fallback_key = os.path.splitext(os.path.basename(candidate_str))[0]
-                        pack_source = _get_case_insensitive(parameters_frcmod, fallback_key)
-                    if not pack_source or not os.path.exists(pack_source):
-                        if metal_parameters:
-                            raise ValueError(f'Frcmod file {candidate_str} was not found in {metal_parameters}.')
-                        raise ValueError(f'Frcmod file {candidate_str} was not found.')
-                    res_upper = os.path.splitext(os.path.basename(candidate_str))[0].upper()
-                    destination = os.path.join(parameters_folder, f"{res_upper}.frcmod")
-                    _copyfile_if_needed(pack_source, destination)
-                    _copy_into_par_folder(res_upper, destination, 'frcmod')
-                    provided_frcmod_residues.add(res_upper)
+                        try:
+                            if cmp(source_path, dest_root, shallow=False):
+                                copy_required = False
+                            else:
+                                raise ValueError(
+                                    f'Conflicting frcmod destination {dest_root} already exists with different contents.'
+                                )
+                        except OSError:
+                            raise ValueError(
+                                f'Unable to compare frcmod destination {dest_root} with source {source_path}.'
+                            )
+                if copy_required:
+                    _copyfile_if_needed(source_path, dest_root)
+                canonical_root = os.path.join(parameters_folder, f"{res_upper}.frcmod")
+                if os.path.normpath(dest_root) != os.path.normpath(canonical_root) and not os.path.exists(canonical_root):
+                    _copyfile_if_needed(dest_root, canonical_root)
+                _copy_into_par_folder(res_upper, dest_root)
+                _register_frcmod_file(res_upper, dest_root)
+                provided_frcmod_residues.add(res_upper)
 
         if extra_mol2:
             def _iter_extra_mol2_sources(values):
                 if isinstance(values, Mapping):
-                    for res_name, src in values.items():
-                        yield res_name, src
+                    for res_name, src_values in values.items():
+                        if isinstance(src_values, (list, tuple)):
+                            for item in src_values:
+                                yield res_name, item
+                        else:
+                            yield res_name, src_values
                 else:
-                    if isinstance(values, (str, os.PathLike)):
-                        values_iterable = [values]
+                    if isinstance(values, (list, tuple)):
+                        iterable = values
+                    elif isinstance(values, (str, os.PathLike)):
+                        iterable = [values]
                     else:
-                        values_iterable = values
-                    for src in values_iterable:
-                        yield None, src
+                        iterable = [values]
+                    for item in iterable:
+                        yield None, item
+
+            def _resolve_mol2_source(residue_hint, entry):
+                if entry is None:
+                    raise ValueError('Mol2 file None was not found.')
+                entry_path = os.fspath(entry) if isinstance(entry, os.PathLike) else entry
+                source_path = None
+                res_upper = None
+                from_user = False
+
+                if residue_hint is not None:
+                    res_upper = str(residue_hint).upper()
+
+                if isinstance(entry, (str, os.PathLike)) and os.path.exists(entry_path):
+                    source_path = entry_path
+                    from_user = True
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(entry_path))[0].upper()
+                else:
+                    lookup_key = entry_path
+                    if residue_hint is not None:
+                        source_path = _get_case_insensitive(parameters_mol2, residue_hint)
+                        if not source_path:
+                            fallback = os.path.splitext(str(residue_hint))[0]
+                            source_path = _get_case_insensitive(parameters_mol2, fallback)
+                    if not source_path:
+                        source_path = _get_case_insensitive(parameters_mol2, lookup_key)
+                    if not source_path:
+                        fallback = os.path.splitext(os.path.basename(lookup_key))[0]
+                        source_path = _get_case_insensitive(parameters_mol2, fallback)
+                    if not source_path or not os.path.exists(source_path):
+                        location_msg = f' at {entry_path}' if isinstance(entry, (str, os.PathLike)) and not os.path.exists(entry_path) else ''
+                        if metal_parameters:
+                            raise ValueError(f'Mol2 file for residue {residue_hint or entry_path} was not found in {metal_parameters}{location_msg}.')
+                        raise ValueError(f'Mol2 file for residue {residue_hint or entry_path}{location_msg} was not found.')
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(source_path))[0].upper()
+
+                return res_upper, source_path, from_user
 
             for residue_key, source in _iter_extra_mol2_sources(extra_mol2):
-                if residue_key is not None:
-                    res_upper = str(residue_key).upper()
-                    dest_root_mol2 = os.path.join(parameters_folder, f'{res_upper}.mol2')
-                    source_is_user = False
-                    if source and os.path.exists(source):
-                        source_path = os.fspath(source)
-                        source_is_user = True
+                res_upper, source_path, source_is_user = _resolve_mol2_source(residue_key, source)
+                basename = os.path.basename(source_path)
+                dest_root_mol2 = os.path.join(parameters_folder, basename)
+                copy_required = True
+                if os.path.exists(dest_root_mol2):
+                    same_file = False
+                    try:
+                        same_file = os.path.samefile(source_path, dest_root_mol2)
+                    except FileNotFoundError:
+                        same_file = False
+                    if same_file:
+                        copy_required = False
                     else:
-                        source_path = _get_case_insensitive(parameters_mol2, residue_key)
-                        if not source_path:
-                            fallback_key = os.path.splitext(str(residue_key))[0]
-                            source_path = _get_case_insensitive(parameters_mol2, fallback_key)
-                    if not source_path or not os.path.exists(source_path):
-                        if source and not os.path.exists(source):
-                            raise ValueError(f'Mol2 file for residue {residue_key} at {source} was not found.')
-                        if metal_parameters:
-                            raise ValueError(f'Mol2 file for residue {residue_key} was not found in {metal_parameters}.')
-                        raise ValueError(f'Mol2 file for residue {residue_key} was not found.')
+                        try:
+                            if cmp(source_path, dest_root_mol2, shallow=False):
+                                copy_required = False
+                            else:
+                                raise ValueError(
+                                    f'Conflicting mol2 destination {dest_root_mol2} already exists with different contents.'
+                                )
+                        except OSError:
+                            raise ValueError(
+                                f'Unable to compare mol2 destination {dest_root_mol2} with source {source_path}.'
+                            )
+                if copy_required:
                     _copyfile_if_needed(source_path, dest_root_mol2)
-                    mark_conversion = res_upper not in provided_frcmod_residues
-                    _stage_external_mol2(res_upper, dest_root_mol2, mark_for_conversion=mark_conversion)
-                    provided_mol2_residues.add(res_upper)
-                    generated_path = generated_pdb_paths.get(res_upper)
-                    if generated_path:
-                        if source_is_user:
-                            candidate_pdb = os.path.splitext(source_path)[0] + '.pdb'
-                            if os.path.exists(candidate_pdb):
-                                _validate_ligand_pdb_atoms(
-                                    generated_path,
-                                    candidate_pdb,
-                                    res_upper,
-                                    f"extra_mol2 source {source_path}"
-                                )
-                        else:
-                            pack_pdb = os.path.join(os.path.dirname(source_path), f'{res_upper}.pdb')
-                            if os.path.exists(pack_pdb):
-                                _validate_ligand_pdb_atoms(
-                                    generated_path,
-                                    pack_pdb,
-                                    res_upper,
-                                    f"extra_mol2 metal_parameters source {source_path}"
-                                )
-                    continue
-
-                if source is None:
-                    raise ValueError('Mol2 file None was not found.')
-                source_str = os.fspath(source) if isinstance(source, os.PathLike) else str(source)
-                res_upper = os.path.splitext(os.path.basename(source_str))[0].upper()
-                dest_root_mol2 = os.path.join(parameters_folder, f'{res_upper}.mol2')
-                if os.path.exists(source_str):
-                    _copyfile_if_needed(source_str, dest_root_mol2)
-                    mark_conversion = res_upper not in provided_frcmod_residues
-                    _stage_external_mol2(res_upper, dest_root_mol2, mark_for_conversion=mark_conversion)
-                    provided_mol2_residues.add(res_upper)
-                    generated_path = generated_pdb_paths.get(res_upper)
-                    candidate_pdb = os.path.splitext(source_str)[0] + '.pdb'
-                    if generated_path and os.path.exists(candidate_pdb):
-                        _validate_ligand_pdb_atoms(
-                            generated_path,
-                            candidate_pdb,
-                            res_upper,
-                            f"extra_mol2 source {source_str}"
-                        )
-                else:
-                    pack_source = _get_case_insensitive(parameters_mol2, source_str)
-                    if not pack_source:
-                        fallback_key = os.path.splitext(os.path.basename(source_str))[0]
-                        pack_source = _get_case_insensitive(parameters_mol2, fallback_key)
-                    if not pack_source or not os.path.exists(pack_source):
-                        if metal_parameters:
-                            raise ValueError(f'Mol2 file {source_str} was not found in {metal_parameters}.')
-                        raise ValueError(f'Mol2 file {source_str} was not found.')
-                    res_upper = os.path.splitext(os.path.basename(pack_source))[0].upper()
-                    dest_root_mol2 = os.path.join(parameters_folder, f'{res_upper}.mol2')
-                    _copyfile_if_needed(pack_source, dest_root_mol2)
-                    mark_conversion = res_upper not in provided_frcmod_residues
-                    _stage_external_mol2(res_upper, dest_root_mol2, mark_for_conversion=mark_conversion)
-                    provided_mol2_residues.add(res_upper)
-                    generated_path = generated_pdb_paths.get(res_upper)
-                    pack_pdb = os.path.join(os.path.dirname(pack_source), f'{res_upper}.pdb')
-                    if generated_path and os.path.exists(pack_pdb):
-                        _validate_ligand_pdb_atoms(
-                            generated_path,
-                            pack_pdb,
-                            res_upper,
-                            f"extra_mol2 metal_parameters source {pack_source}"
-                        )
+                canonical_root = os.path.join(parameters_folder, f"{res_upper}.mol2")
+                if os.path.normpath(dest_root_mol2) != os.path.normpath(canonical_root) and not os.path.exists(canonical_root):
+                    _copyfile_if_needed(dest_root_mol2, canonical_root)
+                _stage_external_mol2(res_upper, dest_root_mol2, mark_for_conversion=res_upper not in provided_frcmod_residues)
+                provided_mol2_residues.add(res_upper)
+                _register_mol2_file(res_upper, dest_root_mol2)
+                generated_path = generated_pdb_paths.get(res_upper)
+                if generated_path:
+                    if source_is_user:
+                        candidate_pdb = os.path.splitext(source_path)[0] + '.pdb'
+                        if os.path.exists(candidate_pdb):
+                            _validate_ligand_pdb_atoms(
+                                generated_path,
+                                candidate_pdb,
+                                res_upper,
+                                f"extra_mol2 source {source_path}"
+                            )
+                    else:
+                        pack_pdb = os.path.join(os.path.dirname(source_path), f'{res_upper}.pdb')
+                        if os.path.exists(pack_pdb):
+                            _validate_ligand_pdb_atoms(
+                                generated_path,
+                                pack_pdb,
+                                res_upper,
+                                f"extra_mol2 metal_parameters source {source_path}"
+                            )
 
         skip_parameterization_residues = provided_mol2_residues & provided_frcmod_residues
 
@@ -818,9 +893,44 @@ class openmm_md:
             gen_mol2 = os.path.join(folder, f"{residue}.mol2")
             gen_frcmod = os.path.join(folder, f"{residue}.frcmod")
             if os.path.exists(gen_mol2):
-                shutil.copyfile(gen_mol2, os.path.join(parameters_folder, f"{residue}.mol2"))
+                canonical_mol2 = os.path.join(parameters_folder, f"{residue}.mol2")
+                shutil.copyfile(gen_mol2, canonical_mol2)
+                if not residue_mol2_files[residue]:
+                    _register_mol2_file(residue, canonical_mol2)
             if os.path.exists(gen_frcmod):
-                shutil.copyfile(gen_frcmod, os.path.join(parameters_folder, f"{residue}.frcmod"))
+                dest_frcmod = os.path.join(parameters_folder, f"{residue}.frcmod")
+                shutil.copyfile(gen_frcmod, dest_frcmod)
+                if not residue_frcmod_files[residue]:
+                    _register_frcmod_file(residue, dest_frcmod)
+            manifest_path = os.path.join(parameters_folder, f"{residue}.frcmod.list")
+            if residue_frcmod_files[residue]:
+                try:
+                    with open(manifest_path, 'w') as mf:
+                        for item in residue_frcmod_files[residue]:
+                            entry = os.path.relpath(item, parameters_folder)
+                            mf.write(entry + '\n')
+                except OSError:
+                    pass
+            elif os.path.exists(manifest_path):
+                try:
+                    os.remove(manifest_path)
+                except OSError:
+                    pass
+
+            mol2_manifest = os.path.join(parameters_folder, f"{residue}.mol2.list")
+            if residue_mol2_files[residue]:
+                try:
+                    with open(mol2_manifest, 'w') as mf:
+                        for item in residue_mol2_files[residue]:
+                            entry = os.path.relpath(item, parameters_folder)
+                            mf.write(entry + '\n')
+                except OSError:
+                    pass
+            elif os.path.exists(mol2_manifest):
+                try:
+                    os.remove(mol2_manifest)
+                except OSError:
+                    pass
 
         # Renumber PDB
         renum_pdb = pdb_file.replace('.pdb', '_renum.pdb')
@@ -866,8 +976,18 @@ class openmm_md:
 
                 _copyfile_if_needed(par_folder[residue]+'/'+residue+'.mol2',
                                     parameters_folder+'/'+residue+'.mol2')
-                _copyfile_if_needed(par_folder[residue]+'/'+residue+'.frcmod',
-                                    parameters_folder+'/'+residue+'.frcmod')
+                existing_frcmods = residue_frcmod_files.get(residue)
+                if existing_frcmods:
+                    primary = existing_frcmods[0]
+                    canonical_path = os.path.join(parameters_folder, f'{residue}.frcmod')
+                    if os.path.exists(primary):
+                        _copyfile_if_needed(primary, canonical_path)
+                else:
+                    frcmod_source = os.path.join(par_folder[residue], f'{residue}.frcmod')
+                    if os.path.exists(frcmod_source):
+                        canonical_path = os.path.join(parameters_folder, f'{residue}.frcmod')
+                        _copyfile_if_needed(frcmod_source, canonical_path)
+                        _register_frcmod_file(residue, canonical_path)
 
             if not metal_parameters:
 
@@ -900,7 +1020,12 @@ class openmm_md:
                     for residue in par_folder:
                         if residue in metal_ligand_values:
                             continue
-                        frcmod += ' '+residue+'.frcmod'
+                        entries = residue_frcmod_files.get(residue, [])
+                        if entries:
+                            frcmod_file = os.path.basename(entries[0])
+                        else:
+                            frcmod_file = f'{residue}.frcmod'
+                        frcmod += ' '+frcmod_file
                     f.write(frcmod+'\n')
 
                 os.chdir(parameters_folder)
@@ -1028,52 +1153,46 @@ class openmm_md:
                 for residue in getNonProteinResidues(pdb.topology):
                     tlf.write(residue.name+' = loadmol2 '+parameters_folder+'/'+residue.name+'.mol2\n')
 
-            if extra_mol2:
-                for residue_key, source in _iter_extra_mol2_sources(extra_mol2):
-                    if residue_key is not None:
-                        res_upper = str(residue_key).upper()
-                    else:
-                        if source is None:
-                            continue
-                        source_str = os.fspath(source) if isinstance(source, os.PathLike) else str(source)
-                        res_upper = os.path.splitext(os.path.basename(source_str))[0].upper()
-                    mol2_path = os.path.join(parameters_folder, f'{res_upper}.mol2')
-                    if os.path.exists(mol2_path) and res_upper not in mol2_loaded_residues:
-                        tlf.write(f'{res_upper} = loadmol2 {mol2_path}\n')
-                        mol2_loaded_residues.add(res_upper)
+            for res_upper, mol2_paths in residue_mol2_files.items():
+                if not mol2_paths:
+                    continue
+                primary_mol2 = mol2_paths[0]
+                if os.path.exists(primary_mol2) and res_upper not in mol2_loaded_residues:
+                    tlf.write(f'{res_upper} = loadmol2 "{primary_mol2}"\n')
+                    mol2_loaded_residues.add(res_upper)
 
             for residue in par_folder:
                 if residue in metal_ligand_values:
                     continue
                 prepi_path = os.path.join(par_folder[residue], f'{residue}.prepi')
-                frcmod_path = os.path.join(par_folder[residue], f'{residue}.frcmod')
                 if not metal_ligand:
                     if os.path.exists(prepi_path):
                         tlf.write(f'loadamberprep {prepi_path}\n')
                     else:
-                        mol2_path = os.path.join(parameters_folder, f'{residue}.mol2')
-                        if os.path.exists(mol2_path) and residue not in mol2_loaded_residues:
-                            tlf.write(f'{residue} = loadmol2 {mol2_path}\n')
-                            mol2_loaded_residues.add(residue)
-                if os.path.exists(frcmod_path):
-                    tlf.write(f'loadamberparams {frcmod_path}\n')
+                        mol2_paths = residue_mol2_files.get(residue, [])
+                        if mol2_paths:
+                            primary_mol2 = mol2_paths[0]
+                            if os.path.exists(primary_mol2) and residue not in mol2_loaded_residues:
+                                tlf.write(f'{residue} = loadmol2 "{primary_mol2}"\n')
+                                mol2_loaded_residues.add(residue)
+                        else:
+                            mol2_path = os.path.join(parameters_folder, f'{residue}.mol2')
+                            if os.path.exists(mol2_path) and residue not in mol2_loaded_residues:
+                                tlf.write(f'{residue} = loadmol2 "{mol2_path}"\n')
+                                mol2_loaded_residues.add(residue)
+                frcmod_paths = residue_frcmod_files.get(residue, [])
+                if frcmod_paths:
+                    for frcmod_path in frcmod_paths:
+                        if os.path.exists(frcmod_path):
+                            tlf.write(f'loadamberparams {frcmod_path}\n')
                 else:
-                    frcmod_root = os.path.join(parameters_folder, f'{residue}.frcmod')
-                    if os.path.exists(frcmod_root):
-                        tlf.write(f'loadamberparams {frcmod_root}\n')
-
-            if extra_frcmod:
-                for residue_key, source in _iter_extra_frcmod_sources(extra_frcmod):
-                    if residue_key is not None:
-                        res_upper = str(residue_key).upper()
+                    fallback_frcmod = os.path.join(par_folder[residue], f'{residue}.frcmod')
+                    if os.path.exists(fallback_frcmod):
+                        tlf.write(f'loadamberparams {fallback_frcmod}\n')
                     else:
-                        if source is None:
-                            continue
-                        source_str = os.fspath(source) if isinstance(source, os.PathLike) else str(source)
-                        res_upper = os.path.splitext(os.path.basename(source_str))[0].upper()
-                    frcmod_path = os.path.join(parameters_folder, f'{res_upper}.frcmod')
-                    if os.path.exists(frcmod_path):
-                        tlf.write(f'loadamberparams {frcmod_path}\n')
+                        fallback_root = os.path.join(parameters_folder, f'{residue}.frcmod')
+                        if os.path.exists(fallback_root):
+                            tlf.write(f'loadamberparams {fallback_root}\n')
 
             if metal_ligand:
                 tlf.write('loadamberparams '+mcpb_frcmod+'\n')

@@ -7794,11 +7794,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                 ligand_pdb = model_ligand_pdb
 
             mol2_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2")
+            mol2_manifest = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2.list")
             alt_mol2 = os.path.join(pack_dir, f"{ligand_key}.mol2")
+            alt_mol2_manifest = os.path.join(pack_dir, f"{ligand_key}.mol2.list")
+            if os.path.exists(alt_mol2_manifest):
+                shutil.copyfile(alt_mol2_manifest, mol2_manifest)
             if os.path.exists(alt_mol2):
                 shutil.copyfile(alt_mol2, mol2_path)
             elif not os.path.exists(mol2_path):
                 raise FileNotFoundError(f"Mol2 file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+            mol2_paths = []
+            if os.path.exists(mol2_manifest):
+                try:
+                    with open(mol2_manifest) as mf:
+                        for raw in mf:
+                            entry = raw.strip()
+                            if not entry:
+                                continue
+                            if os.path.isabs(entry):
+                                candidate = entry
+                            else:
+                                candidate = os.path.normpath(os.path.join(ligand_parameters_folder, entry))
+                            if os.path.exists(candidate):
+                                mol2_paths.append(candidate)
+                except OSError:
+                    mol2_paths = []
+            if not mol2_paths:
+                mol2_paths = [mol2_path]
 
             frcmod_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod")
             alt_frcmod = os.path.join(pack_dir, f"{ligand_key}.frcmod")
@@ -7806,13 +7828,37 @@ make sure of reading the target sequences with the function readTargetSequences(
                 shutil.copyfile(alt_frcmod, frcmod_path)
             elif not os.path.exists(frcmod_path):
                 raise FileNotFoundError(f"Frcmod file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+            frcmod_manifest = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod.list")
+            alt_manifest = os.path.join(pack_dir, f"{ligand_key}.frcmod.list")
+            if os.path.exists(alt_manifest):
+                shutil.copyfile(alt_manifest, frcmod_manifest)
+            frcmod_paths = []
+            if os.path.exists(frcmod_manifest):
+                try:
+                    with open(frcmod_manifest) as mf:
+                        for raw in mf:
+                            entry = raw.strip()
+                            if not entry:
+                                continue
+                            if os.path.isabs(entry):
+                                candidate = entry
+                            else:
+                                candidate = os.path.normpath(os.path.join(ligand_parameters_folder, entry))
+                            if os.path.exists(candidate):
+                                frcmod_paths.append(candidate)
+                except OSError:
+                    frcmod_paths = []
+            if not frcmod_paths:
+                frcmod_paths = [frcmod_path]
 
             tleap_script = os.path.join(ligand_parameters_folder, f"{base_tag}_ligand_only.leap")
             with open(tleap_script, 'w') as tlf:
                 tlf.write('source leaprc.gaff\n')
                 tlf.write('source leaprc.water.tip3p\n')
-                tlf.write(f'loadamberparams "{_posix_path(frcmod_path)}"\n')
-                tlf.write(f'{ligand_key} = loadmol2 "{_posix_path(mol2_path)}"\n')
+                for frcmod in frcmod_paths:
+                    tlf.write(f'loadamberparams "{_posix_path(frcmod)}"\n')
+                primary_mol2 = mol2_paths[0]
+                tlf.write(f'{ligand_key} = loadmol2 "{_posix_path(primary_mol2)}"\n')
                 tlf.write(f'mol = loadpdb "{_posix_path(ligand_pdb)}"\n')
                 tlf.write('solvatebox mol TIP3PBOX 12\n')
                 if add_counterionsRand:
