@@ -7491,7 +7491,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
                                non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
-                               restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
+                               restraint_constant=5.0, chunk_size=100.0,
+                               equilibration_data_report_time=1.0, equilibration_dcd_report_time=0.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
                                extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
                                strict_ligand_atom_check=True,
@@ -7503,6 +7504,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         Parameters:
         ...
+        - nvt_temp_scaling_steps (int, optional): Temperature scaling segments during NVT equilibration.
+          Must be at least 1 and cannot exceed the number of MD steps derived from `nvt_time` and `time_step`.
+        - npt_restraint_scaling_steps (int, optional): Restraint scaling segments during NPT equilibration.
+          Must be at least 1 and cannot exceed the number of MD steps derived from `npt_time` and `time_step`.
         - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
           but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
         - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
@@ -7555,7 +7560,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                       nvt_time=nvt_time, npt_time=npt_time, nvt_temp_scaling_steps=nvt_temp_scaling_steps,
                       npt_restraint_scaling_steps=npt_restraint_scaling_steps,
                       restraint_constant=restraint_constant, chunk_size=chunk_size,
-                      equilibration_report_time=equilibration_report_time, temperature=temperature,
+                      equilibration_data_report_time=equilibration_data_report_time,
+                      equilibration_dcd_report_time=equilibration_dcd_report_time, temperature=temperature,
                       collision_rate=collision_rate, time_step=time_step, cuda=cuda,
                       fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
             """Set up simulation jobs for a single replica.
@@ -7623,7 +7629,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 + f"--nvt_temp_scaling_steps {nvt_temp_scaling_steps} "
                 + f"--npt_restraint_scaling_steps {npt_restraint_scaling_steps} "
                 + f"--restraint_constant {restraint_constant} "
-                + f"--equilibration_report_time {equilibration_report_time}"
+                + f"--equilibration_data_report_time {equilibration_data_report_time} "
+                + f"--equilibration_dcd_report_time {equilibration_dcd_report_time}"
             )
             # Always provide a seed for the simulation. Use the given fixed seed
             # when supplied; otherwise generate a random one so the OpenMM
