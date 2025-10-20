@@ -377,9 +377,11 @@ try:
             dT = (T_final - T_initial) / (nvt_temp_scaling_steps - 1)
             for i in range(nvt_temp_scaling_steps):
                 current_temperature = (T_initial + i * dT) * kelvin
+                integrator.setTemperature(current_temperature)
                 print(f'\r{" " * 80}', end='\r')
                 print(f'\tRunning NVT temperature scaling step {i+1} of {nvt_temp_scaling_steps} at T={current_temperature}', end='\r')
                 simulation.step(int(nvt_simulation_steps / nvt_temp_scaling_steps))
+                
             print(f'\r{" " * 80}', end='\r')
             print('\tFinished running NVT equilibration.')
             nvt_end = current_time()
