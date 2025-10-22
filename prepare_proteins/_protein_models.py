@@ -43,6 +43,7 @@ from scipy.spatial.distance import cdist
 
 import prepare_proteins
 from . import MD, _atom_selectors, alignment, rosettaScripts
+from .MD.parameterization import get_backend
 
 
 try:
@@ -7497,6 +7498,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
                                strict_ligand_atom_check=True,
                                ligand_parameters_source=None,
+                               parameterization_method='ambertools',
+                               parameterization_options=None,
                                only_models=None, skip_models=None):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
@@ -7520,6 +7523,10 @@ make sure of reading the target sequences with the function readTargetSequences(
           contains these packs, or a parent folder with a `parameters/` subfolder. Only ligands present in the
           system are considered; for those found, the full pack is copied into the job `parameters/` and
           parameterization for that ligand is skipped via `metal_parameters`.
+        - parameterization_method (str, optional): Name of the parameterization backend to use. Defaults to
+          ``'ambertools'`` which preserves the existing workflow.
+        - parameterization_options (dict, optional): Backend-specific options forwarded to the selected
+          parameterization backend.
         - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
         - skip_models (list of str, optional): If provided, skip setup for these models.
         """
@@ -7555,7 +7562,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     needed.append(replica)
             return needed, prepared
 
-        def setUpJobs(job_folder, openmm_md, script_file, simulation_time=simulation_time,
+        def setUpJobs(job_folder, openmm_md, script_file, parameterization_result=None, simulation_time=simulation_time,
                       dcd_report_time=dcd_report_time, data_report_time=data_report_time,
                       nvt_time=nvt_time, npt_time=npt_time, nvt_temp_scaling_steps=nvt_temp_scaling_steps,
                       npt_restraint_scaling_steps=npt_restraint_scaling_steps,
@@ -7567,8 +7574,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             """Set up simulation jobs for a single replica.
 
             This prepares the replica folder with an `input_files/` directory containing
-            the required AMBER inputs (`.prmtop` and `.inpcrd`/`.rst7`) and returns a list
-            with the command to run the OpenMM simulation script.
+            the required simulation inputs. For the current AMBER workflow, this means
+            copying the `.prmtop` and `.inpcrd`/`.rst7` files and returning a list with
+            the command to run the OpenMM simulation script.
+            If a ``parameterization_result`` is provided, its metadata determines which
+            files are copied into the replica folder.
 
             Returns
             -------
@@ -7585,8 +7595,21 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Base filename for input files (model basename + extension)
             base_name = getattr(openmm_md, 'pdb_name', 'input')
-            prmtop_src = getattr(openmm_md, 'prmtop_file', None)
-            inpcrd_src = getattr(openmm_md, 'inpcrd_file', None)
+            resolved_parameterization = parameterization_result or getattr(openmm_md, 'parameterization_result', None)
+            input_format = None
+            if resolved_parameterization is not None:
+                input_format = resolved_parameterization.input_format
+                prmtop_src = resolved_parameterization.prmtop_path or getattr(openmm_md, 'prmtop_file', None)
+                inpcrd_src = resolved_parameterization.coordinates_path or getattr(openmm_md, 'inpcrd_file', None)
+                openmm_md.parameterization_result = resolved_parameterization
+            else:
+                prmtop_src = getattr(openmm_md, 'prmtop_file', None)
+                inpcrd_src = getattr(openmm_md, 'inpcrd_file', None)
+
+            if input_format and input_format != 'amber':
+                raise NotImplementedError(
+                    f"Parameterization format '{input_format}' is not supported by the default OpenMM runner."
+                )
 
             prmtop_ext = os.path.splitext(prmtop_src)[1] if prmtop_src else '.prmtop'
             inpcrd_ext = os.path.splitext(inpcrd_src)[1] if inpcrd_src else '.inpcrd'
@@ -7679,6 +7702,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             return None
 
         resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source)
+
+        backend_options = dict(parameterization_options) if parameterization_options else {}
+        backend = get_backend(parameterization_method, **backend_options)
 
         script_folder = os.path.join(job_folder, 'scripts')
         if not os.path.exists(script_folder):
@@ -7972,19 +7998,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                             lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
                         )
                     skip_argument = list(skip_for_param) if skip_for_param else None
-                    _ = self.openmm_md[model].parameterizePDBLigands(
-                        ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
+                    backend.prepare_model(
+                        self.openmm_md[model],
+                        ligand_parameters_folder,
+                        charges=ligand_charges,
+                        metal_ligand=metal_ligand,
                         add_bonds=add_bonds.get(model) if add_bonds else None,
-                        skip_ligands=skip_argument, overwrite=False, metal_parameters=external_params,
-                        extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
+                        skip_ligands=skip_argument,
+                        overwrite=False,
+                        metal_parameters=external_params,
+                        extra_frcmod=extra_frcmod,
+                        extra_mol2=extra_mol2,
+                        cpus=20,
+                        return_qm_jobs=True,
                         extra_force_field=extra_force_field,
-                        force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,
-                        add_counterions=True, add_counterionsRand=add_counterionsRand, save_amber_pdb=True, solvate=True,
-                        regenerate_amber_files=True, non_standard_residues=non_standard_residues,
+                        force_field='ff14SB',
+                        residue_names=residue_names.get(model) if residue_names else None,
+                        add_counterions=True,
+                        add_counterionsRand=add_counterionsRand,
+                        save_amber_pdb=True,
+                        solvate=True,
+                        regenerate_amber_files=True,
+                        non_standard_residues=non_standard_residues,
                         strict_atom_name_check=strict_ligand_atom_check,
                         only_residues=selected_ligands_set,
-                        build_full_system=False
+                        build_full_system=False,
                     )
+                    self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
                     packs = _collect_ligand_packs(ligand_parameters_folder)
 
                 ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
@@ -8026,17 +8066,33 @@ make sure of reading the target sequences with the function readTargetSequences(
             has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
             if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
                 external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
-                _ = self.openmm_md[model].parameterizePDBLigands(
-                    ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
+                backend.prepare_model(
+                    self.openmm_md[model],
+                    ligand_parameters_folder,
+                    charges=ligand_charges,
+                    metal_ligand=metal_ligand,
                     add_bonds=add_bonds.get(model) if add_bonds else None,
-                    skip_ligands=skip_ligands, overwrite=False, metal_parameters=external_params,
-                    extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
+                    skip_ligands=skip_ligands,
+                    overwrite=False,
+                    metal_parameters=external_params,
+                    extra_frcmod=extra_frcmod,
+                    extra_mol2=extra_mol2,
+                    cpus=20,
+                    return_qm_jobs=True,
                     extra_force_field=extra_force_field,
-                    force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,
-                    add_counterions=True, add_counterionsRand=add_counterionsRand, save_amber_pdb=True, solvate=True,
-                    regenerate_amber_files=True, non_standard_residues=non_standard_residues,
-                    strict_atom_name_check=strict_ligand_atom_check
+                    force_field='ff14SB',
+                    residue_names=residue_names.get(model) if residue_names else None,
+                    add_counterions=True,
+                    add_counterionsRand=add_counterionsRand,
+                    save_amber_pdb=True,
+                    solvate=True,
+                    regenerate_amber_files=True,
+                    non_standard_residues=non_standard_residues,
+                    strict_atom_name_check=strict_ligand_atom_check,
                 )
+
+            parameterization_result = backend.describe_model(self.openmm_md[model])
+            self.openmm_md[model].parameterization_result = parameterization_result
 
             zfill = max(len(str(replicas)), 2)
             for replica in range(1, replicas + 1):
@@ -8048,7 +8104,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists(replica_folder):
                     os.mkdir(replica_folder)
 
-                jobs = setUpJobs(replica_folder, self.openmm_md[model], script_file)
+                jobs = setUpJobs(
+                    replica_folder,
+                    self.openmm_md[model],
+                    script_file,
+                    parameterization_result=parameterization_result,
+                )
                 simulation_jobs.extend(jobs)
 
         self.openmm_md.openmm_command_logs.clear()

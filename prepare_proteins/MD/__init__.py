@@ -1,5 +1,6 @@
 from .alignment import alignTrajectoryBySequenceAlignment
 from .gromacs_files import mdp
+from . import parameterization
 try:
     import openmm
     from .openmm_setup import openmm_md
