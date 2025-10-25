@@ -1,6 +1,7 @@
 import fileinput
 import gc
 import io
+import importlib
 import itertools
 import json
 import os
@@ -27,6 +28,26 @@ class _OpenMMSimulationRegistry(dict):
         self.openmm_command_logs = {}
 
 
+def _require_openmm_support(feature="OpenMM-dependent functionality"):
+    """
+    Import the OpenMM integration module on demand, raising a clear error when unavailable.
+    """
+    try:
+        module = importlib.import_module("prepare_proteins.MD.openmm_setup")
+    except Exception as exc:
+        raise ImportError(
+            f"OpenMM support is required to use {feature}. "
+            "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
+        ) from exc
+    if not getattr(module, "OPENMM_AVAILABLE", False):
+        import_error = getattr(module, "OPENMM_IMPORT_ERROR", None)
+        raise ImportError(
+            f"OpenMM support is required to use {feature}. "
+            "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
+        ) from import_error
+    return module
+
+
 import ipywidgets as widgets
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -44,6 +65,7 @@ from scipy.spatial.distance import cdist
 import prepare_proteins
 from . import MD, _atom_selectors, alignment, rosettaScripts
 from .MD.parameterization import get_backend
+from .MD.parameterization.utils import DEFAULT_PARAMETERIZATION_SKIP_RESIDUES
 
 
 try:
@@ -7500,7 +7522,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                                ligand_parameters_source=None,
                                parameterization_method='ambertools',
                                parameterization_options=None,
-                               only_models=None, skip_models=None):
+                               only_models=None, skip_models=None,
+                               ligand_smiles=None,
+                               ligand_sdf_files=None,
+                               skip_ligand_charge_computation=False):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
         Includes support for multiple replicas.
@@ -7527,11 +7552,87 @@ make sure of reading the target sequences with the function readTargetSequences(
           ``'ambertools'`` which preserves the existing workflow.
         - parameterization_options (dict, optional): Backend-specific options forwarded to the selected
           parameterization backend.
+        - ligand_smiles (dict, optional): Mapping from ligand residue name to SMILES strings. Required by the
+          OpenFF backend to build ligand templates; ignored by AmberTools.
+        - ligand_sdf_files (dict, optional): Mapping from residue name to SDF file paths or option dictionaries
+          (with optional ``index`` and ``charge_method`` keys). When provided, the OpenFF backend uses the SDF
+          connectivity/chemistry while retaining ligand coordinates from the model PDB.
         - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
         - skip_models (list of str, optional): If provided, skip setup for these models.
+        - skip_ligand_charge_computation (bool, optional): If True, the OpenFF backend will reuse existing
+          partial charges from cached ligand templates (or the supplied SDF) instead of recomputing them.
         """
 
+        openmm_setup = _require_openmm_support("proteinModels.setUpOpenMMSimulations")
+        openmm_md_cls = getattr(openmm_setup, "openmm_md", None)
+        if openmm_md_cls is None:
+            raise ImportError(
+                "OpenMM support is enabled but the 'openmm_md' class could not be located. "
+                "Reinstall prepare_proteins with its OpenMM extras."
+            )
+
         import os, shutil
+
+        if ligand_smiles is not None:
+            if not isinstance(ligand_smiles, dict):
+                raise TypeError("ligand_smiles must be a dict mapping residue name to SMILES.")
+            normalized_smiles = {}
+            for key, value in ligand_smiles.items():
+                if not isinstance(key, str):
+                    raise TypeError("ligand_smiles keys must be strings.")
+                if not isinstance(value, str):
+                    raise TypeError(f"SMILES for residue {key!r} must be a string.")
+                residue_name = key.strip().upper()
+                smiles_value = value.strip()
+                if not residue_name or not smiles_value:
+                    raise ValueError("ligand_smiles entries must not be empty.")
+                normalized_smiles[residue_name] = smiles_value
+            ligand_smiles = normalized_smiles
+
+        if ligand_sdf_files is not None:
+            if not isinstance(ligand_sdf_files, dict):
+                raise TypeError("ligand_sdf_files must be a dict mapping residue name to SDF definitions.")
+            normalized_sdfs = {}
+            for key, value in ligand_sdf_files.items():
+                if not isinstance(key, str):
+                    raise TypeError("ligand_sdf_files keys must be strings.")
+                residue_name = key.strip().upper()
+                if not residue_name:
+                    raise ValueError("ligand_sdf_files entries must not have empty residue names.")
+                if isinstance(value, str):
+                    normalized_sdfs[residue_name] = {"path": value}
+                elif isinstance(value, dict):
+                    if "path" not in value:
+                        raise ValueError(f"ligand_sdf_files entry for {residue_name!r} is missing a 'path'.")
+                    entry = {"path": value["path"]}
+                    if "index" in value:
+                        entry["index"] = value["index"]
+                    if "charge_method" in value:
+                        entry["charge_method"] = value["charge_method"]
+                    normalized_sdfs[residue_name] = entry
+                else:
+                    raise TypeError(
+                        "ligand_sdf_files values must be path strings or dictionaries with options."
+                    )
+            ligand_sdf_files = normalized_sdfs
+
+        def _select_backend_parameters_folder(base_folder: str, backend_label: str) -> str:
+            if not backend_label:
+                return base_folder
+            backend_folder = os.path.join(base_folder, backend_label)
+            if backend_label == "ambertools":
+                try:
+                    entries = os.listdir(base_folder)
+                except OSError:
+                    entries = []
+                has_legacy_packs = any(
+                    entry.endswith('_parameters') and os.path.isdir(os.path.join(base_folder, entry))
+                    for entry in entries
+                )
+                if has_legacy_packs:
+                    return base_folder
+            os.makedirs(backend_folder, exist_ok=True)
+            return backend_folder
 
         # Normalize model filters
         if isinstance(only_models, str):
@@ -7671,40 +7772,54 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.openmm_md = _OpenMMSimulationRegistry()
 
         ligand_parameters_folder = os.path.join(job_folder, 'parameters')
-        if not os.path.exists(ligand_parameters_folder):
-            os.mkdir(ligand_parameters_folder)
+        os.makedirs(ligand_parameters_folder, exist_ok=True)
 
         if ligand_parameters_source is not None and not os.path.exists(ligand_parameters_source):
             raise ValueError(f"ligand_parameters_source not found: {ligand_parameters_source}")
 
         # Resolve the actual source directory that contains `<RES>_parameters` packs.
-        def _resolve_ligand_pack_root(path):
+        def _resolve_ligand_pack_root(path, backend_label=None):
             if path is None:
                 return None
-            # Prefer a direct folder with *_parameters entries
-            try:
-                entries = os.listdir(path)
-            except Exception:
-                return None
-            has_packs = any(name.endswith('_parameters') and os.path.isdir(os.path.join(path, name)) for name in entries)
-            if has_packs:
-                return path
-            # Otherwise, look for a common `parameters/` subfolder
-            sub = os.path.join(path, 'parameters')
-            if os.path.isdir(sub):
+            candidate_paths = []
+            if backend_label:
+                candidate_paths.append(os.path.join(path, backend_label))
+            candidate_paths.append(path)
+            for candidate in candidate_paths:
+                try:
+                    entries = os.listdir(candidate)
+                except Exception:
+                    entries = []
+                has_packs = any(
+                    name.endswith('_parameters') and os.path.isdir(os.path.join(candidate, name)) for name in entries
+                )
+                if has_packs:
+                    return candidate
+                sub = os.path.join(candidate, 'parameters')
+                if not os.path.isdir(sub):
+                    continue
                 try:
                     sub_entries = os.listdir(sub)
                 except Exception:
-                    return None
-                has_packs = any(name.endswith('_parameters') and os.path.isdir(os.path.join(sub, name)) for name in sub_entries)
+                    continue
+                has_packs = any(
+                    name.endswith('_parameters') and os.path.isdir(os.path.join(sub, name)) for name in sub_entries
+                )
                 if has_packs:
                     return sub
             return None
-
-        resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source)
-
+        resolved_ligand_pack_root = None
         backend_options = dict(parameterization_options) if parameterization_options else {}
+        if ligand_smiles:
+            backend_options.setdefault("ligand_smiles", ligand_smiles)
+        if ligand_sdf_files:
+            backend_options.setdefault("ligand_sdf_files", ligand_sdf_files)
+        if skip_ligand_charge_computation:
+            backend_options.setdefault("skip_ligand_charge_computation", True)
         backend = get_backend(parameterization_method, **backend_options)
+        backend_label = getattr(backend, "name", str(parameterization_method)).lower()
+        ligand_parameters_folder = _select_backend_parameters_folder(ligand_parameters_folder, backend_label)
+        resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source, backend_label)
 
         script_folder = os.path.join(job_folder, 'scripts')
         if not os.path.exists(script_folder):
@@ -7714,7 +7829,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             _copyScriptFile(script_folder, "openmm_simulation.py", subfolder='md/openmm', hidden=False)
             script_file = script_folder + '/openmm_simulation.py'
 
-        aa3_residues = set(MD.openmm_setup.aa3)
+        aa3_residues = set(openmm_setup.aa3)
         ALL_LIGANDS = "__ALL__"
 
         def _normalize_ligand_only_option(option):
@@ -7741,12 +7856,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         ligand_only_selector = _normalize_ligand_only_option(ligand_only)
         ligand_only_active = ligand_only_selector is not None
 
-        skip_ligands_upper = set()
+        skip_ligands_upper = set(DEFAULT_PARAMETERIZATION_SKIP_RESIDUES)
         if skip_ligands:
             if isinstance(skip_ligands, str):
-                skip_ligands_upper = {skip_ligands.strip().upper()}
+                skip_ligands_upper.add(skip_ligands.strip().upper())
             else:
-                skip_ligands_upper = {str(item).strip().upper() for item in skip_ligands}
+                skip_ligands_upper.update({str(item).strip().upper() for item in skip_ligands})
+        effective_skip_ligands = sorted(skip_ligands_upper) if skip_ligands_upper else None
 
         def _detect_model_ligands(model_name):
             structure = self.structures.get(model_name)
@@ -7956,7 +8072,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             model_ligands = _detect_model_ligands(model)
 
-            self.openmm_md[model] = prepare_proteins.MD.openmm_md(self.models_paths[model])
+            self.openmm_md[model] = openmm_md_cls(self.models_paths[model])
             if not skip_preparation:
                 self.openmm_md[model].setUpFF(ff)
                 if add_hydrogens:
@@ -7998,13 +8114,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
                         )
                     skip_argument = list(skip_for_param) if skip_for_param else None
-                    backend.prepare_model(
+                backend.prepare_model(
                         self.openmm_md[model],
                         ligand_parameters_folder,
                         charges=ligand_charges,
                         metal_ligand=metal_ligand,
                         add_bonds=add_bonds.get(model) if add_bonds else None,
-                        skip_ligands=skip_argument,
+                        skip_ligands=sorted(skip_argument) if skip_argument else effective_skip_ligands,
                         overwrite=False,
                         metal_parameters=external_params,
                         extra_frcmod=extra_frcmod,
@@ -8024,8 +8140,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                         only_residues=selected_ligands_set,
                         build_full_system=False,
                     )
-                    self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
-                    packs = _collect_ligand_packs(ligand_parameters_folder)
+                self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
+                packs = _collect_ligand_packs(ligand_parameters_folder)
 
                 ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
                 ligand_setup_completed = True
@@ -8067,12 +8183,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
                 external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
                 backend.prepare_model(
-                    self.openmm_md[model],
-                    ligand_parameters_folder,
-                    charges=ligand_charges,
-                    metal_ligand=metal_ligand,
-                    add_bonds=add_bonds.get(model) if add_bonds else None,
-                    skip_ligands=skip_ligands,
+                        self.openmm_md[model],
+                        ligand_parameters_folder,
+                        charges=ligand_charges,
+                        metal_ligand=metal_ligand,
+                        add_bonds=add_bonds.get(model) if add_bonds else None,
+                        skip_ligands=effective_skip_ligands,
                     overwrite=False,
                     metal_parameters=external_params,
                     extra_frcmod=extra_frcmod,
@@ -12294,13 +12410,25 @@ make sure of reading the target sequences with the function readTargetSequences(
         model : str
             Model name to remove
         """
+        missing = []
         try:
             self.models_paths.pop(model)
+        except KeyError:
+            missing.append("models_paths")
+        try:
             self.models_names.remove(model)
+        except ValueError:
+            missing.append("models_names")
+        try:
             self.structures.pop(model)
+        except KeyError:
+            missing.append("structures")
+        try:
             self.sequences.pop(model)
-        except:
-            raise ValueError("Model  %s is not present" % model)
+        except KeyError:
+            missing.append("sequences")
+        if missing:
+            raise ValueError(f"Model {model!r} not present in: {', '.join(missing)}")
 
     def readTargetSequences(self, fasta_file):
         """
@@ -13204,7 +13332,7 @@ def _readRosettaScoreFile(score_file, indexing=False, skip_empty=False):
     return scores_df
 
 def _getAlignedResiduesBasedOnStructuralAlignment(
-    ref_struct, target_struct, max_ca_ca=5.0
+    ref_struct, target_struct, max_ca_ca=5.0, verbose=False
 ):
     """
     Return a sequence string with aligned residues based on a structural alignment. All residues
@@ -13218,6 +13346,8 @@ def _getAlignedResiduesBasedOnStructuralAlignment(
         Target structure
     max_ca_ca : float
         Maximum CA-CA distance to be considered aligned
+    verbose : bool
+        Print basic alignment diagnostics (sequence lengths, CA counts, mapped residues).
 
     Returns
     =======
@@ -13247,6 +13377,14 @@ def _getAlignedResiduesBasedOnStructuralAlignment(
         [a.coord for a in target_struct.get_atoms() if a.name == "CA"]
     )
 
+    if verbose:
+        print(
+            "[getAlignedResidues] "
+            f"ref_len={len(r_sequence)} target_len={len(t_sequence)} "
+            f"ref_CA={len(r_ca_coord)} target_CA={len(t_ca_coord)} "
+            f"max_ca_ca={max_ca_ca}"
+        )
+
     # Map residues based on a CA-CA distances
     D = distance_matrix(t_ca_coord, r_ca_coord)  # Calculate CA-CA distance matrix
     D = np.where(D <= max_ca_ca, D, np.inf)  # < Cap matrix to max_ca_ca
@@ -13261,6 +13399,13 @@ def _getAlignedResiduesBasedOnStructuralAlignment(
         D[i].fill(np.inf)  # This avoids double assignments
         D[:, j].fill(np.inf)  # This avoids double assignments
 
+    if verbose:
+        print(
+            "[getAlignedResidues] "
+            f"mapped_pairs={len(mapping)} "
+            f"unmapped_target={len(t_sequence) - len(mapping)}"
+        )
+
     # Create alignment based on the structural alignment mapping
     aligned_residues = []
     for i, r in enumerate(t_sequence):
@@ -13271,5 +13416,12 @@ def _getAlignedResiduesBasedOnStructuralAlignment(
 
     # Join list to get aligned sequences
     aligned_residues = "".join(aligned_residues)
+
+    if verbose:
+        aligned_count = sum(1 for c in aligned_residues if c != "-")
+        print(
+            "[getAlignedResidues] "
+            f"aligned_residues={aligned_count} total_target={len(aligned_residues)}"
+        )
 
     return aligned_residues
