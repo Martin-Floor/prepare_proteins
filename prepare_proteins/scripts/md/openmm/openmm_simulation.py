@@ -1,7 +1,11 @@
-from openmm.app import *
-from simtk.openmm import *
-from simtk.unit import *
-import numpy as np
+try:
+    import openmm as omm
+    from openmm import unit as u
+    from openmm.app import *
+except Exception:  # pragma: no cover - fallback for older installs
+    from simtk import openmm as omm
+    from simtk import unit as u
+    from simtk.openmm.app import *
 import argparse
 import time
 import re
@@ -22,10 +26,10 @@ parser.add_argument('--nvt_time', type=float, default=0.1, help='NVT equilibrati
 parser.add_argument('--npt_time', type=float, default=0.2, help='NPT equilibration time in ns.')
 parser.add_argument('--nvt_temp_scaling_steps', type=int, default=50, help='Number of iterations for NVT temperature scaling.')
 parser.add_argument('--npt_restraint_scaling_steps', type=int, default=50, help='Number of iterations for NPT restraint scaling.')
-parser.add_argument('--restraint_constant', type=float, default=5.0, help='Force constant for positional restraints (kcal/mol/Å²).')
+parser.add_argument('--restraint_constant', type=float, default=100.0, help='Force constant for positional restraints (kcal/mol/Å²).')
 parser.add_argument('--equilibration_data_report_time', type=float, default=1.0, help='Data report interval during equilibration in ps.')
 parser.add_argument('--equilibration_dcd_report_time', type=float, default=0.0, help='DCD report interval during equilibration in ps (0 disables reporting).')
-parser.add_argument('--seed', help='The seed to be used to generate the intial velocities')
+parser.add_argument('--seed', type=int, help='Seed for initial velocities (int)')
 args = parser.parse_args()
 
 def _ns_to_steps(duration_ns, time_step_ps, label):
@@ -77,7 +81,7 @@ try:
     restraint_constant = float(args.restraint_constant)
     equilibration_data_report_time = float(args.equilibration_data_report_time)
     equilibration_dcd_report_time = float(args.equilibration_dcd_report_time)
-    seed = int(args.seed) if args.seed is not None else None
+    seed = args.seed
 
     if (simulation_time <= 0 or chunk_size <= 0 or temperature <= 0 or time_step <= 0 or
             collision_rate <= 0 or nvt_time <= 0 or npt_time <= 0 or restraint_constant < 0 or
@@ -96,6 +100,8 @@ try:
     npt_steps = _ns_to_steps(npt_time, time_step, "NPT time")
     equilibration_data_report_steps = _interval_to_steps(equilibration_data_report_time, time_step, "Equilibration data report time")
     equilibration_dcd_report_steps = _interval_to_steps(equilibration_dcd_report_time, time_step, "Equilibration DCD report time", allow_zero=True)
+    if equilibration_dcd_report_steps is None and equilibration_data_report_steps is not None:
+        equilibration_dcd_report_steps = equilibration_data_report_steps
     production_data_report_steps = _interval_to_steps(data_report_time, time_step, "Data report time")
     production_dcd_report_steps = _interval_to_steps(dcd_report_time, time_step, "DCD report time")
     nvt_step_schedule = _split_steps(nvt_steps, nvt_temp_scaling_steps, "NVT temperature scaling steps")
@@ -106,27 +112,27 @@ except ValueError as e:
 
 
 def getHeavyAtoms(topology, exclude_solvent=True):
-    """
-    Get a list of non-hydrogen atoms in molecules different than HOH.
-
-    Parameters:
-    topology (Topology): The topology of the system.
-    exclude_solvent (bool): Whether to exclude solvent molecules (HOH).
-
-    Returns:
-    list: A list of heavy atoms.
-    """
-    _hydrogen = re.compile("[123 ]*H.*")
+    """Return non-hydrogen atoms, skipping water and common ions."""
     heavy_atoms = []
+    ion_names = {"NA", "K", "CL", "MG", "CA", "ZN", "LI", "RB", "SR", "BA", "CU"}
     for residue in topology.residues():
-        if exclude_solvent and residue.name == 'HOH':
+        try:
+            is_water = Topology.isWater(residue)
+        except Exception:
+            is_water = residue.name.upper() in {"HOH", "WAT", "TIP3", "SOL"}
+        if exclude_solvent and is_water:
+            continue
+        if residue.name.upper() in ion_names:
             continue
         for atom in residue.atoms():
-            if not _hydrogen.match(atom.name):
-                heavy_atoms.append(atom)
+            element = getattr(atom, "element", None)
+            symbol = getattr(element, "symbol", None)
+            if symbol == "H":
+                continue
+            heavy_atoms.append(atom)
     return heavy_atoms
 
-def addHeavyAtomsPositionalRestraintForce(system, positions, topology, restraint_constant):
+def addHeavyAtomsPositionalRestraintForce(system, positions, topology, restraint_constant, has_box):
     """
     Add a positional restraint force for heavy atoms.
 
@@ -135,20 +141,24 @@ def addHeavyAtomsPositionalRestraintForce(system, positions, topology, restraint
     positions (list): The positions of the atoms.
     topology (Topology): The topology of the system.
     restraint_constant (float): The force constant for the restraints.
+    has_box (bool): True when periodic conditions are present.
 
     Returns:
     CustomExternalForce: The positional restraint force.
     """
     heavy_atoms = getHeavyAtoms(topology)
-    posres_force = CustomExternalForce("k*periodicdistance(x, y, z, x0, y0, z0)^2")
-    force_constant = restraint_constant * kilocalories_per_mole / angstroms ** 2
+    dist_expr = "periodicdistance(x, y, z, x0, y0, z0)" if has_box else "sqrt((x-x0)^2 + (y-y0)^2 + (z-z0)^2)"
+    posres_force = omm.CustomExternalForce(f"k*{dist_expr}^2")
+    force_constant = (
+        restraint_constant * u.kilocalories_per_mole / u.angstroms**2
+    ).value_in_unit(u.kilojoules_per_mole / u.nanometer**2)
     posres_force.addGlobalParameter("k", force_constant)
     posres_force.addPerParticleParameter("x0")
     posres_force.addPerParticleParameter("y0")
     posres_force.addPerParticleParameter("z0")
 
     for atom in heavy_atoms:
-        posres_force.addParticle(atom.index, positions[atom.index].value_in_unit(nanometers))
+        posres_force.addParticle(atom.index, positions[atom.index].value_in_unit(u.nanometers))
 
     system.addForce(posres_force)
     return posres_force
@@ -161,7 +171,7 @@ def removeHeavyAtomPositionalRestraintForce(system):
     system (System): The OpenMM system.
     """
     for i, force in enumerate(system.getForces()):
-        if isinstance(force, CustomExternalForce) and 'k' in [force.getGlobalParameterName(j) for j in range(force.getNumGlobalParameters())]:
+        if isinstance(force, omm.CustomExternalForce) and 'k' in [force.getGlobalParameterName(j) for j in range(force.getNumGlobalParameters())]:
             system.removeForce(i)
             break
 
@@ -225,7 +235,7 @@ class CustomDataReporter(StateDataReporter):
         values = super()._constructReportValues(simulation, state)
         for force in self.force_groups:
             group = self.force_groups[force]
-            energy = simulation.context.getState(getEnergy=True, groups={group}).getPotentialEnergy().value_in_unit(kilocalories_per_mole)
+            energy = simulation.context.getState(getEnergy=True, groups={group}).getPotentialEnergy().value_in_unit(u.kilocalories_per_mole)
             values.append(energy)
         return values
 
@@ -329,21 +339,35 @@ try:
 
     # --- choose nonbonded method based on periodicity
     nb_method = PME if has_box else NoCutoff
-    nb_cutoff = 1 * nanometer if has_box else None
+    nb_cutoff = 1 * u.nanometer if has_box else None
 
-    system_kwargs = dict(nonbondedMethod=nb_method, constraints=HBonds)
+    system_kwargs = dict(nonbondedMethod=nb_method, constraints=HBonds, rigidWater=True)
     if nb_cutoff is not None:
         system_kwargs["nonbondedCutoff"] = nb_cutoff
+    if has_box:
+        system_kwargs["ewaldErrorTolerance"] = 1e-4
     system = prmtop.createSystem(**system_kwargs)
+    # Remove center-of-mass drift every 100 steps
+    system.addForce(omm.CMMotionRemover(100))
 
     # Set up integrator
-    integrator = LangevinMiddleIntegrator(temperature * kelvin, collision_rate / picosecond, time_step * picoseconds)
+    integrator = omm.LangevinMiddleIntegrator(temperature * u.kelvin, collision_rate / u.picosecond, time_step * u.picoseconds)
     if seed is not None:
         integrator.setRandomNumberSeed(seed)
+
+    # Persist serialized system/integrator for reproducibility
+    with open('system.xml', 'w') as f:
+        f.write(omm.XmlSerializer.serialize(system))
+    with open('integrator.xml', 'w') as f:
+        f.write(omm.XmlSerializer.serialize(integrator))
+
     simulation = Simulation(prmtop.topology, system, integrator)
 
     # Initialize simulation
     simulation.context.setPositions(inpcrd.positions)
+    # Ensure periodic box vectors are present when using PME
+    if inpcrd.boxVectors is not None:
+        simulation.context.setPeriodicBoxVectors(*inpcrd.boxVectors)
 
     checkpoint_file = 'production.chk'
 
@@ -376,20 +400,26 @@ try:
     else:
         # Check for the latest chunk checkpoint file if the general checkpoint file is not found
         chunk_checkpoint_found = False
+        start_chunk = 0
         for chunk in range(num_chunks - 1, -1, -1):
             chunk_suffix = str(chunk + 1).zfill(zfill_length)
             chunk_checkpoint_file = f'production_{chunk_suffix}.chk'
             if os.path.exists(chunk_checkpoint_file):
                 print(f'Chunk checkpoint file {chunk_checkpoint_file} found. Loading checkpoint.')
                 simulation.loadCheckpoint(chunk_checkpoint_file)
-                last_step = (chunk + 1) * chunk_steps
+                last_step_data, _ = get_last_step_from_report()
+                if last_step_data > 0:
+                    last_step = last_step_data
+                else:
+                    last_step = chunk * chunk_steps
+                start_chunk = chunk
                 chunk_checkpoint_found = True
                 break
 
         if not chunk_checkpoint_found:
             print('\tAdding positional restraint force')
             # Add a restraint force to the system
-            posres_force = addHeavyAtomsPositionalRestraintForce(system, inpcrd.positions, prmtop.topology, restraint_constant)
+            posres_force = addHeavyAtomsPositionalRestraintForce(system, inpcrd.positions, prmtop.topology, restraint_constant, has_box)
 
             # Set up equilibration reporters
             equilibration_reporter = CustomDataReporter(system, 'equilibration.data', equilibration_data_report_steps, step=True,
@@ -420,7 +450,7 @@ try:
             equilibration_reporter.report(simulation, state)
 
             # Run NVT equilibration
-            initial_temperature = 5 * kelvin
+            initial_temperature = 5 * u.kelvin
             simulation.context.setVelocitiesToTemperature(initial_temperature)
             nvt_simulation_steps = nvt_steps
             nvt_simulation_time = nvt_simulation_steps * time_step
@@ -432,14 +462,14 @@ try:
             T_initial = 5.0
             T_final = temperature
             if nvt_temp_scaling_steps == 1:
-                temperature_schedule = [T_final * kelvin]
+                temperature_schedule = [T_final * u.kelvin]
             else:
                 dT = (T_final - T_initial) / (nvt_temp_scaling_steps - 1)
-                temperature_schedule = [(T_initial + i * dT) * kelvin for i in range(nvt_temp_scaling_steps)]
-            for i, (segment_steps, target_temperature) in enumerate(zip(nvt_step_schedule, temperature_schedule)):
-                integrator.setTemperature(target_temperature)
+                temperature_schedule = [(T_initial + i * dT) * u.kelvin for i in range(nvt_temp_scaling_steps)]
+            for i, (segment_steps, current_temperature) in enumerate(zip(nvt_step_schedule, temperature_schedule)):
+                integrator.setTemperature(current_temperature)
                 print(f'\r{" " * 80}', end='\r')
-                print(f'\tRunning NVT temperature scaling step {i+1} of {nvt_temp_scaling_steps} at T={target_temperature}', end='\r')
+                print(f'\tRunning NVT temperature scaling step {i+1} of {nvt_temp_scaling_steps} at T={current_temperature}', end='\r')
                 simulation.step(segment_steps)
 
             print(f'\r{" " * 80}', end='\r')
@@ -458,10 +488,10 @@ try:
             print('\tInitializing Monte Carlo Barostat:')
             print(f'\tTemperature: {temperature} K')
             print(f'\tPressure: 1 bar')
-            barostat = MonteCarloBarostat(1 * bar, temperature * kelvin)
+            barostat = omm.MonteCarloBarostat(1 * u.bar, temperature * u.kelvin)
             system.addForce(barostat)
             simulation.context.reinitialize(preserveState=True)
-            simulation.context.setVelocitiesToTemperature(temperature * kelvin)
+            simulation.context.setVelocitiesToTemperature(temperature * u.kelvin)
 
             print(f'\tThe simulation will run for {npt_simulation_steps} steps with a time step of {time_step} ps ({npt_simulation_time / 1000} ns).')
             initial_restraint_constant = restraint_constant
@@ -469,7 +499,9 @@ try:
             npt_start = current_time()
             for i, segment_steps in enumerate(npt_step_schedule):
                 t = i / denom
-                K = initial_restraint_constant * (1 - t)**4 * kilocalories_per_mole / angstroms ** 2
+                K = (
+                    initial_restraint_constant * (1 - t)**4 * u.kilocalories_per_mole / u.angstroms**2
+                ).value_in_unit(u.kilojoules_per_mole / u.nanometer**2)
                 posres_force.setGlobalParameterDefaultValue(0, K)
                 simulation.context.setParameter('k', K)
                 print(f'\r{" " * 100}', end='\r')
@@ -491,6 +523,8 @@ try:
 
             last_step = 0  # No steps completed in production run
             chunk = 0
+        else:
+            chunk = start_chunk
 
     # Run the production simulation in chunks
     for chunk in range(chunk, num_chunks):
@@ -499,9 +533,8 @@ try:
         chunk_suffix = str(chunk + 1).zfill(zfill_length)
 
         data_file_exists = os.path.isfile(f'production_{chunk_suffix}.data')
-        data_file_mode = 'a' if data_file_exists else 'w'
 
-        production_reporter = CustomDataReporter(system, open(f'production_{chunk_suffix}.data', data_file_mode), production_data_report_steps, step=True,
+        production_reporter = CustomDataReporter(system, f'production_{chunk_suffix}.data', production_data_report_steps, step=True,
                                                  potentialEnergy=True, temperature=True)
         production_dcd_reporter = DCDReporter(f'production_{chunk_suffix}.dcd', production_dcd_report_steps, append=data_file_exists)
         production_chk_reporter = CheckpointReporter(f'production_{chunk_suffix}.chk', production_data_report_steps)
@@ -515,7 +548,11 @@ try:
         if last_step > chunk_start_step:
             print(f"Resuming from step {last_step}.")
 
-        simulation.step(chunk_end_step - last_step if last_step > chunk_start_step else chunk_steps)
+        steps_to_run = chunk_end_step - max(last_step, chunk_start_step)
+        if steps_to_run <= 0:
+            print('\tChunk already complete; skipping.')
+            continue
+        simulation.step(steps_to_run)
         last_step = chunk_end_step
 
         # Save the general checkpoint file
@@ -523,10 +560,10 @@ try:
 
         chunk_end_time = current_time()
         chunk_elapsed = chunk_end_time - chunk_start_time
-        chunk_time = chunk_steps * time_step / 1000
-        ns_per_day = compute_ns_per_day(chunk_time, chunk_elapsed)
+        actual_ns = steps_to_run * time_step / 1000.0
+        ns_per_day = compute_ns_per_day(actual_ns, chunk_elapsed)
         print_elapsed_time(chunk_start_time, chunk_end_time, f"Production chunk {chunk_suffix}")
-        print(f"Production chunk {chunk_suffix} performance: {ns_per_day} ns/day")
+        print(f"Production chunk {chunk_suffix} performance: {ns_per_day:.2f} ns/day")
 
     print('Production run completed.')
 
