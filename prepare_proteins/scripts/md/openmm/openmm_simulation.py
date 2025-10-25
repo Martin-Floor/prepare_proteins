@@ -327,11 +327,6 @@ try:
     print(f"System atoms: {n_atoms}")
     print(f"Periodic box present?: {has_box}")
 
-    # --- fail fast if the inputs are suspiciously small
-    if n_atoms < 200:
-        raise RuntimeError("Atom count < 200. You are likely loading a ligand-only system. "
-                        "Point to the solvated files (water+ions).")
-
     # --- choose nonbonded method based on periodicity
     nb_method = PME if has_box else NoCutoff
     nb_cutoff = 1 * nanometer if has_box else None
