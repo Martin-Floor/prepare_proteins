@@ -1,14 +1,23 @@
-try:
-    import openmm
-except ImportError as e:
-    raise ValueError('openmm python module not avaiable. Please install it to use this function.')
+from __future__ import annotations
+
+_OPENMM_IMPORT_ERROR = None
+try:  # pragma: no cover - optional dependency
+    import openmm  # type: ignore
+except ImportError as exc:  # pragma: no cover - optional dependency
+    openmm = None  # type: ignore[assignment]
+    _OPENMM_AVAILABLE = False
+    _OPENMM_IMPORT_ERROR = exc
+else:  # pragma: no cover - heavy optional dependency
+    _OPENMM_AVAILABLE = True
+    from openmm import *  # type: ignore
+    from openmm.app import *  # type: ignore
+    from openmm.unit import *  # type: ignore
+    from openmm.vec3 import Vec3  # type: ignore
+
+OPENMM_AVAILABLE = _OPENMM_AVAILABLE
+OPENMM_IMPORT_ERROR = _OPENMM_IMPORT_ERROR
 
 from pkg_resources import resource_filename, Requirement
-
-from openmm import *
-from openmm.app import *
-from openmm.unit import *
-from openmm.vec3 import Vec3
 
 from Bio.PDB.Polypeptide import aa3
 
@@ -23,6 +32,19 @@ import fileinput
 from multiprocessing import cpu_count
 import shlex
 import warnings
+
+from .parameterization.utils import extract_residue_subsystem
+
+
+def _ensure_openmm(feature: str = "OpenMM functionality") -> None:
+    """
+    Ensure the optional OpenMM dependency is available before executing OpenMM-dependent code.
+    """
+    if not OPENMM_AVAILABLE:
+        raise ImportError(
+            f"OpenMM is required to use {feature}. "
+            "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
+        ) from OPENMM_IMPORT_ERROR
 
 aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX', 'ACE', 'NME']
 ions = ['MG', 'NA', 'CL', 'CU']
@@ -55,6 +77,7 @@ def _run_command(command, command_log=None):
 class openmm_md:
 
     def __init__(self, input_pdb):
+        _ensure_openmm("openmm_md")
 
         # Set variables
         self.input_pdb = input_pdb
@@ -180,35 +203,6 @@ class openmm_md:
                                extra_mol2=None, add_counterions=True, add_counterionsRand=False, save_amber_pdb=False, solvate=True,
                                regenerate_amber_files=False, non_standard_residues=None, strict_atom_name_check=True,
                                only_residues=None, build_full_system=True):
-
-        def topologyFromResidue(residue, topol, positions):
-            top = topology.Topology()
-            c = top.addChain()
-            c.id = residue.chain.id
-            r = top.addResidue(residue.name, c)
-            atom_indexes = []
-            pos = openmm.unit.quantity.Quantity()
-            pos.unit = nanometer
-
-            # Get atoms
-            for a in residue.atoms():
-                atom_indexes.append(a.index)
-                top.addAtom(a.name, a.element, r)
-                pos.append(positions[a.index])
-
-            # Get atoms by name
-            atoms = {}
-            for a in r.atoms():
-                atoms[a.name] = a
-
-            # Get bonds
-            for a1, a2 in topol.bonds():
-                if a1.residue == residue and a2.residue == residue:
-                    top.addBond(atoms[a1.name], atoms[a2.name])
-
-            assert top.getNumAtoms() == len(pos)
-
-            return top, pos
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -497,8 +491,7 @@ class openmm_md:
                 continue
 
             # Create PDB for each ligand molecule
-            lig_top, lig_pos = topologyFromResidue(r, self.modeller.topology,
-                                                      self.modeller.positions)
+            lig_top, lig_pos = extract_residue_subsystem(self.modeller, r)
 
             par_folder[residue] = parameters_folder+'/'+residue+'_parameters'
 
@@ -1390,6 +1383,7 @@ class ligandParameters:
                     _run_command(command, self.command_log)
 
 def _getPositionsArrayAsVector(positions):
+    _ensure_openmm("_getPositionsArrayAsVector")
     v3_positions = []
     for p in positions:
         v3_positions.append(quantity.Quantity(Vec3(*p), unit=nanometer))
