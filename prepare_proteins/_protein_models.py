@@ -17,6 +17,120 @@ import pkg_resources
 from pathlib import Path
 from types import SimpleNamespace
 
+# --- Debug printing helper (no-op if debug=False) ---
+def _dbg(debug: bool, msg: str = "", *args):
+    if debug:
+        try:
+            print(msg.format(*args))
+        except Exception:
+            # Be resilient to bad formats/objects
+            print(msg)
+
+def _mask_runs(mask):
+    """Return list of (start, end, value) for contiguous runs in a boolean mask."""
+    runs = []
+    if not mask:
+        return runs
+    start = 0
+    cur = mask[0]
+    for i, v in enumerate(mask[1:], start=1):
+        if v != cur:
+            runs.append((start, i - 1, cur))
+            start = i
+            cur = v
+    runs.append((start, len(mask) - 1, cur))
+    return runs
+
+def _longest_true_run(bool_list):
+    """
+    Return (start_idx, end_idx) of the longest contiguous True run in bool_list.
+    If no True values, return None.
+    """
+    best_len = 0
+    best = None
+    cur_len = 0
+    cur_start = 0
+    for i, v in enumerate(bool_list):
+        if v:
+            if cur_len == 0:
+                cur_start = i
+            cur_len += 1
+            if cur_len > best_len:
+                best_len = cur_len
+                best = (cur_start, i)
+        else:
+            cur_len = 0
+    return best
+
+def _term_anchored_core(mapping_pairs, chain_idx_list):
+    """
+    Core bounded by the reference termini:
+      - mapping_pairs: list of (ref_idx, tgt_idx)
+      - chain_idx_list: global target indices for this chain
+    Return (core_start, core_end) in GLOBAL target indices using the target residues
+    aligned to the MIN and MAX ref_idx present for this chain. If only one anchor is
+    present, fall back to the earliest/latest target-aligned residue.
+    """
+    chain_set = set(chain_idx_list)
+    chain_pairs = [(r, t) for (r, t) in mapping_pairs if t in chain_set]
+    if not chain_pairs:
+        return None
+
+    # Anchor strictly by reference indices (termini)
+    r_min, t_min = min(chain_pairs, key=lambda x: x[0])
+    r_max, t_max = max(chain_pairs, key=lambda x: x[0])
+
+    # If both anchors exist (typical), use them
+    if r_min != r_max:
+        core_start = min(t_min, t_max)
+        core_end = max(t_min, t_max)
+        return (core_start, core_end)
+
+    # Fallback (rare): only one ref anchor effectively present → use first/last target
+    first_tgt = min(chain_pairs, key=lambda x: x[1])[1]
+    last_tgt = max(chain_pairs, key=lambda x: x[1])[1]
+    core_start = min(first_tgt, last_tgt)
+    core_end = max(first_tgt, last_tgt)
+    return (core_start, core_end)
+
+def _analyze_mapping_pairs(mapping, r_ca_coord, t_ca_coord, max_ca_ca, verbose_limit=40):
+    import numpy as np, bisect
+    if not mapping:
+        print("[mapdiag] no pairs")
+        return
+    pairs = sorted([(r, t) for t, r in mapping.items()], key=lambda x: x[0])
+    tgt_order = [t for _, t in pairs]
+
+    inversions = 0
+    last = -1
+    for t in tgt_order:
+        if t <= last:
+            inversions += 1
+        last = t
+
+    lis = []
+    for t in tgt_order:
+        k = bisect.bisect_left(lis, t)
+        if k == len(lis):
+            lis.append(t)
+        else:
+            lis[k] = t
+    lis_len = len(lis)
+
+    d = []
+    for t, r in mapping.items():
+        d.append(float(np.linalg.norm(t_ca_coord[t] - r_ca_coord[r])))
+    d = np.array(d, float)
+    d_med = float(np.median(d)) if d.size else float("nan")
+    d_max = float(np.max(d)) if d.size else float("nan")
+    frac_loose = float((d > 0.75 * max_ca_ca).sum() / d.size) if d.size else float("nan")
+
+    print(f"[mapdiag] pairs={len(mapping)}  inversions={inversions}  LIS_len={lis_len}")
+    print(f"[mapdiag] dists: median={d_med:.2f}  max={d_max:.2f}  frac(>0.75*cutoff)={frac_loose:.2f}")
+
+    for i, (r, t) in enumerate(pairs[:verbose_limit]):
+        print(f"  {i:03d}: ref={r} -> tgt={t}  | d={np.linalg.norm(t_ca_coord[t]-r_ca_coord[r]):.2f}")
+
 _MISSING = object()
 
 
@@ -1542,6 +1656,217 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Missing save models and reload them to take effect.
 
+    def getFoldseekMappingToReference(
+        self,
+        reference_pdb: str,
+        min_prob: float = 0.0,
+        threads: int | None = None,
+        foldseek_exe: str = "foldseek",
+        verbose: bool = False,
+        tmp_dir: str | None = None,
+    ) -> dict[str, dict[int, int]]:
+        """
+        Run Foldseek once (batch) using the *current in-memory* models.
+
+        Steps:
+          1) Save current structures to a temporary directory (fresh PDBs).
+          2) Run: foldseek easy-search <ref> <temp_dir_of_targets>
+          3) Parse best hit per target and build a mapping:
+               { target_local_poly_idx (0-based) -> ref_local_poly_idx (0-based) }
+          4) Return a dict: { <target_basename>: mapping }. Also tries to set
+               protein.foldseek_mapping for convenience (best-effort).
+
+        Parameters
+        ----------
+        tmp_dir : str | None
+            Optional directory to use instead of a temporary one. If provided, results
+            (including intermediate files) are left on disk for inspection.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        if shutil.which(foldseek_exe) is None:
+            raise FileNotFoundError(
+                "Foldseek not found in PATH. Install it or pass 'foldseek_exe'."
+            )
+
+        tmpdir_cm = None
+        if tmp_dir is None:
+            tmpdir_cm = tempfile.TemporaryDirectory()
+            tmpdir = tmpdir_cm.name
+        else:
+            tmpdir = tmp_dir
+            os.makedirs(tmpdir, exist_ok=True)
+
+        try:
+            targets_dir = os.path.join(tmpdir, "targets")
+            if os.path.exists(targets_dir):
+                shutil.rmtree(targets_dir)
+            os.makedirs(targets_dir, exist_ok=True)
+
+            # Save *current* in-memory structures
+            self.saveModels(targets_dir)
+
+            target_files = [
+                os.path.join(targets_dir, f)
+                for f in os.listdir(targets_dir)
+                if f.lower().endswith((".pdb", ".cif", ".mmcif"))
+            ]
+            if not target_files:
+                raise RuntimeError(
+                    "No target structures were saved to the temporary directory."
+                )
+
+            basename_to_obj = {}
+            name_index = {}
+            for p in getattr(self, "proteins", []):
+                candidates = []
+                for attr in ("id", "name", "model_id", "model", "label"):
+                    val = getattr(p, attr, None)
+                    if val:
+                        candidates.append(str(val))
+                for c in candidates:
+                    name_index[c.lower()] = p
+
+            for tf in target_files:
+                bn = os.path.basename(tf)
+                stem = os.path.splitext(bn)[0].lower()
+                if stem in name_index:
+                    basename_to_obj[bn] = name_index[stem]
+
+            out_tsv = os.path.join(tmpdir, "foldseek.tsv")
+
+            # Include qlen/tlen so we know full ref length
+            fmt = "query,target,prob,qstart,qend,tstart,tend,alnlen,qaln,taln,qlen,tlen"
+            cmd = [
+                foldseek_exe,
+                "easy-search",
+                reference_pdb,
+                targets_dir,
+                out_tsv,
+                tmpdir,
+                "--alignment-type",
+                "1",
+                "--format-output",
+                fmt,
+                "--exhaustive-search",
+                "1",
+            ]
+            if threads and threads > 0:
+                cmd += ["--threads", str(threads)]
+
+            if verbose:
+                print("[foldseek] running:", " ".join(cmd))
+                print(f"[foldseek] TSV: {out_tsv}")
+            try:
+                cp = subprocess.run(
+                    cmd,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if verbose and cp.stderr.strip():
+                    tail = "\n".join(cp.stderr.strip().splitlines()[-8:])
+                    if tail:
+                        print("[foldseek] stderr (tail):\n" + tail)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"Foldseek failed with code {e.returncode}.\nSTDERR:\n{e.stderr}"
+                ) from e
+
+            if not os.path.exists(out_tsv) or os.path.getsize(out_tsv) == 0:
+                raise RuntimeError("Foldseek produced no results (empty TSV).")
+
+            best_by_target: dict[str, dict] = {}
+            with open(out_tsv, "r") as fh:
+                for raw in fh:
+                    if verbose:
+                        print(raw, end="")
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    # Expecting 12 fields now
+                    if len(parts) < 12:
+                        continue
+                    rec = {
+                        "query":   parts[0],
+                        "target":  os.path.basename(parts[1]),
+                        "prob":    float(parts[2]),
+                        "qstart":  int(parts[3]),
+                        "qend":    int(parts[4]),
+                        "tstart":  int(parts[5]),
+                        "tend":    int(parts[6]),
+                        "alnlen":  int(parts[7]),
+                        "qaln":    parts[8],
+                        "taln":    parts[9],
+                        "qlen":    int(parts[10]),
+                        "tlen":    int(parts[11]),
+                    }
+                    cur = best_by_target.get(rec["target"])
+                    if (cur is None) or (rec["prob"] > cur["prob"]):
+                        best_by_target[rec["target"]] = rec
+
+            results: dict[str, dict[int, int]] = {}
+            for tgt_bn, rec in best_by_target.items():
+                prob = rec["prob"]
+                if prob < min_prob:
+                    if verbose:
+                        print(f"[foldseek] {tgt_bn}: prob={prob:.2f} < {min_prob} → skipped")
+                    continue
+
+                qaln, taln = rec["qaln"], rec["taln"]
+                if len(qaln) != len(taln):
+                    if verbose:
+                        print(
+                            f"[foldseek] {tgt_bn}: alignment length mismatch (qaln/taln) → skipped"
+                        )
+                    continue
+
+                # Build raw mapping from alignment strings (0-based local indices)
+                qpos = rec["qstart"] - 1
+                tpos = rec["tstart"] - 1
+                mapping: dict[int, int] = {}
+                for qa, ta in zip(qaln, taln):
+                    q_idx = None
+                    t_idx = None
+                    if qa != "-":
+                        q_idx = qpos
+                        qpos += 1
+                    if ta != "-":
+                        t_idx = tpos
+                        tpos += 1
+                    if (q_idx is not None) and (t_idx is not None):
+                        if t_idx not in mapping:
+                            mapping[t_idx] = q_idx
+
+                # Keep the raw mapping from Foldseek (no clipping)
+                results[tgt_bn] = mapping
+
+                if verbose:
+                    print(f"[foldseek] {tgt_bn}: prob={prob:.2f}  mapped={len(mapping)}")
+
+                p = basename_to_obj.get(tgt_bn)
+                if p is not None:
+                    try:
+                        setattr(p, "foldseek_mapping", mapping)
+                    except Exception:
+                        pass
+
+            if verbose:
+                print(
+                    f"[foldseek] completed. {len(results)} mappings above prob ≥ {min_prob}."
+                )
+
+            return results
+        finally:
+            if tmpdir_cm is not None:
+                tmpdir_cm.cleanup()
+
+
     def removeNotAlignedRegions(
         self,
         ref_structure,
@@ -1549,13 +1874,35 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         remove_low_confidence_unaligned_loops=False,
         confidence_threshold=50.0,
         min_loop_length=10,
+        keep_aligned_fold_until_low_confidence=False,
+        **kwargs,
     ):
         """
-        Remove models regions that not aligned with the given reference structure. The mapping is based on
-        the current structural alignment of the reference and the target models. The termini are removed
-        if they don't align with the reference structure. Internal loops that do not align with the given
-        reference structure can optionally be removed if they have a confidence score lower than the one
-        defined as threshold.
+        Default behavior: define the fold core using the target residues aligned to the reference termini (first and last aligned reference positions per chain) and remove only terminal regions outside that span (no internal removals).
+        Special modes:
+        - keep_aligned_fold_until_low_confidence=True (existing)
+        - remove_low_confidence_unaligned_loops=True (existing)
+
+        Remove regions not structurally aligned to a reference, or (optional) keep only the
+        aligned fold extended through high-confidence residues up to the first low-confidence
+        region (per chain).
+
+        Modes
+        -----
+        - Default:
+            For each chain, identify the target residues aligned to the smallest and largest
+            reference residue indices, keep the contiguous span between them, and trim only
+            termini outside this anchor-defined core. Internal unaligned residues inside the
+            span are preserved.
+        - Fold-keep mode (keep_aligned_fold_until_low_confidence=True):
+            For each chain, identify the aligned core (positions with structural alignment),
+            then extend the kept region on the N and C sides across any contiguous residues
+            whose mean per-residue confidence (AlphaFold pLDDT stored in B-factor) is
+            >= confidence_threshold. Stop extending at the first low-confidence residue in
+            each direction. Delete residues outside the kept region.
+        - Loop-prune mode (remove_low_confidence_unaligned_loops=True):
+            Retain aligned residues plus termini while pruning internal unaligned loops that are both
+            sufficiently long and below the confidence_threshold.
 
         Parameters
         ==========
@@ -1570,95 +1917,639 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Threshold to consider a loop region not algined as low confidence for their removal.
         min_loop_length : int
             Length of the internal unaligned region to be considered a loop.
+        keep_aligned_fold_until_low_confidence : bool
+            When True, keep aligned cores and extend across high-confidence residues, removing
+            all other polymeric residues per chain.
 
         Returns
         =======
+        None
 
+        Side effects:
+            - Mutates structures in-place by deleting residues.
+            - Calls self.getModelsSequences() at the end.
         """
+        debug: bool = kwargs.pop("debug", False)
+        dry_run: bool = kwargs.pop("dry_run", False)  # if True, compute but do not modify models
+        tmp_dir: str | None = kwargs.pop("tmp_dir", None)
 
-        # Check input structure input
+        if kwargs:
+            warnings.warn(
+                f"removeNotAlignedRegions: ignoring unexpected kwargs {list(kwargs.keys())}"
+            )
+
+        reference_input = ref_structure
+
         if isinstance(ref_structure, str):
-            if ref_structure.endswith(".pdb"):
-                ref_structure = prepare_proteins._readPDB("ref", ref_structure)
+            if ref_structure.endswith('.pdb'):
+                ref_structure = prepare_proteins._readPDB('ref', ref_structure)
             else:
                 if ref_structure in self.models_names:
                     ref_structure = self.structures[ref_structure]
                 else:
-                    raise ValueError("Reference structure was not found in models")
+                    raise ValueError('Reference structure was not found in models')
         elif not isinstance(ref_structure, PDB.Structure.Structure):
             raise ValueError(
-                "ref_structure should be a  Bio.PDB.Structure.Structure or string object"
+                'ref_structure should be a  Bio.PDB.Structure.Structure or string object'
             )
 
-        # Iterate models
-        for i, model in enumerate(self):
+        reference_label = (
+            reference_input
+            if isinstance(reference_input, str)
+            else getattr(reference_input, "id", repr(reference_input))
+        )
 
-            # Get structurally aligned residues to reference structure
-            aligned_residues = _getAlignedResiduesBasedOnStructuralAlignment(
-                ref_structure, self.structures[model]
+        _dbg(debug, "\n[removeNotAlignedRegions] reference_pdb: {}", reference_label)
+        _dbg(debug, "[options] max_ca_ca: {}", max_ca_ca)
+        _dbg(debug, "[options] confidence_threshold: {}", confidence_threshold)
+        _dbg(debug, "[options] min_loop_length: {}", min_loop_length)
+        _dbg(debug, "[options] remove_low_confidence_unaligned_loops: {}", remove_low_confidence_unaligned_loops)
+        _dbg(debug, "[options] keep_aligned_fold_until_low_confidence: {}", keep_aligned_fold_until_low_confidence)
+        _dbg(debug, "[options] dry_run: {}", dry_run)
+        if tmp_dir:
+            _dbg(debug, "[options] foldseek tmp_dir: {}", tmp_dir)
+
+        # --- Conservative terminal-seed clipping thresholds (local to this function) ---
+        EDGE_SEED_MAX = 12        # max residues in a terminal "seed" to consider clipping
+        EDGE_GAP_MIN = 20         # min gap (in target indices) separating seed from main cluster
+        MAIN_MIN = 120            # main cluster must have at least this many aligned residues
+        REF_EDGE_WINDOW = 25      # first/last N reference residues = "edges"
+        REF_EDGE_MIN_HITS = 8     # need >= this many hits in a ref edge to keep that seed
+        REQUIRE_REF_EDGE_SUPPORT = True  # if True, weak ref-edge support allows clipping
+        # ------------------------------------------------------------------------------
+
+        ref_ca_atoms = [a for a in ref_structure.get_atoms() if a.name == "CA"]
+        ref_ca_coord = np.array([a.coord for a in ref_ca_atoms])
+        _dbg(debug, "[reference] CA atoms: {}", len(ref_ca_atoms))
+
+        # Count reference polymer residues (for ref-edge support checks)
+        ref_poly_len = sum(1 for r in ref_structure.get_residues() if r.id[0] == " ")
+
+        import tempfile
+        from Bio.PDB import PDBIO
+
+        reference_path_for_foldseek = None
+        temp_reference_path = None
+        if isinstance(reference_input, str) and os.path.exists(reference_input):
+            reference_path_for_foldseek = reference_input
+        else:
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdb")
+            os.close(tmp_fd)
+            io = PDBIO()
+            io.set_structure(ref_structure)
+            io.save(tmp_path)
+            reference_path_for_foldseek = tmp_path
+            temp_reference_path = tmp_path
+
+        try:
+            foldseek_mappings = self.getFoldseekMappingToReference(
+                reference_path_for_foldseek,
+                min_prob=0.0,
+                threads=None,
+                foldseek_exe="foldseek",
+                verbose=debug,
+                tmp_dir=tmp_dir,
+            )
+        finally:
+            if temp_reference_path and os.path.exists(temp_reference_path):
+                try:
+                    os.remove(temp_reference_path)
+                except OSError:
+                    pass
+
+        foldseek_mappings_by_stem = {
+            Path(k).stem: v for k, v in foldseek_mappings.items()
+        }
+
+        def _mean_residue_bfactor(residue):
+            vals = [a.bfactor for a in residue.get_atoms()]
+            return float(np.mean(vals)) if vals else 0.0
+
+        for model in self:
+            structure = self.structures[model]
+
+            polymer_positions = []
+            for chain in structure.get_chains():
+                for res in chain.get_residues():
+                    if res.id[0] == " ":
+                        polymer_positions.append((chain.id, res))
+
+            mapping = {}
+            for ext in ("pdb", "cif", "mmcif"):
+                key = f"{model}.{ext}"
+                if key in foldseek_mappings:
+                    mapping = dict(foldseek_mappings[key])
+                    break
+            if not mapping:
+                mapping = dict(foldseek_mappings_by_stem.get(model, {}))
+            if debug and not mapping:
+                _dbg(debug, "[foldseek] model {}: no mapping retrieved; treating as unaligned", model)
+
+            aligned_mask = np.zeros(len(polymer_positions), dtype=bool)
+            out_of_range = []
+            for tgt_idx in mapping.keys():
+                if 0 <= tgt_idx < len(aligned_mask):
+                    aligned_mask[tgt_idx] = True
+                else:
+                    out_of_range.append(tgt_idx)
+            if out_of_range and debug:
+                _dbg(
+                    debug,
+                    "[mapping] model {}: target indices out of range -> {} (poly_len={})",
+                    model,
+                    out_of_range,
+                    len(aligned_mask),
+                )
+
+            if debug:
+                try:
+                    target_ca_coord = np.array(
+                        [a.coord for a in structure.get_atoms() if a.name == "CA"]
+                    )
+                    _analyze_mapping_pairs(
+                        mapping,
+                        ref_ca_coord,
+                        target_ca_coord,
+                        max_ca_ca,
+                        verbose_limit=30,
+                    )
+                except Exception as exc:
+                    _dbg(
+                        debug,
+                        "[mapdiag] analysis failed for model {}: {}",
+                        model,
+                        exc,
+                    )
+
+            aligned_bool = aligned_mask.tolist()
+
+            per_chain_indices = {}
+            for idx, (cid, _) in enumerate(polymer_positions):
+                per_chain_indices.setdefault(cid, []).append(idx)
+
+            per_chain_res_index_bounds = {
+                cid: (indices[0], indices[-1] + 1)
+                for cid, indices in per_chain_indices.items()
+                if indices
+            }
+
+            def _clip_terminal_seed_hits_for_chain(chain_pairs_sorted_by_tgt, ref_len, label=""):
+                """
+                chain_pairs_sorted_by_tgt: list of (ref_idx, tgt_idx) *for this chain*, sorted by tgt_idx.
+                Returns (core_start, core_end, decision_info, dropped_t_indices_set).
+                If no clipping is needed, returns the span of all hits and empty dropped set.
+                """
+                if not chain_pairs_sorted_by_tgt:
+                    return None, None, {"reason": "no_hits", "label": label}, set()
+
+                tgt_hits = [t for (r, t) in chain_pairs_sorted_by_tgt]
+                ref_hits = [r for (r, t) in chain_pairs_sorted_by_tgt]
+
+                clusters = []
+                cs = ce = tgt_hits[0]
+                cnt = 1
+                for a, b in zip(tgt_hits[1:], tgt_hits[:-1]):
+                    if a - b > EDGE_GAP_MIN:
+                        clusters.append((cs, ce, cnt))
+                        cs = ce = a
+                        cnt = 1
+                    else:
+                        ce = a
+                        cnt += 1
+                clusters.append((cs, ce, cnt))
+
+                span_start, span_end = tgt_hits[0], tgt_hits[-1]
+                info = {
+                    "initial_span": (span_start, span_end),
+                    "clusters": clusters,
+                    "label": label,
+                }
+
+                if len(clusters) == 1:
+                    info["decision"] = "keep_span_single_cluster"
+                    return span_start, span_end, info, set()
+
+                main_idx = max(range(len(clusters)), key=lambda i: clusters[i][2])
+                main_cs, main_ce, main_cnt = clusters[main_idx]
+                info["main_cluster"] = (main_cs, main_ce, main_cnt)
+
+                if main_cnt < MAIN_MIN:
+                    info["decision"] = "keep_span_main_too_small"
+                    return span_start, span_end, info, set()
+
+                def seed_ref_hits_in_window(t_lo, t_hi, ref_lo, ref_hi):
+                    c = 0
+                    for (r, t) in chain_pairs_sorted_by_tgt:
+                        if t_lo <= t <= t_hi and ref_lo <= r <= ref_hi:
+                            c += 1
+                    return c
+
+                dropped = set()
+                decision = "keep_span"
+                core_start, core_end = span_start, span_end
+
+                if main_idx > 0:
+                    n_cs, n_ce, n_cnt = clusters[0]
+                    gap_to_main = max(0, main_cs - n_ce)
+                    ref_hits_N = seed_ref_hits_in_window(n_cs, n_ce, 0, max(0, REF_EDGE_WINDOW - 1))
+                    ok_ref_seed = (
+                        ref_hits_N < REF_EDGE_MIN_HITS
+                    ) if REQUIRE_REF_EDGE_SUPPORT else True
+                    if n_cnt <= EDGE_SEED_MAX and gap_to_main >= EDGE_GAP_MIN and ok_ref_seed:
+                        for (r, t) in chain_pairs_sorted_by_tgt:
+                            if n_cs <= t <= n_ce:
+                                dropped.add(t)
+                        core_start = main_cs
+                        decision = f"clip_N_seed size={n_cnt} gap={gap_to_main} ref_edge_hits={ref_hits_N}"
+
+                if main_idx < len(clusters) - 1:
+                    c_cs, c_ce, c_cnt = clusters[-1]
+                    gap_to_main = max(0, c_cs - main_ce)
+                    ref_hits_C = seed_ref_hits_in_window(
+                        c_cs, c_ce, max(0, ref_len - REF_EDGE_WINDOW), ref_len - 1
+                    )
+                    ok_ref_seed = (
+                        ref_hits_C < REF_EDGE_MIN_HITS
+                    ) if REQUIRE_REF_EDGE_SUPPORT else True
+                    if c_cnt <= EDGE_SEED_MAX and gap_to_main >= EDGE_GAP_MIN and ok_ref_seed:
+                        for (r, t) in chain_pairs_sorted_by_tgt:
+                            if c_cs <= t <= c_ce:
+                                dropped.add(t)
+                        core_end = main_ce
+                        if decision == "keep_span":
+                            decision = f"clip_C_seed size={c_cnt} gap={gap_to_main} ref_edge_hits={ref_hits_C}"
+                        else:
+                            decision += f" + clip_C_seed size={c_cnt} gap={gap_to_main} ref_edge_hits={ref_hits_C}"
+
+                info["decision"] = decision
+                return core_start, core_end, info, dropped
+
+            mapping_pairs = sorted(
+                [(ref_idx, target_idx) for target_idx, ref_idx in mapping.items()],
+                key=lambda pair: pair[1],
             )
 
-            ### Remove unaligned termini ###
+            chains = [c.id for c in structure.get_chains()]
+            total_residues = sum(1 for _ in structure.get_residues())
+            _dbg(debug, "\n[model {}] chains: {}", model, chains)
+            _dbg(debug, "[model {}] total residues: {}", model, total_residues)
 
-            # Get structurally aligned residues to reference structure
-            target_residues = [
-                r for r in self.structures[model].get_residues() if r.id[0] == " "
-            ]
+            aligned_count = int(aligned_mask.sum())
+            _dbg(debug, "[model {}] aligned residues: {}", model, aligned_count)
 
-            n_terminus = set()
-            for ar, tr in zip(aligned_residues, target_residues):
-                if ar == "-":
-                    n_terminus.add(tr.id[1])
-                else:
-                    break
+            try:
+                per_chain_summary = []
+                for ch_id, (start_idx, end_idx) in per_chain_res_index_bounds.items():
+                    mask_slice = aligned_mask[start_idx:end_idx]
+                    size = end_idx - start_idx
+                    per_chain_summary.append((ch_id, int(mask_slice.sum()), size))
+                for ch_id, aln, size in per_chain_summary:
+                    _dbg(
+                        debug,
+                        "[model {}] chain {}: aligned {}/{} ({:.1f}%)",
+                        model,
+                        ch_id,
+                        aln,
+                        size,
+                        100 * aln / max(1, size),
+                    )
+            except Exception:
+                pass
 
-            c_terminus = set()
-            for ar, tr in reversed(list(zip(aligned_residues, target_residues))):
-                if ar == "-":
-                    c_terminus.add(tr.id[1])
-                else:
-                    break
+            try:
+                best_len = 0
+                best_start = -1
+                cur = 0
+                cur_start = 0
+                for i, v in enumerate(aligned_mask):
+                    if v:
+                        if cur == 0:
+                            cur_start = i
+                        cur += 1
+                        if cur > best_len:
+                            best_len = cur
+                            best_start = cur_start
+                    else:
+                        cur = 0
+                if best_len > 0:
+                    _dbg(
+                        debug,
+                        "[model {}] longest aligned segment: {} residues (idx {}..{})",
+                        model,
+                        best_len,
+                        best_start,
+                        best_start + best_len - 1,
+                    )
+            except Exception:
+                pass
 
-            n_terminus = sorted(list(n_terminus))
-            c_terminus = sorted(list(c_terminus))
+            try:
+                mapping_len = len(mapping_pairs)
+                _dbg(debug, "[model {}] mapping size: {}", model, mapping_len)
+                if mapping_len <= 50:
+                    _dbg(
+                        debug,
+                        "[model {}] mapping (ref_idx -> model_idx): {}",
+                        model,
+                        mapping_pairs,
+                    )
+            except Exception:
+                pass
 
-            #         ### Remove unaligned low confidence loops ###
-            #         if remove_low_confidence_unaligned_loops:
-            #             loops = []
-            #             loop = []
-            #             loops_to_remove = []
-            #             for ar,tr in zip(aligned_residues, target_residues):
-            #                 if ar == '-':
-            #                     loop.append(tr)
-            #                 else:
-            #                     loops.append(loop)
-            #                     loop = []
+            mask_list = aligned_mask.tolist() if hasattr(aligned_mask, "tolist") else list(aligned_mask)
+            runs = _mask_runs(mask_list)
 
-            #             for loop in loops:
-            #                 if len(loop) >= min_loop_length:
-            #                     low_confidence_residues = []
-            #                     for r in loop:
-            #                         for a in r:
-            #                             if a.bfactor < confidence_threshold:
-            #                                 low_confidence_residues.append(r)
-            #                                 break
-            #                     if len(low_confidence_residues) > min_loop_length:
-            #                         for r in low_confidence_residues:
-            #                             loops_to_remove.append(r.id[1])
-            #         print(model, ','.join([str(x) for x in loops_to_remove]))
+            # Compute residue deletions per chain
+            indices_to_remove_by_chain = {cid: set() for cid in per_chain_indices}
+            default_mode = False
+            default_run_spans = []
 
-            remove_this = []
-            for c in self.structures[model].get_chains():
-                for r in c.get_residues():
-                    if (
-                        r.id[1] in n_terminus or r.id[1] in c_terminus
-                    ):  # or r.id[1] in low_confidence_residues:
-                        remove_this.append(r)
-                chain = c
-                # Remove residues
-                for r in remove_this:
-                    chain.detach_child(r.id)
+            if keep_aligned_fold_until_low_confidence:
+                for cid, idx_list in per_chain_indices.items():
+                    if not idx_list:
+                        continue
 
+                    aligned_idxs = [k for k in idx_list if aligned_bool[k]]
+
+                    # If no aligned residues in this chain, drop all polymer residues in this chain
+                    if not aligned_idxs:
+                        for k in idx_list:
+                            indices_to_remove_by_chain[cid].add(k)
+                        continue
+
+                    # Core bounds (aligned region)
+                    core_start = min(aligned_idxs)
+                    core_end = max(aligned_idxs)
+
+                    # Expand to N side through contiguous high-confidence residues
+                    n_keep = core_start
+                    cursor = core_start - 1
+                    while cursor >= idx_list[0]:
+                        _, res = polymer_positions[cursor]
+                        if _mean_residue_bfactor(res) >= float(confidence_threshold):
+                            n_keep = cursor
+                            cursor -= 1
+                        else:
+                            break  # stop at first low-confidence residue
+
+                    # Expand to C side through contiguous high-confidence residues
+                    c_keep = core_end
+                    cursor = core_end + 1
+                    while cursor <= idx_list[-1]:
+                        _, res = polymer_positions[cursor]
+                        if _mean_residue_bfactor(res) >= float(confidence_threshold):
+                            c_keep = cursor
+                            cursor += 1
+                        else:
+                            break  # stop at first low-confidence residue
+
+                    # Everything outside [n_keep, c_keep] (within this chain) is removed
+                    keep_range = set(range(n_keep, c_keep + 1))
+                    for k in idx_list:
+                        if k not in keep_range:
+                            indices_to_remove_by_chain[cid].add(k)
+
+            elif remove_low_confidence_unaligned_loops:
+                for cid, idx_list in per_chain_indices.items():
+                    if not idx_list:
+                        continue
+
+                    # N-terminus run of unaligned
+                    n_cut = []
+                    for k in idx_list:
+                        if not aligned_bool[k]:
+                            n_cut.append(k)
+                        else:
+                            break
+
+                    # C-terminus run of unaligned
+                    c_cut = []
+                    for k in reversed(idx_list):
+                        if not aligned_bool[k]:
+                            c_cut.append(k)
+                        else:
+                            break
+                    c_cut.reverse()
+
+                    idxs_to_remove = set(n_cut + c_cut)
+
+                    # Identify internal region
+                    start = 0
+                    while start < len(idx_list) and not aligned_bool[idx_list[start]]:
+                        start += 1
+                    end = len(idx_list) - 1
+                    while end >= 0 and not aligned_bool[idx_list[end]]:
+                        end -= 1
+                    if start < end:
+                        run = []
+                        internal_runs = []
+                        for pos in idx_list[start : end + 1]:
+                            if not aligned_bool[pos]:
+                                run.append(pos)
+                            else:
+                                if run:
+                                    internal_runs.append(run)
+                                    run = []
+                        if run:
+                            internal_runs.append(run)
+
+                        for run_idx_list in internal_runs:
+                            if len(run_idx_list) < int(min_loop_length):
+                                continue
+                            residues_in_run = [polymer_positions[k][1] for k in run_idx_list]
+                            run_conf = float(
+                                np.mean([_mean_residue_bfactor(r) for r in residues_in_run])
+                            )
+                            if run_conf < float(confidence_threshold):
+                                idxs_to_remove.update(run_idx_list)
+
+                    indices_to_remove_by_chain[cid].update(idxs_to_remove)
+
+            else:
+                # Default: define core by reference-termini anchors (no internal removals).
+                # Pick, per chain, the target residues aligned to the smallest and largest
+                # reference indices; keep the contiguous span between them. Trim only termini.
+                default_mode = True
+                default_run_spans = []  # (start,end) terminal spans to drop across all chains
+
+                for cid, idx_list in per_chain_indices.items():
+                    if not idx_list:
+                        continue
+
+                    core = _term_anchored_core(mapping_pairs, idx_list)
+                    if core is None:
+                        # Nothing aligned to this chain → drop full chain slice
+                        for k in idx_list:
+                            indices_to_remove_by_chain[cid].add(k)
+                        default_run_spans.append((idx_list[0], idx_list[-1]))
+                        _dbg(debug, "[default-core] chain {}: no aligned anchors; dropping {}..{}", cid, idx_list[0], idx_list[-1])
+                        continue
+
+                    core_start, core_end = core
+
+                    chain_set = set(idx_list)
+                    try:
+                        r_min, t_at_rmin = min(
+                            ((r, t) for (r, t) in mapping_pairs if t in chain_set),
+                            key=lambda x: x[0],
+                        )
+                        r_max, t_at_rmax = max(
+                            ((r, t) for (r, t) in mapping_pairs if t in chain_set),
+                            key=lambda x: x[0],
+                        )
+                        _dbg(
+                            debug,
+                            "[default-core] chain {}: anchors ref[min={}, max={}] → tgt[{}..{}] | core {}..{}",
+                            cid,
+                            r_min,
+                            r_max,
+                            t_at_rmin,
+                            t_at_rmax,
+                            core_start,
+                            core_end,
+                        )
+                    except Exception:
+                        pass
+
+                    chain_pairs_tgt_sorted = sorted(
+                        [(r, t) for (r, t) in mapping_pairs if t in chain_set],
+                        key=lambda x: x[1],
+                    )
+
+                    if chain_pairs_tgt_sorted:
+                        c_start2, c_end2, info2, dropped = _clip_terminal_seed_hits_for_chain(
+                            chain_pairs_tgt_sorted, ref_poly_len, label=f"{model}:{cid}"
+                        )
+                        if (
+                            c_start2 is not None
+                            and c_end2 is not None
+                            and info2.get("decision", "").startswith("clip_")
+                        ):
+                            _dbg(
+                                debug,
+                                "[foldseek-core] model {} chain {}: {} | anchor_core {}..{} -> pruned_core {}..{} (dropped {})",
+                                model,
+                                cid,
+                                info2.get("decision"),
+                                core_start,
+                                core_end,
+                                c_start2,
+                                c_end2,
+                                len(dropped),
+                            )
+                            core_start, core_end = c_start2, c_end2
+                        elif c_start2 is not None and c_end2 is not None:
+                            _dbg(
+                                debug,
+                                "[foldseek-core] model {} chain {}: {} | keeping anchor_core {}..{}",
+                                model,
+                                cid,
+                                info2.get("decision"),
+                                core_start,
+                                core_end,
+                            )
+
+                    core_start = max(core_start, idx_list[0])
+                    core_end = min(core_end, idx_list[-1])
+                    if core_start > core_end:
+                        core_start, core_end = core
+
+                    if core_start > idx_list[0]:
+                        for k in range(idx_list[0], core_start):
+                            indices_to_remove_by_chain[cid].add(k)
+                        default_run_spans.append((idx_list[0], core_start - 1))
+
+                    if core_end < idx_list[-1]:
+                        for k in range(core_end + 1, idx_list[-1] + 1):
+                            indices_to_remove_by_chain[cid].add(k)
+                        default_run_spans.append((core_end + 1, idx_list[-1]))
+
+            unaligned_regions = []
+            to_remove_by_chain = {}
+            for cid, idxs in indices_to_remove_by_chain.items():
+                if not idxs:
+                    continue
+                sorted_idxs = sorted(idxs)
+                residues_for_chain = []
+                start_idx = sorted_idxs[0]
+                prev_idx = start_idx
+                for idx in sorted_idxs[1:]:
+                    if idx != prev_idx + 1:
+                        start_res = polymer_positions[start_idx][1]
+                        end_res = polymer_positions[prev_idx][1]
+                        unaligned_regions.append(
+                            (cid, start_res.id[1], end_res.id[1])
+                        )
+                        start_idx = idx
+                    prev_idx = idx
+                # flush final range
+                start_res = polymer_positions[start_idx][1]
+                end_res = polymer_positions[prev_idx][1]
+                unaligned_regions.append((cid, start_res.id[1], end_res.id[1]))
+
+                for idx in sorted_idxs:
+                    residues_for_chain.append(polymer_positions[idx][1])
+                to_remove_by_chain[cid] = residues_for_chain
+
+            # Planned trimming report
+            if default_mode:
+                try:
+                    default_drop_total = sum(
+                        (end - start + 1) for start, end in default_run_spans
+                    )
+                    _dbg(
+                        debug,
+                        "[trim] mode='default' (keep contiguous aligned core; trim termini only) | drop_total={}",
+                        default_drop_total,
+                    )
+                    _dbg(
+                        debug,
+                        "[trim] unaligned regions (count={}): {}",
+                        len(default_run_spans),
+                        default_run_spans,
+                    )
+                except Exception:
+                    pass
+
+            try:
+                _dbg(
+                    debug,
+                    "[trim] unaligned regions by chain (count={}): {}",
+                    len(unaligned_regions),
+                    unaligned_regions,
+                )
+            except Exception:
+                pass
+
+            try:
+                drop_by_chain = {}
+                for (chain_id, start_idx, end_idx) in unaligned_regions:
+                    drop_by_chain.setdefault(chain_id, 0)
+                    drop_by_chain[chain_id] += (end_idx - start_idx + 1)
+                for ch, n in drop_by_chain.items():
+                    _dbg(debug, "[trim] chain {}: dropping {} residues", ch, n)
+            except Exception:
+                pass
+
+            if dry_run:
+                _dbg(debug, "[trim] dry_run=True — skipping structure mutation for model {}", model)
+            else:
+                # Apply deletions on the correct chain objects
+                chains_map = {c.id: c for c in structure.get_chains()}
+                for cid, residues in to_remove_by_chain.items():
+                    chain_obj = chains_map.get(cid)
+                    if not chain_obj or not residues:
+                        continue
+                    for res in residues:
+                        chain_obj.detach_child(res.id)
+
+                try:
+                    new_total = sum(1 for _ in structure.get_residues())
+                    _dbg(debug, "[post] model {} residues after trim: {}", model, new_total)
+                except Exception:
+                    pass
+
+        # Refresh sequences once at the end
         self.getModelsSequences()
 
     def trimByRanges(self, ranges, renumber=False, verbose=True):
@@ -13330,98 +14221,3 @@ def _readRosettaScoreFile(score_file, indexing=False, skip_empty=False):
         scores_df = scores_df.set_index(["Model", "Pose"])
 
     return scores_df
-
-def _getAlignedResiduesBasedOnStructuralAlignment(
-    ref_struct, target_struct, max_ca_ca=5.0, verbose=False
-):
-    """
-    Return a sequence string with aligned residues based on a structural alignment. All residues
-    not structurally aligned are returned as '-'.
-
-    Parameters
-    ==========
-    ref_struct : str
-        Reference structure
-    target_struct : str
-        Target structure
-    max_ca_ca : float
-        Maximum CA-CA distance to be considered aligned
-    verbose : bool
-        Print basic alignment diagnostics (sequence lengths, CA counts, mapped residues).
-
-    Returns
-    =======
-    aligned_residues : str
-        Full-length sequence string containing only aligned residues.
-    """
-
-    # Get sequences
-    r_sequence = "".join(
-        [
-            _three_to_one(r.resname)
-            for r in ref_struct.get_residues()
-            if r.id[0] == " "
-        ]
-    )
-    t_sequence = "".join(
-        [
-            _three_to_one(r.resname)
-            for r in target_struct.get_residues()
-            if r.id[0] == " "
-        ]
-    )
-
-    # Get alpha-carbon coordinates
-    r_ca_coord = np.array([a.coord for a in ref_struct.get_atoms() if a.name == "CA"])
-    t_ca_coord = np.array(
-        [a.coord for a in target_struct.get_atoms() if a.name == "CA"]
-    )
-
-    if verbose:
-        print(
-            "[getAlignedResidues] "
-            f"ref_len={len(r_sequence)} target_len={len(t_sequence)} "
-            f"ref_CA={len(r_ca_coord)} target_CA={len(t_ca_coord)} "
-            f"max_ca_ca={max_ca_ca}"
-        )
-
-    # Map residues based on a CA-CA distances
-    D = distance_matrix(t_ca_coord, r_ca_coord)  # Calculate CA-CA distance matrix
-    D = np.where(D <= max_ca_ca, D, np.inf)  # < Cap matrix to max_ca_ca
-
-    # Map residues to the closest CA-CA distance
-    mapping = {}
-
-    # Start mapping from closest distance avoiding double assignments
-    while not np.isinf(D).all():
-        i, j = np.unravel_index(D.argmin(), D.shape)
-        mapping[i] = j
-        D[i].fill(np.inf)  # This avoids double assignments
-        D[:, j].fill(np.inf)  # This avoids double assignments
-
-    if verbose:
-        print(
-            "[getAlignedResidues] "
-            f"mapped_pairs={len(mapping)} "
-            f"unmapped_target={len(t_sequence) - len(mapping)}"
-        )
-
-    # Create alignment based on the structural alignment mapping
-    aligned_residues = []
-    for i, r in enumerate(t_sequence):
-        if i in mapping:
-            aligned_residues.append(r)
-        else:
-            aligned_residues.append("-")
-
-    # Join list to get aligned sequences
-    aligned_residues = "".join(aligned_residues)
-
-    if verbose:
-        aligned_count = sum(1 for c in aligned_residues if c != "-")
-        print(
-            "[getAlignedResidues] "
-            f"aligned_residues={aligned_count} total_target={len(aligned_residues)}"
-        )
-
-    return aligned_residues
