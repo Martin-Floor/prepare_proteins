@@ -50,6 +50,23 @@ class sequenceModels:
                 "sequences_fasta must be a string or a dictionary containing the sequences!"
             )
 
+        standard_aminoacids = set("ACDEFGHIKLMNPQRSTVWY")
+        non_standard = {}
+        for name, sequence in self.sequences.items():
+            cleaned_sequence = "".join(sequence.split()).upper()
+            invalid_chars = {char for char in cleaned_sequence if char not in standard_aminoacids}
+            if invalid_chars:
+                non_standard[name] = sorted(invalid_chars)
+
+        if non_standard:
+            issues = ", ".join(
+                f"{model}: {''.join(chars)}" for model, chars in non_standard.items()
+            )
+            warnings.warn(
+                f"Sequences contain non-standard amino acid codes — {issues}",
+                UserWarning,
+            )
+
         self.sequences_names = list(self.sequences.keys())
 
     def setUpAlphaFold(
