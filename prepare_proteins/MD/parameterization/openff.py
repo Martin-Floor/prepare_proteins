@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 import shutil
 from typing import Any, Dict, Iterable, List, Mapping, Optional
@@ -148,10 +146,6 @@ class OpenFFBackend(ParameterizationBackend):
 
         # ---- Process each ligand residue group
         ligand_molecules: Dict[str, Molecule] = {}
-        ligand_atom_names: Dict[str, List[List[str]]] = {}
-        ligand_pdb_metadata: Dict[str, Dict[str, Any]] = {}
-        ligand_off_atom_names: Dict[str, List[str]] = {}
-        enable_asserts = bool(int(os.environ.get("PP_LIGAND_NAME_ASSERTS", "0")))
         for resname, residue_specs in ligand_residues.items():
             # Require a user-provided total charge for clarity and validation
             residue_charge = self._find_residue_charge(resname, provided_charges)
@@ -186,21 +180,6 @@ class OpenFFBackend(ParameterizationBackend):
             pose_path = pack_dir / f"{resname}.pdb"
             first_residue = self._resolve_residue(modeller, residue_specs[0])
             first_topology, first_positions = write_residue_pdb(modeller, first_residue, str(pose_path))
-            first_atoms = list(first_topology.atoms())
-            # Preserve original atom naming to carry through AMBER export
-            orig_names = [atom.name for atom in first_atoms]
-            ligand_atom_names[resname] = [orig_names]
-            orig_name_path = pack_dir / f"{resname}_orig_atom_names.txt"
-            orig_name_path.write_text("\n".join(orig_names))
-            (pack_dir / f"{resname}_orig_atom_names_0.txt").write_text("\n".join(orig_names))
-            ligand_pdb_metadata[resname] = {
-                "resname": resname,
-                "pdb_atom_names": orig_names,
-                "pdb_elements": [
-                    getattr(getattr(atom, "element", None), "symbol", None) for atom in first_atoms
-                ],
-            }
-
             # Cache
             offmol_path = pack_dir / f"{resname}.offmol.json"
             base_ligand: Optional[Molecule] = None
@@ -270,46 +249,7 @@ class OpenFFBackend(ParameterizationBackend):
 
             # Persist cache
             offmol_path.write_text(base_ligand.to_json())
-            pdb_meta = ligand_pdb_metadata.get(resname)
-            if pdb_meta:
-                pdb_names = pdb_meta.get("pdb_atom_names") or []
-                if len(pdb_names) != base_ligand.n_atoms:
-                    warnings.warn(
-                        f"[prepare_proteins] Skipping atom-index map for {resname}: "
-                        f"{len(pdb_names)} PDB atoms vs {base_ligand.n_atoms} OFF atoms.",
-                        RuntimeWarning,
-                    )
-                else:
-                    atom_index_map = {idx: idx for idx in range(base_ligand.n_atoms)}
-                    off_names_in_pdb_order: List[Optional[str]] = [None] * base_ligand.n_atoms
-                    for off_idx, pdb_idx in atom_index_map.items():
-                        if off_idx < 0 or off_idx >= base_ligand.n_atoms:
-                            raise ValueError(
-                                f"Ligand {resname}: atom map entry {off_idx} outside OFF atom range."
-                            )
-                        try:
-                            pdb_name = pdb_names[pdb_idx]
-                        except (TypeError, IndexError):
-                            raise ValueError(
-                                f"Ligand {resname}: atom map references missing PDB atom index {pdb_idx}."
-                            ) from None
-                        if not pdb_name:
-                            raise ValueError(
-                                f"Ligand {resname}: missing atom name for PDB atom index {pdb_idx}."
-                            )
-                        off_names_in_pdb_order[off_idx] = pdb_name
-                    if any(name is None for name in off_names_in_pdb_order):
-                        raise ValueError(
-                            f"Ligand {resname}: atom index map incomplete; cannot label all atoms."
-                        )
-                    for off_atom, new_name in zip(base_ligand.atoms, off_names_in_pdb_order):
-                        off_atom.name = new_name
-                    base_ligand.properties.setdefault("residue_name", resname)
-                    pdb_meta["atom_index_map"] = atom_index_map
-                    pdb_meta["off_names_in_pdb_order"] = off_names_in_pdb_order
-                    ligand_off_atom_names[resname] = off_names_in_pdb_order
-                    metadata_path = pack_dir / f"{resname}_pdb_atom_map.json"
-                    metadata_path.write_text(json.dumps(pdb_meta, indent=2))
+            base_ligand.properties.setdefault("residue_name", resname)
 
             # ---- Validate user-provided total charge vs formal charge from the molecule
             try:
@@ -369,9 +309,6 @@ class OpenFFBackend(ParameterizationBackend):
                     ligand_positions = first_positions
                 else:
                     _, ligand_positions = extract_residue_subsystem(modeller, residue)
-                    base_name_set = ligand_atom_names[resname][0]
-                    ligand_atom_names[resname].append(list(base_name_set))
-                    (pack_dir / f"{resname}_orig_atom_names_{idx}.txt").write_text("\n".join(base_name_set))
 
                 coords_angstrom = np.asarray(ligand_positions.value_in_unit(u.angstrom), dtype=float)
                 if coords_angstrom.shape[0] != base_ligand.n_atoms:
@@ -399,33 +336,6 @@ class OpenFFBackend(ParameterizationBackend):
                 modeller.delete(residues_to_delete)
                 for ligand_instance, ligand_positions in ligand_entries:
                     lig_top_omm = ligand_instance.to_topology().to_openmm()
-                    off_names_in_pdb_order = ligand_off_atom_names.get(resname)
-                    if off_names_in_pdb_order:
-                        atoms_list = list(lig_top_omm.atoms())
-                        need_patch = False
-                        for atom in atoms_list:
-                            atom_name = getattr(atom, "name", None)
-                            if not atom_name or not str(atom_name).strip():
-                                need_patch = True
-                                break
-                        if need_patch:
-                            if len(atoms_list) != len(off_names_in_pdb_order):
-                                raise ValueError(
-                                    f"Ligand {resname}: cannot backfill atom names "
-                                    f"({len(atoms_list)} OpenMM atoms vs {len(off_names_in_pdb_order)} OFF names)."
-                                )
-                            for atom, new_name in zip(atoms_list, off_names_in_pdb_order):
-                                atom.name = new_name
-                        if enable_asserts:
-                            assert [
-                                getattr(atom, "name", None) for atom in lig_top_omm.atoms()
-                            ] == off_names_in_pdb_order, (
-                                f"Ligand {resname}: OpenMM topology lost atom names before insertion."
-                            )
-                    for chain in lig_top_omm.chains():
-                        for res in chain.residues():
-                            if sum(1 for _ in res.atoms()) == ligand_instance.n_atoms:
-                                res.name = resname
                     modeller.add(lig_top_omm, ligand_positions)
                 # snapshot the modified modeller for inspection
                 self._write_snapshot(pack_dir / f"{resname}_rebuilt.pdb", modeller)
@@ -469,61 +379,6 @@ class OpenFFBackend(ParameterizationBackend):
 
         # ---- Export AMBER files
         structure = pmd.openmm.load_topology(modeller.topology, export_system, xyz=modeller.positions)
-        if options.get("preserve_ligand_atom_names", True):
-            def _load_orig_name_sets(resname: str) -> List[List[str]]:
-                pack_dir = Path(parameters_folder) / f"{resname}_parameters"
-                if not pack_dir.exists():
-                    return []
-
-                def _parse_idx(path: Path) -> int:
-                    stem = path.stem
-                    idx_token = stem.rsplit("_", 1)[-1]
-                    try:
-                        return int(idx_token)
-                    except ValueError:
-                        return 0
-
-                name_sets: List[List[str]] = []
-                for path in sorted(pack_dir.glob(f"{resname}_orig_atom_names_*.txt"), key=_parse_idx):
-                    names = [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
-                    if names:
-                        name_sets.append(names)
-
-                if not name_sets:
-                    base_file = pack_dir / f"{resname}_orig_atom_names.txt"
-                    if base_file.exists():
-                        names = [ln.strip() for ln in base_file.read_text().splitlines() if ln.strip()]
-                        if names:
-                            name_sets.append(names)
-                return name_sets
-
-            for rname, off_mol in ligand_molecules.items():
-                name_sets = ligand_atom_names.get(rname)
-                if not name_sets:
-                    name_sets = _load_orig_name_sets(rname)
-                if not name_sets:
-                    continue
-
-                matching_residues = [res for res in structure.residues if res.name.strip().upper() == rname]
-                if not matching_residues:
-                    continue
-
-                for idx, res in enumerate(matching_residues):
-                    source_names = name_sets[idx] if idx < len(name_sets) else name_sets[0]
-                    if len(res.atoms) != len(source_names):
-                        continue
-                    already_ok = all(
-                        (getattr(atom, "name", None) or "").strip() == (new_name or "")
-                        for atom, new_name in zip(res.atoms, source_names)
-                    )
-                    if not already_ok:
-                        for atom, new_name in zip(res.atoms, source_names):
-                            atom.name = new_name
-                    if enable_asserts:
-                        assert [getattr(atom, "name", None) for atom in res.atoms()] == source_names, (
-                            f"Ligand {rname}: ParmEd residue lost atom names."
-                        )
-                    res.name = rname
         output_root = Path(parameters_folder)
         output_root.mkdir(parents=True, exist_ok=True)
         prmtop_path = output_root / f"{openmm_md.pdb_name}.prmtop"
