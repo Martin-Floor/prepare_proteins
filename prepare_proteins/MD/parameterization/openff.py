@@ -73,6 +73,7 @@ class OpenFFBackend(ParameterizationBackend):
         # ---- Options and imports
         options = dict(self.options)
         options.update(kwargs)
+        strict_atom_name_check = bool(options.get("strict_atom_name_check", True))
 
         # We currently only prepare full systems in this backend
         if options.get("build_full_system") is False:
@@ -301,7 +302,7 @@ class OpenFFBackend(ParameterizationBackend):
 
             # ---- Replace each occurrence of the residue with the templated ligand (atom-count check)
             residues_to_delete = []
-            ligand_entries: List[tuple[Molecule, Any]] = []
+            ligand_entries: List[tuple[Molecule, Any, List[str], Any]] = []
 
             for idx, residue_spec in enumerate(residue_specs):
                 residue = self._resolve_residue(modeller, residue_spec)
@@ -309,6 +310,8 @@ class OpenFFBackend(ParameterizationBackend):
                     ligand_positions = first_positions
                 else:
                     _, ligand_positions = extract_residue_subsystem(modeller, residue)
+
+                pdb_order_names = [a.name for a in residue.atoms()]
 
                 coords_angstrom = np.asarray(ligand_positions.value_in_unit(u.angstrom), dtype=float)
                 if coords_angstrom.shape[0] != base_ligand.n_atoms:
@@ -330,12 +333,48 @@ class OpenFFBackend(ParameterizationBackend):
                 ligand_instance.partial_charges = base_ligand.partial_charges
 
                 residues_to_delete.append(residue)
-                ligand_entries.append((ligand_instance, ligand_positions))
+                ligand_entries.append((ligand_instance, ligand_positions, pdb_order_names, residue))
 
             if residues_to_delete:
                 modeller.delete(residues_to_delete)
-                for ligand_instance, ligand_positions in ligand_entries:
-                    lig_top_omm = ligand_instance.to_topology().to_openmm()
+                for ligand_instance, ligand_positions, pdb_order_names, residue in ligand_entries:
+                    if len(pdb_order_names) != ligand_instance.n_atoms:
+                        raise ValueError(
+                            f"[naming] Atom count mismatch for {resname}: "
+                            f"{len(pdb_order_names)} names vs {ligand_instance.n_atoms} atoms."
+                        )
+
+                    off_atomic_numbers = [getattr(a, "atomic_number", None) for a in ligand_instance.atoms]
+                    pdb_atomic_numbers = [
+                        a.element.atomic_number if getattr(a, "element", None) else None for a in residue.atoms()
+                    ]
+
+                    mismatch_indices = [
+                        i
+                        for i, (z1, z2) in enumerate(zip(off_atomic_numbers, pdb_atomic_numbers))
+                        if (z1 is not None and z2 is not None and z1 != z2)
+                    ]
+                    if mismatch_indices:
+                        if strict_atom_name_check:
+                            raise ValueError(
+                                f"[naming] Element mismatch in OFF vs PDB order for {resname}. "
+                                "Refuse to assign names to avoid incorrect mapping."
+                            )
+                        warnings.warn(
+                            f"[prepare_proteins] OFF/PDB element mismatch for {resname} at indices {mismatch_indices}; "
+                            "continuing with supplied atom names because strict_atom_name_check=False.",
+                            RuntimeWarning,
+                        )
+
+                    atom_names_off_order = list(pdb_order_names)
+
+                    lig_top_omm = self._build_named_openmm_topology(
+                        ligand_instance,
+                        resname=resname,
+                        chain_id=residue.chain.id,
+                        residue_id=str(residue.id),
+                        atom_names_off_order=atom_names_off_order,
+                    )
                     modeller.add(lig_top_omm, ligand_positions)
                 # snapshot the modified modeller for inspection
                 self._write_snapshot(pack_dir / f"{resname}_rebuilt.pdb", modeller)
@@ -409,6 +448,47 @@ class OpenFFBackend(ParameterizationBackend):
                     ligand_sources[rname] = {"type": "smiles", **ligand_smiles_map.get(rname, {})}
             result.metadata["ligand_sources"] = ligand_sources
         return result
+
+    def _build_named_openmm_topology(
+        self,
+        off_mol: Molecule,
+        *,
+        resname: str,
+        chain_id: str,
+        residue_id: str,
+        atom_names_off_order,
+    ):
+        """
+        Create a minimal OpenMM Topology for a ligand, in OFF atom order,
+        assigning the provided atom names 1:1 to indices (no reordering).
+        """
+        from openmm.app import Topology, Element  # local import to avoid top-level dependency
+
+        top = Topology()
+        chain = top.addChain(id=str(chain_id) if chain_id is not None else None)
+        res = top.addResidue(str(resname), chain, id=str(residue_id) if residue_id is not None else None)
+
+        omm_atoms = []
+        for i, off_atom in enumerate(off_mol.atoms):
+            elem = Element.getByAtomicNumber(off_atom.atomic_number)
+            symbol = None
+            off_elem = getattr(off_atom, "element", None)
+            if off_elem is not None and hasattr(off_elem, "symbol"):
+                symbol = off_elem.symbol
+            elif elem is not None:
+                symbol = elem.symbol
+            fallback_symbol = symbol if symbol else "X"
+            nm = (
+                atom_names_off_order[i]
+                if i < len(atom_names_off_order) and atom_names_off_order[i]
+                else f"{fallback_symbol}{i+1}"
+            )
+            omm_atoms.append(top.addAtom(nm, elem, res))
+
+        for b in off_mol.bonds:
+            top.addBond(omm_atoms[b.atom1_index], omm_atoms[b.atom2_index])
+
+        return top
 
     @staticmethod
     def _remove_skip_residues(modeller: "Modeller", skip_names: Iterable[str]) -> None:
