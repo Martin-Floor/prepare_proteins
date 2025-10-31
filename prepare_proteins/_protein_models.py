@@ -4228,12 +4228,23 @@ make sure of reading the target sequences with the function readTargetSequences(
                 gif.write("OUTERBOX %s, %s, %s\n" % outerbox)
 
                 if cst_positions != None:
+                    parts = []
                     for i, position in enumerate(cst_positions[model]):
+                        parts.append(
+                            "position%s %.14f %.14f %.14f %.14f"
+                            % (
+                                i + 1,
+                                cst_x[i + 1],
+                                cst_y[i + 1],
+                                cst_z[i + 1],
+                                position[-1],
+                            )
+                        )
+                    if parts:
                         gif.write(
-                            'POSIT_CONSTRAINTS "position'
-                            + str(i + 1)
-                            + ' %.14f %.14f %.14f %.14f",\n'
-                            % (cst_x[i + 1], cst_y[i + 1], cst_z[i + 1], position[-1])
+                            "POSIT_CONSTRAINTS "
+                            + ", ".join(f'"{p}"' for p in parts)
+                            + "\n"
                         )
 
                 if mae_input:
@@ -4383,17 +4394,26 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 cst_fragments[grid][substrate]
                             ]
 
-                        for i, fragment in enumerate(cst_fragments[grid][substrate]):
+                        fragments = cst_fragments[grid][substrate]
+                        if fragments:
                             dif.write("[CONSTRAINT_GROUP:1]\n")
-                            dif.write("\tUSE_CONS position1:" + str(i + 1) + ",\n")
-                            dif.write("\tNREQUIRED_CONS ALL\n")
-                            dif.write("[FEATURE:" + str(i + 1) + "]\n")
-                            dif.write(
-                                '\tPATTERN1 "' + fragment[0] + " " + str(fragment[1])
+                            use_cons = ", ".join(
+                                [f"position{k}:{k}" for k in range(1, len(fragments) + 1)]
                             )
-                            if fragment[2]:
-                                dif.write(" include")
-                            dif.write('"\n')
+                            dif.write("\tUSE_CONS  " + use_cons + "\n")
+                            dif.write("\tNREQUIRED_CONS ALL\n")
+
+                            for i, fragment in enumerate(fragments):
+                                dif.write(f"[FEATURE:{i + 1}]\n")
+                                dif.write(
+                                    '\tPATTERN1 "'
+                                    + fragment[0]
+                                    + " "
+                                    + str(fragment[1])
+                                )
+                                if fragment[2]:
+                                    dif.write(" include")
+                                dif.write('"\n')
 
                 # Create commands
                 command = "cd " + docking_folder + "/output_models/" + grid + "\n"
