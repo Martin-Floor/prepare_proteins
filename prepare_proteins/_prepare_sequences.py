@@ -29,6 +29,7 @@ from ipywidgets import interact
 from matplotlib.lines import Line2D
 from pkg_resources import Requirement, resource_listdir, resource_stream
 import pandas as pd
+from tqdm.auto import tqdm
 
 from typing import Any, Dict
 
@@ -2745,7 +2746,13 @@ class sequenceModels:
         # Iterate through each model folder
         for model in os.listdir(bioemu_folder):
 
+            if model in {"fastas", "msas"}:
+                continue
+
             if not os.path.isdir(f"{bioemu_folder}/{model}/"):
+                continue
+
+            if model not in ref_pdb:
                 continue
 
             # Load reference structure
@@ -2816,7 +2823,13 @@ class sequenceModels:
         return rmsd
 
     def computeNativeContacts(
-        self, job_folder, bioemu_folder, native_models_folder, only_models=None
+        self,
+        job_folder,
+        bioemu_folder,
+        native_models_folder,
+        only_models=None,
+        show_smog_output=False,
+        show_progress=True,
     ):
         """
         Compute the distances between native contacts across frames for each model in the dataset.
@@ -2835,6 +2848,8 @@ class sequenceModels:
         - bioemu_folder (str): Path to BioEmu output folders, one per model (should include topology and trajectory).
         - native_models_folder (str, dict): Path to PDB folder containg the files of native models, one per model. Alternatively,
                                             a dictionary containing the paths to each native PDB file.
+        - show_smog_output (bool, optional): Whether to display SMOG2 stdout/stderr. Defaults to False.
+        - show_progress (bool, optional): Whether to display a progress bar. Defaults to True.
 
         Returns:
         - df_distances (dict): Dictionary with model names as keys and DataFrames as values.
@@ -2894,7 +2909,26 @@ class sequenceModels:
         df_distances = {}
 
         models = list(self)  # Ensures tqdm knows the total number of items
-        for model in tqdm(models, desc="Computing native contacts", ncols=100):
+        progress_iter = tqdm(
+            models,
+            desc="Computing native contacts",
+            disable=not show_progress,
+            dynamic_ncols=True,
+        )
+
+        if show_progress and hasattr(progress_iter, "container"):
+            try:
+                progress_iter.container.layout.width = "100%"
+                for child in getattr(progress_iter.container, "children", []):
+                    if hasattr(child, "layout"):
+                        child.layout.width = "100%"
+                        # Allow widget to expand if the notebook supports flex layouts
+                        if hasattr(child.layout, "flex"):
+                            child.layout.flex = "1 1 auto"
+            except Exception:
+                pass
+
+        for model in progress_iter:
 
             if not os.path.isdir(f"{bioemu_folder}/{model}/"):
                 continue
@@ -2918,8 +2952,22 @@ class sequenceModels:
             if not os.path.exists(contacts_file):
                 filtered_pdb = os.path.join(model_folder, f"{model}.pdb")
                 remove_hydrogens_and_oxt(native_models[model], filtered_pdb)
-                command = f"cd {model_folder} && smog2 -i {model}.pdb -s {model} -CA"
-                os.system(command)
+                cmd = ["smog2", "-i", f"{model}.pdb", "-s", model, "-CA"]
+                result = subprocess.run(
+                    cmd,
+                    cwd=model_folder,
+                    stdout=None if show_smog_output else subprocess.PIPE,
+                    stderr=None if show_smog_output else subprocess.PIPE,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    stderr_msg = result.stderr if result.stderr else ""
+                    stdout_msg = result.stdout if result.stdout else ""
+                    raise RuntimeError(
+                        f"SMOG2 failed for model '{model}' with exit code {result.returncode}.\n"
+                        f"stdout:\n{stdout_msg}\n"
+                        f"stderr:\n{stderr_msg}"
+                    )
 
             native_contacts = readNC(contacts_file)
 
@@ -2975,6 +3023,9 @@ class sequenceModels:
             df["Frame"] = range(D_all.shape[0])  # Frame 0 = native
             df = df.set_index("Frame")
             df_distances[model] = df
+
+        if show_progress:
+            progress_iter.close()
 
         return df_distances
 
