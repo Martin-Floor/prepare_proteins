@@ -4332,13 +4332,31 @@ make sure of reading the target sequences with the function readTargetSequences(
                 energies.
             use_new_version (bool): Reserved flag for downstream consumers that
                 require alternate command generation (currently unused).
-            cst_fragments (dict[str, dict[str, tuple]] | None): Optional mapping
-                from grid name to ligand name to tuples describing positional
+            cst_fragments (dict[str, dict[str, tuple | list[tuple]]] | None):
+                Optional mapping from grid name to ligand name to either a single
+                constraint tuple or an iterable of tuples describing positional
                 constraints in the form `(smarts, feature_index, include_flag)`.
             skip_finished (bool | None): When True, skip docking runs that
                 already produced a `_pv.maegz` output file.
             only_ligands (list[str] | str | None): Optional subset of ligand
                 names to include from `ligands_folder`.
+
+        Example:
+            >>> cst_fragments = {
+            ...     "ProteinA": {
+            ...         "ligand1": [
+            ...             ("O=C[O-]", 2, True),
+            ...             ("[H]C([H])[H]", 2, True),
+            ...         ],
+            ...         "ligand2": ("c1ccccc1", 4, False),
+            ...     }
+            ... }
+            >>> jobs = models.setUpGlideDocking(
+            ...     "docking_runs", "grids", "ligands", cst_fragments=cst_fragments
+            ... )
+            This generates a Glide input where the `USE_CONS` line references two
+            grid positions and the `PATTERN1` entries match the provided SMARTS
+            strings and indices.
 
         Returns:
             list[str]: Shell command strings that execute Glide docking jobs for
@@ -4476,7 +4494,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 jobs.append(command)
 
         return jobs
-    
+
     def setUprDockGrid(
         self,
         grid_folder,
@@ -4510,17 +4528,17 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if not os.path.exists(grid_folder + "/output_models"):
             os.mkdir(grid_folder + "/output_models")
-        
+
         for model in self.models_names:
             if not os.path.exists(grid_folder + "/output_models/" + model):
                 os.mkdir(grid_folder + "/output_models/"+model)
-        
+
         if isinstance(models, str):
             models = [models]
 
         if isinstance(exclude_models, str):
             exclude_models = [exclude_models]
-        
+
         center_string = str(center)
         strip_center = center_string.replace(" ", "")
 
@@ -4538,7 +4556,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 continue
             # Write grid input file
             with open(grid_folder + "/output_models/"+model+"/" + model + ".prm", "w") as gif:
-                
+
                 gif.write("RBT_PARAMETER_FILE_V1.00 \n")
                 gif.write("TITLE rdock \n")
                 gif.write(" \n")
@@ -4568,7 +4586,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 gif.write("END_SECTION\n")
 
 
-            command = 'module load rdock \n'    
+            command = 'module load rdock \n'
             command += "cd " + grid_folder + "/output_models/"+model+"\n"
 
             # Add grid generation command
@@ -4578,7 +4596,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             jobs.append(command)
 
         return jobs
-    
+
     def setUprDockDocking(
         self,
         grid_folder,
@@ -4601,16 +4619,16 @@ make sure of reading the target sequences with the function readTargetSequences(
         n : int
             Number of poses to generate
         """
-       
+
         if isinstance(models, str):
             models = [models]
 
         if isinstance(exclude_models, str):
             exclude_models = [exclude_models]
-        
+
         #Get the ligand in the ligand folder
-        ### ADD to get only .sd 
-        folder_path = str(ligand_folder)  
+        ### ADD to get only .sd
+        folder_path = str(ligand_folder)
         ligand_files = [f for f in os.listdir(folder_path) if f.endswith(".sd")]
 
         # Create grid input files
@@ -4618,7 +4636,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         for model in self.models_names:
             for ligand in ligand_files:
 
-                command = 'module load rdock \n'    
+                command = 'module load rdock \n'
                 command += "cd " + grid_folder + "/output_models/"+model+"\n"
 
                 # Add docking command
@@ -4627,7 +4645,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 jobs.append(command)
 
         return jobs
-    
+
     def analyseRdockDockings(self, docking_folder,protocol="score"):
         """
         Analyse rDock calculations. Only protocol "score" works for now
@@ -4649,14 +4667,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Create grid job folders
             if not os.path.exists(storage_path):
                 os.mkdir(storage_path)
-            
+
             data = []
             for model in self.models_names:
-                
+
                 for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
-                    folder_path_model = docking_folder +"output_models/" + model 
+                    folder_path_model = docking_folder +"output_models/" + model
                     file_path = os.path.join(folder_path_model, filename)
-                    
+
                     counter = 1
                     score_bool = False
                     conformer_bool = False
@@ -4700,11 +4718,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Create grid job folders
             if not os.path.exists(storage_path):
                 os.mkdir(storage_path)
-            
-            
+
+
             for model in self.models_names:
                 for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
-                    folder_path_model = docking_folder +"output_models/" + model 
+                    folder_path_model = docking_folder +"output_models/" + model
                     file_path = os.path.join(folder_path_model, filename)
 
                     ligand = filename
@@ -13154,22 +13172,22 @@ make sure of reading the target sequences with the function readTargetSequences(
         It can be use to predict ligand binding with multiple ligands.
         Additionally, it can be used to predict ligand binding affinity, but for just 1 ligand
         Ligand/s should be given in SMILEs format.
-        
+
         To run in MN5 you need to precompute the MSA with AF3 or some other method!!!
 
         Parameters:
         - diffusion_samples: int. The number of diffusion samples to use for prediction.
         - use_msa_server: Bool. Whether to use the MSA server for sampling, it auto-generate the MSA using the mmseqs2 server (not for MN5) because no internet.
         - msa_path: str. Path to the folder with the .a3m files.  It should contain the pre-computed MSA for the proteins. You need to run AF3 first (or something else) to generate the MSA
-            The name of the .a3m files should be the name of the model. 
+            The name of the .a3m files should be the name of the model.
             To run single sequence mode input "empty" for msa_path.
             !!Not tested!!
-        - sampling_steps: int. The number of sampling steps to use for prediction. 
-        - recycling_steps: int. The number of recycling steps to use for prediction. 
-            AF3 uses by default 25 diffusion_samples and 10 recycling_steps. 
-        - use_potentials: bool. Whether to use the potentials for prediction. Set to True should improve performance, but uses more memmory.   
-        - ligands (list[str]): list of ligands SMILEs 
-        - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed 
+        - sampling_steps: int. The number of sampling steps to use for prediction.
+        - recycling_steps: int. The number of recycling steps to use for prediction.
+            AF3 uses by default 25 diffusion_samples and 10 recycling_steps.
+        - use_potentials: bool. Whether to use the potentials for prediction. Set to True should improve performance, but uses more memmory.
+        - ligands (list[str]): list of ligands SMILEs
+        - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed
 
         chains : None, str, iterable or dict, optional
             Chain selector per model used to pick the sequence for the Boltz2
@@ -13179,9 +13197,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         - jobs (list[str]): command string per batch per model
         """
 
-        # Need to write yaml, and then need to write jobs 
+        # Need to write yaml, and then need to write jobs
         os.makedirs(job_folder, exist_ok=True)
-        
+
         for model in self.models_names:
             if not os.path.exists(job_folder + "/" +model):
                 os.mkdir(job_folder+"/"+model)
@@ -13211,7 +13229,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 iyf.write('  - protein:\n')
                 iyf.write(f'      id: [{chain_id}]\n')
                 iyf.write(f'      sequence: {sequence}\n')
-                
+
                 if use_msa_server == False:
                     iyf.write(f'      msa: {msa_path}+{model}.a3m\n')
 
@@ -13234,8 +13252,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder+"/"+model
 
             command = f"cd {pdb_path} \n"
-            command +=  "boltz predict boltz.yaml " 
-            
+            command +=  "boltz predict boltz.yaml "
+
             if use_msa_server == True:
                 command += "--use_msa_server "
             else:
@@ -13256,7 +13274,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-            
+
     def saveModels(
         self,
         output_folder,
