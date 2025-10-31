@@ -4096,19 +4096,43 @@ make sure of reading the target sequences with the function readTargetSequences(
         skip_finished=False,
     ):
         """
-        Setup grid calculation for each model.
+        Generate Glide grid input files and return the shell commands required to
+        launch each grid calculation.
 
-        Parameters
-        ==========
-        grid_folder : str
-            Path to grid calculation folder
-        center_atoms : tuple
-            Atoms to center the grid box.
-        cst_positions : dict
-            atom and radius for cst position for each model:
-            cst_positions = {
-            model : ((chain_id, residue_index, atom_name), radius), ...
-            }
+        Args:
+            grid_folder (str): Directory where input/output subfolders and grid
+                files will be created.
+            center_atoms (dict[str, tuple]): Mapping from model name to either
+                (x, y, z) coordinates or a `(chain_id, residue_index, atom_name)`
+                triplet whose coordinates are used as the grid center.
+            innerbox (tuple[int, int, int]): Dimensions of the inner search box
+                in Glide grid units (angstroms).
+            outerbox (tuple[int, int, int]): Dimensions of the outer search box
+                in Glide grid units (angstroms).
+            useflexmae (bool): Whether to request a flexible receptor MAE in the
+                generated input file.
+            peptide (bool): Flag the receptor as a peptide during grid
+                generation.
+            mae_input (bool): If True, receptors are written and referenced as
+                MAE files; otherwise PDB files are used.
+            cst_positions (dict[str, list[tuple]] | None): Optional mapping from
+                model name to an iterable of `((chain_id, residue_index,
+                atom_name), radius)` tuples used to generate Glide positional
+                constraints.
+            models (list[str] | str | None): Optional subset of model identifiers
+                to process.
+            exclude_models (list[str] | str | None): Optional collection of model
+                identifiers that should be skipped.
+            skip_finished (bool): When True, skip models that already have a
+                corresponding grid output file in `grid_folder/output_models`.
+
+        Returns:
+            list[str]: Shell command strings that execute Glide grid
+            calculations for the selected models.
+
+        Raises:
+            ValueError: If a requested grid center or positional constraint atom
+            cannot be found, or if inner/outer box dimensions are not integers.
         """
 
         # Create grid job folders
@@ -4287,27 +4311,38 @@ make sure of reading the target sequences with the function readTargetSequences(
         only_ligands=None,
     ):
         """
-        Set docking calculations for all the proteins and set of ligands located
-        grid_folders and ligands_folder folders, respectively. The ligands must be provided
-        in MAE format.
+        Build Glide docking input files for every grid/ligand combination and
+        return the commands needed to execute those dockings.
 
-        Parameters
-        ==========
-        docking_folder : str
+        Args:
+            docking_folder (str): Base directory where docking inputs and
+                results will be written.
+            grids_folder (str): Directory that contains previously generated
+                Glide grid ZIP archives under `output_models/`.
+            ligands_folder (str): Directory containing ligand structures in MAE
+                format.
+            models (list[str] | str | None): Optional set of model identifiers to
+                consider; others will be skipped.
+            poses_per_lig (int): Number of poses Glide should keep for each
+                ligand.
+            precision (str): Glide precision mode (e.g., `"SP"` or `"XP"`).
+            use_ligand_charges (bool): If True, request the use of ligand MAE
+                charges during docking.
+            energy_by_residue (bool): If True, write per-residue interaction
+                energies.
+            use_new_version (bool): Reserved flag for downstream consumers that
+                require alternate command generation (currently unused).
+            cst_fragments (dict[str, dict[str, tuple]] | None): Optional mapping
+                from grid name to ligand name to tuples describing positional
+                constraints in the form `(smarts, feature_index, include_flag)`.
+            skip_finished (bool | None): When True, skip docking runs that
+                already produced a `_pv.maegz` output file.
+            only_ligands (list[str] | str | None): Optional subset of ligand
+                names to include from `ligands_folder`.
 
-        ligands_folder : str
-            Path to the folder containing the ligands to dock.
-        residues : dict
-            Dictionary with the residues for each model near which to position the
-            ligand as the starting pose.
-        cst_fragments: dict
-            Dictionary with a tuple composed by 3 elements: first, the fragment of the ligand
-            to which you want to make the bias (in SMARTS pattern nomenclature), the number of feature,
-            if you only have 1 constraint on the grid and in the ligand, it will be 1, and True/False
-            depending on if you want to include that constraint inside the grid constraint (True) or
-            exclude it (False).
-            {'model': {'ligand': ('[fragment]', feature, True) ...
-            }
+        Returns:
+            list[str]: Shell command strings that execute Glide docking jobs for
+            the prepared grid/ligand combinations.
         """
 
         if isinstance(only_ligands, str):
