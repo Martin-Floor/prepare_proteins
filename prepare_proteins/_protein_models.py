@@ -16,6 +16,7 @@ import re
 import pkg_resources
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Union
 
 # --- Debug printing helper (no-op if debug=False) ---
 def _dbg(debug: bool, msg: str = "", *args):
@@ -178,6 +179,7 @@ from scipy.spatial.distance import cdist
 
 import prepare_proteins
 from . import MD, _atom_selectors, alignment, rosettaScripts
+from .analysis import find_neighbours_in_pdb
 from .MD.parameterization import get_backend
 from .MD.parameterization.utils import DEFAULT_PARAMETERIZATION_SKIP_RESIDUES
 
@@ -233,6 +235,8 @@ class proteinModels:
         Remove terminal unstructured regions from all models.
     saveModels(self, output_folder)
         Save current models into an output folder.
+    computeModelContacts(self, query_chains, **kwargs)
+        Analyse inter-chain/ligand contacts for the selected models and cache the result.
 
     Hidden Methods
     ==============
@@ -333,6 +337,7 @@ class proteinModels:
 
         self.distance_data = {}
         self.models_data = {}
+        self.models_contacts = {}
 
         # Read PDB structures into Biopython (serial loading)
         collect_memory = False
@@ -4494,6 +4499,96 @@ make sure of reading the target sequences with the function readTargetSequences(
                 jobs.append(command)
 
         return jobs
+
+    def computeModelContacts(
+        self,
+        chains: Optional[Union[str, Iterable[str], Dict[str, Iterable[str]]]] = None,
+        *,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        mode: Literal["chains", "ligands", "both"] = "both",
+        cutoff: float = 5.0,
+        second_shell: Optional[float] = None,
+        atom_scope: Literal["all", "heavy", "backbone", "sidechain"] = "heavy",
+        group_by: Literal["residue", "atom", "chain"] = "residue",
+        exclude_query_intra: bool = True,
+        include: Optional[Dict[str, Any]] = None,
+        ligand_filters: Optional[Dict[str, Any]] = None,
+        chain_filters: Optional[Dict[str, Any]] = None,
+        altloc_mode: Literal["first", "best_occ"] = "first",
+        print_chain_summary: bool = False,
+        only_residue_dict: bool = False,
+        exclude_bb_contacts: bool = False,
+        classify_bb_sc: bool = True,
+        filter_contact_classes: Optional[Set[str]] = None,
+        split_counts_by_class: bool = False,
+    ):
+        """
+        Compute neighbour contacts for the selected models and cache them.
+
+        The signature mirrors :func:`prepare_proteins.analysis.find_neighbours_in_pdb`
+        with additional ``models`` and ``chains`` arguments to control the subset
+        and chain selection analysed. By default all polymer chains in each model
+        are used.
+
+        Args:
+            chains: Optional chain selector (string, iterable, or per-model mapping)
+                restricting which chains are analysed. Defaults to all polymer chains.
+
+        Returns:
+            dict[str, dict]: Mapping of model name to the contact analysis result.
+        """
+        available_models = list(self.models_names)
+        if models is None:
+            selected_models = available_models
+        else:
+            if isinstance(models, str):
+                requested_models = [str(models)]
+            else:
+                requested_models = [str(m) for m in models]
+            missing_models = sorted(set(requested_models) - set(self.models_paths))
+            if missing_models:
+                raise ValueError(f"Models not found: {', '.join(missing_models)}")
+            selected_models = [m for m in available_models if m in requested_models]
+            for model in requested_models:
+                if model not in selected_models:
+                    selected_models.append(model)
+
+        if not selected_models:
+            raise ValueError("No models available for contact analysis.")
+
+        chain_map = self._resolve_chain_selection(chains=chains, models=selected_models)
+
+        results: Dict[str, Any] = {}
+        for model in selected_models:
+            pdb_path = self.models_paths.get(model)
+            if pdb_path is None:
+                raise ValueError(f"PDB path for model '{model}' not available.")
+            model_chains = chain_map.get(model, [])
+            if not model_chains:
+                raise ValueError(f"No chains available for model '{model}'.")
+            results[model] = find_neighbours_in_pdb(
+                pdb_path,
+                model_chains,
+                mode=mode,
+                cutoff=cutoff,
+                second_shell=second_shell,
+                atom_scope=atom_scope,
+                group_by=group_by,
+                exclude_query_intra=exclude_query_intra,
+                include=include,
+                ligand_filters=ligand_filters,
+                chain_filters=chain_filters,
+                altloc_mode=altloc_mode,
+                print_chain_summary=print_chain_summary,
+                only_residue_dict=only_residue_dict,
+                exclude_bb_contacts=exclude_bb_contacts,
+                classify_bb_sc=classify_bb_sc,
+                filter_contact_classes=filter_contact_classes,
+                split_counts_by_class=split_counts_by_class,
+            )
+
+        self.models_contacts = results
+        return results
 
     def setUprDockGrid(
         self,
