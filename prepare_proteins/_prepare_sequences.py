@@ -53,9 +53,34 @@ class sequenceModels:
 
         standard_aminoacids = set("ACDEFGHIKLMNPQRSTVWY")
         non_standard = {}
+
+        def _iterate_sequences(model_name, sequence_obj):
+            if isinstance(sequence_obj, str):
+                yield str(sequence_obj)
+                return
+            if isinstance(sequence_obj, dict):
+                for chain_id, chain_seq in sequence_obj.items():
+                    if chain_seq is None:
+                        continue
+                    yield str(chain_seq)
+                return
+            if isinstance(sequence_obj, (list, tuple)):
+                for chain_seq in sequence_obj:
+                    if chain_seq is None:
+                        continue
+                    yield str(chain_seq)
+                return
+            raise TypeError(
+                f"Sequence for model '{model_name}' must be a string, mapping, or iterable of strings."
+            )
+
         for name, sequence in self.sequences.items():
-            cleaned_sequence = "".join(sequence.split()).upper()
-            invalid_chars = {char for char in cleaned_sequence if char not in standard_aminoacids}
+            invalid_chars = set()
+            for chain_sequence in _iterate_sequences(name, sequence):
+                cleaned_sequence = "".join(chain_sequence.split()).upper()
+                invalid_chars.update(
+                    char for char in cleaned_sequence if char not in standard_aminoacids
+                )
             if invalid_chars:
                 non_standard[name] = sorted(invalid_chars)
 
@@ -811,6 +836,8 @@ class sequenceModels:
         filter_strict=False,
         filter_kwargs=None,
         return_filter=False,
+        append_model_index=False,
+        overwrite=False,
     ):
         """Collect AlphaFold 3 scores and copy top-ranking predictions as PDBs.
 
@@ -853,6 +880,16 @@ class sequenceModels:
         return_filter : bool, optional
             When ``True`` and strict filtering is enabled, include the filter
             summary dictionary as the last element of the returned tuple.
+        append_model_index : bool, optional
+            When ``True`` append an index suffix derived from the AF3 prediction
+            (sample number, seed/sample pair or ranking order) to the exported
+            file name. Defaults to ``False`` so that only the base model name is
+            used, meaning additional predictions beyond the first are skipped
+            unless this flag is enabled.
+        overwrite : bool, optional
+            When ``True`` existing files in ``output_folder`` are replaced.
+            Defaults to ``False`` which skips copying any prediction whose
+            target file already exists.
 
         Returns
         -------
@@ -1121,6 +1158,29 @@ class sequenceModels:
                     )
                     return model_name, None, warnings_local
 
+        def _derive_prediction_index(row_data, default_idx):
+            candidate_keys = ("sample", "model_sample", "prediction_index")
+            for key in candidate_keys:
+                if key in row_data:
+                    value = row_data.get(key)
+                    if pd.notna(value):
+                        try:
+                            return int(value)
+                        except (TypeError, ValueError):
+                            try:
+                                return int(float(value))
+                            except (TypeError, ValueError):
+                                continue
+            prediction_name = row_data.get("prediction_name")
+            if isinstance(prediction_name, str):
+                match = re.search(r"(\d+)$", prediction_name)
+                if match:
+                    try:
+                        return int(match.group(1))
+                    except ValueError:
+                        pass
+            return default_idx
+
         warning_messages = []
         if tasks:
             with ThreadPoolExecutor() as executor:
@@ -1167,8 +1227,9 @@ class sequenceModels:
 
         copied_paths = defaultdict(list)
         copy_tasks = []
-        reserved_paths = defaultdict(set)
         copy_warning_messages = []
+        multi_skip_warned = set()
+        scheduled_targets = set()
 
         required_index_cols = []
         for candidate in ("model", "seed", "sample"):
@@ -1196,20 +1257,36 @@ class sequenceModels:
 
             if copy_outputs:
                 base_name = _sanitize(model_name)
-                for _, row in top_df.iterrows():
+                for rank_idx, (_, row) in enumerate(top_df.iterrows(), start=1):
+                    if not append_model_index and rank_idx > 1:
+                        if model_name not in multi_skip_warned:
+                            copy_warning_messages.append(
+                                f"Multiple predictions requested for model '{model_name}' but append_model_index=False; "
+                                "only the top-ranked structure was copied."
+                            )
+                            multi_skip_warned.add(model_name)
+                        continue
+
+                    suffix_value = _derive_prediction_index(row, rank_idx)
+                    if append_model_index:
+                        safe_name = f"{base_name}_{suffix_value}"
+                    else:
+                        safe_name = base_name
+
                     job_dir = row["job_dir"]
                     prediction = row.get("prediction_name")
-                    copy_index = len(reserved_paths[model_name])
-                    while True:
-                        safe_name = base_name if copy_index == 0 else f"{base_name}_{copy_index + 1}"
-                        target_path = os.path.join(output_folder, f"{safe_name}.pdb")
-                        if (
-                            target_path not in reserved_paths[model_name]
-                            and not os.path.exists(target_path)
-                        ):
-                            break
-                        copy_index += 1
-                    reserved_paths[model_name].add(target_path)
+                    target_path = os.path.join(output_folder, f"{safe_name}.pdb")
+
+                    if os.path.exists(target_path) and not overwrite:
+                        copy_warning_messages.append(
+                            f"Target file '{target_path}' exists; skipping. Set overwrite=True to replace it."
+                        )
+                        continue
+
+                    if target_path in scheduled_targets:
+                        continue
+                    scheduled_targets.add(target_path)
+
                     copy_tasks.append(
                         {
                             "model": model_name,
