@@ -36,6 +36,42 @@ from typing import Any, Dict
 from . import alignment
 
 
+def _escape_smiles(smiles: str) -> str:
+    # JSON requires escaped backslashes
+    return smiles.replace("\\", "\\\\")
+
+
+def _normalize_smiles_entries(ligand_smiles) -> list[dict]:
+    """Return [{'id': 'L1', 'smiles': '...'}, ...] with escaped SMILES."""
+    if not ligand_smiles:
+        return []
+    norm = []
+    auto_idx = 1
+    for entry in ligand_smiles:
+        if isinstance(entry, str):
+            norm.append({"id": f"L{auto_idx}", "smiles": _escape_smiles(entry)})
+            auto_idx += 1
+        elif isinstance(entry, dict):
+            smi = _escape_smiles(entry["smiles"])
+            lid = entry.get("id") or f"L{auto_idx}"
+            norm.append({"id": lid, "smiles": smi})
+            auto_idx += 1 if entry.get("id") is None else 0
+        else:
+            raise TypeError("ligand_smiles items must be str or dict with {'id','smiles'}.")
+    return norm
+
+
+def _normalise_ligand_resnames(structure):
+    """Trim AF3 ligand residue names (e.g. LIG_PET) to PDB-compliant 3-letter codes."""
+    for residue in structure.get_residues():
+        resname = residue.get_resname()
+        if resname and resname.startswith("LIG_"):
+            trimmed = resname[4:]
+            if not trimmed:
+                continue
+            residue.resname = trimmed[:3].upper().ljust(3)
+
+
 class sequenceModels:
 
     def __init__(self, sequences_fasta):
@@ -184,6 +220,7 @@ class sequenceModels:
         model_seeds=None,
         runner_name='runner',
         ligands=None,
+        ligand_smiles: list | None = None,
         skip_finished=False
     ):
         """Create AF3 job folders, per-model JSONs and sbatch commands.
@@ -220,6 +257,10 @@ class sequenceModels:
             * dict mapping model name (or ``"default"``/``"*"``) to any of the
               previous formats to override the default specification for that
               model.
+        ligand_smiles : list | None
+            List of SMILES ligands. Accepts either ``['CC(=O)O']`` or
+            ``[{'id': 'L1', 'smiles': 'CC(=O)O'}]``. Backslashes are auto-escaped
+            for JSON.
         skip_finished : bool, optional
             When ``True`` models that already contain completed AF3 outputs
             (detected via an existing ``ranking_scores.csv`` under the model
@@ -457,6 +498,23 @@ class sequenceModels:
                 else:
                     for pid in protein_id:
                         occupied_chain_ids.add(str(pid).upper())
+            smiles_blocks = _normalize_smiles_entries(ligand_smiles)
+            for lig in smiles_blocks:
+                if not lig["smiles"] or not lig["smiles"].strip():
+                    raise ValueError(f"Empty SMILES for ligand id '{lig['id']}'.")
+                ligand_id = str(lig["id"])
+                if not ligand_id:
+                    raise ValueError("SMILES ligands require a non-empty id.")
+                ligand_id_upper = ligand_id.upper()
+                if ligand_id_upper in occupied_chain_ids:
+                    raise ValueError(f"Ligand id '{ligand_id}' already present in the complex.")
+                occupied_chain_ids.add(ligand_id_upper)
+                entries.append({
+                    "ligand": {
+                        "id": ligand_id,
+                        "smiles": lig["smiles"],
+                    }
+                })
             payload = {
                 "name": model_name,
                 "modelSeeds": _seeds_for_model(model_name),
@@ -1140,6 +1198,7 @@ class sequenceModels:
                 parser = MMCIFParser(QUIET=True)
                 structure = parser.get_structure(safe_name, cif_path)
                 _normalise_chain_ids(structure)
+                _normalise_ligand_resnames(structure)
                 io_obj = PDBIO()
                 io_obj.set_structure(structure)
                 io_obj.save(target_path)
