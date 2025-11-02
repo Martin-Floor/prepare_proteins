@@ -47,17 +47,48 @@ def _normalize_smiles_entries(ligand_smiles) -> list[dict]:
         return []
     norm = []
     auto_idx = 1
+
+    def _sanitize_smiles_id(raw_id: str) -> str:
+        cleaned = re.sub(r"[^0-9A-Za-z]+", "", str(raw_id))
+        if not cleaned:
+            raise ValueError("SMILES ligand 'id' must contain alphanumeric characters.")
+        return cleaned.upper()
+
     for entry in ligand_smiles:
         if isinstance(entry, str):
             norm.append({"id": f"L{auto_idx}", "smiles": _escape_smiles(entry)})
             auto_idx += 1
         elif isinstance(entry, dict):
+            if "smiles" not in entry:
+                raise KeyError("ligand_smiles dict entries must include a 'smiles' key.")
             smi = _escape_smiles(entry["smiles"])
-            lid = entry.get("id") or f"L{auto_idx}"
-            norm.append({"id": lid, "smiles": smi})
-            auto_idx += 1 if entry.get("id") is None else 0
+            count = entry.get("count", 1)
+            try:
+                count_int = int(count)
+            except (TypeError, ValueError):
+                raise TypeError("ligand_smiles dict 'count' must be an integer.") from None
+            if count_int < 1:
+                raise ValueError("ligand_smiles dict 'count' must be >= 1.")
+            base_id = entry.get("id")
+            if base_id is None:
+                for _ in range(count_int):
+                    lid = f"L{auto_idx}"
+                    auto_idx += 1
+                    norm.append({"id": str(lid), "smiles": smi})
+            else:
+                sanitized = _sanitize_smiles_id(base_id)
+                for idx in range(count_int):
+                    if count_int == 1:
+                        suffix = ""
+                    else:
+                        if idx < 26:
+                            suffix = chr(ord('A') + idx)
+                        else:
+                            suffix = str(idx - 25)
+                    lid = f"{sanitized}{suffix}"
+                    norm.append({"id": lid, "smiles": smi})
         else:
-            raise TypeError("ligand_smiles items must be str or dict with {'id','smiles'}.")
+            raise TypeError("ligand_smiles items must be str or dict with 'smiles' (plus optional 'id'/'count').")
     return norm
 
 
@@ -259,8 +290,11 @@ class sequenceModels:
               model.
         ligand_smiles : list | None
             List of SMILES ligands. Accepts either ``['CC(=O)O']`` or
-            ``[{'id': 'L1', 'smiles': 'CC(=O)O'}]``. Backslashes are auto-escaped
-            for JSON.
+            ``[{'id': 'L1', 'smiles': 'CC(=O)O'}]``. IDs are coerced to uppercase
+            alphanumerics, removing underscores and other punctuation. A
+            ``count`` key duplicates the entry (e.g. ``{'smiles': 'CC(=O)O',
+            'id': 'FMD', 'count': 3}`` -> ``FMDA``, ``FMDB``, ``FMDC``). Backslashes
+            are auto-escaped for JSON.
         skip_finished : bool, optional
             When ``True`` models that already contain completed AF3 outputs
             (detected via an existing ``ranking_scores.csv`` under the model
