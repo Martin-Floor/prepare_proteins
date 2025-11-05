@@ -2968,29 +2968,353 @@ class sequenceModels:
             )
 
         if plot:
-            # Compute average RMSD for each model and order models by average value
-            model_avg = {model: np.mean(vals) for model, vals in rmsd.items()}
-            ordered_models = sorted(model_avg, key=model_avg.get)
-
-            # Build a DataFrame for plotting
-            data = []
-            for model, values in rmsd.items():
-                for value in values:
-                    data.append({"Model": model, "RMSD": value})
-            df = pd.DataFrame(data)
-
-            # Create a violin plot using seaborn
-            plt.figure(figsize=(10, 6))
-            sns.violinplot(
-                x="Model", y="RMSD", data=df, order=ordered_models, inner="quartile"
-            )
-
-            plt.xticks(rotation=45)
-            plt.title("RMSD Distributions Ordered by Average RMSD")
-            plt.tight_layout()
-            plt.show()
+            self.plotBioEmuRMSD(rmsd)
 
         return rmsd
+
+    def plotBioEmuRMSD(
+        self,
+        bioemu_rmsd,
+        reference_model=None,
+        *,
+        reference_label=None,
+        figsize=None,
+        violin_color="skyblue",
+        reference_color="lightgreen",
+        reference_line=True,
+        violin_kwargs=None,
+        show=True,
+    ):
+        """
+        Plot BioEmu RMSD distributions as violin plots.
+
+        Parameters
+        ----------
+        bioemu_rmsd : Mapping[str, Iterable[float]]
+            Mapping between model identifiers and the RMSD values returned by
+            :meth:`computeBioEmuRMSD`.
+        reference_model : str, optional
+            Model identifier to highlight on a dedicated subplot. When the model
+            is not present or omitted, all models are plotted together.
+        reference_label : str, optional
+            Title to use for the reference subplot. Defaults to ``reference_model``.
+        figsize : tuple, optional
+            Matplotlib figure size. If omitted, a size is inferred from the number
+            of models being plotted.
+        violin_color : str, optional
+            Fill color for the violins representing non-reference models.
+        reference_color : str, optional
+            Fill color used for the reference model violin plot.
+        reference_line : bool, optional
+            Whether to draw a horizontal line showing the reference average on the
+            non-reference subplot when applicable.
+        violin_kwargs : dict, optional
+            Extra keyword arguments forwarded to :func:`seaborn.violinplot`.
+        show : bool, optional
+            Whether to display the figure immediately via ``plt.show()``.
+
+        Returns
+        -------
+        matplotlib.figure.Figure, list[matplotlib.axes.Axes]
+            Figure and axes used for the plot.
+        """
+
+        if not bioemu_rmsd:
+            raise ValueError("bioemu_rmsd is empty; nothing to plot.")
+
+        violin_kwargs = {} if violin_kwargs is None else dict(violin_kwargs)
+        violin_kwargs.setdefault("inner", "quartile")
+
+        records = []
+        averages = {}
+        for model, values in bioemu_rmsd.items():
+            if values is None:
+                continue
+            arr = np.asarray(values, dtype=float).ravel()
+            arr = arr[np.isfinite(arr)]
+            if arr.size == 0:
+                continue
+            averages[model] = float(np.mean(arr))
+            for value in arr:
+                records.append({"Model": model, "RMSD": value})
+
+        if not records:
+            raise ValueError("No finite RMSD values provided; nothing to plot.")
+
+        data = pd.DataFrame.from_records(records)
+        if reference_model is not None and reference_model not in averages:
+            warnings.warn(
+                f"Reference model '{reference_model}' not found in RMSD data; plotting all models together.",
+                UserWarning,
+            )
+            reference_model = None
+
+        has_reference = (
+            reference_model is not None and reference_model in averages
+        )
+        other_models = [
+            m
+            for m in sorted(
+                (model for model in averages if model != reference_model),
+                key=lambda name: averages[name],
+            )
+        ]
+
+        if figsize is None:
+            count = len(other_models) if other_models else len(averages)
+            width = max(6.0, 0.7 * max(1, count) + (1.5 if has_reference else 0.0))
+            figsize = (width, 6.0)
+
+        if has_reference and other_models:
+            width_ratios = [0.35, max(1, len(other_models))]
+            fig, axes = plt.subplots(
+                1,
+                2,
+                figsize=figsize,
+                sharey=True,
+                gridspec_kw={"width_ratios": width_ratios},
+            )
+            axes = list(np.atleast_1d(axes))
+
+            ref_data = data[data["Model"] == reference_model]
+            sns.violinplot(
+                data=ref_data,
+                x="Model",
+                y="RMSD",
+                order=[reference_model],
+                color=reference_color,
+                ax=axes[0],
+                **violin_kwargs,
+            )
+            axes[0].set_xlabel("Model")
+            axes[0].set_ylabel("RMSD (nm)")
+            axes[0].tick_params(axis="x", rotation=90, labelsize=8)
+            axes[0].set_title(
+                reference_label or f"Reference – {reference_model}"
+            )
+
+            other_data = data[data["Model"].isin(other_models)]
+            sns.violinplot(
+                data=other_data,
+                x="Model",
+                y="RMSD",
+                order=other_models,
+                color=violin_color,
+                ax=axes[1],
+                **violin_kwargs,
+            )
+            axes[1].set_xlabel("Model")
+            axes[1].tick_params(axis="x", rotation=90, labelsize=8)
+            axes[1].set_ylabel("")
+            axes[1].set_title("Models")
+
+            if reference_line:
+                axes[1].axhline(
+                    averages[reference_model], color="red", linestyle="--", linewidth=1
+                )
+        else:
+            fig, ax = plt.subplots(figsize=figsize)
+            axes = [ax]
+
+            order = sorted(averages, key=lambda name: averages[name])
+            sns.violinplot(
+                data=data,
+                x="Model",
+                y="RMSD",
+                order=order,
+                color=violin_color,
+                ax=ax,
+                **violin_kwargs,
+            )
+            ax.set_xlabel("Model")
+            ax.set_ylabel("RMSD (nm)")
+            ax.set_title("BioEmu RMSD Distributions")
+            ax.tick_params(axis="x", rotation=90, labelsize=8)
+
+        plt.tight_layout()
+        if show:
+            plt.show()
+
+        return fig, axes
+
+    def plotBioEmuFractionOfNativeContacts(
+        self,
+        q_values,
+        reference_model=None,
+        *,
+        reference_label=None,
+        figsize=None,
+        violin_color="skyblue",
+        reference_color="lightgreen",
+        reference_line=True,
+        violin_kwargs=None,
+        show=True,
+    ):
+        """
+        Plot BioEmu fraction of native contact distributions as violin plots.
+
+        Parameters
+        ----------
+        q_values : pd.DataFrame or Mapping[str, Iterable[float]]
+            Q values returned by :meth:`computeFractionOfNativeContacts`. Accepts the
+            DataFrame with MultiIndex (Model, Frame) or a mapping from model identifiers
+            to iterables of Q values.
+        reference_model : str, optional
+            Model identifier to highlight on a dedicated subplot. When omitted or absent
+            from the data, all models are plotted together.
+        reference_label : str, optional
+            Title for the reference subplot. Defaults to ``reference_model``.
+        figsize : tuple, optional
+            Matplotlib figure size. Inferred from the number of models when not provided.
+        violin_color : str, optional
+            Fill color for violins representing non-reference models.
+        reference_color : str, optional
+            Fill color for the reference model violin plot.
+        reference_line : bool, optional
+            Draw a horizontal line showing the reference average on the non-reference
+            subplot when applicable.
+        violin_kwargs : dict, optional
+            Extra keyword arguments forwarded to :func:`seaborn.violinplot`.
+        show : bool, optional
+            Whether to call ``plt.show()`` at the end.
+
+        Returns
+        -------
+        matplotlib.figure.Figure, list[matplotlib.axes.Axes]
+            The figure and axes used for the plot.
+        """
+
+        if isinstance(q_values, pd.DataFrame):
+            if "Model" in q_values.columns:
+                data = q_values.copy()
+            elif "Model" in q_values.index.names:
+                data = q_values.reset_index()
+            else:
+                raise ValueError(
+                    "Q dataframe must have 'Model' either as an index level or column."
+                )
+        elif isinstance(q_values, dict):
+            records = []
+            for model, values in q_values.items():
+                arr = np.asarray(values, dtype=float).ravel()
+                arr = arr[np.isfinite(arr)]
+                for value in arr:
+                    records.append({"Model": model, "Q": value})
+            data = pd.DataFrame.from_records(records)
+        else:
+            raise TypeError(
+                "q_values must be a pandas DataFrame or mapping of model -> iterable of Q values."
+            )
+
+        if data.empty or "Model" not in data.columns or "Q" not in data.columns:
+            raise ValueError("No valid Q values provided; nothing to plot.")
+
+        data = data.copy()
+        data["Q"] = pd.to_numeric(data["Q"], errors="coerce")
+        data = data.dropna(subset=["Q"])
+
+        if data.empty:
+            raise ValueError("No finite Q values provided; nothing to plot.")
+
+        averages = data.groupby("Model")["Q"].mean().to_dict()
+
+        if reference_model is not None and reference_model not in averages:
+            warnings.warn(
+                f"Reference model '{reference_model}' not found in Q data; plotting all models together.",
+                UserWarning,
+            )
+            reference_model = None
+
+        violin_kwargs = {} if violin_kwargs is None else dict(violin_kwargs)
+        violin_kwargs.setdefault("inner", "quartile")
+
+        has_reference = (
+            reference_model is not None and reference_model in averages
+        )
+        other_models = [
+            m
+            for m in sorted(
+                (model for model in averages if model != reference_model),
+                key=lambda name: averages[name],
+            )
+        ]
+
+        if figsize is None:
+            count = len(other_models) if other_models else len(averages)
+            width = max(6.0, 0.7 * max(1, count) + (1.5 if has_reference else 0.0))
+            figsize = (width, 6.0)
+
+        if has_reference and other_models:
+            width_ratios = [0.35, max(1, len(other_models))]
+            fig, axes = plt.subplots(
+                1,
+                2,
+                figsize=figsize,
+                sharey=True,
+                gridspec_kw={"width_ratios": width_ratios},
+            )
+            axes = list(np.atleast_1d(axes))
+
+            ref_data = data[data["Model"] == reference_model]
+            sns.violinplot(
+                data=ref_data,
+                x="Model",
+                y="Q",
+                order=[reference_model],
+                color=reference_color,
+                ax=axes[0],
+                **violin_kwargs,
+            )
+            axes[0].set_xlabel("Model")
+            axes[0].set_ylabel("Fraction of Native Contacts (Q)")
+            axes[0].tick_params(axis="x", rotation=90, labelsize=8)
+            axes[0].set_title(
+                reference_label or f"Reference – {reference_model}"
+            )
+
+            other_data = data[data["Model"].isin(other_models)]
+            sns.violinplot(
+                data=other_data,
+                x="Model",
+                y="Q",
+                order=other_models,
+                color=violin_color,
+                ax=axes[1],
+                **violin_kwargs,
+            )
+            axes[1].set_xlabel("Model")
+            axes[1].tick_params(axis="x", rotation=90, labelsize=8)
+            axes[1].set_ylabel("")
+            axes[1].set_title("Models")
+
+            if reference_line:
+                axes[1].axhline(
+                    averages[reference_model], color="red", linestyle="--", linewidth=1
+                )
+        else:
+            fig, ax = plt.subplots(figsize=figsize)
+            axes = [ax]
+
+            order = sorted(averages, key=lambda name: averages[name])
+            sns.violinplot(
+                data=data,
+                x="Model",
+                y="Q",
+                order=order,
+                color=violin_color,
+                ax=ax,
+                **violin_kwargs,
+            )
+            ax.set_xlabel("Model")
+            ax.set_ylabel("Fraction of Native Contacts (Q)")
+            ax.set_title("BioEmu Fraction of Native Contacts")
+            ax.tick_params(axis="x", rotation=90, labelsize=8)
+
+        plt.tight_layout()
+        if show:
+            plt.show()
+
+        return fig, axes
 
     def computeNativeContacts(
         self,
@@ -3200,7 +3524,15 @@ class sequenceModels:
         return df_distances
 
     def computeFractionOfNativeContacts(
-        self, df_distances, method="hard", inflation=1.2, rel_tolerance=0.2
+        self,
+        df_distances,
+        method="hard",
+        inflation=1.2,
+        rel_tolerance=0.2,
+        *,
+        plot=False,
+        reference_model=None,
+        plot_kwargs=None,
     ):
         """
         Compute the fraction of native contacts (Q) per frame and per model, using either a
@@ -3234,18 +3566,23 @@ class sequenceModels:
             Dictionary with model names as keys and DataFrames as values.
             Each DataFrame has distances per contact (columns) across frames (rows).
             Row index 0 must represent the native (equilibrium) distances.
-
         method : str, optional
             Choice of method to compute Q. Must be "hard" or "relative".
             Default is "hard".
-
         inflation : float, optional
             Factor by which the native distance is multiplied when using the "hard" method.
             Default is 1.2.
-
         rel_tolerance : float, optional
             Relative tolerance for the "relative" method.
             Default is 0.2 (i.e., 20% deviation allowed).
+        plot : bool, optional
+            When ``True`` the function generates a violin plot of the Q distributions by
+            delegating to :meth:`plotBioEmuFractionOfNativeContacts`.
+        reference_model : str, optional
+            Model identifier to highlight in the generated plot. Ignored when ``plot`` is
+            ``False``.
+        plot_kwargs : dict, optional
+            Extra keyword arguments forwarded to :meth:`plotBioEmuFractionOfNativeContacts`.
 
         Returns
         -------
@@ -3293,45 +3630,14 @@ class sequenceModels:
 
         # Combine results for all models into a single DataFrame with a MultiIndex
         df_q = pd.concat(records, ignore_index=True).set_index(["Model", "Frame"])
+
+        if plot:
+            kwargs = {} if plot_kwargs is None else dict(plot_kwargs)
+            if reference_model is not None:
+                kwargs.setdefault("reference_model", reference_model)
+            self.plotBioEmuFractionOfNativeContacts(df_q, **kwargs)
+
         return df_q
-
-    def plotNativeContactsDistribution(self, q_df):
-        """
-        Create an interactive KDE plot of the distribution of native contact fraction (Q)
-        for a selected model.
-
-        This function uses ipywidgets to create a dropdown menu of models based on the input
-        Q dataframe. When a model is selected, it displays a Kernel Density Estimate (KDE)
-        plot of Q values for that model.
-
-        Parameters:
-          - q_df (pd.DataFrame): DataFrame containing the fraction of native contacts for each frame
-                                 and for each model. It is assumed that the index contains the
-                                 "Model" level.
-        """
-        # Reset index to easily filter by the "Model" column.
-        q_reset = q_df.reset_index()
-        # Get the unique models present in the Q dataframe.
-        models = q_reset["Model"].unique()
-
-        def plot_model_q(model):
-            """
-            Inner function: filters the Q dataframe for the selected model and plots its KDE.
-            """
-            df_model = q_reset[q_reset["Model"] == model]
-            plt.figure(figsize=(8, 6))
-            sns.kdeplot(df_model["Q"], shade=True, color="skyblue", bw_adjust=1)
-            plt.title(f"KDE of Q for model: {model}", fontsize=16)
-            plt.xlabel("Fraction of Native Contacts (Q)", fontsize=12)
-            plt.ylabel("Density", fontsize=12)
-            plt.tight_layout()
-            plt.show()
-
-        # Create a dropdown widget and link it to the plotting function.
-        model_dropdown = widgets.Dropdown(
-            options=sorted(models), description="Select Model:"
-        )
-        interact(plot_model_q, model=model_dropdown)
 
     def computeFoldingFreeEnergy(self, df_q, q_threshold=0.8, temperature=300.0):
         """
