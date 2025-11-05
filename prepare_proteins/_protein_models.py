@@ -14,6 +14,7 @@ import warnings
 import copy
 import re
 import pkg_resources
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Union
@@ -504,6 +505,22 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return new_resid
 
+    def _removeAtomsFromConects(self, model, atom_keys):
+        """
+        Remove CONECT entries referencing any atom tuples in ``atom_keys``.
+        """
+        if not atom_keys:
+            return
+        conects = self.conects.get(model)
+        if not conects:
+            return
+        atom_key_set = set(atom_keys)
+        self.conects[model] = [
+            conect
+            for conect in conects
+            if atom_key_set.isdisjoint(conect)
+        ]
+
     def removeModelAtoms(self, model, atoms_list, verbose=True):
         """
         Remove specific atoms of a model. Atoms to delete are given as a list of tuples.
@@ -517,17 +534,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Specifies the list of atoms to delete for the particular model.
         """
 
-        def removeAtomInConects(self, model, atom):
-            """
-            Function for removing conect lines involving the deleted atom.
-            """
-            to_remove = []
-            for conect in self.conects[model]:
-                if atom in conect:
-                    to_remove.append(conect)
-            for conect in to_remove:
-                self.conects[model].remove(conect)
-
+        removed_atoms = []
         for remove_atom in atoms_list:
             for chain in self.structures[model].get_chains():
                 if chain.id == remove_atom[0]:
@@ -543,7 +550,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                             + model
                                         )
                                     residue.detach_child(atom.id)
-                                    removeAtomInConects(self, model, remove_atom)
+                                    removed_atoms.append(remove_atom)
+        if removed_atoms:
+            self._removeAtomsFromConects(model, removed_atoms)
 
     def removeModelResidues(self, model, residues_list, verbose=True):
         """
@@ -554,32 +563,296 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         model : str
             Identifier of the model whose residues should be removed. Must exist in
             `self.structures`.
-        residues_list : iterable of tuple[str, int]
-            Residues to delete, provided as `(chain_id, resseq)` pairs where `chain_id`
-            matches the PDB chain identifier and `resseq` is the integer component of
-            Biopython's `Residue.id` (`residue.id[1]`). Insertion codes and alternate
-            locations are ignored when matching residues.
+        residues_list : iterable
+            Residue selectors describing the residues to delete. Each entry can be:
+
+              * a ``Bio.PDB.Residue`` instance obtained from the structure;
+              * a tuple ``(chain_id, resseq)`` (legacy behaviour);
+              * a tuple ``(chain_id, residue_id_tuple)`` where ``residue_id_tuple`` is
+                the three-element Biopython ``Residue.id`` (``hetfield``, ``resseq``,
+                ``icode``); or
+              * a bare ``Residue.id`` tuple (three elements) to match residues across
+                any chain. When such tuples appear multiple times their multiplicity is
+                respected (e.g. duplicating the tuple removes that many matching
+                residues).
         verbose : bool, optional
-            If True (default) log each atom removal.
+            If True (default) log each residue removal.
 
         Raises
         ======
         ValueError
-            Raised when none of the requested residues are found in the structure.
+            Raised when no residues matching the provided selectors are found.
+        TypeError
+            Raised when selectors cannot be interpreted.
         """
 
-        # Get all atoms for residues to remove them
-        atoms_to_remove = []
-        for residue in self.structures[model].get_residues():
-            chain = residue.get_parent().id
-            if (chain, residue.id[1]) in residues_list:
-                for atom in residue:
-                    atoms_to_remove.append((chain, residue.id[1], atom.name))
+        if model not in self.structures:
+            raise ValueError(f"Model '{model}' is not present in the current session.")
 
-        if atoms_to_remove == []:
+        try:
+            requested = list(residues_list)
+        except TypeError as exc:
+            raise TypeError(
+                "residues_list must be an iterable of residue identifiers."
+            ) from exc
+
+        if not requested:
+            raise ValueError("No residue identifiers were supplied.")
+
+        structure = self.structures[model]
+
+        explicit_full = Counter()
+        explicit_resseq = Counter()
+        global_full = Counter()
+        explicit_full_desc = {}
+        explicit_resseq_desc = {}
+        global_full_desc = {}
+
+        def _coerce_resseq(value):
+            if isinstance(value, int):
+                return value
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"Residue sequence identifier {value!r} is not an integer."
+                ) from exc
+
+        def _check_residue_id(residue_id):
+            if (
+                not isinstance(residue_id, tuple)
+                or len(residue_id) != 3
+                or not isinstance(residue_id[1], int)
+            ):
+                raise TypeError(
+                    f"Residue identifier {residue_id!r} is not a valid Biopython Residue.id tuple."
+                )
+
+        for entry in requested:
+            if isinstance(entry, PDB.Residue.Residue):
+                chain_id = entry.get_parent().id
+                residue_id = entry.id
+                explicit_full[(chain_id, residue_id)] += 1
+                explicit_full_desc.setdefault(
+                    (chain_id, residue_id), f"{chain_id}:{residue_id}"
+                )
+                continue
+
+            if not isinstance(entry, tuple):
+                raise TypeError(
+                    "Residue selectors must be Bio.PDB.Residue objects or tuples."
+                )
+
+            if len(entry) == 2:
+                chain_id, residue_token = entry
+                if isinstance(residue_token, tuple):
+                    _check_residue_id(residue_token)
+                    explicit_full[(chain_id, residue_token)] += 1
+                    explicit_full_desc.setdefault(
+                        (chain_id, residue_token), f"{chain_id}:{residue_token}"
+                    )
+                else:
+                    resseq = _coerce_resseq(residue_token)
+                    explicit_resseq[(chain_id, resseq)] += 1
+                    explicit_resseq_desc.setdefault(
+                        (chain_id, resseq), f"{chain_id}:resseq={resseq}"
+                    )
+                continue
+
+            if len(entry) == 3:
+                _check_residue_id(entry)
+                global_full[entry] += 1
+                global_full_desc.setdefault(entry, f"{entry}")
+                continue
+
+            if len(entry) == 4:
+                chain_id = entry[0]
+                residue_id = tuple(entry[1:])
+                _check_residue_id(residue_id)
+                explicit_full[(chain_id, residue_id)] += 1
+                explicit_full_desc.setdefault(
+                    (chain_id, residue_id), f"{chain_id}:{residue_id}"
+                )
+                continue
+
+            raise TypeError(f"Unsupported residue selector format: {entry!r}")
+
+        matched_explicit_full = Counter()
+        matched_explicit_resseq = Counter()
+        matched_global_full = Counter()
+
+        atoms_to_remove = []
+        residues_to_detach = {}
+
+        for chain in structure.get_chains():
+            chain_id = chain.id
+            for residue in chain:
+                full_key = (chain_id, residue.id)
+                resseq_key = (chain_id, residue.id[1])
+                matched = False
+
+                if explicit_full[full_key] > matched_explicit_full[full_key]:
+                    matched_explicit_full[full_key] += 1
+                    matched = True
+                elif explicit_resseq[resseq_key] > matched_explicit_resseq[resseq_key]:
+                    matched_explicit_resseq[resseq_key] += 1
+                    matched = True
+                elif global_full[residue.id] > matched_global_full[residue.id]:
+                    matched_global_full[residue.id] += 1
+                    matched = True
+
+                if matched:
+                    residues_to_detach.setdefault((chain_id, residue.id), chain)
+                    for atom in residue:
+                        atoms_to_remove.append((chain_id, residue.id[1], atom.name))
+
+        missing = []
+        for key, count in explicit_full.items():
+            deficit = count - matched_explicit_full[key]
+            if deficit > 0:
+                missing.extend([explicit_full_desc[key]] * deficit)
+        for key, count in explicit_resseq.items():
+            deficit = count - matched_explicit_resseq[key]
+            if deficit > 0:
+                missing.extend([explicit_resseq_desc[key]] * deficit)
+        for key, count in global_full.items():
+            deficit = count - matched_global_full[key]
+            if deficit > 0:
+                missing.extend([global_full_desc[key]] * deficit)
+
+        if not residues_to_detach:
+            if missing:
+                raise ValueError(
+                    "None of the requested residues were found: "
+                    + ", ".join(sorted(set(missing)))
+                )
             raise ValueError("No atoms were found for the specified residue!")
 
-        self.removeModelAtoms(model, atoms_to_remove, verbose=verbose)
+        if missing:
+            warnings.warn(
+                "Some requested residues were not found and were skipped: "
+                + ", ".join(sorted(set(missing))),
+                UserWarning,
+            )
+
+        self._removeAtomsFromConects(model, atoms_to_remove)
+
+        for (chain_id, residue_id), chain_obj in residues_to_detach.items():
+            if verbose:
+                resseq = residue_id[1]
+                icode = residue_id[2].strip() if isinstance(residue_id[2], str) else residue_id[2]
+                if icode:
+                    print(
+                        f"Removing residue: ({chain_id}, {resseq}{icode}) from model {model}"
+                    )
+                else:
+                    print(
+                        f"Removing residue: ({chain_id}, {resseq}) from model {model}"
+                    )
+            if residue_id in chain_obj.child_dict:
+                chain_obj.detach_child(residue_id)
+
+    def removeModelChains(self, model, chains, verbose=True):
+        """
+        Remove one or more chains from a stored model.
+
+        Parameters
+        ==========
+        model : str
+            Identifier of the model whose chains should be removed. Must exist in
+            ``self.structures``.
+        chains : str, Bio.PDB.Chain.Chain, or iterable
+            Chain selectors. Each entry may be a chain ID string or a Biopython
+            ``Chain`` object. Iterables are flattened one level (e.g. list or set of
+            chain IDs). Duplicate IDs are ignored after the first occurrence.
+        verbose : bool, optional
+            If True (default) log each chain removal.
+
+        Raises
+        ======
+        ValueError
+            Raised when the model is unknown, no chains are provided, or none of the
+            requested chains are present in the model.
+        TypeError
+            Raised when chain selectors cannot be interpreted.
+        """
+
+        if model not in self.structures:
+            raise ValueError(f"Model '{model}' is not present in the current session.")
+
+        if isinstance(chains, (str, PDB.Chain.Chain)):
+            selector_entries = [chains]
+        else:
+            try:
+                selector_entries = list(chains)
+            except TypeError as exc:
+                raise TypeError("chains must be a chain ID, Chain object, or iterable.") from exc
+
+        if not selector_entries:
+            raise ValueError("No chain identifiers were supplied.")
+
+        chain_id_order = []
+        for entry in selector_entries:
+            if isinstance(entry, PDB.Chain.Chain):
+                chain_id = entry.id
+            elif isinstance(entry, str):
+                if not entry:
+                    raise ValueError("Chain identifier strings must be non-empty.")
+                chain_id = entry
+            else:
+                raise TypeError(
+                    "Chain selectors must be strings or Bio.PDB.Chain.Chain objects."
+                )
+            chain_id_order.append(chain_id)
+
+        # Preserve user order while removing duplicates
+        seen = set()
+        target_chain_ids = []
+        for cid in chain_id_order:
+            if cid not in seen:
+                seen.add(cid)
+                target_chain_ids.append(cid)
+
+        target_chain_set = set(target_chain_ids)
+
+        structure = self.structures[model]
+        models_list = list(structure.get_models())
+
+        atoms_to_remove = []
+        chains_to_detach = []
+        found_chain_ids = set()
+
+        for stored_model in models_list:
+            for chain in list(stored_model.get_chains()):
+                if chain.id not in target_chain_set:
+                    continue
+                found_chain_ids.add(chain.id)
+                chains_to_detach.append((stored_model, chain))
+                for residue in chain.get_residues():
+                    for atom in residue:
+                        atoms_to_remove.append((chain.id, residue.id[1], atom.name))
+
+        if not found_chain_ids:
+            raise ValueError(
+                "No chains matching the provided identifiers were found in model "
+                f"'{model}'."
+            )
+
+        missing = [cid for cid in target_chain_ids if cid not in found_chain_ids]
+        self._removeAtomsFromConects(model, atoms_to_remove)
+
+        for stored_model, chain_obj in chains_to_detach:
+            if verbose:
+                print(f"Removing chain: {chain_obj.id} from model {model}")
+            if chain_obj.id in stored_model.child_dict:
+                stored_model.detach_child(chain_obj.id)
+
+        if missing:
+            warnings.warn(
+                "Some requested chains were not found and were skipped: "
+                + ", ".join(sorted(set(missing))),
+                UserWarning,
+            )
 
     def changeResidueAtomNames(
         self,
