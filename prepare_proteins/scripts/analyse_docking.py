@@ -161,10 +161,6 @@ if return_failed:
         json.dump(failed_dockings, fdjof)
 
 # Calculate and add scores
-skip_scores = True
-skip_distances = True
-skip_angles = True
-
 for model in sorted(mae_output):
 
     for ligand in sorted(mae_output[model]):
@@ -174,14 +170,17 @@ for model in sorted(mae_output):
         distance_csv = docking_folder+'/'+analysis_folder+'/atom_pairs/'+csv_name
         angles_csv = docking_folder+'/'+analysis_folder+'/angles/'+csv_name
 
-        if not os.path.exists(scores_csv) or overwrite:
-            skip_scores = False
+        skip_scores = os.path.exists(scores_csv) and not overwrite
 
-        if atom_pairs and not os.path.exists(distance_csv) or overwrite:
-            skip_distances = False
+        if atom_pairs:
+            skip_distances = os.path.exists(distance_csv) and not overwrite
+        else:
+            skip_distances = True
 
-        if angles and not os.path.exists(angles_csv) or overwrite:
-            skip_angles = False
+        if angles:
+            skip_angles = os.path.exists(angles_csv) and not overwrite
+        else:
+            skip_angles = True
 
         if skip_scores and skip_distances and skip_angles:
             continue

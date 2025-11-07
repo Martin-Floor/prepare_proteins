@@ -172,7 +172,7 @@ import numpy as np
 import pandas as pd
 from Bio import PDB, BiopythonWarning
 from Bio.PDB.DSSP import DSSP
-from Bio.PDB.Polypeptide import aa3
+from Bio.PDB.Polypeptide import aa3, is_aa
 from ipywidgets import interactive_output, VBox, IntSlider, Checkbox, interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
@@ -1685,7 +1685,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         self.getModelsSequences()
 
-    def removeTerminalUnstructuredRegions(self, n_hanging=3, chains=None):
+    def removeTerminalUnstructuredRegions(self, n_hanging=3, chains=None, verbose=False):
         """
         Remove unstructured terminal regions from models.
 
@@ -1695,6 +1695,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Maximum unstructured number of residues to keep at the unstructured terminal regions.
         chains : None, str, iterable or dict
             Chain selector identifying which chains should be processed.
+        verbose : bool, default=False
+            When True, log the residues that are trimmed per model/chain.
         """
 
         if not self.chain_secondary_structure:
@@ -1782,17 +1784,32 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if not remove_indexes:
                     continue
 
-                polymer_residues = [
-                    r for r in chain_obj.get_residues() if r.id[0] == " "
+                # Only consider amino-acid polymer residues so ligands/nucleic acids survive trimming
+                protein_residues = [
+                    r
+                    for r in chain_obj.get_residues()
+                    if r.id[0] == " " and is_aa(r, standard=False)
                 ]
                 to_remove = [
-                    polymer_residues[i]
+                    protein_residues[i]
                     for i in remove_indexes
-                    if i < len(polymer_residues)
+                    if i < len(protein_residues)
                 ]
 
+                removed_labels = []
                 for residue in to_remove:
+                    if verbose:
+                        resseq = residue.id[1]
+                        icode = residue.id[2].strip()
+                        label = f"{model}:{chain_id}:{residue.get_resname().strip()} {resseq}{icode}"
+                        removed_labels.append(label)
                     chain_obj.detach_child(residue.id)
+
+                if verbose and removed_labels:
+                    print(
+                        "[removeTerminalUnstructuredRegions] Removed residues: "
+                        + ", ".join(removed_labels)
+                    )
 
         self.getModelsSequences()
         self.calculateSecondaryStructure()
@@ -13676,6 +13693,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         convert_to_mol2=False,
         write_conect_lines=True,
         replace_symbol=None,
+        add_cryst1_record=False,
         **keywords,
     ):
         """
@@ -13685,6 +13703,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         ==========
         output_folder : str
             Path to the output folder to store models.
+        add_cryst1_record : bool, optional
+            When True, a standard CRYST1 line is prepended if missing.
         """
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
@@ -13709,6 +13729,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 model_name = model
 
+            pdb_output_path = os.path.join(output_folder, f"{model_name}.pdb")
+
             # Skip models not in the given list
             if models != None:
                 if model not in models:
@@ -13722,10 +13744,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             _saveStructureToPDB(
                 self.structures[model],
-                output_folder + "/" + model_name + ".pdb",
+                pdb_output_path,
                 keep_residues=kr,
                 **keywords,
             )
+
+            if add_cryst1_record:
+                _ensure_cryst1_record(pdb_output_path)
 
             if "remove_hydrogens" in keywords:
                 if keywords["remove_hydrogens"] == True:
@@ -13741,7 +13766,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if write_conect_lines:
                 self._write_conect_lines(
                     model,
-                    output_folder + "/" + model_name + ".pdb",
+                    pdb_output_path,
                     check_file=check_file,
                     hydrogens=hydrogens,
                 )
@@ -14359,6 +14384,23 @@ def _saveStructureToPDB(
         io.save(output_file, selector)
     else:
         io.save(output_file)
+
+_DEFAULT_CRYST1_RECORD = "CRYST1   1.000   1.000   1.000  90.00  90.00  90.00 P 1           1"
+
+def _ensure_cryst1_record(pdb_path, cryst1_record=_DEFAULT_CRYST1_RECORD):
+    """
+    Make sure the CRYST1 record exists at the top of the PDB file.
+    """
+    record = cryst1_record.rstrip("\n") + "\n"
+    with open(pdb_path, "r") as existing:
+        lines = existing.readlines()
+
+    if lines and lines[0].startswith("CRYST1"):
+        return
+
+    with open(pdb_path, "w") as updated:
+        updated.write(record)
+        updated.writelines(lines)
 
 def _copyScriptFile(
     output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
