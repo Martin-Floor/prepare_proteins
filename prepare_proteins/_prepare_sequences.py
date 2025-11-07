@@ -31,7 +31,7 @@ from pkg_resources import Requirement, resource_listdir, resource_stream
 import pandas as pd
 from tqdm.auto import tqdm
 
-from typing import Any, Dict
+from typing import Any, Dict, Literal, Optional, Sequence
 
 from . import alignment
 
@@ -993,6 +993,12 @@ class sequenceModels:
             selected_df, copied_paths)``. If strict filtering is requested and
             ``return_filter`` is ``True``, the filter summary is appended as the
             final element of the returned tuple.
+
+        See Also
+        --------
+        compare_to_af3_reference
+            Summarise model performance relative to a reference (e.g. wild type)
+            across multiple AlphaFold 3 metrics.
         """
 
         def _sanitize(name):
@@ -1323,6 +1329,7 @@ class sequenceModels:
         copy_warning_messages = []
         multi_skip_warned = set()
         scheduled_targets = set()
+        overwrite_needed = False
 
         required_index_cols = []
         for candidate in ("model", "seed", "sample"):
@@ -1371,9 +1378,7 @@ class sequenceModels:
                     target_path = os.path.join(output_folder, f"{safe_name}.pdb")
 
                     if os.path.exists(target_path) and not overwrite:
-                        copy_warning_messages.append(
-                            f"Target file '{target_path}' exists; skipping. Set overwrite=True to replace it."
-                        )
+                        overwrite_needed = True
                         continue
 
                     if target_path in scheduled_targets:
@@ -1402,6 +1407,12 @@ class sequenceModels:
                     if exported_path:
                         copied_paths[model_name].append(exported_path)
                     copy_warning_messages.extend(warn_msgs)
+
+        if overwrite_needed:
+            copy_warning_messages.append(
+                f"Existing files were detected under '{output_folder}'. "
+                "Use overwrite=True to replace them."
+            )
 
         all_warnings = warning_messages + copy_warning_messages
         if all_warnings:
@@ -1447,6 +1458,222 @@ class sequenceModels:
             return scores_df, filter_result
 
         return scores_df
+
+    @staticmethod
+    def compare_to_af3_reference(
+        df: pd.DataFrame,
+        wt_model_name: str,
+        score_columns: Optional[Sequence[str]] = None,
+        lower_is_better: Optional[Sequence[str]] = (
+            "summary_fraction_disordered",
+            "summary_has_clash",
+        ),
+        agg: Literal["best", "mean"] = "best",
+        equal_tol: float = 1e-6,
+        min_n_better: Optional[int] = None,
+        max_n_better: Optional[int] = None,
+        min_n_equal: Optional[int] = None,
+        max_n_equal: Optional[int] = None,
+        min_n_worse: Optional[int] = None,
+        max_n_worse: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        Compare model-level metrics to a reference (typically the wild-type).
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Output dataframe from :meth:`collectAlphaFold3Results`. Must contain a
+            ``model`` level in the index or a ``model`` column.
+        wt_model_name : str
+            Name of the reference model against which other entries are compared.
+        score_columns : sequence of str, optional
+            Metrics used for the comparison. Defaults to all numeric columns
+            excluding ``seed``/``sample`` if not provided.
+        lower_is_better : sequence of str, optional
+            Subset of ``score_columns`` where smaller values indicate better
+            performance.
+        agg : {"best", "mean"}, optional
+            Aggregation strategy for per-model scores. ``"best"`` (default)
+            selects the best-performing prediction per metric (max for
+            higher-is-better, min for lower-is-better). ``"mean"`` averages
+            across predictions for each model.
+        equal_tol : float, optional
+            Absolute tolerance used to decide whether two scores are equal.
+        min_n_better, max_n_better : int, optional
+            Bounds applied to ``n_better``. Rows outside the range are dropped.
+        min_n_equal, max_n_equal : int, optional
+            Bounds applied to ``n_equal``.
+        min_n_worse, max_n_worse : int, optional
+            Bounds applied to ``n_worse``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            A dataframe indexed by model with the aggregated metrics and
+            comparison metadata columns: ``accepted_all`` (bool),
+            ``status`` (categorical string), ``better_in``, ``equal_in``,
+            ``worse_in`` (comma-separated metric names) and the counts
+            ``n_better``, ``n_equal`` and ``n_worse``.
+        """
+
+        if df.empty:
+            raise ValueError("Input dataframe is empty; nothing to compare.")
+
+        df_work = df.copy()
+        if "model" in df_work.columns:
+            df_work = df_work.set_index("model")
+
+        if isinstance(df_work.index, pd.MultiIndex):
+            names = list(df_work.index.names)
+            if "model" not in names:
+                raise ValueError("MultiIndex dataframe must contain a 'model' level.")
+            model_level = names.index("model")
+            while model_level > 0:
+                df_work = df_work.swaplevel(model_level, model_level - 1)
+                names = list(df_work.index.names)
+                model_level -= 1
+            df_work = df_work.sort_index()
+        else:
+            if df_work.index.name != "model":
+                raise ValueError("Need a 'model' level in index or a 'model' column.")
+
+        if score_columns is None:
+            numeric_cols = df_work.select_dtypes(include=[np.number]).columns
+            score_columns = [
+                col for col in numeric_cols if col not in {"seed", "sample"}
+            ]
+        else:
+            score_columns = [col for col in score_columns if col in df_work.columns]
+
+        if not score_columns:
+            raise ValueError("No score columns available for comparison.")
+
+        lower_is_better_set = {
+            col for col in (lower_is_better or []) if col in score_columns
+        }
+        higher_is_better = [col for col in score_columns if col not in lower_is_better_set]
+
+        gb = df_work.groupby(level="model", sort=False)
+        if agg == "mean":
+            agg_df = gb[score_columns].mean()
+        elif agg == "best":
+            parts = []
+            if higher_is_better:
+                parts.append(gb[higher_is_better].max())
+            if lower_is_better_set:
+                parts.append(gb[list(lower_is_better_set)].min())
+            agg_df = pd.concat(parts, axis=1)
+            agg_df = agg_df[score_columns]
+        else:
+            raise ValueError("agg must be 'best' or 'mean'.")
+
+        if wt_model_name not in agg_df.index:
+            raise ValueError(
+                f"Reference model '{wt_model_name}' not found among: {list(agg_df.index)}"
+            )
+
+        wt_metrics = agg_df.loc[wt_model_name, score_columns]
+
+        tol = float(equal_tol) if equal_tol is not None else 0.0
+        records = []
+        for model_name, row in agg_df.iterrows():
+            better_metrics, equal_metrics, worse_metrics = [], [], []
+
+            for metric in higher_is_better:
+                value = row.get(metric)
+                wt_value = wt_metrics.get(metric)
+                if pd.isna(value) or pd.isna(wt_value):
+                    worse_metrics.append(metric)
+                    continue
+                if value > wt_value + tol:
+                    better_metrics.append(metric)
+                elif value < wt_value - tol:
+                    worse_metrics.append(metric)
+                else:
+                    equal_metrics.append(metric)
+
+            for metric in lower_is_better_set:
+                value = row.get(metric)
+                wt_value = wt_metrics.get(metric)
+                if pd.isna(value) or pd.isna(wt_value):
+                    worse_metrics.append(metric)
+                    continue
+                if value < wt_value - tol:
+                    better_metrics.append(metric)
+                elif value > wt_value + tol:
+                    worse_metrics.append(metric)
+                else:
+                    equal_metrics.append(metric)
+
+            accepted_all = len(worse_metrics) == 0
+            if accepted_all:
+                if len(better_metrics) and not equal_metrics:
+                    status = "better"
+                elif not better_metrics and len(equal_metrics) == len(score_columns):
+                    status = "equal"
+                else:
+                    status = "mixed"
+            else:
+                status = "worse" if len(worse_metrics) == len(score_columns) else "mixed"
+
+            records.append(
+                {
+                    "model": model_name,
+                    **{metric: row.get(metric, np.nan) for metric in score_columns},
+                    "accepted_all": accepted_all,
+                    "status": status,
+                    "better_in": ", ".join(better_metrics),
+                    "equal_in": ", ".join(equal_metrics),
+                    "worse_in": ", ".join(worse_metrics),
+                    "n_better": len(better_metrics),
+                    "n_equal": len(equal_metrics),
+                    "n_worse": len(worse_metrics),
+                }
+            )
+
+        out = pd.DataFrame.from_records(records).set_index("model").reindex(agg_df.index)
+        mask = pd.Series(True, index=out.index, dtype=bool)
+
+        def _apply_bounds(series: pd.Series, min_val: Optional[int], max_val: Optional[int]) -> None:
+            nonlocal mask
+            if min_val is not None:
+                mask &= series >= int(min_val)
+            if max_val is not None:
+                mask &= series <= int(max_val)
+
+        _apply_bounds(out["n_better"], min_n_better, max_n_better)
+        _apply_bounds(out["n_equal"], min_n_equal, max_n_equal)
+        _apply_bounds(out["n_worse"], min_n_worse, max_n_worse)
+
+        if not mask.all():
+            out = out[mask]
+
+        sort_columns = ["accepted_all", "n_better", "n_worse"] + list(score_columns)
+        sort_ascending = [
+            False,
+            False,
+            True,
+            *(
+                False if metric in higher_is_better else True
+                for metric in score_columns
+            ),
+        ]
+        out = out.sort_values(sort_columns, ascending=sort_ascending, kind="mergesort")
+        out.attrs["reference_model"] = wt_model_name
+        out.attrs["score_columns"] = list(score_columns)
+        out.attrs["lower_is_better"] = sorted(lower_is_better_set)
+        out.attrs["aggregation"] = agg
+        out.attrs["equal_tol"] = tol
+        out.attrs["filters"] = {
+            "min_n_better": min_n_better,
+            "max_n_better": max_n_better,
+            "min_n_equal": min_n_equal,
+            "max_n_equal": max_n_equal,
+            "min_n_worse": min_n_worse,
+            "max_n_worse": max_n_worse,
+        }
+        return out
 
     def loadAFScores(self, af_folder, only_indexes=None):
         """
