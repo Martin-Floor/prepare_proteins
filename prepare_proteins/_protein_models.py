@@ -4587,6 +4587,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         cst_fragments=None,
         skip_finished=None,
         only_ligands=None,
+        failed_pairs=None,
     ):
         """
         Build Glide docking input files for every grid/ligand combination and
@@ -4618,6 +4619,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 already produced a `_pv.maegz` output file.
             only_ligands (list[str] | str | None): Optional subset of ligand
                 names to include from `ligands_folder`.
+            failed_pairs (Iterable[tuple[str, str]] | None): Optional iterable
+                of `(protein, ligand)` identifiers produced by
+                `analyseDocking(..., return_failed=True)`; when provided, only
+                those combinations are prepared (after applying the other
+                filters).
 
         Example:
             >>> cst_fragments = {
@@ -4646,6 +4652,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if isinstance(models, str):
             models = [models]
+
+        failed_map = None
+        if failed_pairs:
+            failed_map = {}
+            for pair in failed_pairs:
+                if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                    raise ValueError(
+                        "Each item in failed_pairs must be a (protein, ligand) pair."
+                    )
+                protein, ligand = pair
+                protein = str(protein)
+                ligand = str(ligand)
+                failed_map.setdefault(protein, set()).add(ligand)
 
         # Create docking job folders
         if not os.path.exists(docking_folder):
@@ -4686,12 +4705,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             if models:
                 if grid not in models:
                     continue
+            if failed_map is not None and grid not in failed_map:
+                continue
 
             # Create ouput folder
             if not os.path.exists(docking_folder + "/output_models/" + grid):
                 os.mkdir(docking_folder + "/output_models/" + grid)
 
             for substrate in substrates_paths:
+
+                if failed_map is not None and substrate not in failed_map.get(grid, set()):
+                    continue
 
                 output_path = docking_folder+"/output_models/"+grid+'/'+grid+"_"+ substrate+'_pv.maegz'
                 if skip_finished and os.path.exists(output_path):
