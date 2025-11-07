@@ -4337,7 +4337,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if epik_pHt:
                     command += "-epik_pHt " + str(epik_pHt) + " "
             command += "-propka_pH " + str(pH) + " "
-            command += "-f 2005 "
+            command += "-f OPLS_2005 "
             command += "-rmsd 0.3 "
             if samplewater:
                 command += "-samplewater "
