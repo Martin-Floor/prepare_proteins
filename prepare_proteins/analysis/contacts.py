@@ -177,6 +177,34 @@ def _contact_class(q_is_bb: bool, q_is_sc: bool, t_is_bb: bool, t_is_sc: bool) -
     return "BS"
 
 
+def _contact_class_extended(q_rec: np.void, t_rec: np.void, classify_bb_sc: bool) -> str:
+    """Return contact class including metal-specific classes.
+
+    - If ``t_rec`` is a metal atom not belonging to a cofactor residue, return:
+        - "MB" when the query atom is backbone
+        - "MS" when the query atom is sidechain (or neither explicitly BB/SC)
+    - If ``t_rec`` is any non-protein non-metal ligand atom (water, ion, organic, cofactor, or cofactor-bound metal),
+      classify as:
+        - "LB" when the query atom is backbone
+        - "LS" otherwise
+    - If both sides are protein, fall back to BB/SS/BS when ``classify_bb_sc`` is True, or "NA" if False.
+    - Cofactor-bound metal atoms are treated as cofactors (i.e., follow LB/LS, not MB/MS).
+    """
+    if not classify_bb_sc:
+        return "NA"
+
+    # If target is not protein, classify as ligand-specific classes
+    if not t_rec["is_protein"]:
+        # Metals not belonging to cofactors → MB/MS
+        if t_rec["is_metal"] and (not t_rec["is_cofactor"]):
+            return "MB" if q_rec["is_backbone"] else "MS"
+        # All other ligands (including cofactors and cofactor-bound metals) → LB/LS
+        return "LB" if q_rec["is_backbone"] else "LS"
+
+    # Protein–protein contacts → BB/SS/BS
+    return _contact_class(q_rec["is_backbone"], q_rec["is_sidechain"], t_rec["is_backbone"], t_rec["is_sidechain"])
+
+
 def find_neighbours_in_pdb(
     pdb_path: str,
     query_chains: Iterable[str],
@@ -206,6 +234,13 @@ def find_neighbours_in_pdb(
         If exclude_bb_contacts=True, residues whose contacts are all backbone-backbone (BB) are removed.
     Else:
         returns { "table": DataFrame, "contact_pairs": {...}, "residue_dict": {...} }
+
+    Notes on contact_class when ``classify_bb_sc=True``:
+    - Protein–protein contacts: "BB", "SS", or "BS" depending on backbone/sidechain.
+    - Protein–metal contacts (neighbor_kind == "metal"): "MB" (metal–backbone) or "MS" (metal–sidechain).
+    - Protein–ligand contacts (non-metals: water, ions, organics, cofactors, and cofactor-bound metals):
+      "LB" (ligand–backbone) if the protein atom is backbone, else "LS" (ligand–sidechain).
+    - Metal atoms that belong to cofactor residues are treated as cofactors (thus LB/LS, not MB/MS).
     """
     include = include or {"waters": False, "ions": True, "metals": True, "cofactors": True, "organics": True}
     ligand_filters = ligand_filters or {"resnames_in": [], "resnames_ex": [], "min_heavy_atoms": 1}
@@ -264,12 +299,16 @@ def find_neighbours_in_pdb(
 
     def build_target_mask_for_ligands():
         m = ~arr["is_protein"]
+
+        # Treat metals that belong to cofactor residues as cofactors (not metals)
+        is_metal_effective = arr["is_metal"] & ~arr["is_cofactor"]
+
         if not include.get("waters", False):
             m &= ~arr["is_water"]
         if not include.get("ions", True):
             m &= ~arr["is_ion"]
         if not include.get("metals", True):
-            m &= ~arr["is_metal"]
+            m &= ~is_metal_effective
         if not include.get("cofactors", True):
             m &= ~arr["is_cofactor"]
         if not include.get("organics", True):
@@ -356,7 +395,10 @@ def find_neighbours_in_pdb(
         def _pack_row(qi, ti, dist, shell: str):
             q, t = arr[qi], arr[ti]
             if not t["is_protein"]:
-                if t["is_metal"]:
+                # Prioritize cofactor classification over metal when both apply
+                if t["is_cofactor"]:
+                    kind = "cofactor"
+                elif t["is_metal"]:
                     kind = "metal"
                 elif t["is_ion"]:
                     kind = "ion"
@@ -368,13 +410,8 @@ def find_neighbours_in_pdb(
                     kind = "organic"
             else:
                 kind = "chain"
-            cls = (
-                "BB"
-                if (q["is_backbone"] and t["is_backbone"])
-                else ("SS" if (q["is_sidechain"] and t["is_sidechain"]) else "BS")
-                if classify_bb_sc
-                else "NA"
-            )
+            # Compute contact class with metal-specific MB/MS, treating cofactor-bound metals as cofactors
+            cls = _contact_class_extended(q, t, classify_bb_sc)
             return {
                 "query_chain": q["chain"],
                 "query_resseq": int(q["resseq"]),
@@ -404,11 +441,7 @@ def find_neighbours_in_pdb(
         if only_residue_dict:
             atom_classes: Dict[int, Set[str]] = {}
             for qi, ti, _ in (first_pairs_abs + second_pairs_abs):
-                cls = (
-                    _contact_class(arr[qi]["is_backbone"], arr[qi]["is_sidechain"], arr[ti]["is_backbone"], arr[ti]["is_sidechain"])
-                    if classify_bb_sc
-                    else "NA"
-                )
+                cls = _contact_class_extended(arr[qi], arr[ti], classify_bb_sc)
                 atom_classes.setdefault(qi, set()).add(cls)
 
             res_keys: Set[Tuple[int, str, str]] = set()
