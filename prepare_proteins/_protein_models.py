@@ -1,6 +1,7 @@
 import fileinput
 import gc
 import io
+import importlib
 import itertools
 import json
 import os
@@ -13,6 +14,155 @@ import warnings
 import copy
 import re
 import pkg_resources
+from collections import Counter
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Union
+
+# --- Debug printing helper (no-op if debug=False) ---
+def _dbg(debug: bool, msg: str = "", *args):
+    if debug:
+        try:
+            print(msg.format(*args))
+        except Exception:
+            # Be resilient to bad formats/objects
+            print(msg)
+
+def _mask_runs(mask):
+    """Return list of (start, end, value) for contiguous runs in a boolean mask."""
+    runs = []
+    if not mask:
+        return runs
+    start = 0
+    cur = mask[0]
+    for i, v in enumerate(mask[1:], start=1):
+        if v != cur:
+            runs.append((start, i - 1, cur))
+            start = i
+            cur = v
+    runs.append((start, len(mask) - 1, cur))
+    return runs
+
+def _longest_true_run(bool_list):
+    """
+    Return (start_idx, end_idx) of the longest contiguous True run in bool_list.
+    If no True values, return None.
+    """
+    best_len = 0
+    best = None
+    cur_len = 0
+    cur_start = 0
+    for i, v in enumerate(bool_list):
+        if v:
+            if cur_len == 0:
+                cur_start = i
+            cur_len += 1
+            if cur_len > best_len:
+                best_len = cur_len
+                best = (cur_start, i)
+        else:
+            cur_len = 0
+    return best
+
+def _term_anchored_core(mapping_pairs, chain_idx_list):
+    """
+    Core bounded by the reference termini:
+      - mapping_pairs: list of (ref_idx, tgt_idx)
+      - chain_idx_list: global target indices for this chain
+    Return (core_start, core_end) in GLOBAL target indices using the target residues
+    aligned to the MIN and MAX ref_idx present for this chain. If only one anchor is
+    present, fall back to the earliest/latest target-aligned residue.
+    """
+    chain_set = set(chain_idx_list)
+    chain_pairs = [(r, t) for (r, t) in mapping_pairs if t in chain_set]
+    if not chain_pairs:
+        return None
+
+    # Anchor strictly by reference indices (termini)
+    r_min, t_min = min(chain_pairs, key=lambda x: x[0])
+    r_max, t_max = max(chain_pairs, key=lambda x: x[0])
+
+    # If both anchors exist (typical), use them
+    if r_min != r_max:
+        core_start = min(t_min, t_max)
+        core_end = max(t_min, t_max)
+        return (core_start, core_end)
+
+    # Fallback (rare): only one ref anchor effectively present → use first/last target
+    first_tgt = min(chain_pairs, key=lambda x: x[1])[1]
+    last_tgt = max(chain_pairs, key=lambda x: x[1])[1]
+    core_start = min(first_tgt, last_tgt)
+    core_end = max(first_tgt, last_tgt)
+    return (core_start, core_end)
+
+def _analyze_mapping_pairs(mapping, r_ca_coord, t_ca_coord, max_ca_ca, verbose_limit=40):
+    import numpy as np, bisect
+    if not mapping:
+        print("[mapdiag] no pairs")
+        return
+    pairs = sorted([(r, t) for t, r in mapping.items()], key=lambda x: x[0])
+    tgt_order = [t for _, t in pairs]
+
+    inversions = 0
+    last = -1
+    for t in tgt_order:
+        if t <= last:
+            inversions += 1
+        last = t
+
+    lis = []
+    for t in tgt_order:
+        k = bisect.bisect_left(lis, t)
+        if k == len(lis):
+            lis.append(t)
+        else:
+            lis[k] = t
+    lis_len = len(lis)
+
+    d = []
+    for t, r in mapping.items():
+        d.append(float(np.linalg.norm(t_ca_coord[t] - r_ca_coord[r])))
+    d = np.array(d, float)
+    d_med = float(np.median(d)) if d.size else float("nan")
+    d_max = float(np.max(d)) if d.size else float("nan")
+    frac_loose = float((d > 0.75 * max_ca_ca).sum() / d.size) if d.size else float("nan")
+
+    print(f"[mapdiag] pairs={len(mapping)}  inversions={inversions}  LIS_len={lis_len}")
+    print(f"[mapdiag] dists: median={d_med:.2f}  max={d_max:.2f}  frac(>0.75*cutoff)={frac_loose:.2f}")
+
+    for i, (r, t) in enumerate(pairs[:verbose_limit]):
+        print(f"  {i:03d}: ref={r} -> tgt={t}  | d={np.linalg.norm(t_ca_coord[t]-r_ca_coord[r]):.2f}")
+
+_MISSING = object()
+
+
+class _OpenMMSimulationRegistry(dict):
+    """Dictionary storing per-model openmm_md objects plus a command log registry."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.openmm_command_logs = {}
+
+
+def _require_openmm_support(feature="OpenMM-dependent functionality"):
+    """
+    Import the OpenMM integration module on demand, raising a clear error when unavailable.
+    """
+    try:
+        module = importlib.import_module("prepare_proteins.MD.openmm_setup")
+    except Exception as exc:
+        raise ImportError(
+            f"OpenMM support is required to use {feature}. "
+            "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
+        ) from exc
+    if not getattr(module, "OPENMM_AVAILABLE", False):
+        import_error = getattr(module, "OPENMM_IMPORT_ERROR", None)
+        raise ImportError(
+            f"OpenMM support is required to use {feature}. "
+            "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
+        ) from import_error
+    return module
+
 
 import ipywidgets as widgets
 import matplotlib as mpl
@@ -22,7 +172,7 @@ import numpy as np
 import pandas as pd
 from Bio import PDB, BiopythonWarning
 from Bio.PDB.DSSP import DSSP
-from Bio.PDB.Polypeptide import aa3
+from Bio.PDB.Polypeptide import aa3, is_aa
 from ipywidgets import interactive_output, VBox, IntSlider, Checkbox, interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
@@ -30,6 +180,29 @@ from scipy.spatial.distance import cdist
 
 import prepare_proteins
 from . import MD, _atom_selectors, alignment, rosettaScripts
+from .analysis import find_neighbours_in_pdb
+from .MD.parameterization import get_backend
+from .MD.parameterization.utils import DEFAULT_PARAMETERIZATION_SKIP_RESIDUES
+
+
+try:
+    _BIOPYTHON_THREE_TO_ONE = PDB.Polypeptide.three_to_one
+
+    def _three_to_one(resname):
+        return _BIOPYTHON_THREE_TO_ONE(resname)
+
+except AttributeError:
+    from Bio.Data.PDBData import protein_letters_3to1_extended as _protein_letters_3to1_extended
+
+    def _three_to_one(resname):
+        """Biopython>=1.83 compatibility: map three-letter codes to one letter."""
+        key = f"{resname}".strip().upper()
+        if not key:
+            raise KeyError(resname)
+        key = f"{key:<3s}"[:3]
+        if key in _protein_letters_3to1_extended:
+            return _protein_letters_3to1_extended[key]
+        raise KeyError(resname)
 
 
 class proteinModels:
@@ -63,6 +236,8 @@ class proteinModels:
         Remove terminal unstructured regions from all models.
     saveModels(self, output_folder)
         Save current models into an output folder.
+    computeModelContacts(self, query_chains, **kwargs)
+        Analyse inter-chain/ligand contacts for the selected models and cache the result.
 
     Hidden Methods
     ==============
@@ -84,6 +259,7 @@ class proteinModels:
         ignore_biopython_warnings=False,
         collect_memory_every=None,
         only_hetatm_conects=False,
+        wat_to_hoh=True,
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -137,11 +313,14 @@ class proteinModels:
             )
         self.models_names = []  # Store model names
         self.structures = {}  # structures are stored here
-        self.sequences = {}  # sequences are stored here
+        self.sequences = {}  # sequences are stored here (single-chain legacy access)
+        self.chain_sequences = {}  # per-chain sequences for each model
         self.target_sequences = {}  # Final sequences are stored here
         self.msa = None  # multiple sequence alignment
+        self.msa_chain_selection = {}  # chain mapping used for latest MSA
         self.multi_chain = False
-        self.ss = {}  # secondary structure strings are stored here
+        self.ss = {}  # secondary structure strings are stored here (legacy access)
+        self.chain_secondary_structure = {}  # per-chain secondary structure strings
         self.docking_data = None  # secondary structure strings are stored here
         self.docking_distances = {}
         self.docking_angles = {}
@@ -159,8 +338,9 @@ class proteinModels:
 
         self.distance_data = {}
         self.models_data = {}
+        self.models_contacts = {}
 
-        # Read PDB structures into Biopython
+        # Read PDB structures into Biopython (serial loading)
         collect_memory = False
         for i, model in enumerate(sorted(self.models_paths)):
 
@@ -179,6 +359,7 @@ class proteinModels:
                 add_to_path=True,
                 collect_memory=collect_memory,
                 only_hetatoms=only_hetatm_conects,
+                wat_to_hoh=wat_to_hoh,
             )
 
         if get_sequences:
@@ -324,7 +505,23 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return new_resid
 
-    def removeModelAtoms(self, model, atoms_list):
+    def _removeAtomsFromConects(self, model, atom_keys):
+        """
+        Remove CONECT entries referencing any atom tuples in ``atom_keys``.
+        """
+        if not atom_keys:
+            return
+        conects = self.conects.get(model)
+        if not conects:
+            return
+        atom_key_set = set(atom_keys)
+        self.conects[model] = [
+            conect
+            for conect in conects
+            if atom_key_set.isdisjoint(conect)
+        ]
+
+    def removeModelAtoms(self, model, atoms_list, verbose=True):
         """
         Remove specific atoms of a model. Atoms to delete are given as a list of tuples.
         Each tuple contains three positions specifying (chain_id, residue_id, atom_name).
@@ -337,17 +534,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Specifies the list of atoms to delete for the particular model.
         """
 
-        def removeAtomInConects(self, model, atom):
-            """
-            Function for removing conect lines involving the deleted atom.
-            """
-            to_remove = []
-            for conect in self.conects[model]:
-                if atom in conect:
-                    to_remove.append(conect)
-            for conect in to_remove:
-                self.conects[model].remove(conect)
-
+        removed_atoms = []
         for remove_atom in atoms_list:
             for chain in self.structures[model].get_chains():
                 if chain.id == remove_atom[0]:
@@ -355,39 +542,557 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                         if residue.id[1] == remove_atom[1]:
                             for atom in residue:
                                 if atom.name == remove_atom[2]:
-                                    print(
-                                        "Removing atom: "
-                                        + str(remove_atom)
-                                        + " from model "
-                                        + model
-                                    )
+                                    if verbose:
+                                        print(
+                                            "Removing atom: "
+                                            + str(remove_atom)
+                                            + " from model "
+                                            + model
+                                        )
                                     residue.detach_child(atom.id)
-                                    removeAtomInConects(self, model, remove_atom)
+                                    removed_atoms.append(remove_atom)
+        if removed_atoms:
+            self._removeAtomsFromConects(model, removed_atoms)
 
-    def removeModelResidues(self, model, residues_list):
+    def removeModelResidues(self, model, residues_list, verbose=True):
         """
         Remove a group of residues from the model structure.
 
-        Paramters
-        =========
+        Parameters
+        ==========
         model : str
-            model ID
-        residues_list : list
-            Specifies the list of resdiues to delete for the particular model.
+            Identifier of the model whose residues should be removed. Must exist in
+            `self.structures`.
+        residues_list : iterable
+            Residue selectors describing the residues to delete. Each entry can be:
+
+              * a ``Bio.PDB.Residue`` instance obtained from the structure;
+              * a tuple ``(chain_id, resseq)`` (legacy behaviour);
+              * a tuple ``(chain_id, residue_id_tuple)`` where ``residue_id_tuple`` is
+                the three-element Biopython ``Residue.id`` (``hetfield``, ``resseq``,
+                ``icode``); or
+              * a bare ``Residue.id`` tuple (three elements) to match residues across
+                any chain. When such tuples appear multiple times their multiplicity is
+                respected (e.g. duplicating the tuple removes that many matching
+                residues).
+        verbose : bool, optional
+            If True (default) log each residue removal.
+
+        Raises
+        ======
+        ValueError
+            Raised when no residues matching the provided selectors are found.
+        TypeError
+            Raised when selectors cannot be interpreted.
         """
 
-        # Get all atoms for residues to remove them
-        atoms_to_remove = []
-        for residue in self.structures[model].get_residues():
-            chain = residue.get_parent().id
-            if (chain, residue.id[1]) in residues_list:
-                for atom in residue:
-                    atoms_to_remove.append((chain, residue.id[1], atom.name))
+        if model not in self.structures:
+            raise ValueError(f"Model '{model}' is not present in the current session.")
 
-        if atoms_to_remove == []:
+        try:
+            requested = list(residues_list)
+        except TypeError as exc:
+            raise TypeError(
+                "residues_list must be an iterable of residue identifiers."
+            ) from exc
+
+        if not requested:
+            raise ValueError("No residue identifiers were supplied.")
+
+        structure = self.structures[model]
+
+        explicit_full = Counter()
+        explicit_resseq = Counter()
+        global_full = Counter()
+        explicit_full_desc = {}
+        explicit_resseq_desc = {}
+        global_full_desc = {}
+
+        def _coerce_resseq(value):
+            if isinstance(value, int):
+                return value
+            try:
+                return int(value)
+            except (TypeError, ValueError) as exc:
+                raise TypeError(
+                    f"Residue sequence identifier {value!r} is not an integer."
+                ) from exc
+
+        def _check_residue_id(residue_id):
+            if (
+                not isinstance(residue_id, tuple)
+                or len(residue_id) != 3
+                or not isinstance(residue_id[1], int)
+            ):
+                raise TypeError(
+                    f"Residue identifier {residue_id!r} is not a valid Biopython Residue.id tuple."
+                )
+
+        for entry in requested:
+            if isinstance(entry, PDB.Residue.Residue):
+                chain_id = entry.get_parent().id
+                residue_id = entry.id
+                explicit_full[(chain_id, residue_id)] += 1
+                explicit_full_desc.setdefault(
+                    (chain_id, residue_id), f"{chain_id}:{residue_id}"
+                )
+                continue
+
+            if not isinstance(entry, tuple):
+                raise TypeError(
+                    "Residue selectors must be Bio.PDB.Residue objects or tuples."
+                )
+
+            if len(entry) == 2:
+                chain_id, residue_token = entry
+                if isinstance(residue_token, tuple):
+                    _check_residue_id(residue_token)
+                    explicit_full[(chain_id, residue_token)] += 1
+                    explicit_full_desc.setdefault(
+                        (chain_id, residue_token), f"{chain_id}:{residue_token}"
+                    )
+                else:
+                    resseq = _coerce_resseq(residue_token)
+                    explicit_resseq[(chain_id, resseq)] += 1
+                    explicit_resseq_desc.setdefault(
+                        (chain_id, resseq), f"{chain_id}:resseq={resseq}"
+                    )
+                continue
+
+            if len(entry) == 3:
+                _check_residue_id(entry)
+                global_full[entry] += 1
+                global_full_desc.setdefault(entry, f"{entry}")
+                continue
+
+            if len(entry) == 4:
+                chain_id = entry[0]
+                residue_id = tuple(entry[1:])
+                _check_residue_id(residue_id)
+                explicit_full[(chain_id, residue_id)] += 1
+                explicit_full_desc.setdefault(
+                    (chain_id, residue_id), f"{chain_id}:{residue_id}"
+                )
+                continue
+
+            raise TypeError(f"Unsupported residue selector format: {entry!r}")
+
+        matched_explicit_full = Counter()
+        matched_explicit_resseq = Counter()
+        matched_global_full = Counter()
+
+        atoms_to_remove = []
+        residues_to_detach = {}
+
+        for chain in structure.get_chains():
+            chain_id = chain.id
+            for residue in chain:
+                full_key = (chain_id, residue.id)
+                resseq_key = (chain_id, residue.id[1])
+                matched = False
+
+                if explicit_full[full_key] > matched_explicit_full[full_key]:
+                    matched_explicit_full[full_key] += 1
+                    matched = True
+                elif explicit_resseq[resseq_key] > matched_explicit_resseq[resseq_key]:
+                    matched_explicit_resseq[resseq_key] += 1
+                    matched = True
+                elif global_full[residue.id] > matched_global_full[residue.id]:
+                    matched_global_full[residue.id] += 1
+                    matched = True
+
+                if matched:
+                    residues_to_detach.setdefault((chain_id, residue.id), chain)
+                    for atom in residue:
+                        atoms_to_remove.append((chain_id, residue.id[1], atom.name))
+
+        missing = []
+        for key, count in explicit_full.items():
+            deficit = count - matched_explicit_full[key]
+            if deficit > 0:
+                missing.extend([explicit_full_desc[key]] * deficit)
+        for key, count in explicit_resseq.items():
+            deficit = count - matched_explicit_resseq[key]
+            if deficit > 0:
+                missing.extend([explicit_resseq_desc[key]] * deficit)
+        for key, count in global_full.items():
+            deficit = count - matched_global_full[key]
+            if deficit > 0:
+                missing.extend([global_full_desc[key]] * deficit)
+
+        if not residues_to_detach:
+            if missing:
+                raise ValueError(
+                    "None of the requested residues were found: "
+                    + ", ".join(sorted(set(missing)))
+                )
             raise ValueError("No atoms were found for the specified residue!")
 
-        self.removeModelAtoms(model, atoms_to_remove)
+        if missing:
+            warnings.warn(
+                "Some requested residues were not found and were skipped: "
+                + ", ".join(sorted(set(missing))),
+                UserWarning,
+            )
+
+        self._removeAtomsFromConects(model, atoms_to_remove)
+
+        for (chain_id, residue_id), chain_obj in residues_to_detach.items():
+            if verbose:
+                resseq = residue_id[1]
+                icode = residue_id[2].strip() if isinstance(residue_id[2], str) else residue_id[2]
+                if icode:
+                    print(
+                        f"Removing residue: ({chain_id}, {resseq}{icode}) from model {model}"
+                    )
+                else:
+                    print(
+                        f"Removing residue: ({chain_id}, {resseq}) from model {model}"
+                    )
+            if residue_id in chain_obj.child_dict:
+                chain_obj.detach_child(residue_id)
+
+    def removeModelChains(self, model, chains, verbose=True):
+        """
+        Remove one or more chains from a stored model.
+
+        Parameters
+        ==========
+        model : str
+            Identifier of the model whose chains should be removed. Must exist in
+            ``self.structures``.
+        chains : str, Bio.PDB.Chain.Chain, or iterable
+            Chain selectors. Each entry may be a chain ID string or a Biopython
+            ``Chain`` object. Iterables are flattened one level (e.g. list or set of
+            chain IDs). Duplicate IDs are ignored after the first occurrence.
+        verbose : bool, optional
+            If True (default) log each chain removal.
+
+        Raises
+        ======
+        ValueError
+            Raised when the model is unknown, no chains are provided, or none of the
+            requested chains are present in the model.
+        TypeError
+            Raised when chain selectors cannot be interpreted.
+        """
+
+        if model not in self.structures:
+            raise ValueError(f"Model '{model}' is not present in the current session.")
+
+        if isinstance(chains, (str, PDB.Chain.Chain)):
+            selector_entries = [chains]
+        else:
+            try:
+                selector_entries = list(chains)
+            except TypeError as exc:
+                raise TypeError("chains must be a chain ID, Chain object, or iterable.") from exc
+
+        if not selector_entries:
+            raise ValueError("No chain identifiers were supplied.")
+
+        chain_id_order = []
+        for entry in selector_entries:
+            if isinstance(entry, PDB.Chain.Chain):
+                chain_id = entry.id
+            elif isinstance(entry, str):
+                if not entry:
+                    raise ValueError("Chain identifier strings must be non-empty.")
+                chain_id = entry
+            else:
+                raise TypeError(
+                    "Chain selectors must be strings or Bio.PDB.Chain.Chain objects."
+                )
+            chain_id_order.append(chain_id)
+
+        # Preserve user order while removing duplicates
+        seen = set()
+        target_chain_ids = []
+        for cid in chain_id_order:
+            if cid not in seen:
+                seen.add(cid)
+                target_chain_ids.append(cid)
+
+        target_chain_set = set(target_chain_ids)
+
+        structure = self.structures[model]
+        models_list = list(structure.get_models())
+
+        atoms_to_remove = []
+        chains_to_detach = []
+        found_chain_ids = set()
+
+        for stored_model in models_list:
+            for chain in list(stored_model.get_chains()):
+                if chain.id not in target_chain_set:
+                    continue
+                found_chain_ids.add(chain.id)
+                chains_to_detach.append((stored_model, chain))
+                for residue in chain.get_residues():
+                    for atom in residue:
+                        atoms_to_remove.append((chain.id, residue.id[1], atom.name))
+
+        if not found_chain_ids:
+            raise ValueError(
+                "No chains matching the provided identifiers were found in model "
+                f"'{model}'."
+            )
+
+        missing = [cid for cid in target_chain_ids if cid not in found_chain_ids]
+        self._removeAtomsFromConects(model, atoms_to_remove)
+
+        for stored_model, chain_obj in chains_to_detach:
+            if verbose:
+                print(f"Removing chain: {chain_obj.id} from model {model}")
+            if chain_obj.id in stored_model.child_dict:
+                stored_model.detach_child(chain_obj.id)
+
+        if missing:
+            warnings.warn(
+                "Some requested chains were not found and were skipped: "
+                + ", ".join(sorted(set(missing))),
+                UserWarning,
+            )
+
+    def changeResidueAtomNames(
+        self,
+        residue_name,
+        atom_names,
+        models=None,
+        verbose=False,
+        summary=False,
+    ):
+        """
+        Rename atoms for residues matching ``residue_name`` across stored models.
+
+        Parameters
+        ----------
+        residue_name : str
+            Residue name (e.g. ligand three-letter code) to target.
+        atom_names : dict
+            Mapping from original four-character (including padding) atom names to
+            their four-character replacements.
+        models : iterable or str, optional
+            Specific model name(s) to modify. Defaults to all loaded models.
+        verbose : bool, optional
+            Print each replacement as it occurs.
+        summary : bool, optional
+            Print a summary of replacements once processing finishes.
+
+        Returns
+        -------
+        int
+            Total number of atom names updated.
+        """
+
+        if not isinstance(residue_name, str) or not residue_name.strip():
+            raise ValueError("residue_name must be a non-empty string.")
+
+        if not isinstance(atom_names, dict) or not atom_names:
+            raise ValueError("atom_names must be a non-empty dictionary.")
+
+        normalized_map = {}
+        found_map = {}
+        for old_name, new_name in atom_names.items():
+            if not isinstance(old_name, str) or not isinstance(new_name, str):
+                raise ValueError("Atom name mappings must use strings as keys and values.")
+
+            if len(old_name) != 4:
+                raise ValueError(
+                    f'Atom name mapping keys must be exactly four characters long (including padding); '
+                    f'received "{old_name}".'
+                )
+            if len(new_name) != 4:
+                raise ValueError(
+                    f'Atom name mapping values must be exactly four characters long (including padding); '
+                    f'received "{new_name}".'
+                )
+
+            stripped_old = old_name.strip()
+            stripped_new = new_name.strip()
+
+            if not stripped_old:
+                raise ValueError("Atom name mapping keys cannot be empty.")
+            if not stripped_new:
+                raise ValueError("Atom name mapping values cannot be empty.")
+
+            if stripped_old in normalized_map and normalized_map[stripped_old] != stripped_new:
+                raise ValueError(
+                    f'Conflicting mappings supplied for atom "{stripped_old}".'
+                )
+
+            normalized_map[stripped_old] = stripped_new
+            found_map[stripped_old] = False
+
+        if isinstance(models, str):
+            target_models = [models]
+        elif models is None:
+            target_models = list(self.structures.keys())
+        else:
+            target_models = list(models)
+
+        if not target_models:
+            return 0
+
+        target_models = list(dict.fromkeys(target_models))
+
+        missing_models = [m for m in target_models if m not in self.structures]
+        if missing_models:
+            raise KeyError(
+                "Requested models are not loaded: %s" % ", ".join(sorted(missing_models))
+            )
+
+        total_replacements = 0
+        summary_records = {}
+        target_resname = residue_name.strip().upper()
+
+        for model_name in target_models:
+            structure = self.structures[model_name]
+            for stored_model in structure.get_models():
+                for chain in stored_model.get_chains():
+                    for residue in chain.get_residues():
+                        if residue.get_resname().strip().upper() != target_resname:
+                            continue
+
+                        residue_id = residue.id[1]
+
+                        atoms = list(residue.get_atoms())
+                        atoms_by_name = {a.get_name().strip(): a for a in atoms}
+                        target_names = [
+                            old_name for old_name in normalized_map if old_name in atoms_by_name
+                        ]
+                        if not target_names:
+                            continue
+
+                        residue_child_dict = getattr(residue, "child_dict", None)
+                        if residue_child_dict is None:
+                            raise ValueError(
+                                "Residue object is missing child_dict; cannot rename atoms."
+                            )
+
+                        non_target_names = set(atoms_by_name).difference(target_names)
+                        for old_name in target_names:
+                            new_atom_name = normalized_map[old_name]
+                            if (
+                                new_atom_name in non_target_names
+                                and new_atom_name not in target_names
+                            ):
+                                raise ValueError(
+                                    f'Renaming atom "{old_name}" to "{new_atom_name}" '
+                                    f'would overwrite an existing atom in residue {chain.id}:{residue_id} '
+                                    f'of model "{model_name}".'
+                                )
+
+                        new_names_for_targets = [normalized_map[name] for name in target_names]
+                        if len(new_names_for_targets) != len(set(new_names_for_targets)):
+                            raise ValueError(
+                                f"Atom name mapping produces duplicates for residue {chain.id}:{residue_id} "
+                                f'of model "{model_name}".'
+                            )
+
+                        reserved_names = set(atoms_by_name)
+                        reserved_names.update(normalized_map.values())
+
+                        temp_assignments = {}
+                        residue_name_updates = {}
+
+                        def _generate_temp_name(counter: int) -> str:
+                            attempt = counter
+                            while True:
+                                candidate = f"T{attempt:03d}"
+                                if candidate not in reserved_names:
+                                    reserved_names.add(candidate)
+                                    return candidate
+                                attempt += 1
+
+                        # First pass: move targeted atoms to unique temporary names to avoid clashes
+                        for idx, old_name in enumerate(target_names):
+                            atom = atoms_by_name[old_name]
+                            temp_name = _generate_temp_name(idx)
+
+                            residue_child_dict.pop(atom.id, None)
+                            atom.name = temp_name
+                            atom.id = temp_name
+                            atom.fullname = f"{temp_name:>4s}"
+                            atom.full_id = atom.get_full_id()
+                            residue_child_dict[temp_name] = atom
+
+                            temp_assignments[old_name] = (atom, temp_name)
+                            atoms_by_name[temp_name] = atom
+                            atoms_by_name.pop(old_name, None)
+
+                        # Second pass: assign the requested final names
+                        for old_name in target_names:
+                            atom, temp_name = temp_assignments[old_name]
+                            new_atom_name = normalized_map[old_name]
+
+                            residue_child_dict.pop(temp_name, None)
+                            if verbose:
+                                print(
+                                    f'[{model_name}] chain {chain.id} residue {residue_id}: '
+                                    f'{old_name} -> {new_atom_name}'
+                                )
+
+                            atom.name = new_atom_name
+                            atom.id = new_atom_name
+                            atom.fullname = f"{new_atom_name:>4s}"
+                            atom.full_id = atom.get_full_id()
+                            residue_child_dict[new_atom_name] = atom
+
+                            atoms_by_name[new_atom_name] = atom
+                            atoms_by_name.pop(temp_name, None)
+
+                            found_map[old_name] = True
+                            total_replacements += 1
+                            residue_name_updates[old_name] = new_atom_name
+                            if summary:
+                                key = (model_name, chain.id, residue_id)
+                                summary_records[key] = summary_records.get(key, 0) + 1
+
+                        if residue_name_updates and model_name in self.conects:
+                            updated_conects = []
+                            for conect in self.conects[model_name]:
+                                updated_conect = []
+                                for entry_chain, entry_resid, entry_atom in conect:
+                                    if (
+                                        entry_chain == chain.id
+                                        and entry_resid == residue_id
+                                        and entry_atom in residue_name_updates
+                                    ):
+                                        updated_conect.append(
+                                            (
+                                                entry_chain,
+                                                entry_resid,
+                                                residue_name_updates[entry_atom],
+                                            )
+                                        )
+                                    else:
+                                        updated_conect.append(
+                                            (entry_chain, entry_resid, entry_atom)
+                                        )
+                                updated_conects.append(updated_conect)
+                            self.conects[model_name] = updated_conects
+
+        for atom_key, was_found in found_map.items():
+            if not was_found:
+                print(
+                    f'Atom name "{atom_key}" was not found in residues named "{target_resname}".'
+                )
+
+        if summary:
+            if total_replacements:
+                print(
+                    f'Renamed {total_replacements} atom(s) across {len(summary_records)} residue(s).'
+                )
+                for key, count in sorted(summary_records.items()):
+                    model_name, chain_id, residue_id = key
+                    print(
+                        f'  [{model_name}] chain {chain_id} residue {residue_id}: {count} atom(s) renamed.'
+                    )
+            else:
+                print("No atom names were updated.")
+
+        return total_replacements
 
     def removeAtomFromConectLines(self, residue_name, atom_name, verbose=True):
         """
@@ -509,13 +1214,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 # Remove termini
                 if ACE and remove_ace:
                     for a in ACE:
-                        self.removeAtomFromConectLines("ACE", a, verbose=False)
-                    chain.detach_child(ACE.id)
+                        self.removeAtomFromConectLines("ACE", a.name, verbose=False)
+                    ACE.get_parent().detach_child(ACE.id)
 
                 if NMA and remove_nma:
                     for a in NMA:
-                        self.removeAtomFromConectLines("NMA", a, verbose=False)
-                    chain.detach_child(NMA.id)
+                        self.removeAtomFromConectLines("NMA", a.name, verbose=False)
+                    NMA.get_parent().detach_child(NMA.id)
 
     def addOXTAtoms(self):
         """
@@ -591,17 +1296,22 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if residue.resname == "WAT":
                     residue.resname = "HOH"
 
-        if model not in self.conects or self.conects[model] == [] and conect_update:
-            # Read conect lines
-            self.conects[model] = self._readPDBConectLines(pdb_file, model, only_hetatoms=only_hetatoms)
+        # Read conect lines (avoid double read if covalent_check may rewrite PDB)
+        if conect_update and not covalent_check:
+            if model not in self.conects or self.conects[model] == []:
+                self.conects[model] = self._readPDBConectLines(
+                    pdb_file, model, only_hetatoms=only_hetatoms
+                )
 
         # Check covalent ligands
         if covalent_check:
             self._checkCovalentLigands(model, pdb_file, atom_mapping=atom_mapping)
 
-        # Update conect lines
+        # Update conect lines once after potential covalent sorting
         if conect_update:
-            self.conects[model] = self._readPDBConectLines(pdb_file, model, only_hetatoms=only_hetatoms)
+            self.conects[model] = self._readPDBConectLines(
+                pdb_file, model, only_hetatoms=only_hetatoms
+            )
 
         if add_to_path:
             self.models_paths[model] = pdb_file
@@ -622,20 +1332,109 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Contains the sequences of all models.
         """
         self.multi_chain = False
-        # Add sequence information
+        self.chain_sequences = {}
+
         for model in self.models_names:
             chains = [c for c in self.structures[model].get_chains()]
-            if len(chains) == 1:
-                for c in chains:
-                    self.sequences[model] = self._getChainSequence(c)
+            per_chain_sequences = {}
+            for c in chains:
+                per_chain_sequences[c.id] = self._getChainSequence(c)
+
+            self.chain_sequences[model] = per_chain_sequences
+
+            if len(per_chain_sequences) == 1:
+                self.sequences[model] = next(iter(per_chain_sequences.values()))
             else:
-                self.sequences[model] = {}
-                for c in chains:
-                    self.sequences[model][c.id] = self._getChainSequence(c)
-                # If any model has more than one chain set multi_chain to True.
+                self.sequences[model] = per_chain_sequences
+
+            valid_sequences = [
+                seq for seq in per_chain_sequences.values() if seq not in (None, "")
+            ]
+            if len(valid_sequences) > 1:
+                # If any model has more than one polymeric chain set multi_chain to True.
                 self.multi_chain = True
 
         return self.sequences
+
+    def _resolve_chain_selection(self, chains=None, models=None, require_single=False):
+        """
+        Normalize user-provided chain selections.
+
+        Parameters
+        ----------
+        chains : None, str, iterable, or dict
+            Chain selector. When dict, keys are model names and values can be single
+            chain IDs or iterables of chain IDs.
+        models : iterable, optional
+            Subset of models to consider. Defaults to all loaded models.
+        require_single : bool, optional
+            When True, ensure a single chain ID is returned per model.
+
+        Returns
+        -------
+        dict
+            Mapping of model -> list of chain IDs (require_single=False) or
+            model -> single chain ID (require_single=True).
+        """
+        if models is None:
+            models = self.models_names
+
+        # Ensure sequence information is populated
+        if self.chain_sequences == {} and self.structures:
+            self.getModelsSequences()
+
+        selection = {}
+
+        def _normalize_value(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple, set)):
+                return list(dict.fromkeys(value))
+            raise TypeError(
+                "Chain selectors must be strings, iterables, or dictionaries mapping to them."
+            )
+
+        for model in models:
+            available_sequences = self.chain_sequences.get(model, {})
+            polymer_chains = [
+                chain_id
+                for chain_id, seq in available_sequences.items()
+                if seq not in (None, "")
+            ]
+            if polymer_chains:
+                available = list(polymer_chains)
+            elif available_sequences:
+                available = list(available_sequences.keys())
+            else:
+                available = [c.id for c in self.structures[model].get_chains()]
+
+            if isinstance(chains, dict):
+                requested = _normalize_value(chains.get(model))
+            else:
+                requested = _normalize_value(chains)
+
+            if requested is None:
+                requested = available
+
+            missing = [c for c in requested if c not in available]
+            if missing:
+                raise ValueError(
+                    f"Requested chain(s) {missing} not found in model {model}. "
+                    f"Available chains: {available}"
+                )
+
+            if require_single:
+                if len(requested) != 1:
+                    raise ValueError(
+                        f"Model {model} requires a single chain selection but received {requested}."
+                    )
+                selection[model] = requested[0]
+            else:
+                selection[model] = requested
+
+        return selection
 
     def renumberModels(self, by_chain=True):
         """
@@ -675,40 +1474,30 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Dictionary specifying which chain to use for each model
         """
 
-        # If only a single ID is given use it for all models
-        if isinstance(chains, str):
-            cd = {}
-            for model in self:
-                cd[model] = chains
-            chains = cd
+        # Normalize chain selection (requires a single chain per model)
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=True
+        )
 
-        for model in self:
-            if isinstance(self.sequences[model], dict) and chains == None:
+        sequences = {}
+        for model in self.models_names:
+            chain_id = chain_selection.get(model)
+            if chain_id is None:
+                continue
+
+            seq = self.chain_sequences.get(model, {}).get(chain_id)
+            if seq in (None, ""):
                 raise ValueError(
-                    "There are multiple chains in model %s. Specify which \
-chain to use for each model with the chains option."
-                    % model
+                    f"Selected chain {chain_id} in model {model} does not contain a protein sequence."
                 )
 
-        if chains != None:
-            sequences = {}
-            for model in self.models_names:
-                if isinstance(self.sequences[model], dict):
-                    sequences[model] = self.sequences[model][chains[model]]
-                else:
-                    sequences[model] = self.sequences[model]
-
-            if isinstance(extra_sequences, dict):
-                for s in extra_sequences:
-                    sequences[s] = extra_sequences[s]
-        else:
-            sequences = self.sequences.copy()
+            sequences[model] = seq
 
         if isinstance(extra_sequences, dict):
-            for s in extra_sequences:
-                sequences[s] = extra_sequences[s]
+            sequences.update(extra_sequences)
 
         self.msa = alignment.mafft.multipleSequenceAlignment(sequences, stderr=False)
+        self.msa_chain_selection = chain_selection
 
         return self.msa
 
@@ -803,7 +1592,7 @@ chain to use for each model with the chains option."
 
     import mdtraj as md
 
-    def calculateSecondaryStructure(self, simplified=True):
+    def calculateSecondaryStructure(self, simplified=True, chains=None, _save_structure=False):
         """
         Calculate secondary structure information for each model using MDTraj.
 
@@ -814,6 +1603,11 @@ chain to use for each model with the chains option."
             - H (helix) → "H"
             - E (sheet) → "E"
             - Everything else → "C" (coil)
+        chains : None, str, iterable or dict, optional
+            Chain selector to limit the calculation. When None, all chains per
+            model are processed.
+        _save_structure : bool, optional
+            Unused legacy argument retained for backwards compatibility.
 
         frame : int, default=0
             Frame index to extract the secondary structure from (MD simulations).
@@ -830,13 +1624,38 @@ chain to use for each model with the chains option."
             Contains the secondary structure strings for each model.
         """
 
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=False
+        )
+
+        self.ss = {}
+        self.chain_secondary_structure = {}
+
         for model in self.models_names:
 
             # Load structure into MDTraj
             traj = md.load(self.models_paths[model])
 
             # Compute secondary structure
-            self.ss[model] = md.compute_dssp(traj, simplified=simplified)[0]
+            assignments = md.compute_dssp(traj, simplified=simplified)[0]
+            per_chain_ss = {}
+
+            for residue, code in zip(traj.topology.residues, assignments):
+                chain_id = residue.chain.chain_id
+                per_chain_ss.setdefault(chain_id, []).append(code)
+
+            normalized = {}
+            for chain_id in chain_selection.get(model, []):
+                codes = per_chain_ss.get(chain_id, [])
+                normalized[chain_id] = "".join(codes)
+
+            # Keep a record for downstream multi-chain aware operations
+            self.chain_secondary_structure[model] = normalized
+
+            if len(normalized) == 1:
+                self.ss[model] = next(iter(normalized.values()))
+            else:
+                self.ss[model] = normalized
 
         return self.ss
 
@@ -866,7 +1685,7 @@ chain to use for each model with the chains option."
 
         self.getModelsSequences()
 
-    def removeTerminalUnstructuredRegions(self, n_hanging=3):
+    def removeTerminalUnstructuredRegions(self, n_hanging=3, chains=None, verbose=False):
         """
         Remove unstructured terminal regions from models.
 
@@ -874,61 +1693,126 @@ chain to use for each model with the chains option."
         ==========
         n_hangin : int
             Maximum unstructured number of residues to keep at the unstructured terminal regions.
+        chains : None, str, iterable or dict
+            Chain selector identifying which chains should be processed.
+        verbose : bool, default=False
+            When True, log the residues that are trimmed per model/chain.
         """
 
-        if self.multi_chain:
-            raise ValueError(
-                "removeTerminalUnstructuredRegions() function only supports single chain models"
-            )
+        if not self.chain_secondary_structure:
+            self.calculateSecondaryStructure()
+
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=False
+        )
+
+        def _resolve_n_hanging(model, chain_id):
+            if isinstance(n_hanging, dict):
+                model_value = n_hanging.get(model)
+                if isinstance(model_value, dict):
+                    if chain_id in model_value:
+                        return model_value[chain_id]
+                elif isinstance(model_value, int):
+                    return model_value
+
+                chain_value = n_hanging.get(chain_id)
+                if isinstance(chain_value, int):
+                    return chain_value
+
+                default_value = n_hanging.get("default")
+                if isinstance(default_value, int):
+                    return default_value
+
+                raise ValueError(
+                    f"Could not resolve n_hanging for model {model} chain {chain_id}."
+                )
+            return int(n_hanging)
+
+        def _is_unstructured(code):
+            return code not in ("H", "E")
 
         # Calculate residues to be removed
         for model in self.models_names:
 
-            # Get N-terminal residues to remove based on secondary structure.
-            remove_indexes = []
-            for i, r in enumerate(self.ss[model]):
-                if r == "-":
-                    remove_indexes.append(i)
+            model_selection = chain_selection.get(model, [])
+            model_ss = self.chain_secondary_structure.get(model, {})
+            if not model_selection:
+                continue
+
+            # Fetch chain objects once for reuse
+            chains_map = {c.id: c for c in self.structures[model].get_chains()}
+
+            for chain_id in model_selection:
+                chain_obj = chains_map.get(chain_id)
+                if chain_obj is None:
+                    continue
+
+                ss_string = model_ss.get(chain_id, "")
+                if not ss_string:
+                    continue
+
+                limit = _resolve_n_hanging(model, chain_id)
+
+                # N-terminus
+                leading = []
+                for idx, code in enumerate(ss_string):
+                    if _is_unstructured(code):
+                        leading.append(idx)
+                    else:
+                        break
+
+                if limit < len(leading):
+                    leading = leading[: len(leading) - limit]
                 else:
-                    break
+                    leading = []
 
-            if len(remove_indexes) > n_hanging:
-                remove_indexes = remove_indexes[:-n_hanging]
-            else:
-                remove_indexes = []
-
-            # Get C-terminal residues to remove based on secondary structure.
-            remove_C = []
-            for i, r in enumerate(self.ss[model][::-1]):
-                if r == "-":
-                    remove_C.append(i)
+                # C-terminus
+                trailing = []
+                for offset, code in enumerate(reversed(ss_string)):
+                    if _is_unstructured(code):
+                        trailing.append(len(ss_string) - 1 - offset)
+                    else:
+                        break
+                trailing = list(reversed(trailing))
+                if limit < len(trailing):
+                    trailing = trailing[: len(trailing) - limit]
                 else:
-                    break
-            if len(remove_C) > n_hanging:
-                remove_C = remove_C[:-n_hanging]
-            else:
-                remove_C = []
+                    trailing = []
 
-            for x in remove_C:
-                remove_indexes.append(len(self.ss[model]) - 1 - x)
+                remove_indexes = sorted(set(leading + trailing))
 
-            # Sort indexes
-            remove_indexes = sorted(remove_indexes)
+                if not remove_indexes:
+                    continue
 
-            # Get residues to remove from models structures
-            remove_this = []
-            for c in self.structures[model].get_chains():
-                for i, r in enumerate(c.get_residues()):
-                    if i in remove_indexes:
-                        remove_this.append(r)
-                chain = c
+                # Only consider amino-acid polymer residues so ligands/nucleic acids survive trimming
+                protein_residues = [
+                    r
+                    for r in chain_obj.get_residues()
+                    if r.id[0] == " " and is_aa(r, standard=False)
+                ]
+                to_remove = [
+                    protein_residues[i]
+                    for i in remove_indexes
+                    if i < len(protein_residues)
+                ]
 
-            # Remove residues
-            for r in remove_this:
-                chain.detach_child(r.id)
+                removed_labels = []
+                for residue in to_remove:
+                    if verbose:
+                        resseq = residue.id[1]
+                        icode = residue.id[2].strip()
+                        label = f"{model}:{chain_id}:{residue.get_resname().strip()} {resseq}{icode}"
+                        removed_labels.append(label)
+                    chain_obj.detach_child(residue.id)
+
+                if verbose and removed_labels:
+                    print(
+                        "[removeTerminalUnstructuredRegions] Removed residues: "
+                        + ", ".join(removed_labels)
+                    )
 
         self.getModelsSequences()
-        self.calculateSecondaryStructure(_save_structure=True)
+        self.calculateSecondaryStructure()
 
     def removeTerminiByConfidenceScore(
         self,
@@ -971,22 +1855,50 @@ chain to use for each model with the chains option."
                 remove_models.add(model)
                 continue
 
-            n_terminus = set()
             something = False
-            for a in atoms:
-                if a.bfactor < confidence_threshold:
-                    n_terminus.add(a.get_parent().id[1])
-                else:
-                    something = True
-                    break
+            n_terminus = {}
+            c_terminus = {}
 
-            c_terminus = set()
-            for a in reversed(atoms):
-                if a.bfactor < confidence_threshold:
-                    c_terminus.add(a.get_parent().id[1])
-                else:
-                    something = True
-                    break
+            for chain in self.structures[model].get_chains():
+                chain_id = chain.get_id()
+                polymer_atoms = [
+                    atom
+                    for atom in chain.get_atoms()
+                    if atom.get_parent().id[0] == " "
+                ]
+
+                if not polymer_atoms:
+                    continue
+
+                chain_n = []
+                for atom in polymer_atoms:
+                    if atom.bfactor < confidence_threshold:
+                        residue_id = atom.get_parent().id
+                        if residue_id not in chain_n:
+                            chain_n.append(residue_id)
+                    else:
+                        something = True
+                        break
+
+                chain_c = []
+                for atom in reversed(polymer_atoms):
+                    if atom.bfactor < confidence_threshold:
+                        residue_id = atom.get_parent().id
+                        if residue_id not in chain_c:
+                            chain_c.append(residue_id)
+                    else:
+                        something = True
+                        break
+
+                if keep_up_to is not None and len(chain_n) <= keep_up_to:
+                    chain_n = []
+                if keep_up_to is not None and len(chain_c) <= keep_up_to:
+                    chain_c = []
+
+                if chain_n:
+                    n_terminus[chain_id] = set(chain_n)
+                if chain_c:
+                    c_terminus[chain_id] = set(chain_c)
 
             if not something:
                 if verbose and model not in remove_models:
@@ -996,23 +1908,19 @@ chain to use for each model with the chains option."
                 remove_models.add(model)
                 continue
 
-            n_terminus = sorted(list(n_terminus))
-            c_terminus = sorted(list(c_terminus))
-
-            if len(n_terminus) <= keep_up_to:
-                n_terminus = []
-            if len(c_terminus) <= keep_up_to:
-                c_terminus = []
-
             model_lr = lr.get(model, None) if lr else None
             model_ur = ur.get(model, None) if ur else None
 
             for c in self.structures[model].get_chains():
+                chain_id = c.get_id()
                 remove_this = []
+                chain_n_ids = n_terminus.get(chain_id, set())
+                chain_c_ids = c_terminus.get(chain_id, set())
+
                 for r in c.get_residues():
                     if (
-                        r.id[1] in n_terminus
-                        or r.id[1] in c_terminus
+                        r.id in chain_n_ids
+                        or r.id in chain_c_ids
                         or (
                             model_lr is not None
                             and model_ur is not None
@@ -1043,6 +1951,217 @@ chain to use for each model with the chains option."
 
         # Missing save models and reload them to take effect.
 
+    def getFoldseekMappingToReference(
+        self,
+        reference_pdb: str,
+        min_prob: float = 0.0,
+        threads: int | None = None,
+        foldseek_exe: str = "foldseek",
+        verbose: bool = False,
+        tmp_dir: str | None = None,
+    ) -> dict[str, dict[int, int]]:
+        """
+        Run Foldseek once (batch) using the *current in-memory* models.
+
+        Steps:
+          1) Save current structures to a temporary directory (fresh PDBs).
+          2) Run: foldseek easy-search <ref> <temp_dir_of_targets>
+          3) Parse best hit per target and build a mapping:
+               { target_local_poly_idx (0-based) -> ref_local_poly_idx (0-based) }
+          4) Return a dict: { <target_basename>: mapping }. Also tries to set
+               protein.foldseek_mapping for convenience (best-effort).
+
+        Parameters
+        ----------
+        tmp_dir : str | None
+            Optional directory to use instead of a temporary one. If provided, results
+            (including intermediate files) are left on disk for inspection.
+        """
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        if shutil.which(foldseek_exe) is None:
+            raise FileNotFoundError(
+                "Foldseek not found in PATH. Install it or pass 'foldseek_exe'."
+            )
+
+        tmpdir_cm = None
+        if tmp_dir is None:
+            tmpdir_cm = tempfile.TemporaryDirectory()
+            tmpdir = tmpdir_cm.name
+        else:
+            tmpdir = tmp_dir
+            os.makedirs(tmpdir, exist_ok=True)
+
+        try:
+            targets_dir = os.path.join(tmpdir, "targets")
+            if os.path.exists(targets_dir):
+                shutil.rmtree(targets_dir)
+            os.makedirs(targets_dir, exist_ok=True)
+
+            # Save *current* in-memory structures
+            self.saveModels(targets_dir)
+
+            target_files = [
+                os.path.join(targets_dir, f)
+                for f in os.listdir(targets_dir)
+                if f.lower().endswith((".pdb", ".cif", ".mmcif"))
+            ]
+            if not target_files:
+                raise RuntimeError(
+                    "No target structures were saved to the temporary directory."
+                )
+
+            basename_to_obj = {}
+            name_index = {}
+            for p in getattr(self, "proteins", []):
+                candidates = []
+                for attr in ("id", "name", "model_id", "model", "label"):
+                    val = getattr(p, attr, None)
+                    if val:
+                        candidates.append(str(val))
+                for c in candidates:
+                    name_index[c.lower()] = p
+
+            for tf in target_files:
+                bn = os.path.basename(tf)
+                stem = os.path.splitext(bn)[0].lower()
+                if stem in name_index:
+                    basename_to_obj[bn] = name_index[stem]
+
+            out_tsv = os.path.join(tmpdir, "foldseek.tsv")
+
+            # Include qlen/tlen so we know full ref length
+            fmt = "query,target,prob,qstart,qend,tstart,tend,alnlen,qaln,taln,qlen,tlen"
+            cmd = [
+                foldseek_exe,
+                "easy-search",
+                reference_pdb,
+                targets_dir,
+                out_tsv,
+                tmpdir,
+                "--alignment-type",
+                "1",
+                "--format-output",
+                fmt,
+                "--exhaustive-search",
+                "1",
+            ]
+            if threads and threads > 0:
+                cmd += ["--threads", str(threads)]
+
+            if verbose:
+                print("[foldseek] running:", " ".join(cmd))
+                print(f"[foldseek] TSV: {out_tsv}")
+            try:
+                cp = subprocess.run(
+                    cmd,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                if verbose and cp.stderr.strip():
+                    tail = "\n".join(cp.stderr.strip().splitlines()[-8:])
+                    if tail:
+                        print("[foldseek] stderr (tail):\n" + tail)
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(
+                    f"Foldseek failed with code {e.returncode}.\nSTDERR:\n{e.stderr}"
+                ) from e
+
+            if not os.path.exists(out_tsv) or os.path.getsize(out_tsv) == 0:
+                raise RuntimeError("Foldseek produced no results (empty TSV).")
+
+            best_by_target: dict[str, dict] = {}
+            with open(out_tsv, "r") as fh:
+                for raw in fh:
+                    if verbose:
+                        print(raw, end="")
+                    line = raw.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("\t")
+                    # Expecting 12 fields now
+                    if len(parts) < 12:
+                        continue
+                    rec = {
+                        "query":   parts[0],
+                        "target":  os.path.basename(parts[1]),
+                        "prob":    float(parts[2]),
+                        "qstart":  int(parts[3]),
+                        "qend":    int(parts[4]),
+                        "tstart":  int(parts[5]),
+                        "tend":    int(parts[6]),
+                        "alnlen":  int(parts[7]),
+                        "qaln":    parts[8],
+                        "taln":    parts[9],
+                        "qlen":    int(parts[10]),
+                        "tlen":    int(parts[11]),
+                    }
+                    cur = best_by_target.get(rec["target"])
+                    if (cur is None) or (rec["prob"] > cur["prob"]):
+                        best_by_target[rec["target"]] = rec
+
+            results: dict[str, dict[int, int]] = {}
+            for tgt_bn, rec in best_by_target.items():
+                prob = rec["prob"]
+                if prob < min_prob:
+                    if verbose:
+                        print(f"[foldseek] {tgt_bn}: prob={prob:.2f} < {min_prob} → skipped")
+                    continue
+
+                qaln, taln = rec["qaln"], rec["taln"]
+                if len(qaln) != len(taln):
+                    if verbose:
+                        print(
+                            f"[foldseek] {tgt_bn}: alignment length mismatch (qaln/taln) → skipped"
+                        )
+                    continue
+
+                # Build raw mapping from alignment strings (0-based local indices)
+                qpos = rec["qstart"] - 1
+                tpos = rec["tstart"] - 1
+                mapping: dict[int, int] = {}
+                for qa, ta in zip(qaln, taln):
+                    q_idx = None
+                    t_idx = None
+                    if qa != "-":
+                        q_idx = qpos
+                        qpos += 1
+                    if ta != "-":
+                        t_idx = tpos
+                        tpos += 1
+                    if (q_idx is not None) and (t_idx is not None):
+                        if t_idx not in mapping:
+                            mapping[t_idx] = q_idx
+
+                # Keep the raw mapping from Foldseek (no clipping)
+                results[tgt_bn] = mapping
+
+                if verbose:
+                    print(f"[foldseek] {tgt_bn}: prob={prob:.2f}  mapped={len(mapping)}")
+
+                p = basename_to_obj.get(tgt_bn)
+                if p is not None:
+                    try:
+                        setattr(p, "foldseek_mapping", mapping)
+                    except Exception:
+                        pass
+
+            if verbose:
+                print(
+                    f"[foldseek] completed. {len(results)} mappings above prob ≥ {min_prob}."
+                )
+
+            return results
+        finally:
+            if tmpdir_cm is not None:
+                tmpdir_cm.cleanup()
+
+
     def removeNotAlignedRegions(
         self,
         ref_structure,
@@ -1050,13 +2169,35 @@ chain to use for each model with the chains option."
         remove_low_confidence_unaligned_loops=False,
         confidence_threshold=50.0,
         min_loop_length=10,
+        keep_aligned_fold_until_low_confidence=False,
+        **kwargs,
     ):
         """
-        Remove models regions that not aligned with the given reference structure. The mapping is based on
-        the current structural alignment of the reference and the target models. The termini are removed
-        if they don't align with the reference structure. Internal loops that do not align with the given
-        reference structure can optionally be removed if they have a confidence score lower than the one
-        defined as threshold.
+        Default behavior: define the fold core using the target residues aligned to the reference termini (first and last aligned reference positions per chain) and remove only terminal regions outside that span (no internal removals).
+        Special modes:
+        - keep_aligned_fold_until_low_confidence=True (existing)
+        - remove_low_confidence_unaligned_loops=True (existing)
+
+        Remove regions not structurally aligned to a reference, or (optional) keep only the
+        aligned fold extended through high-confidence residues up to the first low-confidence
+        region (per chain).
+
+        Modes
+        -----
+        - Default:
+            For each chain, identify the target residues aligned to the smallest and largest
+            reference residue indices, keep the contiguous span between them, and trim only
+            termini outside this anchor-defined core. Internal unaligned residues inside the
+            span are preserved.
+        - Fold-keep mode (keep_aligned_fold_until_low_confidence=True):
+            For each chain, identify the aligned core (positions with structural alignment),
+            then extend the kept region on the N and C sides across any contiguous residues
+            whose mean per-residue confidence (AlphaFold pLDDT stored in B-factor) is
+            >= confidence_threshold. Stop extending at the first low-confidence residue in
+            each direction. Delete residues outside the kept region.
+        - Loop-prune mode (remove_low_confidence_unaligned_loops=True):
+            Retain aligned residues plus termini while pruning internal unaligned loops that are both
+            sufficiently long and below the confidence_threshold.
 
         Parameters
         ==========
@@ -1071,95 +2212,723 @@ chain to use for each model with the chains option."
             Threshold to consider a loop region not algined as low confidence for their removal.
         min_loop_length : int
             Length of the internal unaligned region to be considered a loop.
+        keep_aligned_fold_until_low_confidence : bool
+            When True, keep aligned cores and extend across high-confidence residues, removing
+            all other polymeric residues per chain.
 
         Returns
         =======
+        None
 
+        Side effects:
+            - Mutates structures in-place by deleting residues.
+            - Calls self.getModelsSequences() at the end.
         """
+        debug: bool = kwargs.pop("debug", False)
+        dry_run: bool = kwargs.pop("dry_run", False)  # if True, compute but do not modify models
+        tmp_dir: str | None = kwargs.pop("tmp_dir", None)
 
-        # Check input structure input
+        if kwargs:
+            warnings.warn(
+                f"removeNotAlignedRegions: ignoring unexpected kwargs {list(kwargs.keys())}"
+            )
+
+        reference_input = ref_structure
+
         if isinstance(ref_structure, str):
-            if ref_structure.endswith(".pdb"):
-                ref_structure = prepare_proteins._readPDB("ref", ref_structure)
+            if ref_structure.endswith('.pdb'):
+                ref_structure = prepare_proteins._readPDB('ref', ref_structure)
             else:
                 if ref_structure in self.models_names:
                     ref_structure = self.structures[ref_structure]
                 else:
-                    raise ValueError("Reference structure was not found in models")
+                    raise ValueError('Reference structure was not found in models')
         elif not isinstance(ref_structure, PDB.Structure.Structure):
             raise ValueError(
-                "ref_structure should be a  Bio.PDB.Structure.Structure or string object"
+                'ref_structure should be a  Bio.PDB.Structure.Structure or string object'
             )
 
-        # Iterate models
-        for i, model in enumerate(self):
+        reference_label = (
+            reference_input
+            if isinstance(reference_input, str)
+            else getattr(reference_input, "id", repr(reference_input))
+        )
 
-            # Get structurally aligned residues to reference structure
-            aligned_residues = _getAlignedResiduesBasedOnStructuralAlignment(
-                ref_structure, self.structures[model]
+        _dbg(debug, "\n[removeNotAlignedRegions] reference_pdb: {}", reference_label)
+        _dbg(debug, "[options] max_ca_ca: {}", max_ca_ca)
+        _dbg(debug, "[options] confidence_threshold: {}", confidence_threshold)
+        _dbg(debug, "[options] min_loop_length: {}", min_loop_length)
+        _dbg(debug, "[options] remove_low_confidence_unaligned_loops: {}", remove_low_confidence_unaligned_loops)
+        _dbg(debug, "[options] keep_aligned_fold_until_low_confidence: {}", keep_aligned_fold_until_low_confidence)
+        _dbg(debug, "[options] dry_run: {}", dry_run)
+        if tmp_dir:
+            _dbg(debug, "[options] foldseek tmp_dir: {}", tmp_dir)
+
+        # --- Conservative terminal-seed clipping thresholds (local to this function) ---
+        EDGE_SEED_MAX = 12        # max residues in a terminal "seed" to consider clipping
+        EDGE_GAP_MIN = 20         # min gap (in target indices) separating seed from main cluster
+        MAIN_MIN = 120            # main cluster must have at least this many aligned residues
+        REF_EDGE_WINDOW = 25      # first/last N reference residues = "edges"
+        REF_EDGE_MIN_HITS = 8     # need >= this many hits in a ref edge to keep that seed
+        REQUIRE_REF_EDGE_SUPPORT = True  # if True, weak ref-edge support allows clipping
+        # ------------------------------------------------------------------------------
+
+        ref_ca_atoms = [a for a in ref_structure.get_atoms() if a.name == "CA"]
+        ref_ca_coord = np.array([a.coord for a in ref_ca_atoms])
+        _dbg(debug, "[reference] CA atoms: {}", len(ref_ca_atoms))
+
+        # Count reference polymer residues (for ref-edge support checks)
+        ref_poly_len = sum(1 for r in ref_structure.get_residues() if r.id[0] == " ")
+
+        import tempfile
+        from Bio.PDB import PDBIO
+
+        reference_path_for_foldseek = None
+        temp_reference_path = None
+        if isinstance(reference_input, str) and os.path.exists(reference_input):
+            reference_path_for_foldseek = reference_input
+        else:
+            tmp_fd, tmp_path = tempfile.mkstemp(suffix=".pdb")
+            os.close(tmp_fd)
+            io = PDBIO()
+            io.set_structure(ref_structure)
+            io.save(tmp_path)
+            reference_path_for_foldseek = tmp_path
+            temp_reference_path = tmp_path
+
+        try:
+            foldseek_mappings = self.getFoldseekMappingToReference(
+                reference_path_for_foldseek,
+                min_prob=0.0,
+                threads=None,
+                foldseek_exe="foldseek",
+                verbose=debug,
+                tmp_dir=tmp_dir,
+            )
+        finally:
+            if temp_reference_path and os.path.exists(temp_reference_path):
+                try:
+                    os.remove(temp_reference_path)
+                except OSError:
+                    pass
+
+        foldseek_mappings_by_stem = {
+            Path(k).stem: v for k, v in foldseek_mappings.items()
+        }
+
+        def _mean_residue_bfactor(residue):
+            vals = [a.bfactor for a in residue.get_atoms()]
+            return float(np.mean(vals)) if vals else 0.0
+
+        for model in self:
+            structure = self.structures[model]
+
+            polymer_positions = []
+            for chain in structure.get_chains():
+                for res in chain.get_residues():
+                    if res.id[0] == " ":
+                        polymer_positions.append((chain.id, res))
+
+            mapping = {}
+            for ext in ("pdb", "cif", "mmcif"):
+                key = f"{model}.{ext}"
+                if key in foldseek_mappings:
+                    mapping = dict(foldseek_mappings[key])
+                    break
+            if not mapping:
+                mapping = dict(foldseek_mappings_by_stem.get(model, {}))
+            if debug and not mapping:
+                _dbg(debug, "[foldseek] model {}: no mapping retrieved; treating as unaligned", model)
+
+            aligned_mask = np.zeros(len(polymer_positions), dtype=bool)
+            out_of_range = []
+            for tgt_idx in mapping.keys():
+                if 0 <= tgt_idx < len(aligned_mask):
+                    aligned_mask[tgt_idx] = True
+                else:
+                    out_of_range.append(tgt_idx)
+            if out_of_range and debug:
+                _dbg(
+                    debug,
+                    "[mapping] model {}: target indices out of range -> {} (poly_len={})",
+                    model,
+                    out_of_range,
+                    len(aligned_mask),
+                )
+
+            if debug:
+                try:
+                    target_ca_coord = np.array(
+                        [a.coord for a in structure.get_atoms() if a.name == "CA"]
+                    )
+                    _analyze_mapping_pairs(
+                        mapping,
+                        ref_ca_coord,
+                        target_ca_coord,
+                        max_ca_ca,
+                        verbose_limit=30,
+                    )
+                except Exception as exc:
+                    _dbg(
+                        debug,
+                        "[mapdiag] analysis failed for model {}: {}",
+                        model,
+                        exc,
+                    )
+
+            aligned_bool = aligned_mask.tolist()
+
+            per_chain_indices = {}
+            for idx, (cid, _) in enumerate(polymer_positions):
+                per_chain_indices.setdefault(cid, []).append(idx)
+
+            per_chain_res_index_bounds = {
+                cid: (indices[0], indices[-1] + 1)
+                for cid, indices in per_chain_indices.items()
+                if indices
+            }
+
+            def _clip_terminal_seed_hits_for_chain(chain_pairs_sorted_by_tgt, ref_len, label=""):
+                """
+                chain_pairs_sorted_by_tgt: list of (ref_idx, tgt_idx) *for this chain*, sorted by tgt_idx.
+                Returns (core_start, core_end, decision_info, dropped_t_indices_set).
+                If no clipping is needed, returns the span of all hits and empty dropped set.
+                """
+                if not chain_pairs_sorted_by_tgt:
+                    return None, None, {"reason": "no_hits", "label": label}, set()
+
+                tgt_hits = [t for (r, t) in chain_pairs_sorted_by_tgt]
+                ref_hits = [r for (r, t) in chain_pairs_sorted_by_tgt]
+
+                clusters = []
+                cs = ce = tgt_hits[0]
+                cnt = 1
+                for a, b in zip(tgt_hits[1:], tgt_hits[:-1]):
+                    if a - b > EDGE_GAP_MIN:
+                        clusters.append((cs, ce, cnt))
+                        cs = ce = a
+                        cnt = 1
+                    else:
+                        ce = a
+                        cnt += 1
+                clusters.append((cs, ce, cnt))
+
+                span_start, span_end = tgt_hits[0], tgt_hits[-1]
+                info = {
+                    "initial_span": (span_start, span_end),
+                    "clusters": clusters,
+                    "label": label,
+                }
+
+                if len(clusters) == 1:
+                    info["decision"] = "keep_span_single_cluster"
+                    return span_start, span_end, info, set()
+
+                main_idx = max(range(len(clusters)), key=lambda i: clusters[i][2])
+                main_cs, main_ce, main_cnt = clusters[main_idx]
+                info["main_cluster"] = (main_cs, main_ce, main_cnt)
+
+                if main_cnt < MAIN_MIN:
+                    info["decision"] = "keep_span_main_too_small"
+                    return span_start, span_end, info, set()
+
+                def seed_ref_hits_in_window(t_lo, t_hi, ref_lo, ref_hi):
+                    c = 0
+                    for (r, t) in chain_pairs_sorted_by_tgt:
+                        if t_lo <= t <= t_hi and ref_lo <= r <= ref_hi:
+                            c += 1
+                    return c
+
+                dropped = set()
+                decision = "keep_span"
+                core_start, core_end = span_start, span_end
+
+                if main_idx > 0:
+                    n_cs, n_ce, n_cnt = clusters[0]
+                    gap_to_main = max(0, main_cs - n_ce)
+                    ref_hits_N = seed_ref_hits_in_window(n_cs, n_ce, 0, max(0, REF_EDGE_WINDOW - 1))
+                    ok_ref_seed = (
+                        ref_hits_N < REF_EDGE_MIN_HITS
+                    ) if REQUIRE_REF_EDGE_SUPPORT else True
+                    if n_cnt <= EDGE_SEED_MAX and gap_to_main >= EDGE_GAP_MIN and ok_ref_seed:
+                        for (r, t) in chain_pairs_sorted_by_tgt:
+                            if n_cs <= t <= n_ce:
+                                dropped.add(t)
+                        core_start = main_cs
+                        decision = f"clip_N_seed size={n_cnt} gap={gap_to_main} ref_edge_hits={ref_hits_N}"
+
+                if main_idx < len(clusters) - 1:
+                    c_cs, c_ce, c_cnt = clusters[-1]
+                    gap_to_main = max(0, c_cs - main_ce)
+                    ref_hits_C = seed_ref_hits_in_window(
+                        c_cs, c_ce, max(0, ref_len - REF_EDGE_WINDOW), ref_len - 1
+                    )
+                    ok_ref_seed = (
+                        ref_hits_C < REF_EDGE_MIN_HITS
+                    ) if REQUIRE_REF_EDGE_SUPPORT else True
+                    if c_cnt <= EDGE_SEED_MAX and gap_to_main >= EDGE_GAP_MIN and ok_ref_seed:
+                        for (r, t) in chain_pairs_sorted_by_tgt:
+                            if c_cs <= t <= c_ce:
+                                dropped.add(t)
+                        core_end = main_ce
+                        if decision == "keep_span":
+                            decision = f"clip_C_seed size={c_cnt} gap={gap_to_main} ref_edge_hits={ref_hits_C}"
+                        else:
+                            decision += f" + clip_C_seed size={c_cnt} gap={gap_to_main} ref_edge_hits={ref_hits_C}"
+
+                info["decision"] = decision
+                return core_start, core_end, info, dropped
+
+            mapping_pairs = sorted(
+                [(ref_idx, target_idx) for target_idx, ref_idx in mapping.items()],
+                key=lambda pair: pair[1],
             )
 
-            ### Remove unaligned termini ###
+            chains = [c.id for c in structure.get_chains()]
+            total_residues = sum(1 for _ in structure.get_residues())
+            _dbg(debug, "\n[model {}] chains: {}", model, chains)
+            _dbg(debug, "[model {}] total residues: {}", model, total_residues)
 
-            # Get structurally aligned residues to reference structure
-            target_residues = [
-                r for r in self.structures[model].get_residues() if r.id[0] == " "
-            ]
+            aligned_count = int(aligned_mask.sum())
+            _dbg(debug, "[model {}] aligned residues: {}", model, aligned_count)
 
-            n_terminus = set()
-            for ar, tr in zip(aligned_residues, target_residues):
-                if ar == "-":
-                    n_terminus.add(tr.id[1])
-                else:
-                    break
+            try:
+                per_chain_summary = []
+                for ch_id, (start_idx, end_idx) in per_chain_res_index_bounds.items():
+                    mask_slice = aligned_mask[start_idx:end_idx]
+                    size = end_idx - start_idx
+                    per_chain_summary.append((ch_id, int(mask_slice.sum()), size))
+                for ch_id, aln, size in per_chain_summary:
+                    _dbg(
+                        debug,
+                        "[model {}] chain {}: aligned {}/{} ({:.1f}%)",
+                        model,
+                        ch_id,
+                        aln,
+                        size,
+                        100 * aln / max(1, size),
+                    )
+            except Exception:
+                pass
 
-            c_terminus = set()
-            for ar, tr in reversed(list(zip(aligned_residues, target_residues))):
-                if ar == "-":
-                    c_terminus.add(tr.id[1])
-                else:
-                    break
+            try:
+                best_len = 0
+                best_start = -1
+                cur = 0
+                cur_start = 0
+                for i, v in enumerate(aligned_mask):
+                    if v:
+                        if cur == 0:
+                            cur_start = i
+                        cur += 1
+                        if cur > best_len:
+                            best_len = cur
+                            best_start = cur_start
+                    else:
+                        cur = 0
+                if best_len > 0:
+                    _dbg(
+                        debug,
+                        "[model {}] longest aligned segment: {} residues (idx {}..{})",
+                        model,
+                        best_len,
+                        best_start,
+                        best_start + best_len - 1,
+                    )
+            except Exception:
+                pass
 
-            n_terminus = sorted(list(n_terminus))
-            c_terminus = sorted(list(c_terminus))
+            try:
+                mapping_len = len(mapping_pairs)
+                _dbg(debug, "[model {}] mapping size: {}", model, mapping_len)
+                if mapping_len <= 50:
+                    _dbg(
+                        debug,
+                        "[model {}] mapping (ref_idx -> model_idx): {}",
+                        model,
+                        mapping_pairs,
+                    )
+            except Exception:
+                pass
 
-            #         ### Remove unaligned low confidence loops ###
-            #         if remove_low_confidence_unaligned_loops:
-            #             loops = []
-            #             loop = []
-            #             loops_to_remove = []
-            #             for ar,tr in zip(aligned_residues, target_residues):
-            #                 if ar == '-':
-            #                     loop.append(tr)
-            #                 else:
-            #                     loops.append(loop)
-            #                     loop = []
+            mask_list = aligned_mask.tolist() if hasattr(aligned_mask, "tolist") else list(aligned_mask)
+            runs = _mask_runs(mask_list)
 
-            #             for loop in loops:
-            #                 if len(loop) >= min_loop_length:
-            #                     low_confidence_residues = []
-            #                     for r in loop:
-            #                         for a in r:
-            #                             if a.bfactor < confidence_threshold:
-            #                                 low_confidence_residues.append(r)
-            #                                 break
-            #                     if len(low_confidence_residues) > min_loop_length:
-            #                         for r in low_confidence_residues:
-            #                             loops_to_remove.append(r.id[1])
-            #         print(model, ','.join([str(x) for x in loops_to_remove]))
+            # Compute residue deletions per chain
+            indices_to_remove_by_chain = {cid: set() for cid in per_chain_indices}
+            default_mode = False
+            default_run_spans = []
 
-            remove_this = []
+            if keep_aligned_fold_until_low_confidence:
+                for cid, idx_list in per_chain_indices.items():
+                    if not idx_list:
+                        continue
+
+                    aligned_idxs = [k for k in idx_list if aligned_bool[k]]
+
+                    # If no aligned residues in this chain, drop all polymer residues in this chain
+                    if not aligned_idxs:
+                        for k in idx_list:
+                            indices_to_remove_by_chain[cid].add(k)
+                        continue
+
+                    # Core bounds (aligned region)
+                    core_start = min(aligned_idxs)
+                    core_end = max(aligned_idxs)
+
+                    # Expand to N side through contiguous high-confidence residues
+                    n_keep = core_start
+                    cursor = core_start - 1
+                    while cursor >= idx_list[0]:
+                        _, res = polymer_positions[cursor]
+                        if _mean_residue_bfactor(res) >= float(confidence_threshold):
+                            n_keep = cursor
+                            cursor -= 1
+                        else:
+                            break  # stop at first low-confidence residue
+
+                    # Expand to C side through contiguous high-confidence residues
+                    c_keep = core_end
+                    cursor = core_end + 1
+                    while cursor <= idx_list[-1]:
+                        _, res = polymer_positions[cursor]
+                        if _mean_residue_bfactor(res) >= float(confidence_threshold):
+                            c_keep = cursor
+                            cursor += 1
+                        else:
+                            break  # stop at first low-confidence residue
+
+                    # Everything outside [n_keep, c_keep] (within this chain) is removed
+                    keep_range = set(range(n_keep, c_keep + 1))
+                    for k in idx_list:
+                        if k not in keep_range:
+                            indices_to_remove_by_chain[cid].add(k)
+
+            elif remove_low_confidence_unaligned_loops:
+                for cid, idx_list in per_chain_indices.items():
+                    if not idx_list:
+                        continue
+
+                    # N-terminus run of unaligned
+                    n_cut = []
+                    for k in idx_list:
+                        if not aligned_bool[k]:
+                            n_cut.append(k)
+                        else:
+                            break
+
+                    # C-terminus run of unaligned
+                    c_cut = []
+                    for k in reversed(idx_list):
+                        if not aligned_bool[k]:
+                            c_cut.append(k)
+                        else:
+                            break
+                    c_cut.reverse()
+
+                    idxs_to_remove = set(n_cut + c_cut)
+
+                    # Identify internal region
+                    start = 0
+                    while start < len(idx_list) and not aligned_bool[idx_list[start]]:
+                        start += 1
+                    end = len(idx_list) - 1
+                    while end >= 0 and not aligned_bool[idx_list[end]]:
+                        end -= 1
+                    if start < end:
+                        run = []
+                        internal_runs = []
+                        for pos in idx_list[start : end + 1]:
+                            if not aligned_bool[pos]:
+                                run.append(pos)
+                            else:
+                                if run:
+                                    internal_runs.append(run)
+                                    run = []
+                        if run:
+                            internal_runs.append(run)
+
+                        for run_idx_list in internal_runs:
+                            if len(run_idx_list) < int(min_loop_length):
+                                continue
+                            residues_in_run = [polymer_positions[k][1] for k in run_idx_list]
+                            run_conf = float(
+                                np.mean([_mean_residue_bfactor(r) for r in residues_in_run])
+                            )
+                            if run_conf < float(confidence_threshold):
+                                idxs_to_remove.update(run_idx_list)
+
+                    indices_to_remove_by_chain[cid].update(idxs_to_remove)
+
+            else:
+                # Default: define core by reference-termini anchors (no internal removals).
+                # Pick, per chain, the target residues aligned to the smallest and largest
+                # reference indices; keep the contiguous span between them. Trim only termini.
+                default_mode = True
+                default_run_spans = []  # (start,end) terminal spans to drop across all chains
+
+                for cid, idx_list in per_chain_indices.items():
+                    if not idx_list:
+                        continue
+
+                    core = _term_anchored_core(mapping_pairs, idx_list)
+                    if core is None:
+                        # Nothing aligned to this chain → drop full chain slice
+                        for k in idx_list:
+                            indices_to_remove_by_chain[cid].add(k)
+                        default_run_spans.append((idx_list[0], idx_list[-1]))
+                        _dbg(debug, "[default-core] chain {}: no aligned anchors; dropping {}..{}", cid, idx_list[0], idx_list[-1])
+                        continue
+
+                    core_start, core_end = core
+
+                    chain_set = set(idx_list)
+                    try:
+                        r_min, t_at_rmin = min(
+                            ((r, t) for (r, t) in mapping_pairs if t in chain_set),
+                            key=lambda x: x[0],
+                        )
+                        r_max, t_at_rmax = max(
+                            ((r, t) for (r, t) in mapping_pairs if t in chain_set),
+                            key=lambda x: x[0],
+                        )
+                        _dbg(
+                            debug,
+                            "[default-core] chain {}: anchors ref[min={}, max={}] → tgt[{}..{}] | core {}..{}",
+                            cid,
+                            r_min,
+                            r_max,
+                            t_at_rmin,
+                            t_at_rmax,
+                            core_start,
+                            core_end,
+                        )
+                    except Exception:
+                        pass
+
+                    chain_pairs_tgt_sorted = sorted(
+                        [(r, t) for (r, t) in mapping_pairs if t in chain_set],
+                        key=lambda x: x[1],
+                    )
+
+                    if chain_pairs_tgt_sorted:
+                        c_start2, c_end2, info2, dropped = _clip_terminal_seed_hits_for_chain(
+                            chain_pairs_tgt_sorted, ref_poly_len, label=f"{model}:{cid}"
+                        )
+                        if (
+                            c_start2 is not None
+                            and c_end2 is not None
+                            and info2.get("decision", "").startswith("clip_")
+                        ):
+                            _dbg(
+                                debug,
+                                "[foldseek-core] model {} chain {}: {} | anchor_core {}..{} -> pruned_core {}..{} (dropped {})",
+                                model,
+                                cid,
+                                info2.get("decision"),
+                                core_start,
+                                core_end,
+                                c_start2,
+                                c_end2,
+                                len(dropped),
+                            )
+                            core_start, core_end = c_start2, c_end2
+                        elif c_start2 is not None and c_end2 is not None:
+                            _dbg(
+                                debug,
+                                "[foldseek-core] model {} chain {}: {} | keeping anchor_core {}..{}",
+                                model,
+                                cid,
+                                info2.get("decision"),
+                                core_start,
+                                core_end,
+                            )
+
+                    core_start = max(core_start, idx_list[0])
+                    core_end = min(core_end, idx_list[-1])
+                    if core_start > core_end:
+                        core_start, core_end = core
+
+                    if core_start > idx_list[0]:
+                        for k in range(idx_list[0], core_start):
+                            indices_to_remove_by_chain[cid].add(k)
+                        default_run_spans.append((idx_list[0], core_start - 1))
+
+                    if core_end < idx_list[-1]:
+                        for k in range(core_end + 1, idx_list[-1] + 1):
+                            indices_to_remove_by_chain[cid].add(k)
+                        default_run_spans.append((core_end + 1, idx_list[-1]))
+
+            unaligned_regions = []
+            to_remove_by_chain = {}
+            for cid, idxs in indices_to_remove_by_chain.items():
+                if not idxs:
+                    continue
+                sorted_idxs = sorted(idxs)
+                residues_for_chain = []
+                start_idx = sorted_idxs[0]
+                prev_idx = start_idx
+                for idx in sorted_idxs[1:]:
+                    if idx != prev_idx + 1:
+                        start_res = polymer_positions[start_idx][1]
+                        end_res = polymer_positions[prev_idx][1]
+                        unaligned_regions.append(
+                            (cid, start_res.id[1], end_res.id[1])
+                        )
+                        start_idx = idx
+                    prev_idx = idx
+                # flush final range
+                start_res = polymer_positions[start_idx][1]
+                end_res = polymer_positions[prev_idx][1]
+                unaligned_regions.append((cid, start_res.id[1], end_res.id[1]))
+
+                for idx in sorted_idxs:
+                    residues_for_chain.append(polymer_positions[idx][1])
+                to_remove_by_chain[cid] = residues_for_chain
+
+            # Planned trimming report
+            if default_mode:
+                try:
+                    default_drop_total = sum(
+                        (end - start + 1) for start, end in default_run_spans
+                    )
+                    _dbg(
+                        debug,
+                        "[trim] mode='default' (keep contiguous aligned core; trim termini only) | drop_total={}",
+                        default_drop_total,
+                    )
+                    _dbg(
+                        debug,
+                        "[trim] unaligned regions (count={}): {}",
+                        len(default_run_spans),
+                        default_run_spans,
+                    )
+                except Exception:
+                    pass
+
+            try:
+                _dbg(
+                    debug,
+                    "[trim] unaligned regions by chain (count={}): {}",
+                    len(unaligned_regions),
+                    unaligned_regions,
+                )
+            except Exception:
+                pass
+
+            try:
+                drop_by_chain = {}
+                for (chain_id, start_idx, end_idx) in unaligned_regions:
+                    drop_by_chain.setdefault(chain_id, 0)
+                    drop_by_chain[chain_id] += (end_idx - start_idx + 1)
+                for ch, n in drop_by_chain.items():
+                    _dbg(debug, "[trim] chain {}: dropping {} residues", ch, n)
+            except Exception:
+                pass
+
+            if dry_run:
+                _dbg(debug, "[trim] dry_run=True — skipping structure mutation for model {}", model)
+            else:
+                # Apply deletions on the correct chain objects
+                chains_map = {c.id: c for c in structure.get_chains()}
+                for cid, residues in to_remove_by_chain.items():
+                    chain_obj = chains_map.get(cid)
+                    if not chain_obj or not residues:
+                        continue
+                    for res in residues:
+                        chain_obj.detach_child(res.id)
+
+                try:
+                    new_total = sum(1 for _ in structure.get_residues())
+                    _dbg(debug, "[post] model {} residues after trim: {}", model, new_total)
+                except Exception:
+                    pass
+
+        # Refresh sequences once at the end
+        self.getModelsSequences()
+
+    def trimByRanges(self, ranges, renumber=False, verbose=True):
+        """
+        Trim models strictly by provided residue ID ranges.
+
+        Parameters
+        ==========
+        ranges : dict
+            Mapping of model name -> list of (start, end) tuples specifying
+            inclusive residue ID ranges to KEEP. Residue IDs are the PDB
+            numbering (r.id[1]) and are typically one-based. A single
+            (start, end) tuple is also accepted instead of a list.
+        renumber : bool
+            If True, renumber residues in each chain sequentially starting at 1
+            after trimming.
+        verbose : bool
+            If True, print basic warnings/info.
+        """
+
+        if not isinstance(ranges, dict):
+            raise ValueError("ranges must be a dict: {model: [(start, end), ...]}")
+
+        for model in list(self.models_names):
+            if model not in ranges:
+                if verbose:
+                    print(f"trimByRanges: skipping model '{model}' (no ranges provided)")
+                continue
+
+            model_ranges = ranges[model]
+            # Accept a single tuple as shorthand
+            if isinstance(model_ranges, tuple) and len(model_ranges) == 2:
+                model_ranges = [model_ranges]
+
+            if not isinstance(model_ranges, (list, tuple)) or not all(
+                isinstance(x, (list, tuple)) and len(x) == 2 for x in model_ranges
+            ):
+                raise ValueError(
+                    f"ranges['{model}'] must be a list of (start, end) tuples or a single tuple"
+                )
+
+            # Normalize and sanity-check intervals (inclusive)
+            keep_intervals = []
+            for start, end in model_ranges:
+                try:
+                    s = int(start)
+                    e = int(end)
+                except Exception:
+                    raise ValueError(
+                        f"ranges['{model}'] contains non-integer bounds: {(start, end)}"
+                    )
+                if s > e:
+                    s, e = e, s
+                keep_intervals.append((s, e))
+
+            # Perform trimming
             for c in self.structures[model].get_chains():
+                to_remove = []
                 for r in c.get_residues():
-                    if (
-                        r.id[1] in n_terminus or r.id[1] in c_terminus
-                    ):  # or r.id[1] in low_confidence_residues:
-                        remove_this.append(r)
-                chain = c
-                # Remove residues
-                for r in remove_this:
-                    chain.detach_child(r.id)
+                    if r.id[0] != " ":
+                        # Keep hetero residues (cofactors, ions, waters) untouched
+                        continue
+                    resid = r.id[1]
+                    # Keep if resid within any interval
+                    keep = False
+                    for s, e in keep_intervals:
+                        if s <= resid <= e:
+                            keep = True
+                            break
+                    if not keep:
+                        to_remove.append(r)
 
+                for r in to_remove:
+                    c.detach_child(r.id)
+
+                if renumber:
+                    new_resseq = 1
+                    for r in c.get_residues():
+                        if r.id[0] != " ":
+                            continue
+                        r.id = (r.id[0], new_resseq, r.id[2])
+                        new_resseq += 1
+
+        # Update sequences after modifications
         self.getModelsSequences()
 
     def alignModelsToReferencePDB(
@@ -1169,7 +2938,7 @@ chain to use for each model with the chains option."
         chain_indexes=None,
         trajectory_chain_indexes=None,
         reference_chain_indexes=None,
-        aligment_mode="aligned",
+        alignment_mode="aligned",
         verbose=False,
         reference_residues=None,
     ):
@@ -1227,7 +2996,7 @@ chain to use for each model with the chains option."
                     chain_indexes=chain_indexes,
                     trajectory_chain_indexes=trajectory_chain_indexes,
                     reference_chain_indexes=reference_chain_indexes,
-                    aligment_mode=aligment_mode,
+                    alignment_mode=alignment_mode,
                     reference_residues=reference_residues,
                 )
             else:
@@ -1237,7 +3006,7 @@ chain to use for each model with the chains option."
                     chain_indexes=chain_indexes,
                     trajectory_chain_indexes=trajectory_chain_indexes[model],
                     reference_chain_indexes=reference_chain_indexes,
-                    aligment_mode=aligment_mode,
+                    alignment_mode=alignment_mode,
                     reference_residues=reference_residues,
                 )
 
@@ -1780,8 +3549,10 @@ chain to use for each model with the chains option."
     def setUpRosettaOptimization(
         self,
         relax_folder,
-        nstruct=1000,
+        nstruct=_MISSING,
         relax_cycles=5,
+        idealize_before_relax=False,
+        idealize_only=False,
         cst_files=None,
         mutations=False,
         models=None,
@@ -1812,6 +3583,10 @@ chain to use for each model with the chains option."
         ==========
         relax_folder : str
             Folder path where to place the relax job.
+        idealize_before_relax : bool, optional
+            Insert an Idealize mover before FastRelax.
+        idealize_only : bool, optional
+            Run only the Idealize mover and skip FastRelax entirely (mutually exclusive with idealize_before_relax).
         """
 
         # Create minimization job folders
@@ -1839,7 +3614,24 @@ chain to use for each model with the chains option."
                 "CPUs can only be set up when using mpirun parallelisation!"
             )
 
-        if cst_optimization and nstruct > 100:
+        nstruct_provided = nstruct is not _MISSING
+        if not nstruct_provided:
+            nstruct = 1000
+
+        if idealize_only and idealize_before_relax:
+            raise ValueError(
+                "idealize_only already skips FastRelax; do not combine it with idealize_before_relax."
+            )
+
+        if null:
+            if nstruct != 1:
+                if nstruct_provided:
+                    print(
+                        f"WARNING: null optimization forces nstruct=1; overriding provided value ({nstruct})."
+                    )
+            nstruct = 1
+
+        if not idealize_only and cst_optimization and nstruct > 100:
             print(
                 "WARNING: A large number of structures (%s) is not necessary when running constrained optimizations!"
                 % nstruct
@@ -1901,6 +3693,54 @@ has been carried out. Please run compareSequences() function before setting muta
         if ca_constraint:
             if not cst_files:
                 cst_files = {}
+
+        # Reset Rosetta ligand bookkeeping for this run
+        self.rosetta_docking_ligands = {}
+
+        # Prepare params folder bookkeeping if needed
+        params_output_dir = None
+        param_files_list = None
+        param_directory_mode = False
+        if param_files is not None:
+            params_output_dir = Path(relax_folder) / "params"
+            params_output_dir.mkdir(exist_ok=True)
+
+            def _read_ligand_name(params_path):
+                """Extract ligand residue name from a Rosetta params file."""
+                with open(params_path, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        stripped = line.strip()
+                        if stripped.startswith("NAME"):
+                            parts = stripped.split()
+                            if len(parts) >= 2:
+                                return parts[1]
+                            break
+                raise ValueError(
+                    f"Could not determine ligand name from params file: {params_path}"
+                )
+
+            if isinstance(param_files, (str, os.PathLike)) and Path(
+                param_files
+            ).is_dir():
+                param_directory_mode = True
+                param_dir = Path(param_files)
+                param_paths = sorted(param_dir.glob("*.params"))
+                if not param_paths:
+                    raise ValueError(
+                        f"No .params files found in directory {param_dir}"
+                    )
+                for params_path in param_paths:
+                    ligand_name = _read_ligand_name(params_path)
+                    destination = params_output_dir / f"{ligand_name}.params"
+                    shutil.copyfile(params_path, destination)
+                    self.rosetta_docking_ligands[ligand_name] = (
+                        f"params/{destination.name}"
+                    )
+            else:
+                if isinstance(param_files, (str, os.PathLike)):
+                    param_files_list = [param_files]
+                else:
+                    param_files_list = list(param_files)
 
         # Create flags files
         jobs = []
@@ -2053,12 +3893,22 @@ has been carried out. Please run compareSequences() function before setting muta
                 xml.addMover(init_membrane)
                 protocol.append(init_membrane)
 
-            # Create fastrelax mover
-            relax = rosettaScripts.movers.fastRelax(repeats=relax_cycles, scorefxn=sfxn)
-            xml.addMover(relax)
+            if idealize_before_relax or idealize_only:
+                idealize_mover = rosettaScripts.movers.idealize()
+                xml.addMover(idealize_mover)
+                if not null:
+                    protocol.append(idealize_mover)
 
-            if not null:
-                protocol.append(relax)
+            relax = None
+            if not idealize_only:
+                # Create fastrelax mover
+                relax = rosettaScripts.movers.fastRelax(
+                    repeats=relax_cycles, scorefxn=sfxn
+                )
+                xml.addMover(relax)
+
+                if not null:
+                    protocol.append(relax)
 
             # Set protocol
             xml.setProtocol(protocol)
@@ -2096,38 +3946,39 @@ has been carried out. Please run compareSequences() function before setting muta
                         flags.addOption(o)
 
             # Add relaxation with constraints options and write flags file
-            if cst_optimization:
-                flags.add_relax_cst_options()
-            else:
-                flags.add_relax_options()
+            if not idealize_only:
+                if cst_optimization:
+                    flags.add_relax_cst_options()
+                else:
+                    flags.add_relax_options()
 
             # Add path to params files
             if param_files != None:
-
-                if not os.path.exists(relax_folder + "/params"):
-                    os.mkdir(relax_folder + "/params")
 
                 for r in self.structures[model].get_residues():
                     if r.resname == 'NMA':
                         _copyScriptFile(relax_folder+"/params", 'NMA.params', subfolder='rosetta_params', path='prepare_proteins', hidden=False)
 
-                if isinstance(param_files, str):
-                    param_files = [param_files]
-
-                patch_line = ""
-                for param in param_files:
-                    param_name = param.split("/")[-1]
-                    shutil.copyfile(param, relax_folder + "/params/" + param_name)
-                    if not param_name.endswith(".params"):
-                        patch_line += "../../params/" + param_name + " "
+                patch_entries = []
+                if param_directory_mode:
+                    pass
+                else:
+                    for param in param_files_list:
+                        param_path = Path(param)
+                        destination = params_output_dir / param_path.name
+                        if not destination.exists():
+                            shutil.copyfile(param_path, destination)
+                        if not param_path.name.endswith(".params"):
+                            patch_entries.append("../../params/" + param_path.name)
 
                 flags.addOption("in:file:extra_res_path", "../../params")
-                if patch_line != "":
-                    flags.addOption("in:file:extra_patch_fa", patch_line)
+                if patch_entries:
+                    flags.addOption("in:file:extra_patch_fa", " ".join(patch_entries))
 
             if membrane:
                 flags.addOption("mp::setup::spans_from_structure", "true")
-                flags.addOption("relax:constrain_relax_to_start_coords")
+                if not idealize_only:
+                    flags.addOption("relax:constrain_relax_to_start_coords")
 
             if sugars:
                 flags.addOption("include_sugars")
@@ -2540,19 +4391,43 @@ make sure of reading the target sequences with the function readTargetSequences(
         skip_finished=False,
     ):
         """
-        Setup grid calculation for each model.
+        Generate Glide grid input files and return the shell commands required to
+        launch each grid calculation.
 
-        Parameters
-        ==========
-        grid_folder : str
-            Path to grid calculation folder
-        center_atoms : tuple
-            Atoms to center the grid box.
-        cst_positions : dict
-            atom and radius for cst position for each model:
-            cst_positions = {
-            model : ((chain_id, residue_index, atom_name), radius), ...
-            }
+        Args:
+            grid_folder (str): Directory where input/output subfolders and grid
+                files will be created.
+            center_atoms (dict[str, tuple]): Mapping from model name to either
+                (x, y, z) coordinates or a `(chain_id, residue_index, atom_name)`
+                triplet whose coordinates are used as the grid center.
+            innerbox (tuple[int, int, int]): Dimensions of the inner search box
+                in Glide grid units (angstroms).
+            outerbox (tuple[int, int, int]): Dimensions of the outer search box
+                in Glide grid units (angstroms).
+            useflexmae (bool): Whether to request a flexible receptor MAE in the
+                generated input file.
+            peptide (bool): Flag the receptor as a peptide during grid
+                generation.
+            mae_input (bool): If True, receptors are written and referenced as
+                MAE files; otherwise PDB files are used.
+            cst_positions (dict[str, list[tuple]] | None): Optional mapping from
+                model name to an iterable of `((chain_id, residue_index,
+                atom_name), radius)` tuples used to generate Glide positional
+                constraints.
+            models (list[str] | str | None): Optional subset of model identifiers
+                to process.
+            exclude_models (list[str] | str | None): Optional collection of model
+                identifiers that should be skipped.
+            skip_finished (bool): When True, skip models that already have a
+                corresponding grid output file in `grid_folder/output_models`.
+
+        Returns:
+            list[str]: Shell command strings that execute Glide grid
+            calculations for the selected models.
+
+        Raises:
+            ValueError: If a requested grid center or positional constraint atom
+            cannot be found, or if inner/outer box dimensions are not integers.
         """
 
         # Create grid job folders
@@ -2672,12 +4547,23 @@ make sure of reading the target sequences with the function readTargetSequences(
                 gif.write("OUTERBOX %s, %s, %s\n" % outerbox)
 
                 if cst_positions != None:
+                    parts = []
                     for i, position in enumerate(cst_positions[model]):
+                        parts.append(
+                            "position%s %.14f %.14f %.14f %.14f"
+                            % (
+                                i + 1,
+                                cst_x[i + 1],
+                                cst_y[i + 1],
+                                cst_z[i + 1],
+                                position[-1],
+                            )
+                        )
+                    if parts:
                         gif.write(
-                            'POSIT_CONSTRAINTS "position'
-                            + str(i + 1)
-                            + ' %.14f %.14f %.14f %.14f",\n'
-                            % (cst_x[i + 1], cst_y[i + 1], cst_z[i + 1], position[-1])
+                            "POSIT_CONSTRAINTS "
+                            + ", ".join(f'"{p}"' for p in parts)
+                            + "\n"
                         )
 
                 if mae_input:
@@ -2718,29 +4604,64 @@ make sure of reading the target sequences with the function readTargetSequences(
         cst_fragments=None,
         skip_finished=None,
         only_ligands=None,
+        failed_pairs=None,
     ):
         """
-        Set docking calculations for all the proteins and set of ligands located
-        grid_folders and ligands_folder folders, respectively. The ligands must be provided
-        in MAE format.
+        Build Glide docking input files for every grid/ligand combination and
+        return the commands needed to execute those dockings.
 
-        Parameters
-        ==========
-        docking_folder : str
+        Args:
+            docking_folder (str): Base directory where docking inputs and
+                results will be written.
+            grids_folder (str): Directory that contains previously generated
+                Glide grid ZIP archives under `output_models/`.
+            ligands_folder (str): Directory containing ligand structures in MAE
+                format.
+            models (list[str] | str | None): Optional set of model identifiers to
+                consider; others will be skipped.
+            poses_per_lig (int): Number of poses Glide should keep for each
+                ligand.
+            precision (str): Glide precision mode (e.g., `"SP"` or `"XP"`).
+            use_ligand_charges (bool): If True, request the use of ligand MAE
+                charges during docking.
+            energy_by_residue (bool): If True, write per-residue interaction
+                energies.
+            use_new_version (bool): Reserved flag for downstream consumers that
+                require alternate command generation (currently unused).
+            cst_fragments (dict[str, dict[str, tuple | list[tuple]]] | None):
+                Optional mapping from grid name to ligand name to either a single
+                constraint tuple or an iterable of tuples describing positional
+                constraints in the form `(smarts, feature_index, include_flag)`.
+            skip_finished (bool | None): When True, skip docking runs that
+                already produced a `_pv.maegz` output file.
+            only_ligands (list[str] | str | None): Optional subset of ligand
+                names to include from `ligands_folder`.
+            failed_pairs (Iterable[tuple[str, str]] | None): Optional iterable
+                of `(protein, ligand)` identifiers produced by
+                `analyseDocking(..., return_failed=True)`; when provided, only
+                those combinations are prepared (after applying the other
+                filters).
 
-        ligands_folder : str
-            Path to the folder containing the ligands to dock.
-        residues : dict
-            Dictionary with the residues for each model near which to position the
-            ligand as the starting pose.
-        cst_fragments: dict
-            Dictionary with a tuple composed by 3 elements: first, the fragment of the ligand
-            to which you want to make the bias (in SMARTS pattern nomenclature), the number of feature,
-            if you only have 1 constraint on the grid and in the ligand, it will be 1, and True/False
-            depending on if you want to include that constraint inside the grid constraint (True) or
-            exclude it (False).
-            {'model': {'ligand': ('[fragment]', feature, True) ...
-            }
+        Example:
+            >>> cst_fragments = {
+            ...     "ProteinA": {
+            ...         "ligand1": [
+            ...             ("O=C[O-]", 2, True),
+            ...             ("[H]C([H])[H]", 2, True),
+            ...         ],
+            ...         "ligand2": ("c1ccccc1", 4, False),
+            ...     }
+            ... }
+            >>> jobs = models.setUpGlideDocking(
+            ...     "docking_runs", "grids", "ligands", cst_fragments=cst_fragments
+            ... )
+            This generates a Glide input where the `USE_CONS` line references two
+            grid positions and the `PATTERN1` entries match the provided SMARTS
+            strings and indices.
+
+        Returns:
+            list[str]: Shell command strings that execute Glide docking jobs for
+            the prepared grid/ligand combinations.
         """
 
         if isinstance(only_ligands, str):
@@ -2748,6 +4669,19 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if isinstance(models, str):
             models = [models]
+
+        failed_map = None
+        if failed_pairs:
+            failed_map = {}
+            for pair in failed_pairs:
+                if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+                    raise ValueError(
+                        "Each item in failed_pairs must be a (protein, ligand) pair."
+                    )
+                protein, ligand = pair
+                protein = str(protein)
+                ligand = str(ligand)
+                failed_map.setdefault(protein, set()).add(ligand)
 
         # Create docking job folders
         if not os.path.exists(docking_folder):
@@ -2788,12 +4722,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             if models:
                 if grid not in models:
                     continue
+            if failed_map is not None and grid not in failed_map:
+                continue
 
             # Create ouput folder
             if not os.path.exists(docking_folder + "/output_models/" + grid):
                 os.mkdir(docking_folder + "/output_models/" + grid)
 
             for substrate in substrates_paths:
+
+                if failed_map is not None and substrate not in failed_map.get(grid, set()):
+                    continue
 
                 output_path = docking_folder+"/output_models/"+grid+'/'+grid+"_"+ substrate+'_pv.maegz'
                 if skip_finished and os.path.exists(output_path):
@@ -2827,17 +4766,26 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 cst_fragments[grid][substrate]
                             ]
 
-                        for i, fragment in enumerate(cst_fragments[grid][substrate]):
+                        fragments = cst_fragments[grid][substrate]
+                        if fragments:
                             dif.write("[CONSTRAINT_GROUP:1]\n")
-                            dif.write("\tUSE_CONS position1:" + str(i + 1) + ",\n")
-                            dif.write("\tNREQUIRED_CONS ALL\n")
-                            dif.write("[FEATURE:" + str(i + 1) + "]\n")
-                            dif.write(
-                                '\tPATTERN1 "' + fragment[0] + " " + str(fragment[1])
+                            use_cons = ", ".join(
+                                [f"position{k}:{k}" for k in range(1, len(fragments) + 1)]
                             )
-                            if fragment[2]:
-                                dif.write(" include")
-                            dif.write('"\n')
+                            dif.write("\tUSE_CONS  " + use_cons + "\n")
+                            dif.write("\tNREQUIRED_CONS ALL\n")
+
+                            for i, fragment in enumerate(fragments):
+                                dif.write(f"[FEATURE:{i + 1}]\n")
+                                dif.write(
+                                    '\tPATTERN1 "'
+                                    + fragment[0]
+                                    + " "
+                                    + str(fragment[1])
+                                )
+                                if fragment[2]:
+                                    dif.write(" include")
+                                dif.write('"\n')
 
                 # Create commands
                 command = "cd " + docking_folder + "/output_models/" + grid + "\n"
@@ -2865,6 +4813,361 @@ make sure of reading the target sequences with the function readTargetSequences(
                 jobs.append(command)
 
         return jobs
+
+    def computeModelContacts(
+        self,
+        chains: Optional[Union[str, Iterable[str], Dict[str, Iterable[str]]]] = None,
+        *,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        mode: Literal["chains", "ligands", "both"] = "both",
+        cutoff: float = 5.0,
+        second_shell: Optional[float] = None,
+        atom_scope: Literal["all", "heavy", "backbone", "sidechain"] = "heavy",
+        group_by: Literal["residue", "atom", "chain"] = "residue",
+        exclude_query_intra: bool = True,
+        query_residues: Optional[Any] = None,
+        include: Optional[Dict[str, Any]] = None,
+        ligand_filters: Optional[Dict[str, Any]] = None,
+        chain_filters: Optional[Dict[str, Any]] = None,
+        altloc_mode: Literal["first", "best_occ"] = "first",
+        print_chain_summary: bool = False,
+        only_residue_dict: bool = False,
+        exclude_bb_contacts: bool = False,
+        classify_bb_sc: bool = True,
+        filter_contact_classes: Optional[Set[str]] = None,
+        split_counts_by_class: bool = False,
+    ):
+        """
+        Compute neighbour contacts for the selected models and cache them.
+
+        The signature mirrors :func:`prepare_proteins.analysis.find_neighbours_in_pdb`
+        with additional ``models`` and ``chains`` arguments to control the subset
+        and chain selection analysed. By default all polymer chains in each model
+        are used.
+
+        Args:
+            chains: Optional chain selector (string, iterable, or per-model mapping)
+                restricting which chains are analysed. Defaults to all polymer chains.
+
+        Returns:
+            dict[str, dict]: Mapping of model name to the contact analysis result.
+        """
+        available_models = list(self.models_names)
+        if models is None:
+            selected_models = available_models
+        else:
+            if isinstance(models, str):
+                requested_models = [str(models)]
+            else:
+                requested_models = [str(m) for m in models]
+            missing_models = sorted(set(requested_models) - set(self.models_paths))
+            if missing_models:
+                raise ValueError(f"Models not found: {', '.join(missing_models)}")
+            selected_models = [m for m in available_models if m in requested_models]
+            for model in requested_models:
+                if model not in selected_models:
+                    selected_models.append(model)
+
+        if not selected_models:
+            raise ValueError("No models available for contact analysis.")
+
+        chain_map = self._resolve_chain_selection(chains=chains, models=selected_models)
+
+        results: Dict[str, Any] = {}
+        for model in selected_models:
+            pdb_path = self.models_paths.get(model)
+            if pdb_path is None:
+                raise ValueError(f"PDB path for model '{model}' not available.")
+            model_chains = chain_map.get(model, [])
+            if not model_chains:
+                raise ValueError(f"No chains available for model '{model}'.")
+            results[model] = find_neighbours_in_pdb(
+                pdb_path,
+                model_chains,
+                mode=mode,
+                cutoff=cutoff,
+                second_shell=second_shell,
+                atom_scope=atom_scope,
+                group_by=group_by,
+                exclude_query_intra=exclude_query_intra,
+                query_residues=query_residues,
+                include=include,
+                ligand_filters=ligand_filters,
+                chain_filters=chain_filters,
+                altloc_mode=altloc_mode,
+                print_chain_summary=print_chain_summary,
+                only_residue_dict=only_residue_dict,
+                exclude_bb_contacts=exclude_bb_contacts,
+                classify_bb_sc=classify_bb_sc,
+                filter_contact_classes=filter_contact_classes,
+                split_counts_by_class=split_counts_by_class,
+            )
+
+        self.models_contacts = results
+        return results
+
+    def setUprDockGrid(
+        self,
+        grid_folder,
+        center=(10,10,10),
+        mol2_input=True,
+        models=None,
+        exclude_models=None,
+    ):
+        """
+        Setup grid calculation for each model.
+
+        Parameters
+        ==========
+        grid_folder : str
+            Path to grid calculation folder
+        center_atoms : tuple
+            Atoms to center the grid box.
+        cst_positions : dict
+            atom and radius for cst position for each model:
+            cst_positions = {
+            model : ((chain_id, residue_index, atom_name), radius), ...
+            }
+        """
+
+        # Create grid job folders
+        if not os.path.exists(grid_folder):
+            os.mkdir(grid_folder)
+
+        if not os.path.exists(grid_folder + "/input_models"):
+            os.mkdir(grid_folder + "/input_models")
+
+        if not os.path.exists(grid_folder + "/output_models"):
+            os.mkdir(grid_folder + "/output_models")
+
+        for model in self.models_names:
+            if not os.path.exists(grid_folder + "/output_models/" + model):
+                os.mkdir(grid_folder + "/output_models/"+model)
+
+        if isinstance(models, str):
+            models = [models]
+
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+
+        center_string = str(center)
+        strip_center = center_string.replace(" ", "")
+
+        # Save all input models
+        self.saveModels(grid_folder + "/input_models", convert_to_mol2=mol2_input, models=models)
+
+        # Create grid input files
+        jobs = []
+        for model in self.models_names:
+
+            if models and model not in models:
+                continue
+
+            if exclude_models and model in exclude_models:
+                continue
+            # Write grid input file
+            with open(grid_folder + "/output_models/"+model+"/" + model + ".prm", "w") as gif:
+
+                gif.write("RBT_PARAMETER_FILE_V1.00 \n")
+                gif.write("TITLE rdock \n")
+                gif.write(" \n")
+                gif.write("RECEPTOR_FILE "+"../../input_models/"+model+".mol2 \n")
+                gif.write("RECEPTOR_FLEX 3.0 \n")
+                gif.write(" \n")
+                gif.write("##################################################################\n")
+                gif.write("### CAVITY DEFINITION:\n")
+                gif.write("##################################################################\n")
+                gif.write("SECTION MAPPER\n")
+                gif.write("    SITE_MAPPER RbtSphereSiteMapper\n")
+                gif.write("    CENTER "+strip_center+" \n")
+                gif.write("    RADIUS 10\n")
+                gif.write("    SMALL_SPHERE 1.0\n")
+                gif.write("    MIN_VOLUME 100\n")
+                gif.write("    MAX_CAVITIES 1\n")
+                gif.write("    VOL_INCR 0.0\n")
+                gif.write("    GRIDSTEP 0.5\n")
+                gif.write("END_SECTION\n")
+                gif.write("\n")
+                gif.write("#################################\n")
+                gif.write("#CAVITY RESTRAINT PENALTY\n")
+                gif.write("#################################\n")
+                gif.write("SECTION CAVITY\n")
+                gif.write("    SCORING_FUNCTION RbtCavityGridSF\n")
+                gif.write("    WEIGHT 1.0\n")
+                gif.write("END_SECTION\n")
+
+
+            command = 'module load rdock \n'
+            command += "cd " + grid_folder + "/output_models/"+model+"\n"
+
+            # Add grid generation command
+
+            command += "rbcavity -was -d -r " + model + ".prm > " + model+".log \n"
+            command += "cd ../../.. \n"
+            jobs.append(command)
+
+        return jobs
+
+    def setUprDockDocking(
+        self,
+        grid_folder,
+        ligand_folder,
+        n=100,
+        models=None,
+        exclude_models=None,
+    ):
+        """
+        Setup rdock calculation for each model.
+        First you need to run the grid calculation (setUprDockGrid)
+        You need to upload the folder where you have your ligands in .sd format to the place you want to run the docking
+
+        Parameters
+        ==========
+        grid_folder : str
+            Path to grid calculation folder
+        ligand_folder : str
+            Path to the ligand folder where ligands in .sd format are stored.
+        n : int
+            Number of poses to generate
+        """
+
+        if isinstance(models, str):
+            models = [models]
+
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+
+        #Get the ligand in the ligand folder
+        ### ADD to get only .sd
+        folder_path = str(ligand_folder)
+        ligand_files = [f for f in os.listdir(folder_path) if f.endswith(".sd")]
+
+        # Create grid input files
+        jobs = []
+        for model in self.models_names:
+            for ligand in ligand_files:
+
+                command = 'module load rdock \n'
+                command += "cd " + grid_folder + "/output_models/"+model+"\n"
+
+                # Add docking command
+                command += "rbdock -i ../../../" + ligand_folder+"/"+ligand+ " -o "+ model + "_results.out -r " + model+".prm " + "-p dock.prm -n " + str(n) + " -allH \n"
+                command += "cd ../../.. \n"
+                jobs.append(command)
+
+        return jobs
+
+    def analyseRdockDockings(self, docking_folder,protocol="score"):
+        """
+        Analyse rDock calculations. Only protocol "score" works for now
+        It generates a folder with all the .csv files
+        Parameters
+        ==========
+        docking_folder : str
+            Path to rdock calculation folder
+        protocol : str
+            Protocol to use
+        """
+
+        import csv
+        if protocol == 'dock':
+
+            # Folder path containing the files
+            folder_path = str(docking_folder)
+            storage_path = str(docking_folder)+"results"
+            # Create grid job folders
+            if not os.path.exists(storage_path):
+                os.mkdir(storage_path)
+
+            data = []
+            for model in self.models_names:
+
+                for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
+                    folder_path_model = docking_folder +"output_models/" + model
+                    file_path = os.path.join(folder_path_model, filename)
+
+                    counter = 1
+                    score_bool = False
+                    conformer_bool = False
+
+                    # Open the file
+                    with open(file_path, 'r') as file:
+                        for line in file:
+                            if score_bool:
+                                score = line.split()[0]
+                            if conformer_bool:
+                                ligand, conformer = line.split('-')
+                                data.append(
+                                    [filename, counter, ligand, conformer, score])
+                            if '$$$$' in line:
+                                counter += 1
+                            if '>  <SCORE>' in line:
+                                score_bool = True
+                            else:
+                                score_bool = False
+                            if '>  <s_lp_Variant>' in line:
+                                conformer_bool = True
+                            else:
+                                conformer_bool = False
+                # Write the extracted data to a CSV file
+                output_file = '{}_rDock_data.csv'.format(model)
+                #print(storage_path, output_file)
+                with open(os.path.join(storage_path, output_file), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(['file_name', 'file_entry', 'ligand',
+                                 'conformer', 'rdock_score'])
+                    writer.writerows(data)
+
+                print(' - rDock data extraction completed.')
+                print(' - Data saved in {}'.format(os.path.join(storage_path, output_file)))
+
+        elif protocol == 'score':
+
+            # Folder path containing the files
+            folder_path = str(docking_folder)
+            storage_path = str(docking_folder)+"results"
+            # Create grid job folders
+            if not os.path.exists(storage_path):
+                os.mkdir(storage_path)
+
+
+            for model in self.models_names:
+                for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
+                    folder_path_model = docking_folder +"output_models/" + model
+                    file_path = os.path.join(folder_path_model, filename)
+
+                    ligand = filename
+
+                    counter = 1
+                    score_bool = False
+                    conformer_bool = False
+
+                # Open the file
+                    data = []
+                    with open(file_path, 'r') as file:
+                        for line in file:
+                            if score_bool:
+                                score = line.split()[0]
+                                data.append(
+                                [filename, counter, ligand, score])
+                            if '$$$$' in line:
+                                counter += 1
+                            if '>  <SCORE>' in line:
+                                score_bool = True
+                            else:
+                                score_bool = False
+
+                # Write the extracted data to a CSV file
+                output_file = '{}_rDock_data.csv'.format(model)
+                with open(os.path.join(storage_path, output_file), 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(
+                        ['file_name', 'file_entry', 'ligand', 'rdock_score'])
+                    writer.writerows(data)
+
+                print(' - rDock data extraction completed.')
+                print(' - Data saved in {}'.format(os.path.join(storage_path, output_file)))
+
 
     def setUpRosettaDocking(self, docking_folder, ligands_pdb_folder=None, ligands_sdf_folder=None,
                             param_files=None,
@@ -6590,101 +8893,259 @@ make sure of reading the target sequences with the function readTargetSequences(
                     )
 
     def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
-                               add_bonds=None, skip_ligands=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
+                               add_bonds=None, skip_ligands=None, ligand_only=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
                                extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
                                non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
-                               restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
-                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None, extra_script_options=None,
-                               add_counterionsRand=False,charge_model='bcc'):
+                               restraint_constant=5.0, chunk_size=100.0,
+                               equilibration_data_report_time=1.0, equilibration_dcd_report_time=0.0, temperature=300.0,
+                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
+                               extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
+                               strict_ligand_atom_check=True,
+                               ligand_parameters_source=None,
+                               parameterization_method='ambertools',
+                               parameterization_options=None,
+                               only_models=None, skip_models=None,
+                               ligand_smiles=None,
+                               ligand_sdf_files=None,
+                               skip_ligand_charge_computation=False,
+                               ):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
         Includes support for multiple replicas.
 
         Parameters:
-        - job_folder (str): Path to the folder where the simulations will be set up.
-        - replicas (int): The number of replicas to generate for each model.
-        - simulation_time (float): Total simulation time in ns (mandatory).
-        - ligand_charges (dict, optional): Dictionary of ligand charges to apply during parameterization.
-        - residue_names (dict, optional): Dictionary of residue names to rename for each model. Format: {'model': {(chain, resnum): 'new_resname'}}.
-        - ff (str): Force field to use for the simulations (default is 'amber14').
-        - add_bonds (dict, optional): Dictionary of bonds to be added between atoms for each model.
-        - skip_ligands (list, optional): List of ligand residue names to skip during parameterization.
-        - metal_ligand (optional): Specify metal-ligand interactions if applicable.
-        - metal_parameters (optional): Additional parameters for metals.
-        - extra_frcmod (optional): Extra force field modifications.
-        - extra_mol2 (optional): Extra mol2 files for ligand parameterization.
-        - dcd_report_time (float): The DCD report interval in ps.
-        - data_report_time (float): The data report interval in ps.
-        - nvt_time (float): The NVT equilibration time in ns.
-        - npt_time (float): The NPT equilibration time in ns.
-        - nvt_temp_scaling_steps (int): The number of iterations for NVT temperature scaling.
-        - npt_restraint_scaling_steps (int): The number of iterations for NPT restraint scaling.
-        - restraint_constant (float): Force constant for positional restraints (kcal/mol/Å²).
-        - chunk_size (float): The chunk size for output report files (data and dcd) in ns.
-        - equilibration_report_time (float): The report interval for equilibration steps in ps.
-        - temperature (float): The temperature for the simulation (K).
-        - collision_rate (float): The collision rate for the Langevin integrator (1/ps).
-        - time_step (float): The simulation time step (ps).
-        - cuda (bool): Whether to use CUDA for GPU acceleration.
-        - fixed_seed (int, optional): A fixed seed for the simulation, if provided.
-        - script_file (str, optional): Path to the OpenMM simulation script.
-        - add_counterionsRand(bool, optional): use the tleap function add_counterionsRand instead of addions2 to place the ions in the simulation box. It places
-        the ions randomly in the simulation box without computing charges, so it is much faster than addions2. The default is False. Use when you have a large number of systems to prepare.
-
+        ...
+        - nvt_temp_scaling_steps (int, optional): Temperature scaling segments during NVT equilibration.
+          Must be at least 1 and cannot exceed the number of MD steps derived from `nvt_time` and `time_step`.
+        - npt_restraint_scaling_steps (int, optional): Restraint scaling segments during NPT equilibration.
+          Must be at least 1 and cannot exceed the number of MD steps derived from `npt_time` and `time_step`.
+        - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
+          but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
+        - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
+          same atom-name set as the ligand extracted from the PDB; mismatches raise an error. Disable to downgrade to warnings.
+        - ligand_only (bool or str or list of str, optional): If set, skip protein + ligand simulations and instead
+          prepare solvated ligand-only systems. Use True to process every ligand detected in each model, a single
+          residue name to limit the run to that ligand, or a list of residue names for multiple ligands.
+        - ligand_parameters_source (str, optional): Path to a folder containing per-ligand parameter packs named
+          like `<RESNAME>_parameters` (e.g., `NAD_parameters`). You can pass either the folder that directly
+          contains these packs, or a parent folder with a `parameters/` subfolder. Only ligands present in the
+          system are considered; for those found, the full pack is copied into the job `parameters/` and
+          parameterization for that ligand is skipped via `metal_parameters`.
+        - parameterization_method (str, optional): Name of the parameterization backend to use. Defaults to
+          ``'ambertools'`` which preserves the existing workflow.
+        - parameterization_options (dict, optional): Backend-specific options forwarded to the selected
+          parameterization backend.
+        - ligand_smiles (dict, optional): Mapping from ligand residue name to SMILES strings. Required by the
+          OpenFF backend to build ligand templates; ignored by AmberTools.
+        - ligand_sdf_files (dict, optional): Mapping from residue name to SDF file paths or option dictionaries
+          (with optional ``index`` and ``charge_method`` keys). When provided, the OpenFF backend uses the SDF
+          connectivity/chemistry while retaining ligand coordinates from the model PDB.
+        - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
+        - skip_models (list of str, optional): If provided, skip setup for these models.
+        - skip_ligand_charge_computation (bool, optional): If True, the OpenFF backend will reuse existing
+          partial charges from cached ligand templates (or the supplied SDF) instead of recomputing them.
         """
 
-        def setUpJobs(job_folder, openmm_md, script_file, simulation_time=simulation_time, dcd_report_time=dcd_report_time,
-                      data_report_time=data_report_time, nvt_time=nvt_time, npt_time=npt_time,
-                      nvt_temp_scaling_steps=nvt_temp_scaling_steps, npt_restraint_scaling_steps=npt_restraint_scaling_steps,
+        openmm_setup = _require_openmm_support("proteinModels.setUpOpenMMSimulations")
+        openmm_md_cls = getattr(openmm_setup, "openmm_md", None)
+        if openmm_md_cls is None:
+            raise ImportError(
+                "OpenMM support is enabled but the 'openmm_md' class could not be located. "
+                "Reinstall prepare_proteins with its OpenMM extras."
+            )
+
+        import os, shutil
+
+        if ligand_smiles is not None:
+            if not isinstance(ligand_smiles, dict):
+                raise TypeError("ligand_smiles must be a dict mapping residue name to SMILES.")
+            normalized_smiles = {}
+            for key, value in ligand_smiles.items():
+                if not isinstance(key, str):
+                    raise TypeError("ligand_smiles keys must be strings.")
+                if not isinstance(value, str):
+                    raise TypeError(f"SMILES for residue {key!r} must be a string.")
+                residue_name = key.strip().upper()
+                smiles_value = value.strip()
+                if not residue_name or not smiles_value:
+                    raise ValueError("ligand_smiles entries must not be empty.")
+                normalized_smiles[residue_name] = smiles_value
+            ligand_smiles = normalized_smiles
+
+        if ligand_sdf_files is not None:
+            if not isinstance(ligand_sdf_files, dict):
+                raise TypeError("ligand_sdf_files must be a dict mapping residue name to SDF definitions.")
+            normalized_sdfs = {}
+            for key, value in ligand_sdf_files.items():
+                if not isinstance(key, str):
+                    raise TypeError("ligand_sdf_files keys must be strings.")
+                residue_name = key.strip().upper()
+                if not residue_name:
+                    raise ValueError("ligand_sdf_files entries must not have empty residue names.")
+                if isinstance(value, str):
+                    normalized_sdfs[residue_name] = {"path": value}
+                elif isinstance(value, dict):
+                    if "path" not in value:
+                        raise ValueError(f"ligand_sdf_files entry for {residue_name!r} is missing a 'path'.")
+                    entry = {"path": value["path"]}
+                    if "index" in value:
+                        entry["index"] = value["index"]
+                    if "charge_method" in value:
+                        entry["charge_method"] = value["charge_method"]
+                    normalized_sdfs[residue_name] = entry
+                else:
+                    raise TypeError(
+                        "ligand_sdf_files values must be path strings or dictionaries with options."
+                    )
+            ligand_sdf_files = normalized_sdfs
+
+        def _select_backend_parameters_folder(base_folder: str, backend_label: str) -> str:
+            if not backend_label:
+                return base_folder
+            backend_folder = os.path.join(base_folder, backend_label)
+            if backend_label == "ambertools":
+                try:
+                    entries = os.listdir(base_folder)
+                except OSError:
+                    entries = []
+                has_legacy_packs = any(
+                    entry.endswith('_parameters') and os.path.isdir(os.path.join(base_folder, entry))
+                    for entry in entries
+                )
+                if has_legacy_packs:
+                    return base_folder
+            os.makedirs(backend_folder, exist_ok=True)
+            return backend_folder
+
+        # Normalize model filters
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        if skip_models is None:
+            skip_models = []
+
+        def _replica_has_inputs(replica_folder: str) -> bool:
+            input_dir = os.path.join(replica_folder, 'input_files')
+            if not os.path.isdir(input_dir):
+                return False
+            files = os.listdir(input_dir)
+            has_prmtop = any(f.endswith('.prmtop') for f in files)
+            has_inpcrd = any(f.endswith('.inpcrd') or f.endswith('.rst7') for f in files)
+            return has_prmtop and has_inpcrd
+
+        def _replicas_needed(model_folder: str, replicas: int, skip_replicas):
+            zfill = max(len(str(replicas)), 2)
+            needed, prepared = [], []
+            for replica in range(1, replicas + 1):
+                if skip_replicas and replica in skip_replicas:
+                    continue
+                rname = f"replica_{str(replica).zfill(zfill)}"
+                rfolder = os.path.join(model_folder, rname)
+                if _replica_has_inputs(rfolder):
+                    prepared.append(replica)
+                else:
+                    needed.append(replica)
+            return needed, prepared
+
+        def setUpJobs(job_folder, openmm_md, script_file, parameterization_result=None, simulation_time=simulation_time,
+                      dcd_report_time=dcd_report_time, data_report_time=data_report_time,
+                      nvt_time=nvt_time, npt_time=npt_time, nvt_temp_scaling_steps=nvt_temp_scaling_steps,
+                      npt_restraint_scaling_steps=npt_restraint_scaling_steps,
                       restraint_constant=restraint_constant, chunk_size=chunk_size,
-                      equilibration_report_time=equilibration_report_time, temperature=temperature,
-                      collision_rate=collision_rate, time_step=time_step, cuda=cuda, fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
+                      equilibration_data_report_time=equilibration_data_report_time,
+                      equilibration_dcd_report_time=equilibration_dcd_report_time, temperature=temperature,
+                      collision_rate=collision_rate, time_step=time_step, cuda=cuda,
+                      fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
+            """Set up simulation jobs for a single replica.
+
+            This prepares the replica folder with an `input_files/` directory containing
+            the required simulation inputs. For the current AMBER workflow, this means
+            copying the `.prmtop` and `.inpcrd`/`.rst7` files and returning a list with
+            the command to run the OpenMM simulation script.
+            If a ``parameterization_result`` is provided, its metadata determines which
+            files are copied into the replica folder.
+
+            Returns
+            -------
+            list[str]
+                Shell command(s) to run for this replica.
             """
-            Subfunction to set up individual OpenMM simulation jobs with inherited parameters.
-            """
-            if not os.path.exists(os.path.join(job_folder, 'input_files')):
-                os.makedirs(os.path.join(job_folder, 'input_files'))
 
-            prmtop_name = os.path.basename(openmm_md.prmtop_file)
-            inpcrd_name = os.path.basename(openmm_md.inpcrd_file)
+            jobs: list[str] = []
 
-            shutil.copyfile(openmm_md.prmtop_file, os.path.join(job_folder, 'input_files', prmtop_name))
-            shutil.copyfile(openmm_md.inpcrd_file, os.path.join(job_folder, 'input_files', inpcrd_name))
-            script = os.path.basename(script_file)
-            shutil.copyfile(script_file, os.path.join(job_folder, script))
+            # Ensure replica folder and inputs folder exist
+            os.makedirs(job_folder, exist_ok=True)
+            input_dir = os.path.join(job_folder, 'input_files')
+            os.makedirs(input_dir, exist_ok=True)
 
-            jobs = []
-            command = ''
-            if not fixed_seed:
-                command += f'SEED=$(($SLURM_JOB_ID + $RANDOM % 100000))\n'
+            # Base filename for input files (model basename + extension)
+            base_name = getattr(openmm_md, 'pdb_name', 'input')
+            resolved_parameterization = parameterization_result or getattr(openmm_md, 'parameterization_result', None)
+            input_format = None
+            if resolved_parameterization is not None:
+                input_format = resolved_parameterization.input_format
+                prmtop_src = resolved_parameterization.prmtop_path or getattr(openmm_md, 'prmtop_file', None)
+                inpcrd_src = resolved_parameterization.coordinates_path or getattr(openmm_md, 'inpcrd_file', None)
+                openmm_md.parameterization_result = resolved_parameterization
             else:
-                command += f'SEED=' + str(fixed_seed) + '\n'
-            command += 'echo employed seed: $SEED\n'
-            command += f'cd {job_folder}\n'
-            command += f'python {script} '
-            command += f'input_files/{prmtop_name} '
-            command += f'input_files/{inpcrd_name} '
-            command += f'{simulation_time} '
-            command += f'--dcd_report_time {dcd_report_time} '
-            command += f'--data_report_time {data_report_time} '
-            command += f'--nvt_time {nvt_time} '
-            command += f'--npt_time {npt_time} '
-            command += f'--nvt_temp_scaling_steps {nvt_temp_scaling_steps} '
-            command += f'--npt_restraint_scaling_steps {npt_restraint_scaling_steps} '
-            command += f'--restraint_constant {restraint_constant} '
-            command += f'--chunk_size {chunk_size} '
-            command += f'--equilibration_report_time {equilibration_report_time} '
-            command += f'--temperature {temperature} '
-            command += f'--collision_rate {collision_rate} '
-            command += f'--time_step {time_step} '
-            command += f'--seed $SEED '
-            if extra_script_options:
-                for option in extra_script_options:
-                    command += f'--{option[0]} {str(option[1])} '
-            command += '\n'
-            command += f'cd {"../" * len(job_folder.split(os.sep))}\n'
-            jobs.append(command)
+                prmtop_src = getattr(openmm_md, 'prmtop_file', None)
+                inpcrd_src = getattr(openmm_md, 'inpcrd_file', None)
+
+            if input_format and input_format != 'amber':
+                raise NotImplementedError(
+                    f"Parameterization format '{input_format}' is not supported by the default OpenMM runner."
+                )
+
+            prmtop_ext = os.path.splitext(prmtop_src)[1] if prmtop_src else '.prmtop'
+            inpcrd_ext = os.path.splitext(inpcrd_src)[1] if inpcrd_src else '.inpcrd'
+
+            prmtop_name = f"{base_name}{prmtop_ext}"
+            inpcrd_name = f"{base_name}{inpcrd_ext}"
+
+            prmtop_path = os.path.join(input_dir, prmtop_name)
+            inpcrd_path = os.path.join(input_dir, inpcrd_name)
+
+            # Copy source files into input directory using the model's basename
+            if prmtop_src and os.path.exists(prmtop_src) and not os.path.exists(prmtop_path):
+                shutil.copyfile(prmtop_src, prmtop_path)
+            if inpcrd_src and os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_path):
+                shutil.copyfile(inpcrd_src, inpcrd_path)
+
+            # Build the command regardless; execution-time checks will fail fast if inputs are missing
+            cmd = []
+            cmd.append(f"cd {job_folder}")
+
+            # Use a path to the script relative to the replica folder so the
+            # simulation script can be located regardless of the submission
+            # working directory.
+            rel_script = os.path.relpath(script_file, job_folder)
+
+            cmd.append(
+                "python "
+                + f"{rel_script} "
+                + f"{os.path.join('input_files', prmtop_name)} "
+                + f"{os.path.join('input_files', inpcrd_name)} "
+                + f"{simulation_time} "
+                + f"--chunk_size {chunk_size} "
+                + f"--temperature {temperature} "
+                + f"--collision_rate {collision_rate} "
+                + f"--time_step {time_step} "
+                + f"--dcd_report_time {dcd_report_time} "
+                + f"--data_report_time {data_report_time} "
+                + f"--nvt_time {nvt_time} "
+                + f"--npt_time {npt_time} "
+                + f"--nvt_temp_scaling_steps {nvt_temp_scaling_steps} "
+                + f"--npt_restraint_scaling_steps {npt_restraint_scaling_steps} "
+                + f"--restraint_constant {restraint_constant} "
+                + f"--equilibration_data_report_time {equilibration_data_report_time} "
+                + f"--equilibration_dcd_report_time {equilibration_dcd_report_time}"
+            )
+            # Always provide a seed for the simulation. Use the given fixed seed
+            # when supplied; otherwise generate a random one so the OpenMM
+            # script, which requires the flag, always receives a value.
+            seed = int(fixed_seed) if fixed_seed is not None else int(np.random.randint(0, 2**31 - 1))
+            cmd[-1] += f" --seed {seed}"
+            jobs.append("\n".join(cmd))
 
             return jobs
 
@@ -6692,11 +9153,57 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        self.openmm_md = {}  # Dictionary to hold openmm_md instances for each model
+        self.openmm_md = _OpenMMSimulationRegistry()
 
         ligand_parameters_folder = os.path.join(job_folder, 'parameters')
-        if not os.path.exists(ligand_parameters_folder):
-            os.mkdir(ligand_parameters_folder)
+        os.makedirs(ligand_parameters_folder, exist_ok=True)
+
+        if ligand_parameters_source is not None and not os.path.exists(ligand_parameters_source):
+            raise ValueError(f"ligand_parameters_source not found: {ligand_parameters_source}")
+
+        # Resolve the actual source directory that contains `<RES>_parameters` packs.
+        def _resolve_ligand_pack_root(path, backend_label=None):
+            if path is None:
+                return None
+            candidate_paths = []
+            if backend_label:
+                candidate_paths.append(os.path.join(path, backend_label))
+            candidate_paths.append(path)
+            for candidate in candidate_paths:
+                try:
+                    entries = os.listdir(candidate)
+                except Exception:
+                    entries = []
+                has_packs = any(
+                    name.endswith('_parameters') and os.path.isdir(os.path.join(candidate, name)) for name in entries
+                )
+                if has_packs:
+                    return candidate
+                sub = os.path.join(candidate, 'parameters')
+                if not os.path.isdir(sub):
+                    continue
+                try:
+                    sub_entries = os.listdir(sub)
+                except Exception:
+                    continue
+                has_packs = any(
+                    name.endswith('_parameters') and os.path.isdir(os.path.join(sub, name)) for name in sub_entries
+                )
+                if has_packs:
+                    return sub
+            return None
+        resolved_ligand_pack_root = None
+        backend_options = dict(parameterization_options) if parameterization_options else {}
+        if ligand_smiles:
+            backend_options.setdefault("ligand_smiles", ligand_smiles)
+        if ligand_sdf_files:
+            backend_options.setdefault("ligand_sdf_files", ligand_sdf_files)
+        if skip_ligand_charge_computation:
+            backend_options.setdefault("skip_ligand_charge_computation", True)
+        backend = get_backend(parameterization_method, **backend_options)
+        backend_label = getattr(backend, "name", str(parameterization_method)).lower()
+        ligand_parameters_folder = _select_backend_parameters_folder(ligand_parameters_folder, backend_label)
+        resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source, backend_label)
 
         script_folder = os.path.join(job_folder, 'scripts')
         if not os.path.exists(script_folder):
@@ -6706,52 +9213,411 @@ make sure of reading the target sequences with the function readTargetSequences(
             _copyScriptFile(script_folder, "openmm_simulation.py", subfolder='md/openmm', hidden=False)
             script_file = script_folder + '/openmm_simulation.py'
 
-        # Iterate over all models
-        simulation_jobs = []
-        for model in self:
-            model_folder = os.path.join(job_folder, model)
+        aa3_residues = set(openmm_setup.aa3)
+        ALL_LIGANDS = "__ALL__"
 
-            # Create a subdirectory for the model if it doesn't exist
+        def _normalize_ligand_only_option(option):
+            if option in (None, False):
+                return None
+            if option is True:
+                return ALL_LIGANDS
+            if isinstance(option, str):
+                value = option.strip()
+                if not value:
+                    return None
+                if value.lower() == "all":
+                    return ALL_LIGANDS
+                return {value.upper()}
+            if isinstance(option, (list, tuple, set)):
+                normalized = {str(item).strip().upper() for item in option if str(item).strip()}
+                if not normalized:
+                    return None
+                if "ALL" in normalized:
+                    return ALL_LIGANDS
+                return normalized
+            raise TypeError("ligand_only must be True, False, a string, or an iterable of strings.")
+
+        ligand_only_selector = _normalize_ligand_only_option(ligand_only)
+        ligand_only_active = ligand_only_selector is not None
+
+        skip_ligands_upper = set(DEFAULT_PARAMETERIZATION_SKIP_RESIDUES)
+        if skip_ligands:
+            if isinstance(skip_ligands, str):
+                skip_ligands_upper.add(skip_ligands.strip().upper())
+            else:
+                skip_ligands_upper.update({str(item).strip().upper() for item in skip_ligands})
+        effective_skip_ligands = sorted(skip_ligands_upper) if skip_ligands_upper else None
+
+        def _detect_model_ligands(model_name):
+            structure = self.structures.get(model_name)
+            if structure is None:
+                return []
+            ligands = []
+            for residue in structure.get_residues():
+                resname = getattr(residue, 'resname', '').strip().upper()
+                if not resname or resname in ('HOH', 'WAT'):
+                    continue
+                if resname in aa3_residues or resname in skip_ligands_upper:
+                    continue
+                if resname not in ligands:
+                    ligands.append(resname)
+            return ligands
+
+        def _collect_ligand_packs(parameters_folder):
+            packs = {}
+            if not os.path.isdir(parameters_folder):
+                return packs
+            for entry in os.listdir(parameters_folder):
+                if entry.endswith('_parameters'):
+                    residue = entry[: -len('_parameters')]
+                    packs[residue.upper()] = os.path.join(parameters_folder, entry)
+            return packs
+
+        def _posix_path(path):
+            return Path(path).expanduser().absolute().as_posix()
+
+        def _execute_with_logging(command, model_key=None):
+            entry = None
+            if model_key is not None:
+                md_obj = self.openmm_md.get(model_key)
+                if md_obj is not None:
+                    log = getattr(md_obj, "command_log", None)
+                    if log is not None:
+                        entry = {"command": command.rstrip(), "returncode": None}
+                        log.append(entry)
+            ret = os.system(command)
+            if entry is not None:
+                entry["returncode"] = ret
+            return ret
+
+        def _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate):
+            ligand_key = ligand_name.upper()
+            base_tag = f"{model_name}_{ligand_key}"
+            prmtop_path = os.path.join(ligand_parameters_folder, f"{base_tag}.prmtop")
+            inpcrd_path = os.path.join(ligand_parameters_folder, f"{base_tag}.inpcrd")
+            inpcrd_candidates = [inpcrd_path, os.path.join(ligand_parameters_folder, f"{base_tag}.rst7")]
+            existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
+            model_ligand_pdb = os.path.join(ligand_parameters_folder, f"{base_tag}.pdb")
+            if os.path.exists(prmtop_path) and existing_inpcrd:
+                return prmtop_path, existing_inpcrd
+
+            if not allow_generate:
+                raise FileNotFoundError(
+                    f"Missing ligand-only inputs for {ligand_key} in model {model_name}. "
+                    f"Enable preparation or place the AMBER files in {ligand_parameters_folder}."
+                )
+
+            pack_dir = packs.get(ligand_key)
+            if not pack_dir or not os.path.isdir(pack_dir):
+                packs.update(_collect_ligand_packs(ligand_parameters_folder))
+                pack_dir = packs.get(ligand_key)
+            if not pack_dir or not os.path.isdir(pack_dir):
+                raise ValueError(
+                    f"Parameter pack for ligand {ligand_key} not found in {ligand_parameters_folder}. "
+                    "Run preparation without skip_preparation or provide ligand_parameters_source."
+                )
+
+            ligand_pdb = os.path.join(pack_dir, f"{ligand_key}.pdb")
+            if os.path.exists(model_ligand_pdb):
+                ligand_pdb = model_ligand_pdb
+            else:
+                if not os.path.exists(ligand_pdb):
+                    raise FileNotFoundError(f"Ligand PDB for {ligand_key} not found at {ligand_pdb}.")
+                shutil.copyfile(ligand_pdb, model_ligand_pdb)
+                ligand_pdb = model_ligand_pdb
+
+            mol2_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2")
+            mol2_manifest = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2.list")
+            alt_mol2 = os.path.join(pack_dir, f"{ligand_key}.mol2")
+            alt_mol2_manifest = os.path.join(pack_dir, f"{ligand_key}.mol2.list")
+            if os.path.exists(alt_mol2_manifest):
+                shutil.copyfile(alt_mol2_manifest, mol2_manifest)
+            if os.path.exists(alt_mol2):
+                shutil.copyfile(alt_mol2, mol2_path)
+            elif not os.path.exists(mol2_path):
+                raise FileNotFoundError(f"Mol2 file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+            mol2_paths = []
+            if os.path.exists(mol2_manifest):
+                try:
+                    with open(mol2_manifest) as mf:
+                        for raw in mf:
+                            entry = raw.strip()
+                            if not entry:
+                                continue
+                            if os.path.isabs(entry):
+                                candidate = entry
+                            else:
+                                candidate = os.path.normpath(os.path.join(ligand_parameters_folder, entry))
+                            if os.path.exists(candidate):
+                                mol2_paths.append(candidate)
+                except OSError:
+                    mol2_paths = []
+            if not mol2_paths:
+                mol2_paths = [mol2_path]
+
+            frcmod_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod")
+            alt_frcmod = os.path.join(pack_dir, f"{ligand_key}.frcmod")
+            if os.path.exists(alt_frcmod):
+                shutil.copyfile(alt_frcmod, frcmod_path)
+            elif not os.path.exists(frcmod_path):
+                raise FileNotFoundError(f"Frcmod file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
+            frcmod_manifest = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod.list")
+            alt_manifest = os.path.join(pack_dir, f"{ligand_key}.frcmod.list")
+            if os.path.exists(alt_manifest):
+                shutil.copyfile(alt_manifest, frcmod_manifest)
+            frcmod_paths = []
+            if os.path.exists(frcmod_manifest):
+                try:
+                    with open(frcmod_manifest) as mf:
+                        for raw in mf:
+                            entry = raw.strip()
+                            if not entry:
+                                continue
+                            if os.path.isabs(entry):
+                                candidate = entry
+                            else:
+                                candidate = os.path.normpath(os.path.join(ligand_parameters_folder, entry))
+                            if os.path.exists(candidate):
+                                frcmod_paths.append(candidate)
+                except OSError:
+                    frcmod_paths = []
+            if not frcmod_paths:
+                frcmod_paths = [frcmod_path]
+
+            tleap_script = os.path.join(ligand_parameters_folder, f"{base_tag}_ligand_only.leap")
+            with open(tleap_script, 'w') as tlf:
+                tlf.write('source leaprc.gaff\n')
+                tlf.write('source leaprc.water.tip3p\n')
+                for frcmod in frcmod_paths:
+                    tlf.write(f'loadamberparams "{_posix_path(frcmod)}"\n')
+                primary_mol2 = mol2_paths[0]
+                tlf.write(f'{ligand_key} = loadmol2 "{_posix_path(primary_mol2)}"\n')
+                tlf.write(f'mol = loadpdb "{_posix_path(ligand_pdb)}"\n')
+                tlf.write('solvatebox mol TIP3PBOX 12\n')
+                if add_counterionsRand:
+                    tlf.write('addIonsRand mol Na+ 0\n')
+                    tlf.write('addIonsRand mol Cl- 0\n')
+                else:
+                    tlf.write('addIons2 mol Na+ 0\n')
+                    tlf.write('addIons2 mol Cl- 0\n')
+                tlf.write(f'saveamberparm mol "{_posix_path(prmtop_path)}" "{_posix_path(inpcrd_path)}"\n')
+                tlf.write('quit\n')
+
+            command = f'tleap -s -f "{tleap_script}"'
+            ret = _execute_with_logging(command, model_name)
+            if ret != 0:
+                raise RuntimeError(f"tleap failed while preparing ligand-only inputs for {ligand_key} in model {model_name}.")
+
+            existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
+            if not (os.path.exists(prmtop_path) and existing_inpcrd):
+                raise RuntimeError(f"Failed to generate prmtop/inpcrd for ligand {ligand_key} in model {model_name}.")
+
+            return prmtop_path, existing_inpcrd
+
+        def _prepare_ligand_only_jobs(model_name, selected_ligands, packs):
+            jobs = []
+            allow_generate = not skip_preparation
+            zfill = max(len(str(replicas)), 2)
+
+            for ligand_name in selected_ligands:
+                prmtop_src, inpcrd_src = _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate)
+
+                ligand_root = os.path.join(job_folder, ligand_name)
+                os.makedirs(ligand_root, exist_ok=True)
+
+                model_root = os.path.join(ligand_root, model_name)
+                os.makedirs(model_root, exist_ok=True)
+
+                ligand_md = SimpleNamespace(
+                    pdb_name=f"{model_name}_{ligand_name.upper()}",
+                    prmtop_file=prmtop_src,
+                    inpcrd_file=inpcrd_src,
+                )
+
+                for replica in range(1, replicas + 1):
+                    if skip_replicas and replica in skip_replicas:
+                        continue
+                    replica_folder = os.path.join(model_root, f"replica_{str(replica).zfill(zfill)}")
+                    jobs.extend(setUpJobs(replica_folder, ligand_md, script_file))
+
+            return jobs
+
+        simulation_jobs = []
+        ligand_simulation_jobs = []
+        ligand_setup_completed = False
+
+        for model in self:
+            if only_models and model not in only_models:
+                continue
+            if model in skip_models:
+                continue
+            if ligand_only_active and ligand_setup_completed:
+                break
+
+            model_ligands = _detect_model_ligands(model)
+
+            self.openmm_md[model] = openmm_md_cls(self.models_paths[model])
+            if not skip_preparation:
+                self.openmm_md[model].setUpFF(ff)
+                if add_hydrogens:
+                    variants = self.openmm_md[model].getProtonationStates()
+                    self.openmm_md[model].removeHydrogens()
+                    self.openmm_md[model].addHydrogens(variants=variants)
+
+            if ligand_only_active:
+                if ligand_only_selector == ALL_LIGANDS:
+                    selected_ligands = model_ligands
+                else:
+                    selected_ligands = [lig for lig in model_ligands if lig in ligand_only_selector]
+                    missing = ligand_only_selector - set(selected_ligands)
+                    if missing:
+                        raise ValueError(
+                            f"Requested ligand(s) {sorted(missing)} not found in model {model}. "
+                            f"Available ligands: {model_ligands or 'none'}"
+                        )
+
+                if not selected_ligands:
+                    continue
+
+                selected_ligands = [lig.upper() for lig in selected_ligands]
+                selected_ligands_set = set(selected_ligands)
+
+                packs = _collect_ligand_packs(ligand_parameters_folder)
+                missing_packs = [lig for lig in selected_ligands if lig not in packs]
+                if missing_packs and skip_preparation:
+                    raise FileNotFoundError(
+                        f"Ligand parameter packs missing for {missing_packs} in model {model}. "
+                        "Disable skip_preparation or provide pre-generated packs."
+                    )
+
+                if missing_packs and not skip_preparation:
+                    external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
+                    skip_for_param = set(skip_ligands_upper)
+                    if ligand_only_selector != ALL_LIGANDS:
+                        skip_for_param.update(
+                            lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
+                        )
+                    skip_argument = list(skip_for_param) if skip_for_param else None
+                backend.prepare_model(
+                        self.openmm_md[model],
+                        ligand_parameters_folder,
+                        charges=ligand_charges,
+                        metal_ligand=metal_ligand,
+                        add_bonds=add_bonds.get(model) if add_bonds else None,
+                        skip_ligands=sorted(skip_argument) if skip_argument else effective_skip_ligands,
+                        overwrite=False,
+                        metal_parameters=external_params,
+                        extra_frcmod=extra_frcmod,
+                        extra_mol2=extra_mol2,
+                        cpus=20,
+                        return_qm_jobs=True,
+                        extra_force_field=extra_force_field,
+                        force_field='ff14SB',
+                        residue_names=residue_names.get(model) if residue_names else None,
+                        add_counterions=True,
+                        add_counterionsRand=add_counterionsRand,
+                        save_amber_pdb=True,
+                        solvate=True,
+                        regenerate_amber_files=True,
+                        non_standard_residues=non_standard_residues,
+                        strict_atom_name_check=strict_ligand_atom_check,
+                        only_residues=selected_ligands_set,
+                        build_full_system=False,
+                    )
+                self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
+                packs = _collect_ligand_packs(ligand_parameters_folder)
+
+                ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
+                ligand_setup_completed = True
+                continue
+
+            model_folder = os.path.join(job_folder, model)
             if not os.path.exists(model_folder):
                 os.mkdir(model_folder)
 
-            # Generate OpenMM class for setting up calculations
-            self.openmm_md[model] = prepare_proteins.MD.openmm_md(self.models_paths[model])
-            self.openmm_md[model].setUpFF(ff)  # Define the force field
+            needed_replicas, prepared_replicas = _replicas_needed(model_folder, replicas, skip_replicas)
 
-            if add_hydrogens:
-                # Get and set protonation states
-                variants = self.openmm_md[model].getProtonationStates()
-                self.openmm_md[model].removeHydrogens()
-                self.openmm_md[model].addHydrogens(variants=variants)
+            base_name = getattr(self.openmm_md[model], 'pdb_name', 'input')
+            job_prmtop = os.path.join(ligand_parameters_folder, f"{base_name}.prmtop")
+            job_inpcrd = None
+            for ext in ('.inpcrd', '.rst7'):
+                candidate = os.path.join(ligand_parameters_folder, f"{base_name}{ext}")
+                if os.path.exists(candidate):
+                    job_inpcrd = candidate
+                    break
+            if os.path.exists(job_prmtop) and job_inpcrd:
+                self.openmm_md[model].prmtop_file = job_prmtop
+                self.openmm_md[model].inpcrd_file = job_inpcrd
 
-            # Parameterize ligands and build amber topology
-            qm_jobs = self.openmm_md[model].parameterizePDBLigands(
-                ligand_parameters_folder, charges=ligand_charges, metal_ligand=metal_ligand,
-                add_bonds=add_bonds.get(model) if add_bonds else None,  # Use model-specific bond additions
-                skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
-                extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
-                extra_force_field=extra_force_field,charge_model=charge_model,
-                force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
-                add_counterions=True, add_counterionsRand=add_counterionsRand,save_amber_pdb=True, solvate=True, regenerate_amber_files=False,
-                non_standard_residues=non_standard_residues
-            )
+            if not getattr(self.openmm_md[model], 'prmtop_file', None) or not getattr(self.openmm_md[model], 'inpcrd_file', None):
+                if prepared_replicas:
+                    zfill_pre = max(len(str(replicas)), 2)
+                    first_prepared = prepared_replicas[0]
+                    rep_name = f"replica_{str(first_prepared).zfill(zfill_pre)}"
+                    rep_input = os.path.join(model_folder, rep_name, 'input_files')
+                    if os.path.isdir(rep_input):
+                        prmtops = [f for f in os.listdir(rep_input) if f.endswith('.prmtop')]
+                        inpcrds = [f for f in os.listdir(rep_input) if f.endswith('.inpcrd') or f.endswith('.rst7')]
+                        if prmtops and inpcrds:
+                            self.openmm_md[model].prmtop_file = os.path.join(rep_input, prmtops[0])
+                            self.openmm_md[model].inpcrd_file = os.path.join(rep_input, inpcrds[0])
 
-            # Create folders for replicas
+            has_prmtop = bool(getattr(self.openmm_md[model], 'prmtop_file', None))
+            has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
+            if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
+                external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
+                backend.prepare_model(
+                        self.openmm_md[model],
+                        ligand_parameters_folder,
+                        charges=ligand_charges,
+                        metal_ligand=metal_ligand,
+                        add_bonds=add_bonds.get(model) if add_bonds else None,
+                        skip_ligands=effective_skip_ligands,
+                    overwrite=False,
+                    metal_parameters=external_params,
+                    extra_frcmod=extra_frcmod,
+                    extra_mol2=extra_mol2,
+                    cpus=20,
+                    return_qm_jobs=True,
+                    extra_force_field=extra_force_field,
+                    force_field='ff14SB',
+                    residue_names=residue_names.get(model) if residue_names else None,
+                    add_counterions=True,
+                    add_counterionsRand=add_counterionsRand,
+                    save_amber_pdb=True,
+                    solvate=True,
+                    regenerate_amber_files=True,
+                    non_standard_residues=non_standard_residues,
+                    strict_atom_name_check=strict_ligand_atom_check,
+                )
+
+            parameterization_result = backend.describe_model(self.openmm_md[model])
+            self.openmm_md[model].parameterization_result = parameterization_result
+
             zfill = max(len(str(replicas)), 2)
-            for replica in range(1, replicas+1):
-
-                if not isinstance(skip_replicas, type(None)) and replica in skip_replicas:
+            for replica in range(1, replicas + 1):
+                if skip_replicas and replica in skip_replicas:
                     continue
 
                 replica_str = str(replica).zfill(zfill)
                 replica_folder = os.path.join(model_folder, f'replica_{replica_str}')
-
                 if not os.path.exists(replica_folder):
                     os.mkdir(replica_folder)
 
-                # Call the subfunction to set up the individual simulation for each replica
-                simulation_jobs += setUpJobs(replica_folder, self.openmm_md[model], script_file)
+                jobs = setUpJobs(
+                    replica_folder,
+                    self.openmm_md[model],
+                    script_file,
+                    parameterization_result=parameterization_result,
+                )
+                simulation_jobs.extend(jobs)
+
+        self.openmm_md.openmm_command_logs.clear()
+        for model_name, md_obj in self.openmm_md.items():
+            self.openmm_md.openmm_command_logs[model_name] = list(getattr(md_obj, "command_log", []))
+
+        if ligand_only_active:
+            return ligand_simulation_jobs
 
         return simulation_jobs
 
@@ -10145,358 +13011,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         print("Added the following mutants from folder %s:" % mutants_folder)
         print("\t" + ", ".join(models))
 
-    # def loadModelsFromRosettaOptimization(
-    #     self,
-    #     optimization_folder,
-    #     filter_score_term="score",
-    #     min_value=True,
-    #     tags=None,
-    #     wat_to_hoh=True,
-    #     return_missing=False,
-    #     sugars=False,
-    #     conect_update=False,
-    # ):
-    #     """
-    #     Load the best energy models from a set of silent files inside a specfic folder.
-    #     Useful to get the best models from a relaxation run.
-    #
-    #     Parameters
-    #     ==========
-    #     optimization_folder : str
-    #         Path to folder where the Rosetta optimization files are contained
-    #     filter_score_term : str
-    #         Score term used to filter models
-    #     relax_run : bool
-    #         Is this a relax run?
-    #     min_value : bool
-    #         Grab the minimum score value. Set false to grab the maximum scored value.
-    #     tags : dict
-    #         The tag of a specific pose to be loaded for the given model. Each model
-    #         must have a single tag in the tags dictionary. If a model is not found
-    #         in the tags dictionary, normal processing will follow to select
-    #         the loaded pose.
-    #     wat_to_hoh : bool
-    #         Change water names from WAT to HOH when loading.
-    #     return_missing : bool
-    #         Return missing models from the optimization_folder.
-    #     """
-    #
-    #     def getConectLines(pdb_file, format_for_prepwizard=True):
-    #
-    #         ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
-    #
-    #         # Read PDB file
-    #         atom_tuples = {}
-    #         add_one = False
-    #         previous_chain = None
-    #         with open(pdb_file, "r") as f:
-    #             for l in f:
-    #                 if l.startswith("ATOM") or l.startswith("HETATM"):
-    #                     index, name, resname, chain, resid = (
-    #                         int(l[6:11]),        # Atom index
-    #                         l[12:16].strip(),    # Atom name
-    #                         l[17:20].strip(),    # Residue name
-    #                         l[21],               # Chain identifier
-    #                         int(l[22:26]),       # Residue index
-    #                     )
-    #
-    #                     if not previous_chain:
-    #                         previous_chain = chain
-    #
-    #                     if name in ace_names:
-    #                         resid -= 1
-    #
-    #                         if format_for_prepwizard:
-    #                             if name == 'CP2':
-    #                                 name = 'CH3'
-    #                             elif name == 'CO':
-    #                                 name = 'C'
-    #                             elif name == 'OP1':
-    #                                 name = 'O'
-    #                             elif name == '1HP2':
-    #                                 name = '1H'
-    #                             elif name == '2HP2':
-    #                                 name = '2H'
-    #                             elif name == '3HP2':
-    #                                 name = '3H'
-    #
-    #                     if resname == 'NMA':
-    #                         add_one = True
-    #
-    #                         if format_for_prepwizard:
-    #                             if name == 'HN2':
-    #                                 name = 'H'
-    #                             elif name == 'C':
-    #                                 name = 'CA'
-    #                             elif name == 'H1':
-    #                                 name = '1HA'
-    #                             elif name == 'H2':
-    #                                 name = '2HA'
-    #                             elif name == 'H3':
-    #                                 name = '3HA'
-    #
-    #                     if previous_chain != chain:
-    #                         add_one = False
-    #
-    #                     if add_one:
-    #                         resid += 1
-    #
-    #                     atom_tuples[index] = (chain, resid, name)
-    #                     previous_chain = chain
-    #
-    #         conects = []
-    #         with open(pdb_file) as pdbf:
-    #             for l in pdbf:
-    #                 if l.startswith("CONECT"):
-    #                     l = l.replace("CONECT", "")
-    #                     l = l.strip("\n").rstrip()
-    #                     num = len(l) / 5
-    #                     new_l = [int(l[i * 5 : (i * 5) + 5]) for i in range(int(num))]
-    #                     conects.append([atom_tuples[int(x)] for x in new_l])
-    #
-    #         return conects
-    #
-    #     def writeConectLines(conects, pdb_file):
-    #
-    #         atom_indexes = {}
-    #         with open(pdb_file, "r") as f:
-    #             for l in f:
-    #                 if l.startswith("ATOM") or l.startswith("HETATM"):
-    #                     index, name, resname, chain, resid = (
-    #                         int(l[6:11]),        # Atom index
-    #                         l[12:16].strip(),    # Atom name
-    #                         l[17:20].strip(),    # Residue name
-    #                         l[21],               # Chain identifier
-    #                         int(l[22:26]),       # Residue index
-    #                     )
-    #                     atom_indexes[(chain, resid, name)] = index
-    #
-    #         # Check atoms not found in conects
-    #         with open(pdb_file + ".tmp", "w") as tmp:
-    #             with open(pdb_file) as pdb:
-    #                 # write all lines but skip END line
-    #                 for line in pdb:
-    #                     if not line.startswith("END"):
-    #                         tmp.write(line)
-    #
-    #                 # Write new conect line mapping
-    #                 for entry in conects:
-    #                     line = "CONECT"
-    #                     for x in entry:
-    #                         line += "%5s" % atom_indexes[x]
-    #                     line += "\n"
-    #                     tmp.write(line)
-    #             tmp.write("END\n")
-    #         shutil.move(pdb_file + ".tmp", pdb_file)
-    #
-    #     def checkCappingGroups(pdb_file, format_for_prepwizard=True, keep_conects=True):
-    #
-    #         ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
-    #
-    #         if keep_conects:
-    #             conect_lines = getConectLines(pdb_file)
-    #
-    #         # Detect capping groups
-    #         structure = _readPDB(pdb_file, best_model_tag+".pdb")
-    #         model = structure[0]
-    #
-    #         for chain in model:
-    #
-    #             add_one = False
-    #             residues = [r for r in chain]
-    #
-    #             # Check for ACE atoms
-    #             ace_atoms = []
-    #             for a in residues[0]:
-    #                 if a.name in ace_names:
-    #                     ace_atoms.append(a)
-    #
-    #             # Check for NMA residue
-    #             nma_residue = None
-    #             for r in residues:
-    #                 if r.resname == 'NMA':
-    #                     nma_residue = r
-    #
-    #             # Build a separate residue for ACE
-    #             new_chain = PDB.Chain.Chain(chain.id)
-    #
-    #             if ace_atoms:
-    #
-    #                 for a in ace_atoms:
-    #                     residues[0].detach_child(a.name)
-    #
-    #                 ace_residue = PDB.Residue.Residue((' ', residues[0].id[1]-1, ' '), 'ACE', '')
-    #
-    #                 for i, a in enumerate(ace_atoms):
-    #                     new_name = a.get_name()
-    #
-    #                     # Define the new name based on the old one
-    #                     if format_for_prepwizard:
-    #                         if new_name == 'CP2':
-    #                             new_name = 'CH3'
-    #                         elif new_name == 'CO':
-    #                             new_name = 'C'
-    #                         elif new_name == 'OP1':
-    #                             new_name = 'O'
-    #                         elif new_name == '1HP2':
-    #                             new_name = '1H'
-    #                         elif new_name == '2HP2':
-    #                             new_name = '2H'
-    #                         elif new_name == '3HP2':
-    #                             new_name = '3H'
-    #
-    #                     # Create a new atom
-    #                     new_atom = PDB.Atom.Atom(
-    #                         new_name,                  # Atom name
-    #                         a.get_coord(),             # Coordinates
-    #                         a.get_bfactor(),           # B-factor
-    #                         a.get_occupancy(),         # Occupancy
-    #                         a.get_altloc(),            # AltLoc
-    #                         "%-4s" % new_name,         # Full atom name (formatted)
-    #                         a.get_serial_number(),     # Serial number
-    #                         a.element                  # Element symbol
-    #                     )
-    #
-    #                     ace_residue.add(new_atom)
-    #
-    #                 new_chain.add(ace_residue)
-    #
-    #             # Renumber residues and rename atoms
-    #             for i, r in enumerate(residues):
-    #
-    #                 # Handle NMA residue atom renaming
-    #                 if r == nma_residue and format_for_prepwizard:
-    #                     renamed_atoms = []
-    #                     for a in nma_residue:
-    #
-    #                         new_name = a.get_name()  # Original atom name
-    #
-    #                         # Rename the atom based on the rules
-    #                         if new_name == 'HN2':
-    #                             new_name = 'H'
-    #                         elif new_name == 'C':
-    #                             new_name = 'CA'
-    #                         elif new_name == 'H1':
-    #                             new_name = '1HA'
-    #                         elif new_name == 'H2':
-    #                             new_name = '2HA'
-    #                         elif new_name == 'H3':
-    #                             new_name = '3HA'
-    #
-    #                         # Create a new atom with the updated name
-    #                         new_atom = PDB.Atom.Atom(
-    #                             new_name,                  # New name
-    #                             a.get_coord(),             # Same coordinates
-    #                             a.get_bfactor(),           # Same B-factor
-    #                             a.get_occupancy(),         # Same occupancy
-    #                             a.get_altloc(),            # Same altloc
-    #                             "%-4s" % new_name,         # Full atom name (formatted)
-    #                             a.get_serial_number(),     # Same serial number
-    #                             a.element                  # Same element
-    #                         )
-    #                         renamed_atoms.append(new_atom)
-    #
-    #                     # Create a new residue with renamed atoms
-    #                     nma_residue = PDB.Residue.Residue(r.id, r.resname, r.segid)
-    #                     for atom in renamed_atoms:
-    #                         nma_residue.add(atom)
-    #
-    #                     r = nma_residue
-    #                     add_one = True
-    #
-    #                 if add_one:
-    #                     chain.detach_child(r.id)  # Deatach residue from old chain
-    #                     new_id = (r.id[0], r.id[1]+1, r.id[2])  # New ID with updated residue number
-    #                     r.id = new_id  # Update residue ID with renumbered value
-    #
-    #                 # Add residue to the new chain
-    #                 new_chain.add(r)
-    #
-    #             model.detach_child(chain.id)
-    #             model.add(new_chain)
-    #
-    #         _saveStructureToPDB(structure, pdb_file)
-    #
-    #         if keep_conects:
-    #             writeConectLines(conect_lines, pdb_file)
-    #
-    #     executable = "extract_pdbs.linuxgccrelease"
-    #     models = []
-    #
-    #     # Check if params were given
-    #     params = None
-    #     if os.path.exists(optimization_folder + "/params"):
-    #         params = optimization_folder + "/params"
-    #         patch_line = ""
-    #         for p in os.listdir(params):
-    #             if not p.endswith(".params"):
-    #                 patch_line += params + "/" + p + " "
-    #
-    #     for d in os.listdir(optimization_folder + "/output_models"):
-    #         if os.path.isdir(optimization_folder + "/output_models/" + d):
-    #             for f in os.listdir(optimization_folder + "/output_models/" + d):
-    #                 if f.endswith("_relax.out"):
-    #                     model = d
-    #
-    #                     # skip models not loaded into the library
-    #                     if model not in self.models_names:
-    #                         continue
-    #
-    #                     scores = readSilentScores(
-    #                         optimization_folder + "/output_models/" + d + "/" + f
-    #                     )
-    #                     if tags != None and model in tags:
-    #                         print(
-    #                             "Reading model %s from the given tag %s"
-    #                             % (model, tags[model])
-    #                         )
-    #                         best_model_tag = tags[model]
-    #                     elif min_value:
-    #                         best_model_tag = scores.idxmin()[filter_score_term]
-    #                     else:
-    #                         best_model_tag = scores.idxmxn()[filter_score_term]
-    #                     command = executable
-    #                     command += (
-    #                         " -silent "
-    #                         + optimization_folder
-    #                         + "/output_models/"
-    #                         + d
-    #                         + "/"
-    #                         + f
-    #                     )
-    #                     if params != None:
-    #                         command += " -extra_res_path " + params
-    #                         if patch_line != "":
-    #                             command += " -extra_patch_fa " + patch_line
-    #                     command += " -tags " + best_model_tag
-    #                     if sugars:
-    #                         command += " -include_sugars"
-    #                         command += " -alternate_3_letter_codes pdb_sugar"
-    #                         command += " -write_glycan_pdb_codes"
-    #                         command += " -auto_detect_glycan_connections"
-    #                         command += " -maintain_links"
-    #                     os.system(command)
-    #
-    #                     checkCappingGroups(best_model_tag+".pdb")
-    #
-    #                     self.readModelFromPDB(
-    #                         model,
-    #                         best_model_tag + ".pdb",
-    #                         wat_to_hoh=wat_to_hoh,
-    #                         conect_update=conect_update,
-    #                     )
-    #                     os.remove(best_model_tag + ".pdb")
-    #                     models.append(model)
-    #
-    #     self.getModelsSequences()
-    #
-    #     missing_models = set(self.models_names) - set(models)
-    #     if missing_models != set():
-    #         print("Missing models in relaxation folder:")
-    #         print("\t" + ", ".join(missing_models))
-    #         if return_missing:
-    #             return missing_models
-
     def loadModelsFromRosettaOptimization(
         self,
         optimization_folder,
@@ -10831,7 +13345,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             command += " -maintain_links"
                         os.system(command)
 
-                        checkCappingGroups(best_model_tag + ".pdb")
+                        checkCappingGroups(best_model_tag + ".pdb", keep_conects=False)
 
                         # Remove the pose index from the name.
                         base_name = '_'.join(best_model_tag.split("_")[:-1])
@@ -10956,14 +13470,241 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = job_folder + "/output_models/" + model + "/" + model + ".pdb"
             self.readModelFromPDB(model, pdb_path)
 
+    def setUpRFDiffusion(
+        self,
+        job_folder,
+        only_models=None,
+        num_designs=100,
+        num_batches=1,
+        diffuser_T=None,
+        contig=None,              # e.g., 'A1-218/30-30'
+        partial_T=None,           # e.g., 10
+        provide_seq=None,         # e.g., [218, 247]
+        script_path=None,
+        additional_args=None,      # dict of other overrides
+        gpu_local=False
+    ):
+        """
+        Create shell commands for RFdiffusion jobs, splitting each model into N batches.
+        You’ll get len(models) * num_batches commands in `jobs`.
+
+        Parameters:
+        - self.models_paths: dict model_name -> path_to_pdb
+        - job_folder (str): Base folder for inputs/outputs
+        - num_designs (int): Number of designs per batch
+        - num_batches (int): How many independent batches per model
+        - contig (str): contigmap.contigs value, e.g. 'A1-218/30-30'
+        - partial_T (int): diffuser.partial_T value
+        - provide_seq (list[int] or str): contigmap.provide_seq value
+        - script_path (str): path to run_inference.py
+        - additional_args (dict): any other key: value RFdiffusion overrides
+        - gpu_local (bool): If True, sets the CUDA_VISIBLE_DEVICES variable for
+                            running GPUs in local computer with multiple GPUS.
+
+        Returns:
+        - jobs (list[str]): one shell-command string per batch per model
+        """
+
+        # ensure folders exist
+        os.makedirs(job_folder, exist_ok=True)
+        input_folder = os.path.join(job_folder, 'input_models')
+        os.makedirs(input_folder, exist_ok=True)
+        output_folder = os.path.join(job_folder, 'output_models')
+        os.makedirs(output_folder, exist_ok=True)
+
+        if not script_path:
+            script_path = 'SCRIPT_PATH/run_inference.py'
+
+        # Convert contig into a per model dictionary
+        if isinstance(contig, str):
+            contig_dict = {}
+            for model in self:
+                contig_dict[model] = contig
+            contig = contig_dict
+
+        jobs = []
+        for model, pdb_path in self.models_paths.items():
+
+            if only_models and model not in only_models:
+                continue
+
+            # copy once per model
+            shutil.copyfile(pdb_path, os.path.join(input_folder, f"{model}.pdb"))
+
+            # create num_batches commands for this model
+            for batch_id in range(num_batches):
+
+                batch_folder = os.path.join(output_folder, f"batch_{batch_id}")
+                os.makedirs(batch_folder, exist_ok=True)
+
+                # include batch in output_prefix
+                output_prefix = f"designs/{model}"
+
+                cmd = []
+                cmd.append('cd '+batch_folder+';')
+                if gpu_local:
+                    cmd.append('CUDA_VISIBLE_DEVICES=GPUID')
+                cmd.append(script_path)
+                cmd.append(f"inference.input_pdb=../../input_models/{model}.pdb")
+                cmd.append(f"inference.output_prefix={output_prefix}")
+                cmd.append(f"inference.num_designs={num_designs}")
+                if diffuser_T:
+                    cmd.append(f"diffuser.T={diffuser_T}")
+                if contig:
+                    cmd.append(f"contigmap.contigs=[{contig[model]}]")
+                if partial_T is not None:
+                    cmd.append(f"diffuser.partial_T={partial_T}")
+                if provide_seq is not None:
+                    if isinstance(provide_seq, (list, tuple)) and len(provide_seq) == 2:
+                        cmd.append(f"contigmap.provide_seq=[{provide_seq[0]}-{provide_seq[1]}]")
+                    else:
+                        cmd.append(f"contigmap.provide_seq={provide_seq}")
+
+                if additional_args:
+                    for key, value in additional_args.items():
+                        if isinstance(value, bool):
+                            value = str(value).lower()
+                        cmd.append(f"{key}={value}")
+                cmd.append('; cd ../../../')
+
+                # join with backslashes for readability
+                jobs.append(" \\\n  ".join(cmd))
+
+        return jobs
+
+    def setUpBoltz2Calculation(
+        self,
+        job_folder,
+        diffusion_samples=1,
+        use_msa_server=True,
+        msa_path=None,
+        sampling_steps=200,
+        recycling_steps=3,
+        output_format="pdb",
+        use_potentials=False,
+        ligands=None,
+        binder=None,
+        chains=None
+    ):
+        """
+        Run Boltz2 structure prediction and afinity.
+
+        It can be use to predict ligand binding with multiple ligands.
+        Additionally, it can be used to predict ligand binding affinity, but for just 1 ligand
+        Ligand/s should be given in SMILEs format.
+
+        To run in MN5 you need to precompute the MSA with AF3 or some other method!!!
+
+        Parameters:
+        - diffusion_samples: int. The number of diffusion samples to use for prediction.
+        - use_msa_server: Bool. Whether to use the MSA server for sampling, it auto-generate the MSA using the mmseqs2 server (not for MN5) because no internet.
+        - msa_path: str. Path to the folder with the .a3m files.  It should contain the pre-computed MSA for the proteins. You need to run AF3 first (or something else) to generate the MSA
+            The name of the .a3m files should be the name of the model.
+            To run single sequence mode input "empty" for msa_path.
+            !!Not tested!!
+        - sampling_steps: int. The number of sampling steps to use for prediction.
+        - recycling_steps: int. The number of recycling steps to use for prediction.
+            AF3 uses by default 25 diffusion_samples and 10 recycling_steps.
+        - use_potentials: bool. Whether to use the potentials for prediction. Set to True should improve performance, but uses more memmory.
+        - ligands (list[str]): list of ligands SMILEs
+        - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed
+
+        chains : None, str, iterable or dict, optional
+            Chain selector per model used to pick the sequence for the Boltz2
+            input. Defaults to the first polymer chain per model.
+
+        Returns:
+        - jobs (list[str]): command string per batch per model
+        """
+
+        # Need to write yaml, and then need to write jobs
+        os.makedirs(job_folder, exist_ok=True)
+
+        for model in self.models_names:
+            if not os.path.exists(job_folder + "/" +model):
+                os.mkdir(job_folder+"/"+model)
+
+        chain_selection = self._resolve_chain_selection(
+            chains, require_single=True
+        )
+
+        for model in self.models_names:
+            chain_id = chain_selection.get(model)
+            sequence = None
+
+            if chain_id is not None:
+                sequence = self.chain_sequences.get(model, {}).get(chain_id)
+            else:
+                sequence = self.sequences.get(model)
+
+            if sequence in (None, ""):
+                raise ValueError(
+                    f"No protein sequence found for model {model} (chain {chain_id})."
+                )
+
+        # Write the YAML file
+            with open(job_folder+"/"+model +"/" + "boltz.yaml", "w") as iyf:
+                iyf.write('version: 1\n')
+                iyf.write('sequences:\n')
+                iyf.write('  - protein:\n')
+                iyf.write(f'      id: [{chain_id}]\n')
+                iyf.write(f'      sequence: {sequence}\n')
+
+                if use_msa_server == False:
+                    iyf.write(f'      msa: {msa_path}+{model}.a3m\n')
+
+                if ligands != None:
+                    for i, ligand in enumerate(ligands):
+                        ligand_chain = chr(ord('B') + i)  # Assign chains starting from 'B'
+                        iyf.write('  - ligand:\n')
+                        iyf.write(f'      id: [{ligand_chain}]\n')
+                        iyf.write(f"      smiles: '{ligand}'\n")
+
+                if binder != None:
+                    iyf.write('properties:\n')
+                    iyf.write('    - affinity:\n')
+                    iyf.write(f'        binder: {binder}\n')
+
+
+        jobs = []
+        for model in self.models_names:
+            pdb_name = f"{model}.pdb"
+            pdb_path = job_folder+"/"+model
+
+            command = f"cd {pdb_path} \n"
+            command +=  "boltz predict boltz.yaml "
+
+            if use_msa_server == True:
+                command += "--use_msa_server "
+            else:
+                if msa_path is None:
+                    raise ValueError("msa_path must be provided if use_msa_server is False")
+            if use_potentials:
+                command += "--use_potentials "
+            if diffusion_samples:
+                command += f"--diffusion_samples {diffusion_samples} "
+            if recycling_steps:
+                command += f"--recycling_steps {recycling_steps} "
+            if sampling_steps:
+                command += f"--sampling_steps {sampling_steps} "
+            if output_format:
+                command += f"--output_format {output_format} "
+
+            jobs.append(command)
+
+        return jobs
+
+
     def saveModels(
         self,
         output_folder,
         keep_residues={},
         models=None,
         convert_to_mae=False,
+        convert_to_mol2=False,
         write_conect_lines=True,
         replace_symbol=None,
+        add_cryst1_record=False,
         **keywords,
     ):
         """
@@ -10973,6 +13714,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         ==========
         output_folder : str
             Path to the output folder to store models.
+        add_cryst1_record : bool, optional
+            When True, a standard CRYST1 line is prepended if missing.
         """
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
@@ -10980,6 +13723,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if convert_to_mae:
             _copyScriptFile(output_folder, "PDBtoMAE.py")
             script_name = "._PDBtoMAE.py"
+        if convert_to_mol2:
+            _copyScriptFile(output_folder, "PDBtoMOL2.py")
+            script_name = "._PDBtoMOL2.py"
 
         if replace_symbol:
             if not isinstance(replace_symbol, tuple) or len(replace_symbol) != 2:
@@ -10994,6 +13740,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 model_name = model
 
+            pdb_output_path = os.path.join(output_folder, f"{model_name}.pdb")
+
             # Skip models not in the given list
             if models != None:
                 if model not in models:
@@ -11007,10 +13755,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             _saveStructureToPDB(
                 self.structures[model],
-                output_folder + "/" + model_name + ".pdb",
+                pdb_output_path,
                 keep_residues=kr,
                 **keywords,
             )
+
+            if add_cryst1_record:
+                _ensure_cryst1_record(pdb_output_path)
 
             if "remove_hydrogens" in keywords:
                 if keywords["remove_hydrogens"] == True:
@@ -11026,7 +13777,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if write_conect_lines:
                 self._write_conect_lines(
                     model,
-                    output_folder + "/" + model_name + ".pdb",
+                    pdb_output_path,
                     check_file=check_file,
                     hydrogens=hydrogens,
                 )
@@ -11034,6 +13785,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         if convert_to_mae:
             command = "cd " + output_folder + "\n"
             command += "run ._PDBtoMAE.py\n"
+            command += "cd ../\n"
+            os.system(command)
+        if convert_to_mol2:
+            command = "cd " + output_folder + "\n"
+            command += "run ._PDBtoMOL2.py\n"
             command += "cd ../\n"
             os.system(command)
 
@@ -11046,13 +13802,25 @@ make sure of reading the target sequences with the function readTargetSequences(
         model : str
             Model name to remove
         """
+        missing = []
         try:
             self.models_paths.pop(model)
+        except KeyError:
+            missing.append("models_paths")
+        try:
             self.models_names.remove(model)
+        except ValueError:
+            missing.append("models_names")
+        try:
             self.structures.pop(model)
+        except KeyError:
+            missing.append("structures")
+        try:
             self.sequences.pop(model)
-        except:
-            raise ValueError("Model  %s is not present" % model)
+        except KeyError:
+            missing.append("sequences")
+        if missing:
+            raise ValueError(f"Model {model!r} not present in: {', '.join(missing)}")
 
     def readTargetSequences(self, fasta_file):
         """
@@ -11287,7 +14055,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if not filter:  # Non heteroatom filter
                 try:
-                    sequence += PDB.Polypeptide.three_to_one(resname)
+                    sequence += _three_to_one(resname)
                 except:
                     sequence += "X"
 
@@ -11579,9 +14347,14 @@ def _readPDB(name, pdb_file):
     """
     Read PDB file to a structure object
     """
-    parser = PDB.PDBParser()
+    parser = PDB.PDBParser(QUIET=True)
     structure = parser.get_structure(name, pdb_file)
     return structure
+
+
+# Note: parallel loading was explored but removed as it did not
+# provide speedups in practice for typical workloads and added
+# complexity. Serial loading plus reduced I/O proved more robust.
 
 def _saveStructureToPDB(
     structure,
@@ -11623,6 +14396,23 @@ def _saveStructureToPDB(
     else:
         io.save(output_file)
 
+_DEFAULT_CRYST1_RECORD = "CRYST1   1.000   1.000   1.000  90.00  90.00  90.00 P 1           1"
+
+def _ensure_cryst1_record(pdb_path, cryst1_record=_DEFAULT_CRYST1_RECORD):
+    """
+    Make sure the CRYST1 record exists at the top of the PDB file.
+    """
+    record = cryst1_record.rstrip("\n") + "\n"
+    with open(pdb_path, "r") as existing:
+        lines = existing.readlines()
+
+    if lines and lines[0].startswith("CRYST1"):
+        return
+
+    with open(pdb_path, "w") as updated:
+        updated.write(record)
+        updated.writelines(lines)
+
 def _copyScriptFile(
     output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
 ):
@@ -11655,6 +14445,121 @@ def _copyScriptFile(
     with open(output_path, "w") as sof:
         for l in script_file:
             sof.write(l)
+
+
+def make_model_path_batches(
+    models,
+    batch_size=None,
+    n_batches=None,
+    only_models=None,
+    exclude_models=None,
+    shuffle=False,
+    seed=None,
+):
+    """
+    Create batches of model paths without loading structures.
+
+    Parameters
+    ==========
+    models : str | dict | list
+        - str: folder containing PDB files
+        - dict: mapping {model_name: pdb_path}
+        - list/tuple: list of PDB file paths
+    batch_size : int, optional
+        Number of models per batch. If None, `n_batches` must be provided.
+    n_batches : int, optional
+        Number of batches to split into. Ignored if `batch_size` is provided.
+    only_models : list|tuple|set|str, optional
+        Subset of model names to include.
+    exclude_models : list|tuple|set|str, optional
+        Subset of model names to exclude.
+    shuffle : bool, default False
+        Randomize model order before batching.
+    seed : int, optional
+        Random seed when `shuffle=True`.
+
+    Returns
+    =======
+    dict
+        Mapping of batch_index -> {model_name: pdb_path}
+    """
+
+    # Collect paths {name: path}
+    if isinstance(models, str):
+        if not os.path.isdir(models):
+            raise ValueError("models path must be a directory when a string is provided")
+        paths = {}
+        for d in os.listdir(models):
+            if d.endswith(".pdb"):
+                name = ".".join(d.split(".")[:-1])
+                paths[name] = os.path.join(models, d)
+    elif isinstance(models, dict):
+        paths = dict(models)
+    elif isinstance(models, (list, tuple)):
+        paths = {}
+        for p in models:
+            if not isinstance(p, str) or not p.endswith(".pdb"):
+                raise ValueError("All items in models list must be PDB file paths")
+            name = os.path.basename(p)
+            name = ".".join(name.split(".")[:-1])
+            paths[name] = p
+    else:
+        raise ValueError("models must be a folder path, dict, or list of PDB paths")
+
+    # Filters
+    if only_models is None:
+        only_models = []
+    elif isinstance(only_models, str):
+        only_models = [only_models]
+
+    if exclude_models is None:
+        exclude_models = []
+    elif isinstance(exclude_models, str):
+        exclude_models = [exclude_models]
+
+    names = list(paths.keys())
+
+    # Apply include/exclude
+    if only_models:
+        names = [n for n in names if n in set(only_models)]
+    if exclude_models:
+        names = [n for n in names if n not in set(exclude_models)]
+
+    # Order or shuffle
+    if shuffle:
+        import random
+
+        rng = random.Random(seed)
+        rng.shuffle(names)
+    else:
+        names = sorted(names)
+
+    total = len(names)
+    if total == 0:
+        return {}
+
+    # Determine batching
+    if batch_size is not None:
+        if batch_size <= 0:
+            raise ValueError("batch_size must be > 0")
+        n_batches_calc = (total + batch_size - 1) // batch_size
+    else:
+        if not n_batches or n_batches <= 0:
+            raise ValueError("Provide batch_size or a positive n_batches")
+        n_batches_calc = n_batches
+        batch_size = (total + n_batches_calc - 1) // n_batches_calc
+
+    # Build batches
+    batches = {}
+    for i in range(n_batches_calc):
+        start = i * batch_size
+        end = min(start + batch_size, total)
+        if start >= end:
+            break
+        batch_names = names[start:end]
+        batches[i] = {n: paths[n] for n in batch_names}
+
+    return batches
 
 def _computeCartesianFromInternal(coord2, coord3, coord4, distance, angle, torsion):
     """
@@ -11834,74 +14739,3 @@ def _readRosettaScoreFile(score_file, indexing=False, skip_empty=False):
         scores_df = scores_df.set_index(["Model", "Pose"])
 
     return scores_df
-
-def _getAlignedResiduesBasedOnStructuralAlignment(
-    ref_struct, target_struct, max_ca_ca=5.0
-):
-    """
-    Return a sequence string with aligned residues based on a structural alignment. All residues
-    not structurally aligned are returned as '-'.
-
-    Parameters
-    ==========
-    ref_struct : str
-        Reference structure
-    target_struct : str
-        Target structure
-    max_ca_ca : float
-        Maximum CA-CA distance to be considered aligned
-
-    Returns
-    =======
-    aligned_residues : str
-        Full-length sequence string containing only aligned residues.
-    """
-
-    # Get sequences
-    r_sequence = "".join(
-        [
-            PDB.Polypeptide.three_to_one(r.resname)
-            for r in ref_struct.get_residues()
-            if r.id[0] == " "
-        ]
-    )
-    t_sequence = "".join(
-        [
-            PDB.Polypeptide.three_to_one(r.resname)
-            for r in target_struct.get_residues()
-            if r.id[0] == " "
-        ]
-    )
-
-    # Get alpha-carbon coordinates
-    r_ca_coord = np.array([a.coord for a in ref_struct.get_atoms() if a.name == "CA"])
-    t_ca_coord = np.array(
-        [a.coord for a in target_struct.get_atoms() if a.name == "CA"]
-    )
-
-    # Map residues based on a CA-CA distances
-    D = distance_matrix(t_ca_coord, r_ca_coord)  # Calculate CA-CA distance matrix
-    D = np.where(D <= max_ca_ca, D, np.inf)  # < Cap matrix to max_ca_ca
-
-    # Map residues to the closest CA-CA distance
-    mapping = {}
-
-    # Start mapping from closest distance avoiding double assignments
-    while not np.isinf(D).all():
-        i, j = np.unravel_index(D.argmin(), D.shape)
-        mapping[i] = j
-        D[i].fill(np.inf)  # This avoids double assignments
-        D[:, j].fill(np.inf)  # This avoids double assignments
-
-    # Create alignment based on the structural alignment mapping
-    aligned_residues = []
-    for i, r in enumerate(t_sequence):
-        if i in mapping:
-            aligned_residues.append(r)
-        else:
-            aligned_residues.append("-")
-
-    # Join list to get aligned sequences
-    aligned_residues = "".join(aligned_residues)
-
-    return aligned_residues

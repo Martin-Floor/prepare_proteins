@@ -1,32 +1,83 @@
-try:
-    import openmm
-except ImportError as e:
-    raise ValueError('openmm python module not avaiable. Please install it to use this function.')
+from __future__ import annotations
+
+_OPENMM_IMPORT_ERROR = None
+try:  # pragma: no cover - optional dependency
+    import openmm  # type: ignore
+except ImportError as exc:  # pragma: no cover - optional dependency
+    openmm = None  # type: ignore[assignment]
+    _OPENMM_AVAILABLE = False
+    _OPENMM_IMPORT_ERROR = exc
+else:  # pragma: no cover - heavy optional dependency
+    _OPENMM_AVAILABLE = True
+    from openmm import *  # type: ignore
+    from openmm.app import *  # type: ignore
+    from openmm.unit import *  # type: ignore
+    from openmm.vec3 import Vec3  # type: ignore
+
+OPENMM_AVAILABLE = _OPENMM_AVAILABLE
+OPENMM_IMPORT_ERROR = _OPENMM_IMPORT_ERROR
 
 from pkg_resources import resource_filename, Requirement
-
-from openmm import *
-from openmm.app import *
-from openmm.unit import *
-from openmm.vec3 import Vec3
 
 from Bio.PDB.Polypeptide import aa3
 
 import numpy as np
 from sys import stdout
+from collections import defaultdict
+from collections.abc import Mapping
+from filecmp import cmp
 import shutil
 import os
 import fileinput
 from multiprocessing import cpu_count
+import shlex
+import warnings
+
+from .parameterization.utils import extract_residue_subsystem
+
+
+def _ensure_openmm(feature: str = "OpenMM functionality") -> None:
+    """
+    Ensure the optional OpenMM dependency is available before executing OpenMM-dependent code.
+    """
+    if not OPENMM_AVAILABLE:
+        raise ImportError(
+            f"OpenMM is required to use {feature}. "
+            "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
+        ) from OPENMM_IMPORT_ERROR
 
 aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX', 'ACE', 'NME']
 ions = ['MG', 'NA', 'CL', 'CU']
 aa3 += ions
 
 
+def _copyfile_if_needed(src, dst):
+    """Copy `src` to `dst` unless they resolve to the same file."""
+    try:
+        if os.path.samefile(src, dst):
+            return
+    except FileNotFoundError:
+        # Destination does not exist yet, fall back to regular copy.
+        pass
+    shutil.copyfile(src, dst)
+
+
+def _run_command(command, command_log=None):
+    """Execute `command` via `os.system` while optionally recording the call."""
+    entry = None
+    if command_log is not None:
+        entry = {"command": command.rstrip(), "returncode": None}
+        command_log.append(entry)
+    ret = os.system(command)
+    if entry is not None:
+        entry["returncode"] = ret
+    return ret
+
+
 class openmm_md:
 
     def __init__(self, input_pdb):
+        _ensure_openmm("openmm_md")
 
         # Set variables
         self.input_pdb = input_pdb
@@ -34,6 +85,7 @@ class openmm_md:
         self.pdb = pdb = PDBFile(self.input_pdb)
         self.modeller = Modeller(pdb.topology, pdb.positions)
         self.positions = np.array([c.value_in_unit(nanometer) for c in self.modeller.positions])
+        self.command_log = []
 
     def setUpFF(self, ff_name):
 
@@ -63,28 +115,71 @@ class openmm_md:
         self.modeller.delete(hydrogens)
 
     def addHydrogens(self, variants=None):
-
-        # Create protein only state
-        positions = {}
+        # Create protein-only state and cache non-protein residues completely
+        # (chain id, residue id, atom names/elements, positions) so we can
+        # reinsert them verbatim after adding hydrogens to the protein.
+        saved_residues = []
+        non_protein = []
+        protein_set = set(aa3) - set(ions)
         for residue in self.modeller.topology.residues():
-            if residue.name not in set(aa3)-set(ions):
-                positions[residue] = []
+            if residue.name not in protein_set:
+                atom_names = []
+                atom_elements = []
+                atom_positions = []
                 for atom in residue.atoms():
-                    positions[residue].append(self.modeller.positions[atom.index])
-        self.modeller.delete(list(positions.keys()))
+                    atom_names.append(atom.name)
+                    atom_elements.append(atom.element)
+                    atom_positions.append(self.modeller.positions[atom.index])
+                saved_residues.append({
+                    "chain_id": residue.chain.id,
+                    "residue_id": str(residue.id),
+                    "residue_name": residue.name,
+                    "atom_names": atom_names,
+                    "atom_elements": atom_elements,
+                    "positions": atom_positions,
+                })
+                non_protein.append(residue)
 
-        # Add hydrogens
+        # Remove non-protein residues so hydrogens are added only to the protein
+        if non_protein:
+            self.modeller.delete(non_protein)
+
+        # Add hydrogens to the remaining (protein) part
         self.modeller.addHydrogens(self.forcefield, variants=variants)
 
-        # Add remaning residues
-        for residue in positions:
-            chain_id = residue.chain.id
-            c = self.modeller.topology.addChain(chain_id)
-            r = self.modeller.topology.addResidue(residue.name, c)
-            for atom in residue.atoms():
-                self.modeller.topology.addAtom(atom.name, atom.element, r)
-            for p in positions[residue]:
-                self.modeller.positions.append(p)
+        # Reinsert the cached non-protein residues, preserving chain names and
+        # atom identity/count exactly as in the input PDB. Add residues in
+        # chain order to satisfy OpenMM's contiguity requirement.
+        # Group by chain id
+        by_chain = {}
+        for entry in saved_residues:
+            by_chain.setdefault(entry["chain_id"], []).append(entry)
+
+        # Existing chains in declared order
+        chain_objs = {c.id: c for c in self.modeller.topology.chains()}
+        chain_order = [c.id for c in self.modeller.topology.chains()]
+
+        # First, add residues to chains that already exist, in order
+        for cid in chain_order:
+            if cid not in by_chain:
+                continue
+            chain = chain_objs[cid]
+            for entry in by_chain.pop(cid):
+                residue = self.modeller.topology.addResidue(entry["residue_name"], chain)
+                for name, elem in zip(entry["atom_names"], entry["atom_elements"]):
+                    self.modeller.topology.addAtom(name, elem, residue)
+                for pos in entry["positions"]:
+                    self.modeller.positions.append(pos)
+
+        # Then, create any missing chains and add their residues
+        for cid, entries in by_chain.items():
+            chain = self.modeller.topology.addChain(cid)
+            for entry in entries:
+                residue = self.modeller.topology.addResidue(entry["residue_name"], chain)
+                for name, elem in zip(entry["atom_names"], entry["atom_elements"]):
+                    self.modeller.topology.addAtom(name, elem, residue)
+                for pos in entry["positions"]:
+                    self.modeller.positions.append(pos)
 
     def getProtonationStates(self, keep_ligands=False):
         """
@@ -149,36 +244,8 @@ class openmm_md:
                                extra_force_field=None,charge_model='bcc',
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
                                extra_mol2=None, add_counterions=True, add_counterionsRand=False, save_amber_pdb=False, solvate=True,
-                               regenerate_amber_files=False, non_standard_residues=None):
-
-        def topologyFromResidue(residue, topol, positions):
-            top = topology.Topology()
-            c = top.addChain()
-            c.id = residue.chain.id
-            r = top.addResidue(residue.name, c)
-            atom_indexes = []
-            pos = openmm.unit.quantity.Quantity()
-            pos.unit = nanometer
-
-            # Get atoms
-            for a in residue.atoms():
-                atom_indexes.append(a.index)
-                top.addAtom(a.name, a.element, r)
-                pos.append(positions[a.index])
-
-            # Get atoms by name
-            atoms = {}
-            for a in r.atoms():
-                atoms[a.name] = a
-
-            # Get bonds
-            for a1, a2 in topol.bonds():
-                if a1.residue == residue and a2.residue == residue:
-                    top.addBond(atoms[a1.name], atoms[a2.name])
-
-            assert top.getNumAtoms() == len(pos)
-
-            return top, pos
+                               regenerate_amber_files=False, non_standard_residues=None, strict_atom_name_check=True,
+                               only_residues=None, build_full_system=True):
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -259,6 +326,52 @@ class openmm_md:
                         else:
                             atom_types[l.split()[0]] = l.split()[4]
             return atom_types
+
+        def _extract_pdb_atom_names(pdb_path):
+            atom_names = set()
+            if not os.path.exists(pdb_path):
+                return atom_names
+            with open(pdb_path) as handle:
+                for line in handle:
+                    if line.startswith(('ATOM', 'HETATM')):
+                        name = line[12:16].strip()
+                        if name:
+                            atom_names.add(name.upper())
+            return atom_names
+
+        def _validate_ligand_pdb_atoms(generated_path, reference_path, residue_name, source_label):
+            if not os.path.exists(generated_path) or not os.path.exists(reference_path):
+                return
+            generated_atoms = _extract_pdb_atom_names(generated_path)
+            reference_atoms = _extract_pdb_atom_names(reference_path)
+            if not generated_atoms and not reference_atoms:
+                return
+            missing = reference_atoms - generated_atoms
+            extra = generated_atoms - reference_atoms
+            if missing or extra:
+                mismatch = []
+                if missing:
+                    mismatch.append(f"missing atoms {sorted(missing)}")
+                if extra:
+                    mismatch.append(f"extra atoms {sorted(extra)}")
+                message = (
+                    f"Atom name mismatch for ligand {residue_name}: generated PDB "
+                    f"({generated_path}) differs from {source_label} ({reference_path}); "
+                    + ", ".join(mismatch)
+                )
+                if strict_atom_name_check:
+                    raise ValueError(message)
+                warnings.warn(message, UserWarning)
+
+        if only_residues:
+            if isinstance(only_residues, str):
+                only_residue_set = {only_residues.strip().upper()} if only_residues.strip() else set()
+            else:
+                only_residue_set = {str(res).strip().upper() for res in only_residues if str(res).strip()}
+            if not only_residue_set:
+                only_residue_set = None
+        else:
+            only_residue_set = None
 
         if regenerate_amber_files:
             if os.path.exists(parameters_folder+'/'+self.pdb_name+'.prmtop'):
@@ -412,66 +525,366 @@ class openmm_md:
 
         # Get molecules that need parameterization
         par_folder = {}
+        generated_pdb_paths = {}
 
         for r in getNonProteinResidues(self.modeller.topology, skip_residues=skip_ligands):
 
             residue = r.name.upper()
+            if only_residue_set and residue not in only_residue_set:
+                continue
 
             # Create PDB for each ligand molecule
-            lig_top, lig_pos = topologyFromResidue(r, self.modeller.topology,
-                                                      self.modeller.positions)
+            lig_top, lig_pos = extract_residue_subsystem(self.modeller, r)
 
             par_folder[residue] = parameters_folder+'/'+residue+'_parameters'
 
             if not os.path.exists(par_folder[residue]):
                 os.mkdir(par_folder[residue])
 
-            with open(par_folder[residue]+'/'+residue+'.pdb', 'w') as rf:
+            generated_ligand_pdb = par_folder[residue]+'/'+residue+'.pdb'
+            with open(generated_ligand_pdb, 'w') as rf:
                 PDBFile.writeFile(lig_top, lig_pos, rf)
+            generated_pdb_paths[residue] = generated_ligand_pdb
+            model_specific_pdb = os.path.join(parameters_folder, f"{self.pdb_name}_{residue}.pdb")
+            shutil.copyfile(generated_ligand_pdb, model_specific_pdb)
 
             if residue in parameters_folders:
+                provided_pack = parameters_folders[residue]
+                pack_pdb = os.path.join(provided_pack, residue+'.pdb')
+                _validate_ligand_pdb_atoms(
+                    generated_ligand_pdb,
+                    pack_pdb,
+                    residue,
+                    f"parameter pack in {provided_pack}"
+                )
                 for d in os.listdir(parameters_folders[residue]):
-                    shutil.copyfile(parameters_folders[residue]+'/'+d,
-                                    par_folder[residue]+'/'+d)
+                    _copyfile_if_needed(parameters_folders[residue]+'/'+d,
+                                        par_folder[residue]+'/'+d)
 
             if residue in parameters_mol2:
-                shutil.copyfile(parameters_mol2[residue],
-                                parameters_folder+'/'+residue+'.mol2')
+                canonical_mol2 = os.path.join(parameters_folder, f'{residue}.mol2')
+                _copyfile_if_needed(parameters_mol2[residue], canonical_mol2)
+
+        mol2_conversion_targets = set()
+        provided_frcmod_residues = set()
+        provided_mol2_residues = set()
+        residue_frcmod_files = defaultdict(list)
+        residue_mol2_files = defaultdict(list)
+
+        def _register_frcmod_file(residue_name, path):
+            if not path:
+                return
+            res_upper = residue_name.upper()
+            files = residue_frcmod_files[res_upper]
+            if path not in files:
+                files.append(path)
+            return files
+
+        def _register_mol2_file(residue_name, path):
+            if not path:
+                return None
+            res_upper = residue_name.upper()
+            files = residue_mol2_files[res_upper]
+            if path not in files:
+                files.append(path)
+            return files
+
+        def _copy_into_par_folder(residue_name, source_path):
+            """Duplicate a provided parameter file into the residue-specific workspace."""
+            if not source_path or not os.path.exists(source_path):
+                return None
+            res_upper = residue_name.upper()
+            if res_upper not in par_folder:
+                return None
+            basename = os.path.basename(os.fspath(source_path))
+            destination = os.path.join(par_folder[res_upper], basename)
+            _copyfile_if_needed(source_path, destination)
+            return destination
+
+        def _get_case_insensitive(mapping, key):
+            """Return a value from `mapping` regardless of key casing."""
+            key_str = str(key)
+            if key_str in mapping:
+                return mapping[key_str]
+            key_upper = key_str.upper()
+            if key_upper in mapping:
+                return mapping[key_upper]
+            key_lower = key_str.lower()
+            if key_lower in mapping:
+                return mapping[key_lower]
+            return None
+
+        def _stage_external_mol2(residue_name, source_path, mark_for_conversion=False):
+            """Place a provided MOL2 inside the working folder so antechamber can reuse it."""
+            res_upper = residue_name.upper()
+            if res_upper not in par_folder:
+                return None
+            if not os.path.exists(source_path):
+                raise ValueError(f'Mol2 file for {residue_name} at {source_path} was not found.')
+            workdir = par_folder[res_upper]
+            basename = os.path.basename(os.fspath(source_path))
+            dest_path = os.path.join(workdir, basename)
+            try:
+                if os.path.exists(dest_path) and os.path.samefile(source_path, dest_path):
+                    return dest_path
+            except FileNotFoundError:
+                pass
+            shutil.copyfile(source_path, dest_path)
+            canonical = os.path.join(workdir, f'{res_upper}.mol2')
+            if os.path.normpath(dest_path) != os.path.normpath(canonical) and not os.path.exists(canonical):
+                try:
+                    shutil.copyfile(dest_path, canonical)
+                except OSError:
+                    pass
+            if mark_for_conversion:
+                mol2_conversion_targets.add(res_upper)
+            return dest_path
+
+        for residue_name in par_folder:
+            canonical_mol2 = os.path.join(parameters_folder, f"{residue_name}.mol2")
+            if os.path.exists(canonical_mol2):
+                _register_mol2_file(residue_name, canonical_mol2)
+
+        for residue_name in par_folder:
+            if residue_name in parameters_mol2:
+                _stage_external_mol2(residue_name, parameters_mol2[residue_name])
 
         if extra_frcmod:
-            for residue in extra_frcmod:
-                if os.path.exists(residue):
-                    shutil.copyfile(residue,
-                                    parameters_folder+'/'+residue.split('/')[-1])
-                elif residue in parameters_frcmod:
-                    shutil.copyfile(parameters_frcmod[residue],
-                                    parameters_folder+'/'+residue+'.frcmod')
-                elif not os.path.exists(residue) and residue not in parameters_frcmod:
-                    raise ValueError(f'Frcmod file {residue} was not found.')
+            def _iter_extra_frcmod_sources(values):
+                """Yield (residue, source_entry) pairs preserving the user-provided order."""
+                if isinstance(values, Mapping):
+                    for res_name, src_values in values.items():
+                        if isinstance(src_values, (list, tuple)):
+                            for item in src_values:
+                                yield res_name, item
+                        else:
+                            yield res_name, src_values
                 else:
-                    raise ValueError(f'Frcmod file for residue {residue} was not found in {metal_parameters}')
+                    if isinstance(values, (list, tuple)):
+                        iterable = values
+                    elif isinstance(values, (str, os.PathLike)):
+                        iterable = [values]
+                    else:
+                        iterable = [values]
+                    for item in iterable:
+                        yield None, item
+
+            def _resolve_frcmod_source(residue_hint, entry):
+                """Return (res_upper, source_path) for a user entry."""
+                if entry is None:
+                    raise ValueError('Frcmod file None was not found.')
+                entry_path = os.fspath(entry) if isinstance(entry, os.PathLike) else entry
+                source_path = None
+                res_upper = None
+
+                if residue_hint is not None:
+                    res_upper = str(residue_hint).upper()
+
+                if isinstance(entry, (str, os.PathLike)) and os.path.exists(entry_path):
+                    source_path = entry_path
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(entry_path))[0].upper()
+                else:
+                    lookup_key = entry_path
+                    if residue_hint is not None:
+                        source_path = _get_case_insensitive(parameters_frcmod, residue_hint)
+                        if not source_path:
+                            fallback = os.path.splitext(str(residue_hint))[0]
+                            source_path = _get_case_insensitive(parameters_frcmod, fallback)
+                    if not source_path:
+                        source_path = _get_case_insensitive(parameters_frcmod, lookup_key)
+                    if not source_path:
+                        fallback = os.path.splitext(os.path.basename(lookup_key))[0]
+                        source_path = _get_case_insensitive(parameters_frcmod, fallback)
+                    if not source_path or not os.path.exists(source_path):
+                        location_msg = f' at {entry_path}' if isinstance(entry, (str, os.PathLike)) and not os.path.exists(entry_path) else ''
+                        if metal_parameters:
+                            raise ValueError(f'Frcmod file for residue {residue_hint or entry_path} was not found in {metal_parameters}{location_msg}.')
+                        raise ValueError(f'Frcmod file for residue {residue_hint or entry_path}{location_msg} was not found.')
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(source_path))[0].upper()
+
+                return res_upper, source_path
+
+            for residue_key, source in _iter_extra_frcmod_sources(extra_frcmod):
+                res_upper, source_path = _resolve_frcmod_source(residue_key, source)
+                basename = os.path.basename(source_path)
+                dest_root = os.path.join(parameters_folder, basename)
+                copy_required = True
+                if os.path.exists(dest_root):
+                    same_file = False
+                    try:
+                        same_file = os.path.samefile(source_path, dest_root)
+                    except FileNotFoundError:
+                        same_file = False
+                    if same_file:
+                        copy_required = False
+                    else:
+                        try:
+                            if cmp(source_path, dest_root, shallow=False):
+                                copy_required = False
+                            else:
+                                raise ValueError(
+                                    f'Conflicting frcmod destination {dest_root} already exists with different contents.'
+                                )
+                        except OSError:
+                            raise ValueError(
+                                f'Unable to compare frcmod destination {dest_root} with source {source_path}.'
+                            )
+                if copy_required:
+                    _copyfile_if_needed(source_path, dest_root)
+                canonical_root = os.path.join(parameters_folder, f"{res_upper}.frcmod")
+                if os.path.normpath(dest_root) != os.path.normpath(canonical_root) and not os.path.exists(canonical_root):
+                    _copyfile_if_needed(dest_root, canonical_root)
+                _copy_into_par_folder(res_upper, dest_root)
+                _register_frcmod_file(res_upper, dest_root)
+                provided_frcmod_residues.add(res_upper)
 
         if extra_mol2:
-            for residue in extra_mol2:
-                if isinstance(extra_mol2, dict):
-                    if os.path.exists(extra_mol2[residue]):
-                        shutil.copyfile(extra_mol2[residue],
-                                        parameters_folder+'/'+extra_mol2[residue].split('/')[-1])
-                    else:
-                        raise ValueError(f'Mol2 file for {residue} {extra_mol2[residue]} was not found.')
+            def _iter_extra_mol2_sources(values):
+                if isinstance(values, Mapping):
+                    for res_name, src_values in values.items():
+                        if isinstance(src_values, (list, tuple)):
+                            for item in src_values:
+                                yield res_name, item
+                        else:
+                            yield res_name, src_values
                 else:
-                    if os.path.exists(residue):
-                        shutil.copyfile(residue,
-                                        parameters_folder+'/'+residue.split('/')[-1])
-                    elif residue in parameters_mol2:
-                        shutil.copyfile(parameters_mol2[residue],
-                                        parameters_folder+'/'+residue+'.mol2')
-                    elif not os.path.exists(residue) and residue not in parameters_mol2:
-                        raise ValueError(f'Mol2 file {residue} was not found.')
+                    if isinstance(values, (list, tuple)):
+                        iterable = values
+                    elif isinstance(values, (str, os.PathLike)):
+                        iterable = [values]
                     else:
-                        raise ValueError(f'Mol2 file for residue {residue} was not found in {metal_parameters}')
+                        iterable = [values]
+                    for item in iterable:
+                        yield None, item
+
+            def _resolve_mol2_source(residue_hint, entry):
+                if entry is None:
+                    raise ValueError('Mol2 file None was not found.')
+                entry_path = os.fspath(entry) if isinstance(entry, os.PathLike) else entry
+                source_path = None
+                res_upper = None
+                from_user = False
+
+                if residue_hint is not None:
+                    res_upper = str(residue_hint).upper()
+
+                if isinstance(entry, (str, os.PathLike)) and os.path.exists(entry_path):
+                    source_path = entry_path
+                    from_user = True
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(entry_path))[0].upper()
+                else:
+                    lookup_key = entry_path
+                    if residue_hint is not None:
+                        source_path = _get_case_insensitive(parameters_mol2, residue_hint)
+                        if not source_path:
+                            fallback = os.path.splitext(str(residue_hint))[0]
+                            source_path = _get_case_insensitive(parameters_mol2, fallback)
+                    if not source_path:
+                        source_path = _get_case_insensitive(parameters_mol2, lookup_key)
+                    if not source_path:
+                        fallback = os.path.splitext(os.path.basename(lookup_key))[0]
+                        source_path = _get_case_insensitive(parameters_mol2, fallback)
+                    if not source_path or not os.path.exists(source_path):
+                        location_msg = f' at {entry_path}' if isinstance(entry, (str, os.PathLike)) and not os.path.exists(entry_path) else ''
+                        if metal_parameters:
+                            raise ValueError(f'Mol2 file for residue {residue_hint or entry_path} was not found in {metal_parameters}{location_msg}.')
+                        raise ValueError(f'Mol2 file for residue {residue_hint or entry_path}{location_msg} was not found.')
+                    if res_upper is None:
+                        res_upper = os.path.splitext(os.path.basename(source_path))[0].upper()
+
+                return res_upper, source_path, from_user
+
+            for residue_key, source in _iter_extra_mol2_sources(extra_mol2):
+                res_upper, source_path, source_is_user = _resolve_mol2_source(residue_key, source)
+                basename = os.path.basename(source_path)
+                dest_root_mol2 = os.path.join(parameters_folder, basename)
+                copy_required = True
+                if os.path.exists(dest_root_mol2):
+                    same_file = False
+                    try:
+                        same_file = os.path.samefile(source_path, dest_root_mol2)
+                    except FileNotFoundError:
+                        same_file = False
+                    if same_file:
+                        copy_required = False
+                    else:
+                        try:
+                            if cmp(source_path, dest_root_mol2, shallow=False):
+                                copy_required = False
+                            else:
+                                raise ValueError(
+                                    f'Conflicting mol2 destination {dest_root_mol2} already exists with different contents.'
+                                )
+                        except OSError:
+                            raise ValueError(
+                                f'Unable to compare mol2 destination {dest_root_mol2} with source {source_path}.'
+                            )
+                if copy_required:
+                    _copyfile_if_needed(source_path, dest_root_mol2)
+                canonical_root = os.path.join(parameters_folder, f"{res_upper}.mol2")
+                if os.path.normpath(dest_root_mol2) != os.path.normpath(canonical_root) and not os.path.exists(canonical_root):
+                    _copyfile_if_needed(dest_root_mol2, canonical_root)
+                _stage_external_mol2(res_upper, dest_root_mol2, mark_for_conversion=res_upper not in provided_frcmod_residues)
+                provided_mol2_residues.add(res_upper)
+                _register_mol2_file(res_upper, dest_root_mol2)
+                generated_path = generated_pdb_paths.get(res_upper)
+                if generated_path:
+                    if source_is_user:
+                        candidate_pdb = os.path.splitext(source_path)[0] + '.pdb'
+                        if os.path.exists(candidate_pdb):
+                            _validate_ligand_pdb_atoms(
+                                generated_path,
+                                candidate_pdb,
+                                res_upper,
+                                f"extra_mol2 source {source_path}"
+                            )
+                    else:
+                        pack_pdb = os.path.join(os.path.dirname(source_path), f'{res_upper}.pdb')
+                        if os.path.exists(pack_pdb):
+                            _validate_ligand_pdb_atoms(
+                                generated_path,
+                                pack_pdb,
+                                res_upper,
+                                f"extra_mol2 metal_parameters source {source_path}"
+                            )
+
+        skip_parameterization_residues = provided_mol2_residues & provided_frcmod_residues
 
         # Create parameters for each molecule
+        def _convert_staged_mol2(residue_name, ligand_charge):
+            res_upper = residue_name.upper()
+            if res_upper not in mol2_conversion_targets:
+                return
+            mol2_path = os.path.join(par_folder[res_upper], f"{res_upper}.mol2")
+            if not os.path.exists(mol2_path):
+                return
+            temp_output = mol2_path + '.tmp'
+            if os.path.exists(temp_output):
+                os.remove(temp_output)
+            charge_value = ligand_charge if ligand_charge is not None else 0
+            command = (
+                'antechamber '
+                f'-i {shlex.quote(mol2_path)} '
+                '-fi mol2 '
+                f'-o {shlex.quote(temp_output)} '
+                '-fo mol2 '
+                '-c bcc '
+                f'-nc {charge_value} '
+                f'-rn {res_upper} '
+                '-s 2 '
+                '-pf y\n'
+            )
+            ret = _run_command(command, self.command_log)
+            if ret != 0:
+                raise RuntimeError(
+                    f'antechamber conversion to GAFF failed for {mol2_path} with exit code {ret}.'
+                )
+            shutil.move(temp_output, mol2_path)
+            mol2_conversion_targets.discard(res_upper)
+
         for residue in par_folder:
 
             # Skip metal ions to be processed together with other ligands
@@ -492,6 +905,11 @@ class openmm_md:
             else:
                 charge = 0
 
+            if residue in skip_parameterization_residues:
+                continue
+
+            _convert_staged_mol2(residue, charge)
+
             if metal_parameters and residue in parameters_folders:
                 continue
 
@@ -501,10 +919,54 @@ class openmm_md:
                 print(f'\t\t{metal_ligand[residue]}')
             os.chdir(par_folder[residue])
 
-            lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb)
+            lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb, command_log=self.command_log)
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
                                        metal_charge=metal_charge,charge_model=charge_model)
             os.chdir('../'*len(par_folder[residue].split('/')))
+
+        # Copy newly generated parameters to the root folder so they can be reused directly.
+        for residue, folder in par_folder.items():
+            gen_mol2 = os.path.join(folder, f"{residue}.mol2")
+            gen_frcmod = os.path.join(folder, f"{residue}.frcmod")
+            if os.path.exists(gen_mol2):
+                canonical_mol2 = os.path.join(parameters_folder, f"{residue}.mol2")
+                shutil.copyfile(gen_mol2, canonical_mol2)
+                if not residue_mol2_files[residue]:
+                    _register_mol2_file(residue, canonical_mol2)
+            if os.path.exists(gen_frcmod):
+                dest_frcmod = os.path.join(parameters_folder, f"{residue}.frcmod")
+                shutil.copyfile(gen_frcmod, dest_frcmod)
+                if not residue_frcmod_files[residue]:
+                    _register_frcmod_file(residue, dest_frcmod)
+            manifest_path = os.path.join(parameters_folder, f"{residue}.frcmod.list")
+            if residue_frcmod_files[residue]:
+                try:
+                    with open(manifest_path, 'w') as mf:
+                        for item in residue_frcmod_files[residue]:
+                            entry = os.path.relpath(item, parameters_folder)
+                            mf.write(entry + '\n')
+                except OSError:
+                    pass
+            elif os.path.exists(manifest_path):
+                try:
+                    os.remove(manifest_path)
+                except OSError:
+                    pass
+
+            mol2_manifest = os.path.join(parameters_folder, f"{residue}.mol2.list")
+            if residue_mol2_files[residue]:
+                try:
+                    with open(mol2_manifest, 'w') as mf:
+                        for item in residue_mol2_files[residue]:
+                            entry = os.path.relpath(item, parameters_folder)
+                            mf.write(entry + '\n')
+                except OSError:
+                    pass
+            elif os.path.exists(mol2_manifest):
+                try:
+                    os.remove(mol2_manifest)
+                except OSError:
+                    pass
 
         # Renumber PDB
         renum_pdb = pdb_file.replace('.pdb', '_renum.pdb')
@@ -512,15 +974,15 @@ class openmm_md:
             command =  'pdb4amber -i '
             command += pdb_file+' '
             command += '-o '+renum_pdb+'\n'
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Parameterize metal complex with MCPB.py
         if metal_ligand:
 
             # Copy frcmmod file from previous optimization
             if metal_parameters:
-                shutil.copyfile(parameters_folders['mcpbpy.frcmod'],
-                                parameters_folder+'/'+self.pdb_name+'_mcpbpy.frcmod')
+                _copyfile_if_needed(parameters_folders['mcpbpy.frcmod'],
+                                    parameters_folder+'/'+self.pdb_name+'_mcpbpy.frcmod')
 
             # Get ion ID
             metal_pdb = PDBFile(renum_pdb)
@@ -545,13 +1007,23 @@ class openmm_md:
                 # Copy metal ions files
                 if residue in metal_ligand:
                     for m in metal_ligand[residue]:
-                        shutil.copyfile(par_folder[residue]+'/'+m+'.mol2',
-                                        parameters_folder+'/'+m+'.mol2')
+                        _copyfile_if_needed(par_folder[residue]+'/'+m+'.mol2',
+                                            parameters_folder+'/'+m+'.mol2')
 
-                shutil.copyfile(par_folder[residue]+'/'+residue+'.mol2',
-                                parameters_folder+'/'+residue+'.mol2')
-                shutil.copyfile(par_folder[residue]+'/'+residue+'.frcmod',
-                                parameters_folder+'/'+residue+'.frcmod')
+                _copyfile_if_needed(par_folder[residue]+'/'+residue+'.mol2',
+                                    parameters_folder+'/'+residue+'.mol2')
+                existing_frcmods = residue_frcmod_files.get(residue)
+                if existing_frcmods:
+                    primary = existing_frcmods[0]
+                    canonical_path = os.path.join(parameters_folder, f'{residue}.frcmod')
+                    if os.path.exists(primary):
+                        _copyfile_if_needed(primary, canonical_path)
+                else:
+                    frcmod_source = os.path.join(par_folder[residue], f'{residue}.frcmod')
+                    if os.path.exists(frcmod_source):
+                        canonical_path = os.path.join(parameters_folder, f'{residue}.frcmod')
+                        _copyfile_if_needed(frcmod_source, canonical_path)
+                        _register_frcmod_file(residue, canonical_path)
 
             if not metal_parameters:
 
@@ -584,14 +1056,19 @@ class openmm_md:
                     for residue in par_folder:
                         if residue in metal_ligand_values:
                             continue
-                        frcmod += ' '+residue+'.frcmod'
+                        entries = residue_frcmod_files.get(residue, [])
+                        if entries:
+                            frcmod_file = os.path.basename(entries[0])
+                        else:
+                            frcmod_file = f'{residue}.frcmod'
+                        frcmod += ' '+frcmod_file
                     f.write(frcmod+'\n')
 
                 os.chdir(parameters_folder)
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 1\n'
-                os.system(command)
+                _run_command(command, self.command_log)
 
                 # Set gaussian calculations for small
                 commands = []
@@ -631,7 +1108,7 @@ class openmm_md:
                     else:
                         print('Computing QM parameters')
                         for command in commands:
-                            os.system(command)
+                            _run_command(command, self.command_log)
 
                 print('QM calculations finished.')
 
@@ -640,7 +1117,7 @@ class openmm_md:
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 2\n'
-                os.system(command)
+                _run_command(command, self.command_log)
                 os.chdir('../'*len(parameters_folder.split('/')))
 
                 # Run step 3 of the MCPB protocol
@@ -648,7 +1125,7 @@ class openmm_md:
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 3\n'
-                os.system(command)
+                _run_command(command, self.command_log)
                 os.chdir('../'*len(parameters_folder.split('/')))
 
                 # Run step 4 of the MCPB protocol
@@ -656,8 +1133,11 @@ class openmm_md:
                 command  = 'MCPB.py '
                 command += '-i '+self.pdb_name+'.in '
                 command += '-s 4\n'
-                os.system(command)
+                _run_command(command, self.command_log)
                 os.chdir('../'*len(parameters_folder.split('/')))
+
+        if not build_full_system:
+            return
 
         # Generate set of metal ligand values
         metal_ligand_values = []
@@ -669,6 +1149,7 @@ class openmm_md:
 
         # Create tleap input file
         with open(parameters_folder+'/tleap.in', 'w') as tlf:
+            mol2_loaded_residues = set()
             tlf.write('source leaprc.protein.ff14SB\n')
             tlf.write('source leaprc.gaff\n')
             tlf.write('source leaprc.water.tip3p\n')
@@ -708,30 +1189,56 @@ class openmm_md:
                 for residue in getNonProteinResidues(pdb.topology):
                     tlf.write(residue.name+' = loadmol2 '+parameters_folder+'/'+residue.name+'.mol2\n')
 
-            if extra_mol2:
-                for residue in extra_mol2:
-                    if isinstance(extra_mol2, dict):
-                        if os.path.exists(extra_mol2[residue]):
-                            tlf.write(residue+' = loadmol2 '+parameters_folder+'/'+extra_mol2[residue].split('/')[-1]+'\n')
-                    else:
-                        if os.path.exists(residue):
-                            tlf.write(residue.split('/')[-1].replace('.mol2', '')+' = loadmol2 '+parameters_folder+'/'+residue.split('/')[-1]+'\n')
-                        else:
-                            tlf.write(residue+' = loadmol2 '+parameters_folder+'/'+residue+'.mol2\n')
+            for res_upper, mol2_paths in residue_mol2_files.items():
+                if not mol2_paths:
+                    continue
+                primary_mol2 = mol2_paths[0]
+                if os.path.exists(primary_mol2) and res_upper not in mol2_loaded_residues:
+                    tlf.write(f'{res_upper} = loadmol2 "{primary_mol2}"\n')
+                    mol2_loaded_residues.add(res_upper)
 
-            for residue in par_folder:
+            frcmod_residue_order = list(par_folder.keys())
+            for residue_name in residue_frcmod_files:
+                if residue_name not in par_folder:
+                    frcmod_residue_order.append(residue_name)
+
+            for residue in frcmod_residue_order:
+                frcmod_paths = residue_frcmod_files.get(residue) or []
+                if frcmod_paths:
+                    for frcmod_path in frcmod_paths:
+                        if os.path.exists(frcmod_path):
+                            tlf.write(f'loadamberparams {frcmod_path}\n')
+                    if residue not in par_folder:
+                        continue
+                elif residue not in par_folder:
+                    continue
+
                 if residue in metal_ligand_values:
                     continue
+                prepi_path = os.path.join(par_folder[residue], f'{residue}.prepi')
                 if not metal_ligand:
-                    tlf.write('loadamberprep '+par_folder[residue]+'/'+residue+'.prepi\n')
-                tlf.write('loadamberparams '+par_folder[residue]+'/'+residue+'.frcmod\n')
-
-            if extra_frcmod:
-                for residue in extra_frcmod:
-                    if os.path.exists(residue):
-                        tlf.write('loadamberparams '+parameters_folder+'/'+residue.split('/')[-1]+'\n')
+                    if os.path.exists(prepi_path):
+                        tlf.write(f'loadamberprep {prepi_path}\n')
                     else:
-                        tlf.write('loadamberparams '+parameters_folder+'/'+residue+'.frcmod\n')
+                        mol2_paths = residue_mol2_files.get(residue, [])
+                        if mol2_paths:
+                            primary_mol2 = mol2_paths[0]
+                            if os.path.exists(primary_mol2) and residue not in mol2_loaded_residues:
+                                tlf.write(f'{residue} = loadmol2 "{primary_mol2}"\n')
+                                mol2_loaded_residues.add(residue)
+                        else:
+                            mol2_path = os.path.join(parameters_folder, f'{residue}.mol2')
+                            if os.path.exists(mol2_path) and residue not in mol2_loaded_residues:
+                                tlf.write(f'{residue} = loadmol2 "{mol2_path}"\n')
+                                mol2_loaded_residues.add(residue)
+                if not frcmod_paths:
+                    fallback_frcmod = os.path.join(par_folder[residue], f'{residue}.frcmod')
+                    if os.path.exists(fallback_frcmod):
+                        tlf.write(f'loadamberparams {fallback_frcmod}\n')
+                    else:
+                        fallback_root = os.path.join(parameters_folder, f'{residue}.frcmod')
+                        if os.path.exists(fallback_root):
+                            tlf.write(f'loadamberparams {fallback_root}\n')
 
             if metal_ligand:
                 tlf.write('loadamberparams '+mcpb_frcmod+'\n')
@@ -756,28 +1263,84 @@ class openmm_md:
             # Add bonds
             if add_bonds:
 
-                # Map original residue indexes to the renumbered ones
                 input_pdb_object = PDBFile(self.input_pdb)
-                o_residues = []
-                for chain in input_pdb_object.topology.chains():
-                    for residue in chain.residues():
-                        o_residues.append((chain.id, int(residue.id)))
-
+                input_positions = np.array(
+                    [vec.value_in_unit(nanometer) for vec in input_pdb_object.positions], dtype=float
+                )
+                saved_pdb_object = PDBFile(pdb_file)
+                saved_positions = np.array(
+                    [vec.value_in_unit(nanometer) for vec in saved_pdb_object.positions], dtype=float
+                )
                 renum_pdb_object = PDBFile(renum_pdb)
-                r_residues = []
-                for chain in renum_pdb_object.topology.chains():
-                    for residue in chain.residues():
-                        r_residues.append((chain.id, int(residue.id)))
 
-                res_mapping = {}
-                for r1, r2 in zip(o_residues, r_residues):
-                    res_mapping[r1] = r2
+                saved_residue_map = {}
+                for chain in saved_pdb_object.topology.chains():
+                    for residue in chain.residues():
+                        saved_residue_map[(chain.id, int(residue.id))] = residue
+
+                saved_atom_lookup = {}
+                saved_atoms_by_signature = defaultdict(list)
+                for atom in saved_pdb_object.topology.atoms():
+                    key = (atom.residue.chain.id, int(atom.residue.id), atom.name)
+                    saved_atom_lookup[key] = atom
+                    saved_atoms_by_signature[(atom.residue.name, atom.name)].append(atom)
+
+                input_residues = {}
+                input_atoms = {}
+                for atom in input_pdb_object.topology.atoms():
+                    chain_id = atom.residue.chain.id
+                    res_id = int(atom.residue.id)
+                    key = (chain_id, res_id)
+                    input_residues[key] = atom.residue
+                    input_atoms[(chain_id, res_id, atom.name)] = atom
+
+                saved_to_renum = {}
+                for saved_residue, renum_residue in zip(
+                    saved_pdb_object.topology.residues(), renum_pdb_object.topology.residues()
+                ):
+                    saved_key = (saved_residue.chain.id, int(saved_residue.id))
+                    saved_to_renum[saved_key] = (renum_residue.chain.id, int(renum_residue.id))
+
+                def _locate_atom(atom_spec):
+                    chain_id, res_id, atom_name = atom_spec
+                    direct_key = (chain_id, res_id, atom_name)
+                    atom = saved_atom_lookup.get(direct_key)
+                    if atom is not None:
+                        saved_chain = atom.residue.chain.id
+                        saved_res = int(atom.residue.id)
+                    else:
+                        input_atom = input_atoms.get(direct_key)
+                        if input_atom is None:
+                            raise ValueError(
+                                f'Atom {atom_name} in residue {chain_id}:{res_id} was not found in the input structure.'
+                            )
+                        input_residue = input_residues[(chain_id, res_id)]
+                        candidates = saved_atoms_by_signature.get((input_residue.name, atom_name), [])
+                        target_pos = input_positions[input_atom.index]
+                        saved_chain = None
+                        saved_res = None
+                        for candidate in candidates:
+                            cand_pos = saved_positions[candidate.index]
+                            if np.linalg.norm(cand_pos - target_pos) < 1e-4:
+                                saved_chain = candidate.residue.chain.id
+                                saved_res = int(candidate.residue.id)
+                                atom = candidate
+                                break
+                        if saved_chain is None:
+                            raise ValueError(
+                                f'Unable to map atom {atom_name} from residue {chain_id}:{res_id} '
+                                'to the renumbered structure.'
+                            )
+                    renum_chain, renum_res = saved_to_renum.get((saved_chain, saved_res), (saved_chain, saved_res))
+                    return renum_chain, renum_res, atom_name
 
                 for bond in add_bonds:
-                    atom1 = (*res_mapping[bond[0][:2]], bond[0][2])
-                    atom2 = (*res_mapping[bond[1][:2]], bond[1][2])
-                    tlf.write('bond mol.'+str(atom1[1])+'.'+atom1[2]+' '+
-                                   'mol.'+str(atom2[1])+'.'+atom2[2]+'\n')
+                    atom1 = _locate_atom(bond[0])
+                    atom2 = _locate_atom(bond[1])
+                    tlf.write(
+                        f'bond mol.{atom1[1]}.{atom1[2]} '
+                        f'mol.{atom2[1]}.{atom2[2]}\n'
+                    )
 
             if solvate:
                 tlf.write('solvatebox mol TIP3PBOX 12\n')
@@ -798,7 +1361,7 @@ class openmm_md:
 
             tlf.write('saveamberparm mol '+parameters_folder+'/'+self.pdb_name+'.prmtop '+parameters_folder+'/'+self.pdb_name+'.inpcrd\n')
 
-        os.system('tleap -s -f '+parameters_folder+'/tleap.in')
+        _run_command('tleap -s -f '+parameters_folder+'/tleap.in', self.command_log)
 
         # Define prmtop and inpcrd file paths
         self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
@@ -822,15 +1385,20 @@ class openmm_md:
         self.positions = self.positions-com
         self.modeller.positions = _getPositionsArrayAsVector(self.positions)
 
+    def get_command_log(self):
+        """Return a copy of the recorded external command log."""
+        return list(self.command_log)
+
 class ligandParameters:
 
-    def __init__(self, ligand_pdb, metal_pdb=None):
+    def __init__(self, ligand_pdb, metal_pdb=None, command_log=None):
 
         self.ligand_pdb = ligand_pdb
         self.pdb = PDBFile(self.ligand_pdb)
         self.pdb_name = ligand_pdb.split('/')[-1].replace('.pdb', '')
         self.metal_pdb = metal_pdb
         self.metal = bool(metal_pdb)
+        self.command_log = command_log
 
         res_count = 0
         for residue in self.pdb.topology.residues():
@@ -841,16 +1409,35 @@ class ligandParameters:
             raise ValueError('A PDB with a single residue must be given for parameterization!')
 
     def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False):
+        def _run_acdoctor_on_mol2(mol2_file):
+            if not os.path.exists(mol2_file):
+                raise FileNotFoundError(f'acdoctor input {mol2_file} not found.')
+            command = (
+                'antechamber '
+                f'-i {shlex.quote(mol2_file)} '
+                '-fi mol2 '
+                '-o /dev/null '
+                '-fo mol2 '
+                '-j 0 '
+                '-dr y '
+                '-s 2 '
+                '-pf y\n'
+            )
+            ret_code = _run_command(command, self.command_log)
+            if ret_code != 0:
+                raise RuntimeError(f'acdoctor (antechamber) failed for {mol2_file} with exit code {ret_code}.')
 
         # Execute pdb4amber to generate a renumbered PDB
         if not os.path.exists(self.resname+'_renum.pdb') or overwrite:
             command  = 'pdb4amber '
             command += '-i '+self.ligand_pdb+' '
             command += '-o '+self.resname+'_renum.pdb '
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Run antechamber to create a mol2 file with the atomic charges
-        if not os.path.exists(self.resname+'.mol2') or overwrite:
+        mol2_path = self.resname+'.mol2'
+        mol2_generated = False
+        if not os.path.exists(mol2_path) or overwrite:
             command = 'antechamber '
             command += '-i '+self.resname+'_renum.pdb '
             command += '-fi pdb '
@@ -860,7 +1447,8 @@ class ligandParameters:
             command += '-c '+charge_model+' '
             command += '-nc '+str(ligand_charge)+' '
             command += '-s 2\n'
-            os.system(command)
+            _run_command(command, self.command_log)
+            mol2_generated = True
 
         # Run antechamber to create a prepi file with the atomic charges
         if not os.path.exists(self.resname+'.prepi') or overwrite:
@@ -873,15 +1461,19 @@ class ligandParameters:
             command += '-c '+charge_model+' '
             command += '-nc '+str(ligand_charge)+' '
             command += '-s 2\n'
-            os.system(command)
+            _run_command(command, self.command_log)
 
-        # Run parmchk to check with forcefield parameters will be used
-        if not os.path.exists(self.resname+'.frcmod') or overwrite:
+        # Run parmchk to check which forcefield parameters will be used
+        frcmod_path = self.resname+'.frcmod'
+        need_parmchk = overwrite or not os.path.exists(frcmod_path)
+        if need_parmchk and not mol2_generated:
+            _run_acdoctor_on_mol2(mol2_path)
+        if need_parmchk:
             command  = 'parmchk2 '
-            command += '-i '+self.resname+'.mol2 '
-            command += '-o '+self.resname+'.frcmod '
+            command += '-i '+mol2_path+' '
+            command += '-o '+frcmod_path+' '
             command += '-f mol2\n'
-            os.system(command)
+            _run_command(command, self.command_log)
 
         # Parameterize metal pdb if given
         if self.metal_pdb:
@@ -897,9 +1489,10 @@ class ligandParameters:
                     command += '-i '+self.metal_pdb[m]+' '
                     command += '-o '+metal_mol2+' '
                     command += '-c '+str(self.metal_charge[m])+'\n'
-                    os.system(command)
+                    _run_command(command, self.command_log)
 
 def _getPositionsArrayAsVector(positions):
+    _ensure_openmm("_getPositionsArrayAsVector")
     v3_positions = []
     for p in positions:
         v3_positions.append(quantity.Quantity(Vec3(*p), unit=nanometer))
