@@ -115,28 +115,71 @@ class openmm_md:
         self.modeller.delete(hydrogens)
 
     def addHydrogens(self, variants=None):
-
-        # Create protein only state
-        positions = {}
+        # Create protein-only state and cache non-protein residues completely
+        # (chain id, residue id, atom names/elements, positions) so we can
+        # reinsert them verbatim after adding hydrogens to the protein.
+        saved_residues = []
+        non_protein = []
+        protein_set = set(aa3) - set(ions)
         for residue in self.modeller.topology.residues():
-            if residue.name not in set(aa3)-set(ions):
-                positions[residue] = []
+            if residue.name not in protein_set:
+                atom_names = []
+                atom_elements = []
+                atom_positions = []
                 for atom in residue.atoms():
-                    positions[residue].append(self.modeller.positions[atom.index])
-        self.modeller.delete(list(positions.keys()))
+                    atom_names.append(atom.name)
+                    atom_elements.append(atom.element)
+                    atom_positions.append(self.modeller.positions[atom.index])
+                saved_residues.append({
+                    "chain_id": residue.chain.id,
+                    "residue_id": str(residue.id),
+                    "residue_name": residue.name,
+                    "atom_names": atom_names,
+                    "atom_elements": atom_elements,
+                    "positions": atom_positions,
+                })
+                non_protein.append(residue)
 
-        # Add hydrogens
+        # Remove non-protein residues so hydrogens are added only to the protein
+        if non_protein:
+            self.modeller.delete(non_protein)
+
+        # Add hydrogens to the remaining (protein) part
         self.modeller.addHydrogens(self.forcefield, variants=variants)
 
-        # Add remaning residues
-        for residue in positions:
-            chain_id = residue.chain.id
-            c = self.modeller.topology.addChain(chain_id)
-            r = self.modeller.topology.addResidue(residue.name, c)
-            for atom in residue.atoms():
-                self.modeller.topology.addAtom(atom.name, atom.element, r)
-            for p in positions[residue]:
-                self.modeller.positions.append(p)
+        # Reinsert the cached non-protein residues, preserving chain names and
+        # atom identity/count exactly as in the input PDB. Add residues in
+        # chain order to satisfy OpenMM's contiguity requirement.
+        # Group by chain id
+        by_chain = {}
+        for entry in saved_residues:
+            by_chain.setdefault(entry["chain_id"], []).append(entry)
+
+        # Existing chains in declared order
+        chain_objs = {c.id: c for c in self.modeller.topology.chains()}
+        chain_order = [c.id for c in self.modeller.topology.chains()]
+
+        # First, add residues to chains that already exist, in order
+        for cid in chain_order:
+            if cid not in by_chain:
+                continue
+            chain = chain_objs[cid]
+            for entry in by_chain.pop(cid):
+                residue = self.modeller.topology.addResidue(entry["residue_name"], chain)
+                for name, elem in zip(entry["atom_names"], entry["atom_elements"]):
+                    self.modeller.topology.addAtom(name, elem, residue)
+                for pos in entry["positions"]:
+                    self.modeller.positions.append(pos)
+
+        # Then, create any missing chains and add their residues
+        for cid, entries in by_chain.items():
+            chain = self.modeller.topology.addChain(cid)
+            for entry in entries:
+                residue = self.modeller.topology.addResidue(entry["residue_name"], chain)
+                for name, elem in zip(entry["atom_names"], entry["atom_elements"]):
+                    self.modeller.topology.addAtom(name, elem, residue)
+                for pos in entry["positions"]:
+                    self.modeller.positions.append(pos)
 
     def getProtonationStates(self, keep_ligands=False):
         """

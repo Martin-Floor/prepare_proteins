@@ -633,6 +633,7 @@ class OpenFFBackend(ParameterizationBackend):
                 {
                     "chain_id": residue.chain.id,
                     "residue_id": str(residue.id),
+                    "residue_name": resname,
                 }
             )
         return ligand_map
@@ -641,9 +642,12 @@ class OpenFFBackend(ParameterizationBackend):
     def _resolve_residue(modeller: "Modeller", spec: Mapping[str, Any]):
         chain_id = str(spec.get("chain_id", "")).strip()
         residue_id = str(spec.get("residue_id", "")).strip()
+        spec_name = str(spec.get("residue_name", "")).strip().upper()
         if not chain_id or not residue_id:
             raise ValueError("Ligand residue specification is missing chain_id or residue_id.")
         for residue in modeller.topology.residues():
             if residue.chain.id == chain_id and str(residue.id) == residue_id:
+                if spec_name and residue.name.strip().upper() != spec_name:
+                    continue
                 return residue
         raise ValueError(f"Residue with chain '{chain_id}' and id '{residue_id}' not found in modeller.")
