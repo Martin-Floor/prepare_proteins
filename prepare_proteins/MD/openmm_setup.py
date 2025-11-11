@@ -1197,7 +1197,22 @@ class openmm_md:
                     tlf.write(f'{res_upper} = loadmol2 "{primary_mol2}"\n')
                     mol2_loaded_residues.add(res_upper)
 
-            for residue in par_folder:
+            frcmod_residue_order = list(par_folder.keys())
+            for residue_name in residue_frcmod_files:
+                if residue_name not in par_folder:
+                    frcmod_residue_order.append(residue_name)
+
+            for residue in frcmod_residue_order:
+                frcmod_paths = residue_frcmod_files.get(residue) or []
+                if frcmod_paths:
+                    for frcmod_path in frcmod_paths:
+                        if os.path.exists(frcmod_path):
+                            tlf.write(f'loadamberparams {frcmod_path}\n')
+                    if residue not in par_folder:
+                        continue
+                elif residue not in par_folder:
+                    continue
+
                 if residue in metal_ligand_values:
                     continue
                 prepi_path = os.path.join(par_folder[residue], f'{residue}.prepi')
@@ -1216,12 +1231,7 @@ class openmm_md:
                             if os.path.exists(mol2_path) and residue not in mol2_loaded_residues:
                                 tlf.write(f'{residue} = loadmol2 "{mol2_path}"\n')
                                 mol2_loaded_residues.add(residue)
-                frcmod_paths = residue_frcmod_files.get(residue, [])
-                if frcmod_paths:
-                    for frcmod_path in frcmod_paths:
-                        if os.path.exists(frcmod_path):
-                            tlf.write(f'loadamberparams {frcmod_path}\n')
-                else:
+                if not frcmod_paths:
                     fallback_frcmod = os.path.join(par_folder[residue], f'{residue}.frcmod')
                     if os.path.exists(fallback_frcmod):
                         tlf.write(f'loadamberparams {fallback_frcmod}\n')
@@ -1253,28 +1263,84 @@ class openmm_md:
             # Add bonds
             if add_bonds:
 
-                # Map original residue indexes to the renumbered ones
                 input_pdb_object = PDBFile(self.input_pdb)
-                o_residues = []
-                for chain in input_pdb_object.topology.chains():
-                    for residue in chain.residues():
-                        o_residues.append((chain.id, int(residue.id)))
-
+                input_positions = np.array(
+                    [vec.value_in_unit(nanometer) for vec in input_pdb_object.positions], dtype=float
+                )
+                saved_pdb_object = PDBFile(pdb_file)
+                saved_positions = np.array(
+                    [vec.value_in_unit(nanometer) for vec in saved_pdb_object.positions], dtype=float
+                )
                 renum_pdb_object = PDBFile(renum_pdb)
-                r_residues = []
-                for chain in renum_pdb_object.topology.chains():
-                    for residue in chain.residues():
-                        r_residues.append((chain.id, int(residue.id)))
 
-                res_mapping = {}
-                for r1, r2 in zip(o_residues, r_residues):
-                    res_mapping[r1] = r2
+                saved_residue_map = {}
+                for chain in saved_pdb_object.topology.chains():
+                    for residue in chain.residues():
+                        saved_residue_map[(chain.id, int(residue.id))] = residue
+
+                saved_atom_lookup = {}
+                saved_atoms_by_signature = defaultdict(list)
+                for atom in saved_pdb_object.topology.atoms():
+                    key = (atom.residue.chain.id, int(atom.residue.id), atom.name)
+                    saved_atom_lookup[key] = atom
+                    saved_atoms_by_signature[(atom.residue.name, atom.name)].append(atom)
+
+                input_residues = {}
+                input_atoms = {}
+                for atom in input_pdb_object.topology.atoms():
+                    chain_id = atom.residue.chain.id
+                    res_id = int(atom.residue.id)
+                    key = (chain_id, res_id)
+                    input_residues[key] = atom.residue
+                    input_atoms[(chain_id, res_id, atom.name)] = atom
+
+                saved_to_renum = {}
+                for saved_residue, renum_residue in zip(
+                    saved_pdb_object.topology.residues(), renum_pdb_object.topology.residues()
+                ):
+                    saved_key = (saved_residue.chain.id, int(saved_residue.id))
+                    saved_to_renum[saved_key] = (renum_residue.chain.id, int(renum_residue.id))
+
+                def _locate_atom(atom_spec):
+                    chain_id, res_id, atom_name = atom_spec
+                    direct_key = (chain_id, res_id, atom_name)
+                    atom = saved_atom_lookup.get(direct_key)
+                    if atom is not None:
+                        saved_chain = atom.residue.chain.id
+                        saved_res = int(atom.residue.id)
+                    else:
+                        input_atom = input_atoms.get(direct_key)
+                        if input_atom is None:
+                            raise ValueError(
+                                f'Atom {atom_name} in residue {chain_id}:{res_id} was not found in the input structure.'
+                            )
+                        input_residue = input_residues[(chain_id, res_id)]
+                        candidates = saved_atoms_by_signature.get((input_residue.name, atom_name), [])
+                        target_pos = input_positions[input_atom.index]
+                        saved_chain = None
+                        saved_res = None
+                        for candidate in candidates:
+                            cand_pos = saved_positions[candidate.index]
+                            if np.linalg.norm(cand_pos - target_pos) < 1e-4:
+                                saved_chain = candidate.residue.chain.id
+                                saved_res = int(candidate.residue.id)
+                                atom = candidate
+                                break
+                        if saved_chain is None:
+                            raise ValueError(
+                                f'Unable to map atom {atom_name} from residue {chain_id}:{res_id} '
+                                'to the renumbered structure.'
+                            )
+                    renum_chain, renum_res = saved_to_renum.get((saved_chain, saved_res), (saved_chain, saved_res))
+                    return renum_chain, renum_res, atom_name
 
                 for bond in add_bonds:
-                    atom1 = (*res_mapping[bond[0][:2]], bond[0][2])
-                    atom2 = (*res_mapping[bond[1][:2]], bond[1][2])
-                    tlf.write('bond mol.'+str(atom1[1])+'.'+atom1[2]+' '+
-                                   'mol.'+str(atom2[1])+'.'+atom2[2]+'\n')
+                    atom1 = _locate_atom(bond[0])
+                    atom2 = _locate_atom(bond[1])
+                    tlf.write(
+                        f'bond mol.{atom1[1]}.{atom1[2]} '
+                        f'mol.{atom2[1]}.{atom2[2]}\n'
+                    )
 
             if solvate:
                 tlf.write('solvatebox mol TIP3PBOX 12\n')
