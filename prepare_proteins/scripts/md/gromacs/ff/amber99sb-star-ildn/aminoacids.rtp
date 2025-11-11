@@ -67,22 +67,26 @@
 
 [ LI ]
  [ atoms ]
-   LI     Li           1.00000     1 
+   LI     Li           1.00000     1
 
 [ ZN ]
  [ atoms ]
    ZN     Zn           2.00000     1
 
+[ CU ]
+  [ atoms ]
+    CU     CU           2.00000     1
+
 [ URE ] ; urea added in by EJS, resp charges by Jim Caldwell
  [ atoms ]
-    C	   C          	0.880229	1	
-    O	   O           -0.613359	2	
-   N1	   N           -0.923545	3	
-  H11 	   H          	0.395055	4	
-  H12	   H          	0.395055	5	
-   N2	   N           -0.923545	6	
-  H21	   H          	0.395055	7	
-  H22	   H          	0.395055	8	
+    C	   C          	0.880229	1
+    O	   O           -0.613359	2
+   N1	   N           -0.923545	3
+  H11 	   H          	0.395055	4
+  H12	   H          	0.395055	5
+   N2	   N           -0.923545	6
+  H21	   H          	0.395055	7
+  H22	   H          	0.395055	8
  [ bonds ]
     C	  N1
     C	  N2
@@ -94,7 +98,7 @@
  [ impropers ]
     N1	  N2	 C     O
      C	 H11	N1   H12
-     C	 H21	N2   H22   	
+     C	 H21	N2   H22
 
 [ ACE ]
  [ atoms ]
@@ -112,8 +116,8 @@
      C     O
  [ impropers ]
    CH3    +N     C     O
-                        
-[ NME ] 
+
+[ NME ]
  [ atoms ]
      N    N           -0.41570     1
      H    H            0.27190     2
@@ -130,7 +134,7 @@
     -C     N
  [ impropers ]
     -C   CH3     N     H
-                        
+
 [ NHE ]
  [ atoms ]
      N    N           -0.46300     1
@@ -184,7 +188,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ GLY ]
  [ atoms ]
      N    N           -0.41570     1
@@ -205,7 +209,7 @@
  [ impropers ]
     -C    CA     N     H
     CA    +N     C     O
-                        
+
 [ SER ]
  [ atoms ]
      N    N           -0.41570     1
@@ -235,7 +239,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ THR ]
  [ atoms ]
      N    N           -0.41570     1
@@ -271,7 +275,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ LEU ]
  [ atoms ]
      N    N           -0.41570     1
@@ -321,7 +325,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ ILE ]
  [ atoms ]
      N    N           -0.41570     1
@@ -370,7 +374,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ VAL ]
  [ atoms ]
      N    N           -0.41570     1
@@ -410,7 +414,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ ASN ]
  [ atoms ]
      N    N           -0.41570     1
@@ -461,7 +465,7 @@
     CB   ND2    CG   OD1
     CG  HD21   ND2  HD22
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ GLN ]
  [ atoms ]
      N    N           -0.41570     1
@@ -505,7 +509,7 @@
     CG   NE2    CD   OE1
     CD  HE21   NE2  HE22
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ ARG ]
  [ atoms ]
      N    N           -0.34790     1
@@ -565,7 +569,7 @@
     CZ  HH11   NH1  HH12
     CZ  HH21   NH2  HH22
     N     CA     C    +N    105.4       0.75       1
-               
+
 [ HID ]
  [ atoms ]
      N    N           -0.41570     1
@@ -612,7 +616,7 @@
    ND1   NE2   CE1   HE1
    ND1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ HIE ]
  [ atoms ]
      N    N           -0.41570     1
@@ -659,7 +663,7 @@
    ND1   NE2   CE1   HE1
    ND1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ HIP ]
  [ atoms ]
      N    N           -0.34790     1
@@ -709,7 +713,7 @@
    ND1   NE2   CE1   HE1
    ND1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ TRP ]
  [ atoms ]
      N    N           -0.41570     1
@@ -774,7 +778,7 @@
     CG   NE1   CD1   HD1
    CD1    CG    CB   CD2
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ PHE ]
  [ atoms ]
      N    N           -0.41570     1
@@ -829,7 +833,7 @@
     CG   CE1   CD1   HD1
    CD1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                       
+
 [ TYR ]
  [ atoms ]
      N    N           -0.41570     1
@@ -886,7 +890,7 @@
    CD1   CD2    CG    CB
    CE1   CE2    CZ    OH
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ GLU ]
  [ atoms ]
      N    N           -0.51630     1
@@ -925,7 +929,7 @@
     CA    +N     C     O
     CG   OE1    CD   OE2
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ ASP ]
  [ atoms ]
      N    N           -0.51630     1
@@ -977,7 +981,7 @@
     CA    +N     C     O
     CB   OD1    CG   OD2
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ LYS ]
  [ atoms ]
      N    N           -0.34790     1
@@ -1165,7 +1169,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ PRO ]
  [ atoms ]
      N    N           -0.25480     1
@@ -1200,10 +1204,10 @@
     -C     N
  [ impropers ]
     CA    +N     C     O
-    -C    CD     N    CA	
+    -C    CD     N    CA
 
 [ HYP ] ; S Park, R J Radmer, T E Klein & V S Pande (submitted).
- [ atoms ] 
+ [ atoms ]
      N    N           -0.25480     1
    CD2    CT           0.05950     2
   HD21    H1           0.07000     3
@@ -1239,7 +1243,7 @@
  [ impropers ]
     CA    +N     C     O
     -C   CD2     N    CA
-                        
+
 [ CYS ]
  [ atoms ]
      N    N           -0.41570     1
@@ -1269,7 +1273,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ CYM ]
  [ atoms ]
      N    N           -0.41570     1
@@ -1297,7 +1301,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ CYX ]
  [ atoms ]
      N    N           -0.41570     1
@@ -1361,7 +1365,7 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ MET ]
  [ atoms ]
      N    N           -0.41570     1
@@ -1403,9 +1407,9 @@
     -C    CA     N     H
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 ; non-terminal acidic AA's
-       
+
 [ ASH ]
  [ atoms ]
      N    N           -0.41570     1
@@ -1440,7 +1444,7 @@
     CA    +N     C     O
     CB   OD1    CG   OD2
     N     CA     C    +N    105.4       0.75       1
-                   
+
 
 [ GLH ]
  [ atoms ]
@@ -1484,7 +1488,7 @@
     N     CA     C    +N    105.4       0.75       1
 
 ; C-terminal AA's
-                        
+
 [ CALA ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1511,9 +1515,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CGLY ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1534,9 +1538,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CSER ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1565,9 +1569,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CTHR ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1602,9 +1606,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CLEU ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1653,9 +1657,9 @@
      C    CA    CB    CG        torsion_LEU_C_CA_CB_CG_mult2
      C    CA    CB    CG        torsion_LEU_C_CA_CB_CG_mult3
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CILE ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1703,9 +1707,9 @@
      N    CA    CB   CG2        torsion_ILE_N_CA_CB_CG2_mult1
      B    CA    CB   CG2        torsion_ILE_N_CA_CB_CG2_mult2
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CVAL ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1744,9 +1748,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ ASF ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1796,11 +1800,11 @@
     CA    CB    CG   ND2        torsion_ASN_CA_CB_CG_ND2_mult5
     CA    CB    CG   ND2        torsion_ASN_CA_CB_CG_ND2_mult6
  [ impropers ]
-    -C    CA     N     H    
-    CA   OF1     C   OF2    
-    CB   ND2    CG   OD1    
-    CG  HD21   ND2  HD22    
-                        
+    -C    CA     N     H
+    CA   OF1     C   OF2
+    CB   ND2    CG   OD1
+    CG  HD21   ND2  HD22
+
 [ CASF ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1850,11 +1854,11 @@
     CA    CB    CG   ND2        torsion_ASN_CA_CB_CG_ND2_mult5
     CA    CB    CG   ND2        torsion_ASN_CA_CB_CG_ND2_mult6
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CB   ND2    CG   OD1    
-    CG  HD21   ND2  HD22    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CB   ND2    CG   OD1
+    CG  HD21   ND2  HD22
+
 [ CASN ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1902,11 +1906,11 @@
     CA    CB    CG   ND2        torsion_ASN_CA_CB_CG_ND2_mult5
     CA    CB    CG   ND2        torsion_ASN_CA_CB_CG_ND2_mult6
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CB   ND2    CG   OD1    
-    CG  HD21   ND2  HD22    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CB   ND2    CG   OD1
+    CG  HD21   ND2  HD22
+
 [ CGLN ]
  [ atoms ]
      N    N           -0.38210     1
@@ -1947,11 +1951,11 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CG   NE2    CD   OE1    
-    CD  HE21   NE2  HE22    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CG   NE2    CD   OE1
+    CD  HE21   NE2  HE22
+
 [ CARG ]
  [ atoms ]
      N    N           -0.34810     1
@@ -2006,13 +2010,13 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    NE   NH1    CZ   NH2    
-    CD    CZ    NE    HE    
-    CZ  HH11   NH1  HH12    
-    CZ  HH21   NH2  HH22    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    NE   NH1    CZ   NH2
+    CD    CZ    NE    HE
+    CZ  HH11   NH1  HH12
+    CZ  HH21   NH2  HH22
+
 [ CHID ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2054,13 +2058,13 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CG   CE1   ND1   HD1    
-    CG   NE2   CD2   HD2    
-   ND1   NE2   CE1   HE1    
-   ND1   CD2    CG    CB    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CG   CE1   ND1   HD1
+    CG   NE2   CD2   HD2
+   ND1   NE2   CE1   HE1
+   ND1   CD2    CG    CB
+
 [ CHIE ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2102,13 +2106,13 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-   CE1   CD2   NE2   HE2    
-    CG   NE2   CD2   HD2    
-   ND1   NE2   CE1   HE1    
-   ND1   CD2    CG    CB    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+   CE1   CD2   NE2   HE2
+    CG   NE2   CD2   HD2
+   ND1   NE2   CE1   HE1
+   ND1   CD2    CG    CB
+
 [ CHIP ]
  [ atoms ]
      N    N           -0.34810     1
@@ -2152,14 +2156,14 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CG   CE1   ND1   HD1    
-   CE1   CD2   NE2   HE2    
-    CG   NE2   CD2   HD2    
-   ND1   NE2   CE1   HE1    
-   ND1   CD2    CG    CB    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CG   CE1   ND1   HD1
+   CE1   CD2   NE2   HE2
+    CG   NE2   CD2   HD2
+   ND1   NE2   CE1   HE1
+   ND1   CD2    CG    CB
+
 [ CTRP ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2216,16 +2220,16 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-   CD1   CE2   NE1   HE1    
-   CE2   CH2   CZ2   HZ2    
-   CZ2   CZ3   CH2   HH2    
-   CH2   CE3   CZ3   HZ3    
-   CZ3   CD2   CE3   HE3    
-    CG   NE1   CD1   HD1    
+    -C    CA     N     H
+    CA   OC1     C   OC2
+   CD1   CE2   NE1   HE1
+   CE2   CH2   CZ2   HZ2
+   CZ2   CZ3   CH2   HH2
+   CH2   CE3   CZ3   HZ3
+   CZ3   CD2   CE3   HE3
+    CG   NE1   CD1   HD1
    CD1    CG    CB   CD2
-                        
+
 [ CPHE ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2273,15 +2277,15 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CG   CE2   CD2   HD2    
-    CZ   CD2   CE2   HE2    
-   CE1   CE2    CZ    HZ    
-   CD1    CZ   CE1   HE1    
-    CG   CE1   CD1   HD1    
-   CD1   CD2    CG    CB    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CG   CE2   CD2   HD2
+    CZ   CD2   CE2   HE2
+   CE1   CE2    CZ    HZ
+   CD1    CZ   CE1   HE1
+    CG   CE1   CD1   HD1
+   CD1   CD2    CG    CB
+
 [ CTYR ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2331,15 +2335,15 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CG   CE2   CD2   HD2    
-    CZ   CD2   CE2   HE2    
-   CD1    CZ   CE1   HE1    
-    CG   CE1   CD1   HD1    
-   CD1   CD2    CG    CB    
-   CE1   CE2    CZ    OH    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CG   CE2   CD2   HD2
+    CZ   CD2   CE2   HE2
+   CD1    CZ   CE1   HE1
+    CG   CE1   CD1   HD1
+   CD1   CD2    CG    CB
+   CE1   CE2    CZ    OH
+
 [ CGLU ]
  [ atoms ]
      N    N           -0.51920     1
@@ -2376,10 +2380,10 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CG   OE1    CD   OE2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CG   OE1    CD   OE2
+
 [ CASP ]
  [ atoms ]
      N    N           -0.51920     1
@@ -2429,10 +2433,10 @@
     CA    CB    CG   OD2        torsion_ASP_CA_CB_CG_OD_mult5
     CA    CB    CG   OD2        torsion_ASP_CA_CB_CG_OD_mult6
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-    CB   OD1    CG   OD2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+    CB   OD1    CG   OD2
+
 [ CLYS ]
  [ atoms ]
      N    N           -0.34810     1
@@ -2483,9 +2487,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CPRO ]
  [ atoms ]
      N    N           -0.28020     1
@@ -2521,9 +2525,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    CA   OC1     C   OC2    
-    -C    CD     N    CA    
-                        
+    CA   OC1     C   OC2
+    -C    CD     N    CA
+
 [ CCYS ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2552,10 +2556,10 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
+    -C    CA     N     H
+    CA   OC1     C   OC2
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ CCYX ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2582,9 +2586,9 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
-                        
+    -C    CA     N     H
+    CA   OC1     C   OC2
+
 [ CMET ]
  [ atoms ]
      N    N           -0.38210     1
@@ -2625,10 +2629,10 @@
      C   OC2
     -C     N
  [ impropers ]
-    -C    CA     N     H    
-    CA   OC1     C   OC2    
+    -C    CA     N     H
+    CA   OC1     C   OC2
 
-; N-terminal AA's                        
+; N-terminal AA's
 
 [ NALA ]
  [ atoms ]
@@ -2660,7 +2664,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NGLY ]
  [ atoms ]
      N    N3           0.29430     1
@@ -2684,7 +2688,7 @@
      C    +N
  [ impropers ]
     CA    +N     C     O
-                        
+
 [ NSER ]
  [ atoms ]
      N    N3           0.18490     1
@@ -2717,7 +2721,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NTHR ]
  [ atoms ]
      N    N3           0.18120     1
@@ -2756,7 +2760,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NLEU ]
  [ atoms ]
      N    N3           0.10100     1
@@ -2809,7 +2813,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NILE ]
  [ atoms ]
      N    N3           0.03110     1
@@ -2861,7 +2865,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NVAL ]
  [ atoms ]
      N    N3           0.05770     1
@@ -2904,7 +2908,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NASN ]
  [ atoms ]
      N    N3           0.18010     1
@@ -2958,7 +2962,7 @@
     CB   ND2    CG   OD1
     CG  HD21   ND2  HD22
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NGLN ]
  [ atoms ]
      N    N3           0.14930     1
@@ -3005,7 +3009,7 @@
     CG   NE2    CD   OE1
     CD  HE21   NE2  HE22
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NARG ]
  [ atoms ]
      N    N3           0.13050     1
@@ -3068,7 +3072,7 @@
     CZ  HH11   NH1  HH12
     CZ  HH21   NH2  HH22
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NHID ]
  [ atoms ]
      N    N3           0.15420     1
@@ -3118,7 +3122,7 @@
    ND1   NE2   CE1   HE1
    ND1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NHIE ]
  [ atoms ]
      N    N3           0.14720     1
@@ -3168,7 +3172,7 @@
    ND1   NE2   CE1   HE1
    ND1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NHIP ]
  [ atoms ]
      N    N3           0.25600     1
@@ -3221,7 +3225,7 @@
    ND1   NE2   CE1   HE1
    ND1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NTRP ]
  [ atoms ]
      N    N3           0.19130     1
@@ -3289,7 +3293,7 @@
     CG   NE1   CD1   HD1
    CD1    CG    CB   CD2
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NPHE ]
  [ atoms ]
      N    N3           0.17370     1
@@ -3347,7 +3351,7 @@
     CG   CE1   CD1   HD1
    CD1   CD2    CG    CB
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NTYR ]
  [ atoms ]
      N    N3           0.19400     1
@@ -3407,8 +3411,8 @@
    CD1   CD2    CG    CB
    CE1   CE2    CZ    OH
     N     CA     C    +N    105.4       0.75       1
-                        
-                        
+
+
 [ NGLU ]
  [ atoms ]
      N    N3           0.00170     1
@@ -3450,7 +3454,7 @@
     CA    +N     C     O
     CG   OE1    CD   OE2
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NASP ]
  [ atoms ]
      N    N3           0.07820     1
@@ -3505,7 +3509,7 @@
     CA    +N     C     O
     CB   OD1    CG   OD2
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NLYS ]
  [ atoms ]
      N    N3           0.09660     1
@@ -3560,7 +3564,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NPRO ]
  [ atoms ]
      N    N3          -0.20200     1
@@ -3599,7 +3603,7 @@
      C    +N
  [ impropers ]
     CA    +N     C     O
-                        
+
 [ NCYS ]
  [ atoms ]
      N    N3           0.13250     1
@@ -3632,7 +3636,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NCYX ]
  [ atoms ]
      N    N3           0.20690     1
@@ -3663,7 +3667,7 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-                        
+
 [ NMET ]
  [ atoms ]
      N    N3           0.15920     1
@@ -3708,4 +3712,3 @@
  [ impropers ]
     CA    +N     C     O
     N     CA     C    +N    105.4       0.75       1
-

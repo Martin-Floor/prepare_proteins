@@ -10,12 +10,15 @@ parser.add_argument('models_folder', help='Path to the folder where the PDB inpu
 parser.add_argument('output_folder', help='Path to the folder where the PDB outputs will be stored.')
 parser.add_argument('--rosetta_style_caps', action='store_true', help='Change cap atom names to match those of Rosetta.')
 parser.add_argument('--prepwizard_style_caps', action='store_true', help='Change cap atom names to match those of Prepwizard.')
+parser.add_argument('--openmm_style_caps', action='store_true', help='Change cap atom names to match those of Prepwizard.')
+
 args = parser.parse_args()
 
 models_folder = args.models_folder
 output_folder = args.output_folder
 rosetta_style_caps = args.rosetta_style_caps
 prepwizard_style_caps = args.prepwizard_style_caps
+openmm_style_caps = args.openmm_style_caps
 
 # Ensure output folder exists
 os.makedirs(output_folder, exist_ok=True)
@@ -61,12 +64,13 @@ for f in os.listdir(models_folder):
                 residues[i].resnum = residues[i+1].resnum
 
             elif openmm_style_caps:
-                if atom.pdbname.strip() == '1H':
-                    atom.pdbname = 'HH31'
-                elif atom.pdbname.strip() == '2H':
-                    atom.pdbname = 'HH32'
-                elif atom.pdbname.strip() == '3H':
-                    atom.pdbname = 'HH33'
+                for atom in residue.atom:
+                    if atom.pdbname.strip() == '1H':
+                        atom.pdbname = 'HH31'
+                    elif atom.pdbname.strip() == '2H':
+                        atom.pdbname = 'HH32'
+                    elif atom.pdbname.strip() == '3H':
+                        atom.pdbname = 'HH33'
 
         elif residue.pdbres == 'NMA ':
             if rosetta_style_caps:
@@ -94,7 +98,7 @@ for f in os.listdir(models_folder):
             elif openmm_style_caps:
                 for atom in residue.atom:
                     if atom.pdbname.strip() == 'CA':
-                        atom.pdbname = 'CH3  '
+                        atom.pdbname = 'CH3 '
                     elif atom.pdbname.strip() == '1HA':
                         atom.pdbname = 'HH31'
                     elif atom.pdbname.strip() == '2HA':

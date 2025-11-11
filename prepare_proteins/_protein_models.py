@@ -2503,7 +2503,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if epik_pHt:
                     command += "-epik_pHt " + str(epik_pHt) + " "
             command += "-propka_pH " + str(pH) + " "
-            command += "-f 2005 "
+            command += "-f OPLS_2005 "
             command += "-rmsd 0.3 "
             if samplewater:
                 command += "-samplewater "
@@ -5941,7 +5941,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def setUpMDSimulations(self, md_folder, sim_time, nvt_time=2, npt_time=0.2, equilibration_dt=2, production_dt=2,
                            temperature=298.15, frags=1, local_command_name=None, remote_command_name="${GMXBIN}",
                            ff="amber99sb-star-ildn", ligand_chains=None, ion_chains=None, replicas=1, charge=None,
-                           system_output="System", models=None, overwrite=False, remove_backups=False):
+                           system_output="System", models=None, overwrite=False, remove_backups=False,constantph=False):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
@@ -6351,7 +6351,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command_local = f"cd {md_folder}/output_models/{model}/{i}/topol\n"
                     command_local += f"{command_name} grompp -f ../../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1\n"
                     command_local += f"echo {group_dics['complex'][sol_group]} | {command_name} genion -s prot_ions.tpr -o prot_ions.gro -p topol.top -pname NA -nname CL -neutral -conc 0.1 -n index.ndx\n"
-                    command_local += f'echo "q"| {command_name} make_ndx -f prot_ions.gro -o index.ndx\n'
+                    # if constatph add buffer
+                    if constantph:
+                        command_local += f"{command_name} grompp -f ../../../../scripts/ions.mdp -c prot_ions.gro -p topol.top -o prot_buf.tpr -maxwarn 1\n"
+                        command_local += f"echo {group_dics['complex'][sol_group]} | {command_name} genion -s prot_buf.tpr -p topol.top -o prot_buf.gro -np 1 -rmin 1.0 -pname BUF -n index.ndx\n"
+                        file_name = 'prot_buf'
+                    else:
+                        file_name = 'prot_ions'
+
+                    command_local += f'echo "q"| {command_name} make_ndx -f {file_name}.gro -o index.ndx\n'
 
                     with open("tmp.sh", "w") as f:
                         f.write(command_local)
@@ -6387,7 +6395,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         elif lig_selector:
                             selector_line += f"{group_dics['complex']['Protein']}|{lig_selector[:-1]}\n"
 
-                        command_local += f'echo -e "{selector_line}q"| {command_name} make_ndx -f prot_ions.gro -o index.ndx\n'
+                        command_local += f'echo -e "{selector_line}q"| {command_name} make_ndx -f {file_name}.gro -o index.ndx\n'
 
 
                         with open("tmp.sh", "w") as f:
@@ -6410,7 +6418,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not skip_em:
                     command += "mkdir -p em\n"
                     command += "cd em\n"
-                    command += f"{remote_command_name} grompp -f ../../../../scripts/em.mdp -c ../topol/prot_ions.gro -p ../topol/topol.top -o prot_em.tpr\n"
+                    command += f"{remote_command_name} grompp -f ../../../../scripts/em.mdp -c ../topol/{file_name}.gro -p ../topol/topol.top -o prot_em.tpr\n"
                     command += f"{remote_command_name} mdrun -v -deffnm prot_em\n"
                     command += "cd ..\n"
 
@@ -6431,7 +6439,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         for ligand_name in ligand_res.values():
                             command += f"echo {group_dics[ligand_name]['System_&_!H*']} | {remote_command_name} genrestr -f ../topol/{ligand_name}.acpype/{ligand_name}_GMX.gro -n ../topol/{ligand_name}_index.ndx -o ../topol/{ligand_name}.acpype/posre_{ligand_name}.itp -fc 1000 1000 1000\n"
                     sel = group_dics['complex']["Protein"] if not ion_residues else f"Protein_{'_'.join([f'r_{r}' for r in ion_residues])}"
-                    command += f"echo {sel} | {remote_command_name} genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx\n"
+                    command += f"echo {sel} | {remote_command_name} genrestr -f ../topol/{file_name}.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx\n"
                     command += f"{remote_command_name} grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx\n"
                     command += f"{remote_command_name} mdrun -v -deffnm prot_nvt\n"
                     command += "cd ..\n"
@@ -6460,7 +6468,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if ligand_chains:
                                     for ligand_name in ligand_res.values():
                                         command += f"echo {group_dics[ligand_name]['System_&_!H*']} | {remote_command_name} genrestr -f ../topol/{ligand_name}.acpype/{ligand_name}_GMX.gro -n ../topol/{ligand_name}_index.ndx -o ../topol/{ligand_name}.acpype/posre_{ligand_name}.itp -fc {FClist[j - 1]} {FClist[j - 1]} {FClist[j - 1]}\n"
-                                command += f"echo {sel} | {remote_command_name} genrestr -f ../topol/prot_ions.gro -o ../topol/posre.itp -fc {FClist[j - 1]} {FClist[j - 1]} {FClist[j - 1]} -n ../topol/index.ndx\n"
+                                command += f"echo {sel} | {remote_command_name} genrestr -f ../topol/{file_name}.gro -o ../topol/posre.itp -fc {FClist[j - 1]} {FClist[j - 1]} {FClist[j - 1]} -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} grompp -f npt.mdp -c prot_npt_{j}.gro -t prot_npt_{j}.cpt -p ../topol/topol.top -o prot_npt_{j + 1}.tpr -r prot_npt_{j}.gro -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_npt_{j + 1}\n"
                     command += "cd ..\n"
@@ -6588,7 +6596,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
                                restraint_constant=100.0, chunk_size=100.0, equilibration_report_time=1.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None, extra_script_options=None,
-                               add_counterionsRand=False):
+                               add_counterionsRand=False,charge_model='bcc'):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
         Includes support for multiple replicas.
@@ -6723,9 +6731,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 add_bonds=add_bonds.get(model) if add_bonds else None,  # Use model-specific bond additions
                 skip_ligands=skip_ligands, overwrite=False, metal_parameters=metal_parameters,
                 extra_frcmod=extra_frcmod, extra_mol2=extra_mol2, cpus=20, return_qm_jobs=True,
-                extra_force_field=extra_force_field,
+                extra_force_field=extra_force_field,charge_model=charge_model,
                 force_field='ff14SB', residue_names=residue_names.get(model) if residue_names else None,  # Use model-specific residue renaming
-                add_counterions=True, add_counterionsRand=add_counterionsRand,save_amber_pdb=True, solvate=True, regenerate_amber_files=True,
+                add_counterions=True, add_counterionsRand=add_counterionsRand,save_amber_pdb=True, solvate=True, regenerate_amber_files=False,
                 non_standard_residues=non_standard_residues
             )
 

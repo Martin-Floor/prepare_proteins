@@ -146,7 +146,7 @@ class openmm_md:
 
     def parameterizePDBLigands(self, parameters_folder, charges=None, skip_ligands=None, overwrite=False,
                                metal_ligand=None, add_bonds=None, cpus=None, return_qm_jobs=False,
-                               extra_force_field=None,
+                               extra_force_field=None,charge_model='bcc',
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
                                extra_mol2=None, add_counterions=True, add_counterionsRand=False, save_amber_pdb=False, solvate=True,
                                regenerate_amber_files=False, non_standard_residues=None):
@@ -503,7 +503,7 @@ class openmm_md:
 
             lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb)
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
-                                       metal_charge=metal_charge)
+                                       metal_charge=metal_charge,charge_model=charge_model)
             os.chdir('../'*len(par_folder[residue].split('/')))
 
         # Renumber PDB
