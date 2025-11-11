@@ -178,31 +178,41 @@ def _contact_class(q_is_bb: bool, q_is_sc: bool, t_is_bb: bool, t_is_sc: bool) -
 
 
 def _contact_class_extended(q_rec: np.void, t_rec: np.void, classify_bb_sc: bool) -> str:
-    """Return contact class including metal-specific classes.
+    """Return contact class including symmetric ligand/metal classes.
 
-    - If ``t_rec`` is a metal atom not belonging to a cofactor residue, return:
-        - "MB" when the query atom is backbone
-        - "MS" when the query atom is sidechain (or neither explicitly BB/SC)
-    - If ``t_rec`` is any non-protein non-metal ligand atom (water, ion, organic, cofactor, or cofactor-bound metal),
-      classify as:
-        - "LB" when the query atom is backbone
-        - "LS" otherwise
-    - If both sides are protein, fall back to BB/SS/BS when ``classify_bb_sc`` is True, or "NA" if False.
-    - Cofactor-bound metal atoms are treated as cofactors (i.e., follow LB/LS, not MB/MS).
+    - Protein–protein: BB/SS/BS using backbone/sidechain of both atoms.
+    - Protein–metal (metal not part of a cofactor residue): MB (protein backbone) / MS (protein sidechain).
+    - Protein–ligand (non-metal ligands, including cofactor-bound metals): LB (protein backbone) / LS (protein sidechain).
+    - Ligand–ligand: MM (both effective metals), ML (one effective metal), LL (no effective metals). Metals inside cofactors
+      are treated as cofactors (not metals) for these purposes.
     """
     if not classify_bb_sc:
         return "NA"
 
-    # If target is not protein, classify as ligand-specific classes
-    if not t_rec["is_protein"]:
-        # Metals not belonging to cofactors → MB/MS
-        if t_rec["is_metal"] and (not t_rec["is_cofactor"]):
-            return "MB" if q_rec["is_backbone"] else "MS"
-        # All other ligands (including cofactors and cofactor-bound metals) → LB/LS
-        return "LB" if q_rec["is_backbone"] else "LS"
+    def is_effective_metal(rec: np.void) -> bool:
+        return (not rec["is_protein"]) and rec["is_metal"] and (not rec["is_cofactor"])
 
-    # Protein–protein contacts → BB/SS/BS
-    return _contact_class(q_rec["is_backbone"], q_rec["is_sidechain"], t_rec["is_backbone"], t_rec["is_sidechain"])
+    q_prot, t_prot = bool(q_rec["is_protein"]), bool(t_rec["is_protein"])
+
+    # Protein–protein
+    if q_prot and t_prot:
+        return _contact_class(q_rec["is_backbone"], q_rec["is_sidechain"], t_rec["is_backbone"], t_rec["is_sidechain"])
+
+    # Exactly one protein partner → classify by protein atom and other being metal or not
+    if q_prot ^ t_prot:
+        p = q_rec if q_prot else t_rec
+        other = t_rec if q_prot else q_rec
+        if is_effective_metal(other):
+            return "MB" if p["is_backbone"] else "MS"
+        return "LB" if p["is_backbone"] else "LS"
+
+    # Ligand–ligand
+    q_eff_m, t_eff_m = is_effective_metal(q_rec), is_effective_metal(t_rec)
+    if q_eff_m and t_eff_m:
+        return "MM"
+    if q_eff_m or t_eff_m:
+        return "ML"
+    return "LL"
 
 
 def find_neighbours_in_pdb(
@@ -215,6 +225,8 @@ def find_neighbours_in_pdb(
     atom_scope: Literal["all", "heavy", "backbone", "sidechain"] = "heavy",
     group_by: Literal["residue", "atom", "chain"] = "residue",
     exclude_query_intra: bool = True,
+    query_residues: Optional[Any] = None,
+    query_label: str = "RESSEL",
     include: Optional[Dict[str, Any]] = None,
     ligand_filters: Optional[Dict[str, Any]] = None,
     chain_filters: Optional[Dict[str, Any]] = None,
@@ -240,7 +252,15 @@ def find_neighbours_in_pdb(
     - Protein–metal contacts (neighbor_kind == "metal"): "MB" (metal–backbone) or "MS" (metal–sidechain).
     - Protein–ligand contacts (non-metals: water, ions, organics, cofactors, and cofactor-bound metals):
       "LB" (ligand–backbone) if the protein atom is backbone, else "LS" (ligand–sidechain).
-    - Metal atoms that belong to cofactor residues are treated as cofactors (thus LB/LS, not MB/MS).
+    - Ligand–ligand contacts (when neither side is protein): "MM" (both metal), "ML" (one metal), or "LL" (no metal).
+    - Metal atoms that belong to cofactor residues are treated as cofactors (thus LB/LS or LL/ML/MM as appropriate, not MB/MS).
+
+    Residue-focused mode (query_residues):
+    - Accepts either a dict mapping label -> list of residue selectors, or a single list (auto-labeled as query_label).
+    - Residue selector forms supported: (chain, resseq), (chain, (resseq, icode)), (chain, (hetflag, resseq, icode)).
+    - When provided, query_chains is ignored and each label is treated as a separate virtual chain named by its label.
+    - Intra-selection contacts are always ignored; interactions with other labels are allowed as external partners.
+    - For non-protein atoms (ligands/metals), atom scope is always treated as "heavy" regardless of the atom_scope argument.
     """
     include = include or {"waters": False, "ions": True, "metals": True, "cofactors": True, "organics": True}
     ligand_filters = ligand_filters or {"resnames_in": [], "resnames_ex": [], "min_heavy_atoms": 1}
@@ -331,17 +351,67 @@ def find_neighbours_in_pdb(
     contact_pairs: Dict[str, List[Tuple[int, int, float]]] = {}
     residue_dict: Dict[str, List[Tuple[int, str, str]]] = {}
 
-    for qch in map(str, query_chains):
-        q_mask = (arr["chain"] == qch) & arr["is_protein"]
-        q_mask &= _mask_from_scope(arr, atom_scope)
+    # Helper to build per-label residue masks when query_residues is provided
+    def _normalize_selector(sel) -> List[tuple]:
+        out = []
+        for entry in sel:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                raise ValueError("Residue selector must be (chain, resid) or (chain, (resseq, icode)) or (chain, (hetflag, resseq, icode)).")
+            chain, resid = entry
+            if isinstance(resid, tuple) and len(resid) == 3:
+                # (hetflag, resseq, icode) → ignore hetflag for matching
+                _, resseq, icode = resid
+            elif isinstance(resid, tuple) and len(resid) == 2:
+                resseq, icode = resid
+            else:
+                resseq, icode = resid, " "
+            icode = (icode or " ").strip() or " "
+            out.append((str(chain), int(resseq), icode))
+        return out
+
+    # Build iteration list depending on query mode
+    if query_residues is not None:
+        if isinstance(query_residues, dict):
+            labels_and_sets = {str(k): set(_normalize_selector(v)) for k, v in query_residues.items()}
+        else:
+            # If a single list is provided → autolabel; if list of lists → error
+            try:
+                items = list(query_residues)
+            except TypeError as exc:
+                raise ValueError("query_residues must be a dict or a list of residue selectors.") from exc
+            if items and isinstance(items[0], (list, tuple)) and items and items and isinstance(items[0][0], (list, tuple)):
+                raise ValueError("Pass a dict[label] = list of residue selectors; list of lists is ambiguous.")
+            labels_and_sets = {str(query_label): set(_normalize_selector(items))}
+
+        query_iter = []
+        for label, selset in labels_and_sets.items():
+            if not selset:
+                query_iter.append((label, np.zeros(arr.shape[0], dtype=bool), np.zeros(arr.shape[0], dtype=bool)))
+                continue
+            in_sel = np.isin(np.core.defchararray.add(np.core.defchararray.add(arr["chain"], ":"), np.char.add(np.char.mod("%d", arr["resseq"]), arr["icode"])),
+                             np.array([f"{c}:{r}{i}" for c, r, i in selset]))
+            # Query mask: protein atoms use requested scope; non-protein atoms always heavy
+            q_mask = in_sel & ((arr["is_protein"] & _mask_from_scope(arr, atom_scope)) | ((~arr["is_protein"]) & arr["is_heavy"]))
+            query_iter.append((label, q_mask, in_sel))
+    else:
+        query_iter = []
+        for qch in map(str, query_chains):
+            q_mask = (arr["chain"] == qch) & arr["is_protein"]
+            q_mask &= _mask_from_scope(arr, atom_scope)
+            in_sel = (arr["chain"] == qch)  # for exclusion in targets
+            query_iter.append((qch, q_mask, in_sel))
+
+    label_mode = query_residues is not None
+
+    for q_key, q_mask, in_sel in query_iter:
         if not np.any(q_mask):
-            contact_pairs[qch] = []
-            residue_dict[qch] = []
+            contact_pairs[q_key] = []
+            residue_dict[q_key] = []
             continue
 
         target_masks = []
         if mode in ("chains", "both"):
-            allowed = [c for c in protein_chains_all if c != qch]
+            allowed = list(protein_chains_all) if label_mode else [c for c in protein_chains_all if c != q_key]
             inc = chain_filters.get("include_chains")
             if inc is not None:
                 allowed = [c for c in allowed if c in inc]
@@ -349,10 +419,12 @@ def find_neighbours_in_pdb(
             allowed = [c for c in allowed if c not in exc]
             if allowed:
                 m = arr["is_protein"] & np.isin(arr["chain"], np.array(allowed))
+                # Protein targets honor atom_scope as requested
                 m &= _mask_from_scope(arr, atom_scope)
                 target_masks.append(m)
         if mode in ("ligands", "both"):
-            m = ligand_mask_all & _mask_from_scope(arr, atom_scope)
+            # Ligands/metals always use heavy scope
+            m = ligand_mask_all & arr["is_heavy"]
             target_masks.append(m)
 
         if not target_masks:
@@ -361,9 +433,11 @@ def find_neighbours_in_pdb(
             continue
 
         t_mask = np.logical_or.reduce(target_masks)
+        # Always exclude the current selection from the targets
+        t_mask &= ~in_sel
         if not np.any(t_mask):
-            contact_pairs[qch] = []
-            residue_dict[qch] = []
+            contact_pairs[q_key] = []
+            residue_dict[q_key] = []
             continue
 
         q_idx = np.where(q_mask)[0]
@@ -371,7 +445,7 @@ def find_neighbours_in_pdb(
         q_xyz, t_xyz = xyz[q_idx], xyz[t_idx]
 
         first_pairs_abs = [(int(q_idx[qi]), int(t_idx[ti]), float(d)) for (qi, ti, d) in _pairs_within(q_xyz, t_xyz, cutoff)]
-        contact_pairs[qch] = first_pairs_abs
+        contact_pairs[q_key] = first_pairs_abs
 
         second_pairs_abs: List[Tuple[int, int, float]] = []
         if second_shell and second_shell > cutoff:
@@ -413,7 +487,7 @@ def find_neighbours_in_pdb(
             # Compute contact class with metal-specific MB/MS, treating cofactor-bound metals as cofactors
             cls = _contact_class_extended(q, t, classify_bb_sc)
             return {
-                "query_chain": q["chain"],
+                "query_chain": q_key,
                 "query_resseq": int(q["resseq"]),
                 "query_icode": q["icode"],
                 "query_resname": q["resname"],
@@ -449,11 +523,11 @@ def find_neighbours_in_pdb(
                 if exclude_bb_contacts and classes == {"BB"}:
                     continue
                 res_keys.add((int(arr[qi]["resseq"]), arr[qi]["icode"], arr[qi]["resname"]))
-            residue_dict[qch] = sorted(res_keys, key=lambda x: (x[0], x[1]))
+            residue_dict[q_key] = sorted(res_keys, key=lambda x: (x[0], x[1]))
         else:
             contact_q_atoms = {qi for qi, _, _ in first_pairs_abs} | {qi for qi, _, _ in second_pairs_abs}
             res_keys = {(int(arr[qi]["resseq"]), arr[qi]["icode"], arr[qi]["resname"]) for qi in contact_q_atoms}
-            residue_dict[qch] = sorted(res_keys, key=lambda x: (x[0], x[1]))
+            residue_dict[q_key] = sorted(res_keys, key=lambda x: (x[0], x[1]))
 
     if only_residue_dict:
         return residue_dict
