@@ -14,10 +14,10 @@ import warnings
 import copy
 import re
 import pkg_resources
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple, Union
 
 # --- Debug printing helper (no-op if debug=False) ---
 def _dbg(debug: bool, msg: str = "", *args):
@@ -94,6 +94,296 @@ def _term_anchored_core(mapping_pairs, chain_idx_list):
     core_start = min(first_tgt, last_tgt)
     core_end = max(first_tgt, last_tgt)
     return (core_start, core_end)
+
+def _wrap_pyrosetta_command(command: str, pyrosetta_env: Optional[str]) -> str:
+    """
+    Wrap the command in a conda environment activation if `pyrosetta_env` is given.
+    """
+    if not pyrosetta_env:
+        return command
+
+    try:
+        result = subprocess.run(
+            ["conda", "info", "--base"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            "Cannot find conda base path. Ensure `conda` is installed and on PATH."
+        ) from exc
+
+    conda_base = result.stdout.strip()
+    conda_sh = os.path.join(conda_base, "etc", "profile.d", "conda.sh")
+    if not os.path.exists(conda_sh):
+        raise FileNotFoundError(
+            f"Cannot locate '{conda_sh}'. Run `conda init` or install Conda."
+        )
+
+    conda_prefix = (
+        f"source {conda_sh} >/dev/null 2>&1 && "
+        f"conda activate {pyrosetta_env} >/dev/null 2>&1 &&"
+    )
+
+    return f"bash -lc \"{conda_prefix} {command.strip()}\""
+
+
+def _sync_ligand_params_to_shared_folder(docking_folder: str):
+    """
+    Ensure Rosetta sees the generated ligand params by mirroring them into docking_folder/params.
+    """
+    ligand_params_root = os.path.join(docking_folder, "ligand_params")
+    if not os.path.isdir(ligand_params_root):
+        return
+
+    shared_params = os.path.join(docking_folder, "params")
+    os.makedirs(shared_params, exist_ok=True)
+
+    for ligand in os.listdir(ligand_params_root):
+        ligand_dir = os.path.join(ligand_params_root, ligand)
+        if not os.path.isdir(ligand_dir):
+            continue
+        for suffix in (".params", ".pdb", "_conformers.pdb"):
+            src = os.path.join(ligand_dir, f"{ligand}{suffix}")
+            if not os.path.exists(src):
+                continue
+            dst = os.path.join(shared_params, f"{ligand}{suffix}")
+            shutil.copyfile(src, dst)
+
+
+def _parse_ligand_atom_map(
+    docking_folder: str,
+    ligand: str,
+    chain_override: Optional[str] = None,
+    resseq_override: Optional[int] = None,
+) -> Dict[str, Tuple[str, int, str]]:
+    ligand_pdb = os.path.join(docking_folder, "ligand_params", ligand, f"{ligand}.pdb")
+    if not os.path.exists(ligand_pdb):
+        raise FileNotFoundError(f"Ligand PDB not found: {ligand_pdb}")
+
+    atom_map: Dict[str, Tuple[str, int, str]] = {}
+    with open(ligand_pdb) as lf:
+        for line in lf:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            atom_name = line[12:16].strip()
+            if not atom_name or atom_name in atom_map:
+                continue
+            chain = line[21].strip()
+            if not chain:
+                chain = " "
+            resseq_str = line[22:26].strip()
+            if not resseq_str.isdigit():
+                raise ValueError(f"Unexpected residue number '{resseq_str}' in {ligand_pdb}")
+            resseq = int(resseq_str)
+            if chain_override is not None:
+                chain = chain_override
+            if resseq_override is not None:
+                resseq = resseq_override
+            atom_map[atom_name] = (chain, resseq, atom_name)
+    if not atom_map:
+        raise ValueError(f"No atoms parsed from ligand PDB: {ligand_pdb}")
+    return atom_map
+
+
+def _list_ligand_atom_names(docking_folder: str, ligand: str) -> List[str]:
+    pdb_path = os.path.join(docking_folder, "ligand_params", ligand, f"{ligand}.pdb")
+    if not os.path.exists(pdb_path):
+        return []
+
+    atom_names = []
+    with open(pdb_path) as lf:
+        for line in lf:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            atom_name = line[12:16].strip()
+            if atom_name and atom_name not in atom_names:
+                atom_names.append(atom_name)
+    return atom_names
+
+
+def _list_params_atom_names(docking_folder: str, ligand: str) -> Tuple[List[str], str]:
+    params_path = os.path.join(docking_folder, "params", f"{ligand}.params")
+    if not os.path.exists(params_path):
+        return [], params_path
+
+    atom_names = []
+    with open(params_path) as pf:
+        for line in pf:
+            stripped = line.strip()
+            if not stripped or not stripped.startswith("ATOM"):
+                continue
+            parts = stripped.split()
+            if len(parts) < 2:
+                continue
+            atom_names.append(parts[1])
+    return atom_names, params_path
+
+
+def _list_pdb_chains(pdb_path: str) -> Set[str]:
+    chains = set()
+    if not os.path.exists(pdb_path):
+        return chains
+    with open(pdb_path) as pf:
+        for line in pf:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            chain = line[21].strip()
+            if chain:
+                chains.add(chain)
+    return chains
+
+
+def _parse_res_num_line(out_path: str) -> Dict[str, Tuple[int, int]]:
+    if not os.path.exists(out_path):
+        return {}
+    with open(out_path) as of:
+        for line in of:
+            if not line.startswith("RES_NUM"):
+                continue
+            tokens = line.strip().split()
+            if len(tokens) < 3:
+                continue
+            ranges: Dict[str, Tuple[int, int]] = {}
+            for token in tokens[1:-1]:
+                if ":" not in token:
+                    continue
+                chain, range_str = token.split(":", 1)
+                if "-" in range_str:
+                    start, end = range_str.split("-", 1)
+                else:
+                    start = range_str
+                    end = range_str
+                try:
+                    ranges[chain] = (int(start), int(end))
+                except ValueError:
+                    continue
+            return ranges
+    return {}
+
+
+def _collect_ligand_chain_overrides(
+    docking_folder: str, model_ligands, separator: str
+) -> Dict[str, Tuple[str, int]]:
+    overrides: Dict[str, Tuple[str, int]] = {}
+    output_models_path = os.path.join(docking_folder, "output_models")
+    input_models_path = os.path.join(docking_folder, "input_models")
+    for model_ligand in model_ligands:
+        if separator not in model_ligand:
+            continue
+        base_model, _ = model_ligand.split(separator, 1)
+        base_pdb = os.path.join(input_models_path, f"{base_model}.pdb")
+        base_chains = _list_pdb_chains(base_pdb)
+        out_path = os.path.join(output_models_path, model_ligand, f"{model_ligand}.out")
+        if not os.path.exists(out_path):
+            sc_path = os.path.join(output_models_path, model_ligand, f"{model_ligand}.sc")
+            out_path = sc_path if os.path.exists(sc_path) else None
+        if out_path is None:
+            continue
+        chain_ranges = _parse_res_num_line(out_path)
+        if not chain_ranges:
+            continue
+        ligand_chains = [chain for chain in chain_ranges if chain not in base_chains]
+        if not ligand_chains:
+            ligand_chains = list(chain_ranges.keys())
+        if not ligand_chains:
+            continue
+        chain = ligand_chains[0]
+        res_start, _ = chain_ranges.get(chain, (None, None))
+        if res_start is None:
+            continue
+        overrides[model_ligand] = (chain, res_start)
+    return overrides
+
+
+def _collect_requested_model_ligand_pairs(atom_pairs) -> Set[Tuple[str, str]]:
+    entries = set()
+    if not isinstance(atom_pairs, dict):
+        return entries
+    for model, ligands in atom_pairs.items():
+        if not isinstance(ligands, dict):
+            continue
+        for ligand in ligands:
+            if isinstance(ligand, str):
+                entries.add((model, ligand))
+    return entries
+
+
+def _collect_requested_ligands(atom_pairs) -> Set[str]:
+    return {ligand for _, ligand in _collect_requested_model_ligand_pairs(atom_pairs)}
+
+
+def _prepare_expanded_atom_pairs(
+    atom_pairs,
+    docking_folder,
+    model_ligands,
+    separator,
+    ligand_chain_overrides=None,
+):
+    """Return the full atom pair list expected by the PyRosetta script."""
+    ligand_atom_cache: Dict[Tuple[str, Optional[str], Optional[int]], Dict[str, Tuple[str, int, str]]] = {}
+    expanded = {}
+    missing_ligand_atoms: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
+    models_without_pairs = []
+    if ligand_chain_overrides is None:
+        ligand_chain_overrides = {}
+
+    def _resolve_ligand_tuple(ligand: str, atom_identifier, override):
+        if isinstance(atom_identifier, tuple):
+            return atom_identifier
+        if not isinstance(atom_identifier, str):
+            raise TypeError("Ligand atom identifier must be a string or tuple.")
+        chain_override = override[0] if override else None
+        resseq_override = override[1] if override else None
+        cache_key = (ligand, chain_override, resseq_override)
+        if cache_key not in ligand_atom_cache:
+            ligand_atom_cache[cache_key] = _parse_ligand_atom_map(
+                docking_folder, ligand, chain_override, resseq_override
+            )
+        mapping = ligand_atom_cache[cache_key]
+        if atom_identifier not in mapping:
+            available = _list_ligand_atom_names(docking_folder, ligand)
+            suggestion = ", ".join(available[:10])
+            raise KeyError(
+                f"Atom '{atom_identifier}' not found in ligand {ligand}. "
+                f"Available ligand atoms: {suggestion}{'...' if len(available)>10 else ''}"
+            )
+        return mapping[atom_identifier]
+
+    for model_ligand in model_ligands:
+        base_model, ligand = model_ligand.split(separator, 1)
+        model_atom_pairs = atom_pairs.get(base_model)
+        if not isinstance(model_atom_pairs, dict):
+            models_without_pairs.append(model_ligand)
+            continue
+        raw_pairs = model_atom_pairs.get(ligand)
+        if raw_pairs is None:
+            models_without_pairs.append(model_ligand)
+            continue
+
+        override = ligand_chain_overrides.get(model_ligand)
+        normalized_pairs = []
+        for entry in raw_pairs:
+            if len(entry) != 2:
+                raise ValueError("Each atom pair entry must be a 2-tuple.")
+            protein_atom, ligand_atom = entry
+            if not (isinstance(protein_atom, tuple) and len(protein_atom) == 3):
+                raise ValueError("Protein atom must be a tuple (chain, residue, atom).")
+            try:
+                ligand_tuple = _resolve_ligand_tuple(ligand, ligand_atom, override)
+            except KeyError:
+                if isinstance(ligand_atom, str):
+                    missing_ligand_atoms[(base_model, ligand)].add(ligand_atom)
+                continue
+            normalized_pairs.append((protein_atom, ligand_tuple))
+
+        if normalized_pairs:
+            expanded[model_ligand] = normalized_pairs
+        else:
+            models_without_pairs.append(model_ligand)
+
+    return expanded, missing_ligand_atoms, models_without_pairs
 
 def _analyze_mapping_pairs(mapping, r_ca_coord, t_ca_coord, max_ca_ca, verbose_limit=40):
     import numpy as np, bisect
@@ -1442,6 +1732,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         """
 
         for m in self:
+            residue_mapping = {}
             structure = PDB.Structure.Structure(0)
             pdb_model = PDB.Model.Model(0)
             for model in self.structures[m]:
@@ -1452,15 +1743,27 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     residues = [r for r in c]
                     chain_copy = PDB.Chain.Chain(c.id)
                     for r in residues:
+                        chain_id = c.id
+                        old_resid = r.id[1]
                         new_id = (r.id[0], i + 1, r.id[2])
                         c.detach_child(r.id)
                         r.id = new_id
                         chain_copy.add(r)
+                        residue_mapping[(chain_id, old_resid)] = new_id[1]
                         i += 1
                     pdb_model.add(chain_copy)
 
             structure.add(pdb_model)
             self.structures[m] = structure
+            if m in self.conects and residue_mapping:
+                updated_conects = []
+                for conect in self.conects[m]:
+                    updated_conect = []
+                    for chain_id, resid, atom_name in conect:
+                        new_resid = residue_mapping.get((chain_id, resid), resid)
+                        updated_conect.append((chain_id, new_resid, atom_name))
+                    updated_conects.append(updated_conect)
+                self.conects[m] = updated_conects
 
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
@@ -5170,7 +5473,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
 
     def setUpRosettaDocking(self, docking_folder, ligands_pdb_folder=None, ligands_sdf_folder=None,
-                            param_files=None,
+                            param_files=None, cst_files=None,
                             coordinates=None, smiles_file=None, sdf_file=None, docking_protocol='repack',
                             high_res_cycles=None, high_res_repack_every_Nth=None, num_conformers=50,
                             prune_rms_threshold=0.5, max_attempts=1000, rosetta_home=None, separator='-',
@@ -5213,7 +5516,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         max_attempts : int, optional
             Maximum number of attempts for embedding conformers. Default is 1000.
         rosetta_home : str, optional
-            Path to the Rosetta home directory.
+            Optional explicit Rosetta home used only when `ROSETTA_HOME` is not already defined in the
+            environment (including sourced `~/.bashrc`). If both are present, the environment variable
+            takes precedence and a warning is emitted.
         separator : str, optional
             Separator character to use in file names. Default is '-'.
         use_exp_torsion_angle_prefs : bool, optional
@@ -5236,6 +5541,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             Chain identifier for the ligand. Default is 'B'.
         nstruct : int, optional
             Number of output structures to generate. Default is 100.
+        distances : dict, optional
+            Per-model/ligand distance filters in the form {model: {ligand: ((chain, res, atom), (chain, res, atom))}}.
+            Atom tuples can omit the ligand chain/residue by specifying only the atom name; the function will assume
+            the ligand chain/residue constants defined in the method.
+        angles : dict, optional
+            Currently unsupported; RosettaScripts does not provide a convenient ``atomicAngle`` mover.
+        cst_files : dict, optional
+            Mapping from model names to ligand dictionaries mirroring ``atom_pairs``:
+                ``{model: {ligand: [constraint_file1, constraint_file2, ...]}}``.
+            Each referenced file is copied to ``docking_folder/cst_files/<model>`` and loaded only for the
+            matching model/ligand combination.
 
         Raises:
         -------
@@ -5322,7 +5638,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 sdf_writer.write(mol, confId=conf_id)
             sdf_writer.close()
 
-        def process_ligand_file(ligand_file_path, base_name, conformers_input_folder):
+        def process_ligand_file(ligand_file_path, base_name, ligand_dir):
             """
             Process a single ligand file (PDB, SDF, or SMILES) to generate conformers and write to SDF.
 
@@ -5332,10 +5648,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 Path to the ligand file.
             base_name : str
                 Base name of the ligand.
-            conformers_input_folder : str
-                Folder to store the output SDF file.
+            ligand_dir : str
+                Folder to store the output SDF file (the ligand's params directory).
             """
-            output_sdf_path = os.path.join(conformers_input_folder, f"{base_name}.sdf")
+            os.makedirs(ligand_dir, exist_ok=True)
+            output_sdf_path = os.path.join(ligand_dir, f"{base_name}.sdf")
 
             # Determine file type and load molecule
             if ligand_file_path.endswith('.pdb'):
@@ -5415,6 +5732,42 @@ make sure of reading the target sequences with the function readTargetSequences(
         except ImportError as e:
             raise ImportError("RDKit is not installed. Please install it to use the setUpRosettaDocking function.")
 
+        def _load_rosetta_from_bashrc():
+            bashrc = os.path.expanduser("~/.bashrc")
+            if not os.path.exists(bashrc):
+                return None
+            result = subprocess.run(
+                ["bash", "-lc", f"source {bashrc} >/dev/null 2>&1 && printf '%s' \"$ROSETTA_HOME\""],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            value = result.stdout.strip()
+            if value:
+                os.environ["ROSETTA_HOME"] = value
+                return value
+            return None
+
+        env_rosetta_home = os.environ.get("ROSETTA_HOME")
+        if not env_rosetta_home:
+            env_rosetta_home = _load_rosetta_from_bashrc()
+
+        final_rosetta_home = env_rosetta_home
+        if env_rosetta_home and rosetta_home and os.path.abspath(rosetta_home) != os.path.abspath(env_rosetta_home):
+            warnings.warn(
+                "ROSETTA_HOME environment variable is already set and will be used; the `rosetta_home` argument is ignored.",
+                UserWarning,
+            )
+        elif not env_rosetta_home and rosetta_home:
+            final_rosetta_home = rosetta_home
+
+        if not final_rosetta_home:
+            raise ValueError("The ROSETTA_HOME environment variable is not set; please export it before calling setUpRosettaDocking.")
+
+        os.environ["ROSETTA_HOME"] = final_rosetta_home
+
+        rosetta_home = final_rosetta_home
+
         if angles:
             raise ValueError('Angles has not being implemented. Rosetta scripts do not have an easy function to compute angles. Perhaps with CreateAngleConstraint mover?')
 
@@ -5426,6 +5779,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         for model in self:
             if separator in model:
                 raise ValueError(f'The given separator {separator} was found in model {model}. Please use a different one.')
+
+        # Warn if coordinates were not provided
+        if coordinates is None:
+            warnings.warn(
+                "Rosetta docking routines require explicit ligand placement coordinates; "
+                "provide the `coordinates` argument so setUpRosettaDocking can construct the XML movers.",
+                UserWarning,
+            )
 
         # Uniform coordinates format
         if isinstance(coordinates, (list, tuple)):
@@ -5451,13 +5812,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create docking job folders
         os.makedirs(docking_folder, exist_ok=True)
         xml_folder = os.path.join(docking_folder, 'xml')
-        conformers_input_folder = os.path.join(docking_folder, 'conformers')
         ligand_params_folder = os.path.join(docking_folder, 'ligand_params')
         input_models_folder = os.path.join(docking_folder, 'input_models')
         flags_folder = os.path.join(docking_folder, 'flags')
         output_folder = os.path.join(docking_folder, 'output_models')
 
-        for folder in [xml_folder, conformers_input_folder, ligand_params_folder, input_models_folder,
+        for folder in [xml_folder, ligand_params_folder, input_models_folder,
                        flags_folder, output_folder]:
             os.makedirs(folder, exist_ok=True)
 
@@ -5592,7 +5952,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
                 ligand_file_path = os.path.join(ligands_pdb_folder, ligand_file)
                 base_name = os.path.splitext(ligand_file)[0]
-                ligands.append(process_ligand_file(ligand_file_path, base_name, conformers_input_folder))
+                ligand_dir = os.path.join(ligand_params_folder, base_name)
+                ligands.append(process_ligand_file(ligand_file_path, base_name, ligand_dir))
 
         # Handle SDF ligand files
         elif ligands_sdf_folder:
@@ -5601,7 +5962,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
                 ligand_file_path = os.path.join(ligands_sdf_folder, ligand_file)
                 base_name = os.path.splitext(ligand_file)[0]
-                ligands.append(process_ligand_file(ligand_file_path, base_name, conformers_input_folder))
+                ligand_dir = os.path.join(ligand_params_folder, base_name)
+                ligands.append(process_ligand_file(ligand_file_path, base_name, ligand_dir))
 
         # Handle SMILES input
         elif smiles_file:
@@ -5613,7 +5975,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         raise ValueError(f"Could not parse SMILES: {smi}")
                     mol = Chem.AddHs(mol)
                     mol.SetProp("_Name", name)
-                    output_sdf_path = os.path.join(conformers_input_folder, f"{name}.sdf")
+                    ligand_dir = os.path.join(ligand_params_folder, name)
+                    os.makedirs(ligand_dir, exist_ok=True)
+                    output_sdf_path = os.path.join(ligand_dir, f"{name}.sdf")
                     ligands.append(name)
                     mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
                                                               prune_rms_threshold=prune_rms_threshold,
@@ -5630,7 +5994,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if mol is None:
                     continue
                 name = mol.GetProp("_Name")
-                output_sdf_path = os.path.join(conformers_input_folder, f"{name}.sdf")
+                ligand_dir = os.path.join(ligand_params_folder, name)
+                os.makedirs(ligand_dir, exist_ok=True)
+                output_sdf_path = os.path.join(ligand_dir, f"{name}.sdf")
                 ligands.append(name)
                 mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
                                                           prune_rms_threshold=prune_rms_threshold,
@@ -5640,18 +6006,39 @@ make sure of reading the target sequences with the function readTargetSequences(
                                                           enforce_chirality=enforce_chirality)
                 write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
 
-        # Add path to params files
-        if param_files != None:
+        has_external_params = False
+        params_folder = os.path.join(docking_folder, "params")
 
-            if not os.path.exists(docking_folder + "/params"):
-                os.mkdir(docking_folder + "/params")
+        # Resolve external params by mirroring them into a dedicated params folder
+        if param_files is not None:
 
             if isinstance(param_files, str):
                 param_files = [param_files]
 
+            resolved_params: List[str] = []
             for param in param_files:
-                param_name = param.split("/")[-1]
-                shutil.copyfile(param, docking_folder + "/params/" + param_name)
+                if os.path.isdir(param):
+                    for entry in os.listdir(param):
+                        if entry.endswith(".params"):
+                            resolved_params.append(os.path.join(param, entry))
+                else:
+                    resolved_params.append(param)
+
+            os.makedirs(params_folder, exist_ok=True)
+
+            for param in resolved_params:
+                abs_param = os.path.abspath(param)
+                if not os.path.exists(abs_param):
+                    raise FileNotFoundError(f"Parameter file not found: {abs_param}")
+
+                destination = os.path.join(params_folder, os.path.basename(abs_param))
+                if os.path.abspath(abs_param) != os.path.abspath(destination):
+                    shutil.copyfile(abs_param, destination)
+                has_external_params = True
+
+                # Leave any auxiliary PDB/conformer files in their original locations to
+                # keep user-supplied parameter sets separate from the ligand params
+                # generated by this function.
 
         # Process each ligand
         jobs = []
@@ -5662,7 +6049,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             addLigand = rosettaScripts.movers.addChain(name='addLigand', update_PDBInfo=True, file_name=ligand_pdb)
 
             # make params
-            input_sdf_path = os.path.join(conformers_input_folder, f"{ligand}.sdf")
+            input_sdf_path = os.path.join(ligand_params_folder, ligand, f"{ligand}.sdf")
             output_dir = ligand_params_folder
             make_param_file(input_sdf_path, ligand, output_dir)
 
@@ -5690,6 +6077,51 @@ make sure of reading the target sequences with the function readTargetSequences(
                 xml.addMovemapBuilder(docking)
                 xml.addMovemapBuilder(final)
 
+                # Prepare constraint movers list
+                constraint_movers = []
+
+                # Add constraint movers
+                if cst_files is not None:
+                    if model not in cst_files:
+                        raise ValueError(f"Model {model} is not in the cst_files dictionary!")
+
+                    model_csts = cst_files[model]
+                    if isinstance(model_csts, dict):
+                        if ligand not in model_csts:
+                            raise ValueError(
+                                f"Ligand {ligand} is not in the cst_files dictionary for model {model}."
+                            )
+                        ligand_cst_files = model_csts[ligand]
+                    else:
+                        warnings.warn(
+                            "cst_files should map each model to a ligand dictionary; "
+                            "the provided files will be applied to every ligand.",
+                            UserWarning,
+                        )
+                        ligand_cst_files = model_csts
+
+                    if isinstance(ligand_cst_files, str):
+                        ligand_cst_files = [ligand_cst_files]
+
+                    if ligand_cst_files:
+                        cst_root = os.path.join(docking_folder, "cst_files")
+                        os.makedirs(cst_root, exist_ok=True)
+                        model_cst_dir = os.path.join(cst_root, model)
+                        os.makedirs(model_cst_dir, exist_ok=True)
+
+                        for cst_file in ligand_cst_files:
+                            cst_name = os.path.basename(cst_file)
+                            dest_file = os.path.join(model_cst_dir, cst_name)
+                            if not os.path.exists(dest_file):
+                                shutil.copyfile(cst_file, dest_file)
+
+                            set_cst = rosettaScripts.movers.constraintSetMover(
+                                add_constraints=True,
+                                cst_file=f"../../cst_files/{model}/{cst_name}",
+                            )
+                            xml.addMover(set_cst)
+                            constraint_movers.append(set_cst)
+
                 # Add scoring grid
                 xml.addScoringGrid(vdw, ligand_chain=ligand_chain, width=grid_width)
 
@@ -5713,6 +6145,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Set up protocol
                 protocol = []
                 protocol.append(addLigand)
+                protocol.extend(constraint_movers)
                 protocol.append(startFrom)
                 if store_initial_placement:
                     protocol.append(store_initial_placement)
@@ -5781,11 +6214,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if only_scorefile:
                     flags.addOption('out:file:score_only')
 
-                ligand_params = '../../ligand_params/'+ligand+'/'+ligand+'.params'
-                flags.addOption('extra_res_fa', ligand_params)
                 flags.add_ligand_docking_options()
-                if param_files:
+                if has_external_params:
                     flags.addOption("in:file:extra_res_path", "../../params")
+                ligand_params_file = os.path.join(ligand_params_folder, ligand, f"{ligand}.params")
+                if os.path.exists(ligand_params_file):
+                    flags.addOption(
+                        "in:file:extra_res_fa",
+                        f"../../ligand_params/{ligand}/{ligand}.params",
+                        append=True,
+                    )
                 flags_output = os.path.join(flags_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.flags')
                 flags.write_flags(flags_output)
 
@@ -10031,83 +10469,407 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def analyseRosettaDocking(self, docking_folder, separator='_', only_models=None):
+    def analyseRosettaDocking(self, docking_folder, separator='-', only_models=None,
+                              atom_pairs=None, energy_by_residue=False,
+                              interacting_residues=False, query_residues=None,
+                              overwrite=False, protonation_states=False,
+                              binding_energy=False, decompose_bb_hb_into_pair_energies=False,
+                              cpus=None, return_jobs=False, verbose=False,
+                              skip_finished=False, pyrosetta_env=None, param_files=None):
+        """
+        Analyse the Rosetta docking folder. By default this function falls back to parsing
+        the Rosetta score files so it works without PyRosetta, but when options such as
+        `atom_pairs`, `energy_by_residue`, or `binding_energy` are requested it reuses
+        the same PyRosetta-driven `analyse_calculation.py` script that powers
+        `analyseRosettaCalculation`.
 
-        # Initialize an empty DataFrame for all scores
-        self.rosetta_docking = pd.DataFrame()
-
-        # Initialize an empty dictionary for distances
-        self.rosetta_docking_distances = {}
+        Parameters
+        ----------
+        docking_folder : str
+            Path to the folder where the Rosetta docking results are stored.
+        separator : str, optional
+            Symbol that separates the protein and ligand names, default is '_' and should
+            not appear more than once in any folder name created by `setUpRosettaDocking`.
+        only_models : str or Sequence[str], optional
+            Limit the analysis to this list of protein models (ligand names are inferred
+            from the folder name after the separator).
+        atom_pairs : dict, optional
+            Dictionary of atom pairs to measure. Keys may be either the combined folder
+            names (Model{separator}Ligand) or the plain model names - keys matching the model
+            will be expanded to all associated ligands. Each atom pair can be expressed in
+            the legacy ((chain, residue, atom), (chain, residue, atom)) form, or you can
+            provide ligand-side tuples like (('chain', res, atom), 'ATOM_NAME'); the ligand
+            atom names are resolved automatically from the `ligand_params/<ligand>/<ligand>.pdb`
+            files so you only need to supply the atom name on the ligand side.
+        energy_by_residue : bool, optional
+            If True, request the energy-by-residue analysis from the PyRosetta script.
+        interacting_residues : bool, optional
+            Compute neighbouring interaction energies.
+        query_residues : list[int], optional
+            Residue IDs to query when running interacting residue/protonation analyses.
+        overwrite : bool, optional
+            Remove existing analysis files before rerunning the PyRosetta script.
+        protonation_states : bool, optional
+            Gather protonation data via PyRosetta.
+        binding_energy : str or bool, optional
+            Chain names for which the binding energy is calculated (comma-separated
+            string). If False, binding energies are skipped.
+        decompose_bb_hb_into_pair_energies : bool, optional
+            Pass the same flag to the PyRosetta analysis.
+        cpus : int, optional
+            Number of CPUs to feed to the PyRosetta script.
+        return_jobs : bool, optional
+            Return a list of shell commands instead of running the analysis; the commands
+            will each target a single model/ligand folder and must be executed manually.
+        verbose : bool, optional
+            Increase verbosity of the PyRosetta script.
+        skip_finished : bool, optional
+            When `return_jobs` is True, omit commands for models that already have
+            `.analysis/scores/<model>.csv` files.
+        pyrosetta_env : str, optional
+            Name of the conda environment to activate before running the PyRosetta analysis script.
+        """
 
         output_models_path = os.path.join(docking_folder, 'output_models')
-        model_ligands = os.listdir(output_models_path)
+        if not os.path.exists(output_models_path):
+            raise ValueError(f"Rosetta docking output folder '{output_models_path}' does not exist.")
 
-        # Filter models to process if only_models is provided
+        model_ligands = [d for d in os.listdir(output_models_path)
+                         if os.path.isdir(os.path.join(output_models_path, d))]
         if only_models is not None:
             if isinstance(only_models, str):
                 only_models = [only_models]
             model_ligands = [ml for ml in model_ligands if ml.split(separator)[0] in only_models]
 
+        if not model_ligands:
+            raise ValueError("No docking models found after applying filters.")
+
+        for model_ligand in model_ligands:
+            if model_ligand.count(separator) != 1:
+                raise ValueError(
+                    f"The separator '{separator}' was not found or was found more than once in '{model_ligand}'."
+                )
+
+        pyrosetta_features = any([
+            atom_pairs,
+            energy_by_residue,
+            interacting_residues,
+            protonation_states,
+            binding_energy,
+            decompose_bb_hb_into_pair_energies,
+            return_jobs,
+        ])
+
+        if not pyrosetta_features:
+            # Fall back to parsing the raw SCORE files.
+            self.rosetta_docking = pd.DataFrame()
+            self.rosetta_docking_distances = {}
+            total_files = len(model_ligands)
+            processed_files = 0
+
+            for model_ligand in model_ligands:
+                model, ligand = model_ligand.split(separator)
+                try:
+                    scorefile_out = os.path.join(output_models_path, f"{model_ligand}/{model_ligand}.out")
+                    scorefile_sc = os.path.join(output_models_path, f"{model_ligand}/{model_ligand}.sc")
+
+                    if os.path.exists(scorefile_out):
+                        scorefile = scorefile_out
+                    elif os.path.exists(scorefile_sc):
+                        scorefile = scorefile_sc
+                    else:
+                        raise FileNotFoundError(
+                            f"Neither '{model_ligand}.out' nor '{model_ligand}.sc' was found."
+                        )
+
+                    scores = _readRosettaScoreFile(scorefile)
+                    scores['Ligand'] = ligand
+                    scores = scores.set_index(['Model', 'Ligand', 'Pose'])
+
+                    distance_columns = [col for col in scores.columns if col.startswith('distance_')]
+                    distance_df = scores[distance_columns]
+
+                    self.rosetta_docking_distances.setdefault(model, {})[ligand] = distance_df
+                    scores = scores.drop(columns=distance_columns)
+
+                    interface_delta_col = next((col for col in scores.columns if col.startswith('interface_delta_')), None)
+                    if interface_delta_col and 'total_score' in scores.columns:
+                        cols = list(scores.columns)
+                        cols.insert(cols.index('total_score') + 1, cols.pop(cols.index(interface_delta_col)))
+                        scores = scores[cols]
+
+                    self.rosetta_docking = pd.concat([self.rosetta_docking, scores])
+
+                except FileNotFoundError as e:
+                    print(f"\nSkipping {model_ligand} due to missing file: {e}")
+                    continue
+
+                processed_files += 1
+                progress = f"Processing: {processed_files}/{total_files} files"
+                sys.stdout.write('\r' + progress)
+                sys.stdout.flush()
+
+            print()
+            self.rosetta_docking_data = self.rosetta_docking
+            return self.rosetta_docking
+
+        # --- PyRosetta-driven analysis path ---
+        analysis_folder = os.path.join(docking_folder, '.analysis')
+        os.makedirs(analysis_folder, exist_ok=True)
+        _copyScriptFile(docking_folder, "analyse_calculation.py", subfolder="pyrosetta")
+        script_path = os.path.join(docking_folder, '._analyse_calculation.py')
+        distances_folder = os.path.join(analysis_folder, 'distances')
+
+        expanded_atom_pairs = None
+        missing_ligand_atoms = {}
+        models_without_pairs = []
+        if atom_pairs is not None:
+            ligand_chain_overrides = _collect_ligand_chain_overrides(docking_folder, model_ligands, separator)
+            expanded_atom_pairs, missing_ligand_atoms, models_without_pairs = _prepare_expanded_atom_pairs(
+                atom_pairs, docking_folder, model_ligands, separator, ligand_chain_overrides=ligand_chain_overrides
+            )
+            if not expanded_atom_pairs:
+                requested_pairs = _collect_requested_model_ligand_pairs(atom_pairs)
+                requested_ligands = _collect_requested_ligands(atom_pairs)
+                if not requested_ligands:
+                    fallback = []
+                    for ml in model_ligands:
+                        if separator in ml:
+                            fallback.append(ml.rsplit(separator, 1)[-1])
+                        else:
+                            fallback.append(ml)
+                    requested_ligands = set(fallback)
+                ligand_atom_summaries = []
+                for ligand in sorted(requested_ligands):
+                    pdb_path = os.path.join(
+                        docking_folder, "ligand_params", ligand, f"{ligand}.pdb"
+                    )
+                    atoms = _list_ligand_atom_names(docking_folder, ligand)
+                    if atoms:
+                        suffix = "..." if len(atoms) > 10 else ""
+                        ligand_atom_summaries.append(
+                            f"{ligand}: {', '.join(atoms[:10])}{suffix} (from {pdb_path})"
+                        )
+                        continue
+
+                    params_atoms, params_path = _list_params_atom_names(docking_folder, ligand)
+                    if params_atoms:
+                        suffix = "..." if len(params_atoms) > 10 else ""
+                        ligand_atom_summaries.append(
+                            f"{ligand}: {', '.join(params_atoms[:10])}{suffix} (from {params_path})"
+                        )
+                        continue
+
+                    paths_checked = [p for p in (pdb_path, params_path) if p]
+                    path_note = (
+                        f" Checked files: {', '.join(paths_checked)}."
+                        if paths_checked
+                        else ""
+                    )
+                    ligand_atom_summaries.append(
+                        f"{ligand}: (no atoms found in ligand_params/{ligand}/{ligand}.pdb;{path_note})"
+                    )
+                detail = "\n".join(ligand_atom_summaries) if ligand_atom_summaries else "no ligands could be derived from the selected models."
+                if missing_ligand_atoms:
+                    missing_lines = []
+                    for (model, ligand), atoms in sorted(missing_ligand_atoms.items()):
+                        atom_list = ", ".join(sorted(atoms))
+                        missing_lines.append(f"{model}/{ligand}: missing requested atoms: {atom_list}")
+                    detail += "\nMissing requested ligand atoms:\n" + "\n".join(missing_lines)
+                if models_without_pairs:
+                    detail += (
+                        "\nNo atom pair entries were matched for the following docking models: "
+                        + ", ".join(sorted(models_without_pairs))
+                    )
+                if requested_pairs:
+                    unmatched = []
+                    for model, ligand in sorted(requested_pairs):
+                        candidate = f"{model}{separator}{ligand}"
+                        if candidate not in expanded_atom_pairs:
+                            unmatched.append(candidate)
+                    if unmatched:
+                        detail += (
+                            "\nRequested model/ligand pairs that were never considered: "
+                            + ", ".join(unmatched)
+                        )
+                raise ValueError(
+                    "No atom pairs matched the selected docking models. "
+                    "The `atom_pairs` dictionary must follow the {model: {ligand: [(protein_atom, ligand_atom), ...]}} "
+                    "structure rather than embedding both names in a single key. "
+                    "Ligand atom names are listed below:\n"
+                    f"{detail}"
+                )
+        atom_pairs_file = (
+            os.path.join(docking_folder, '._atom_pairs.json')
+            if expanded_atom_pairs
+            else None
+        )
+        if atom_pairs_file:
+            with open(atom_pairs_file, 'w') as jf:
+                json.dump(expanded_atom_pairs, jf)
+
+        if overwrite:
+            for subfolder in ['scores', 'distances', 'binding_energy', 'ebr', 'neighbours', 'protonation']:
+                folder = os.path.join(analysis_folder, subfolder)
+                if os.path.isdir(folder):
+                    for model_ligand in model_ligands:
+                        path = os.path.join(folder, f"{model_ligand}.csv")
+                        if os.path.exists(path):
+                            os.remove(path)
+
+        os.makedirs(os.path.join(analysis_folder, 'scores'), exist_ok=True)
+        if expanded_atom_pairs is not None:
+            os.makedirs(os.path.join(analysis_folder, 'distances'), exist_ok=True)
+        if binding_energy:
+            os.makedirs(os.path.join(analysis_folder, 'binding_energy'), exist_ok=True)
+        if energy_by_residue:
+            os.makedirs(os.path.join(analysis_folder, 'ebr'), exist_ok=True)
+        if interacting_residues:
+            os.makedirs(os.path.join(analysis_folder, 'neighbours'), exist_ok=True)
+        if protonation_states:
+            os.makedirs(os.path.join(analysis_folder, 'protonation'), exist_ok=True)
+
+        command = f"python {script_path} {docking_folder} "
+        if binding_energy:
+            command += f"--binding_energy {binding_energy} "
+        if atom_pairs_file:
+            command += f"--atom_pairs {atom_pairs_file} "
+        if energy_by_residue:
+            command += "--energy_by_residue "
+        if interacting_residues:
+            command += "--interacting_residues "
+            if query_residues is not None:
+                command += "--query_residues " + ",".join([str(r) for r in query_residues]) + " "
+        if protonation_states:
+            command += "--protonation_states "
+        if decompose_bb_hb_into_pair_energies:
+            command += "--decompose_bb_hb_into_pair_energies "
+        if cpus is not None:
+            command += f"--cpus {cpus} "
+        if verbose:
+            command += "--verbose "
+
+        if return_jobs:
+            command += "--models MODEL "
+        else:
+            command += "--models " + ",".join(model_ligands) + " "
+
+        if return_jobs:
+            commands = []
+            for model_ligand in model_ligands:
+                score_file = os.path.join(analysis_folder, 'scores', f"{model_ligand}.csv")
+                if skip_finished and os.path.exists(score_file):
+                    continue
+                job_command = command.replace('MODEL', model_ligand)
+                if pyrosetta_env:
+                    job_command = _wrap_pyrosetta_command(job_command, pyrosetta_env)
+                commands.append(job_command)
+
+            print("Returning jobs for running the analysis in parallel.")
+            print("After jobs have finished, rerun this function removing return_jobs=True!")
+            return commands
+
+        missing = False
+        for model_ligand in model_ligands:
+            score_file = os.path.join(analysis_folder, 'scores', f"{model_ligand}.csv")
+            if not os.path.exists(score_file):
+                missing = True
+                break
+
+        if missing:
+            if not pyrosetta_env:
+                installed = {pkg.key for pkg in pkg_resources.working_set}
+                if 'pyrosetta' not in installed:
+                    raise ValueError(
+                        'PyRosetta was not found in your Python environment. '
+                        'Consider using return_jobs=True or activating an environment that does have it.'
+                    )
+            exec_command = command
+            if pyrosetta_env:
+                exec_command = _wrap_pyrosetta_command(exec_command, pyrosetta_env)
+            os.system(exec_command)
+
+        self.rosetta_docking = pd.DataFrame()
+        self.rosetta_docking_distances = {}
         total_files = len(model_ligands)
         processed_files = 0
 
-        # Loop through models
         for model_ligand in model_ligands:
-            if model_ligand.count(separator) != 1:
-                raise ValueError(f"The separator '{separator}' was not found or found more than once in '{model_ligand}'")
-
-            model, ligand = model_ligand.split(separator)
-
-            try:
-                # Check for .out file first
-                scorefile_out = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.out')
-                scorefile_sc = os.path.join(output_models_path, f'{model}{separator}{ligand}/{model}{separator}{ligand}.sc')
-
-                if os.path.exists(scorefile_out):
-                    scorefile = scorefile_out
-                elif os.path.exists(scorefile_sc):
-                    scorefile = scorefile_sc
-                else:
-                    raise FileNotFoundError(f"Neither '{model}{separator}{ligand}.out' nor '{model}{separator}{ligand}.sc' found for '{model_ligand}'")
-
-                scores = _readRosettaScoreFile(scorefile)
-                scores['Ligand'] = ligand  # Add ligand column to scores
-                scores = scores.set_index(['Model', 'Ligand', 'Pose'])
-
-                # Extract distance columns
-                distance_columns = [col for col in scores.columns if col.startswith('distance_')]
-                distance_df = scores[distance_columns]
-
-                # Add to the distances dictionary
-                if model not in self.rosetta_docking_distances:
-                    self.rosetta_docking_distances[model] = {}
-                self.rosetta_docking_distances[model][ligand] = distance_df
-
-                # Remove distance columns from scores
-                scores = scores.drop(columns=distance_columns)
-
-                # Reorder columns to put 'interface_delta_*' after 'total_score'
-                interface_delta_col = next((col for col in scores.columns if col.startswith('interface_delta_')), None)
-                if interface_delta_col and 'total_score' in scores.columns:
-                    cols = list(scores.columns)
-                    cols.insert(cols.index('total_score') + 1, cols.pop(cols.index(interface_delta_col)))
-                    scores = scores[cols]
-
-                # Append the remaining scores to the global DataFrame
-                self.rosetta_docking = pd.concat([self.rosetta_docking, scores])
-
-            except FileNotFoundError as e:
-                print(f"\nSkipping {model_ligand} due to missing file: {e}")
+            score_file = os.path.join(analysis_folder, 'scores', f"{model_ligand}.csv")
+            if not os.path.exists(score_file):
+                print(f"Score file for {model_ligand} not found, skipping.")
                 continue
 
-            # Update and print progress
+            scores = pd.read_csv(score_file)
+            base_model, ligand = model_ligand.split(separator, 1)
+            scores['Model'] = base_model
+            scores['Ligand'] = ligand
+            scores = scores.set_index(['Model', 'Ligand', 'Pose'])
+
+            distance_columns = [col for col in scores.columns if col.startswith('distance_')]
+            distance_df = pd.DataFrame()
+            if distance_columns:
+                distance_df = scores[distance_columns]
+                scores = scores.drop(columns=distance_columns)
+            elif atom_pairs:
+                distance_file = os.path.join(distances_folder, f"{model_ligand}.csv")
+                if os.path.exists(distance_file):
+                    raw_distances = pd.read_csv(distance_file)
+                    if {'Model', 'Pose'}.issubset(raw_distances.columns):
+                        filtered = raw_distances.copy()
+                        mask = filtered['Model'] == model_ligand
+                        if mask.any():
+                            filtered = filtered[mask]
+                        filtered['Ligand'] = ligand
+                        filtered['Model'] = base_model
+                        distance_df = filtered.set_index(['Model', 'Ligand', 'Pose'])
+
+            if not distance_df.empty:
+                self.rosetta_docking_distances.setdefault(base_model, {})[ligand] = distance_df
+
+            interface_delta_col = next((col for col in scores.columns if col.startswith('interface_delta_')), None)
+            if interface_delta_col and 'total_score' in scores.columns:
+                cols = list(scores.columns)
+                cols.insert(cols.index('total_score') + 1, cols.pop(cols.index(interface_delta_col)))
+                scores = scores[cols]
+
+            if self.rosetta_docking.empty:
+                self.rosetta_docking = scores
+            else:
+                self.rosetta_docking = pd.concat([self.rosetta_docking, scores])
+
             processed_files += 1
             progress = f"Processing: {processed_files}/{total_files} files"
             sys.stdout.write('\r' + progress)
             sys.stdout.flush()
 
-        # Print a final newline character to move to the next line after the loop is done
         print()
+        self.rosetta_docking_data = self.rosetta_docking
+        return self.rosetta_docking
+
+    def _set_rosetta_metric_type(self, metric_name: str, metric_type: str):
+        """
+        Record the type ('distance', 'angle', etc.) for a Rosetta docking metric,
+        storing both prefixed (metric_*) and bare names for convenience.
+        """
+        if not hasattr(self, 'rosetta_docking_metric_type') or self.rosetta_docking_metric_type is None:
+            self.rosetta_docking_metric_type = {}
+        prefixed = metric_name if metric_name.startswith('metric_') else f"metric_{metric_name}"
+        bare = prefixed[7:] if prefixed.startswith('metric_') else prefixed
+        self.rosetta_docking_metric_type[prefixed] = metric_type
+        self.rosetta_docking_metric_type[bare] = metric_type
+
+    def _get_rosetta_metric_type(self, metric_name: str):
+        """
+        Retrieve the recorded metric type, accepting either prefixed or bare names.
+        """
+        if not hasattr(self, 'rosetta_docking_metric_type') or self.rosetta_docking_metric_type is None:
+            self.rosetta_docking_metric_type = {}
+        prefixed = metric_name if metric_name.startswith('metric_') else f"metric_{metric_name}"
+        bare = prefixed[7:] if prefixed.startswith('metric_') else prefixed
+        if prefixed in self.rosetta_docking_metric_type:
+            return self.rosetta_docking_metric_type[prefixed]
+        return self.rosetta_docking_metric_type.get(bare)
 
     def combineRosettaDockingDistancesIntoMetrics(self, catalytic_labels, overwrite=False):
         """
@@ -10185,7 +10947,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             )
                             assert ligand_series.shape[0] == len(distance_values)
                             values += distance_values
-                            self.rosetta_docking_metric_type["metric_" + name] = "distance"
+                            self._set_rosetta_metric_type(name, "distance")
                         elif angle_metric:
                             angles = catalytic_labels[name][model][ligand]
                             if len(angles) > 1:
@@ -10199,9 +10961,178 @@ make sure of reading the target sequences with the function readTargetSequences(
                             )
                             assert ligand_series.shape[0] == len(angle_values)
                             values += angle_values
-                            self.rosetta_docking_metric_type["metric_" + name] = "angle"
+                            self._set_rosetta_metric_type(name, "angle")
 
                 self.rosetta_docking["metric_" + name] = values
+
+    def combineRosettaDockingMetricsWithExclusions(self, combinations, exclusions, drop=True):
+        """
+        Combine mutually exclusive Rosetta docking metrics into new metrics while
+        respecting exclusion rules.
+
+        Parameters
+        ----------
+        combinations : dict
+            Dictionary defining which metrics to combine under a new common name, e.g.:
+                {
+                    "Catalytic": ("MetricA", "MetricB"),
+                    ...
+                }
+            Metric names should be provided without the leading ``metric_`` prefix.
+
+        exclusions : list or dict
+            Either a list of tuples describing mutually exclusive metrics or a
+            dictionary mapping a metric to the metrics it should exclude when it is
+            selected as the minimum.
+
+        drop : bool, optional
+            If True, drop the original metric columns after combining. Default True.
+        """
+
+        if self.rosetta_docking_data is None or self.rosetta_docking_data.empty:
+            raise ValueError("Rosetta docking data is empty. Run analyseRosettaDocking first.")
+
+        if not hasattr(self, 'rosetta_docking_metric_type'):
+            self.rosetta_docking_metric_type = {}
+
+        def _with_prefix(name: str) -> str:
+            return name if name.startswith('metric_') else f"metric_{name}"
+
+        def _strip_prefix(name: str) -> str:
+            return name[7:] if name.startswith('metric_') else name
+
+        # Determine exclusion type
+        if isinstance(exclusions, list):
+            simple_exclusions = True
+            by_metric_exclusions = False
+        elif isinstance(exclusions, dict):
+            simple_exclusions = False
+            by_metric_exclusions = True
+        else:
+            raise ValueError('exclusions should be a list of tuples or a dictionary by metrics.')
+
+        # Collect all unique metrics involved
+        unique_metrics = set()
+        for new_metric, metrics in combinations.items():
+            metric_types = []
+            for metric in metrics:
+                metric_label = _with_prefix(metric)
+                if metric_label not in self.rosetta_docking_metric_type:
+                    raise ValueError(f"Metric '{metric}' is not present in rosetta_docking_metric_type.")
+                metric_types.append(self.rosetta_docking_metric_type[metric_label])
+            if len(set(metric_types)) != 1:
+                raise ValueError('Attempting to combine different metric types (e.g., distances and angles) is not allowed.')
+            self._set_rosetta_metric_type(new_metric, metric_types[0])
+            unique_metrics.update(_strip_prefix(metric) for metric in metrics)
+
+        metrics_list = list(unique_metrics)
+        metrics_indexes = {m: idx for idx, m in enumerate(metrics_list)}
+
+        # Add metric prefix if not already present
+        add_metric_prefix = True
+        for m in metrics_list:
+            if 'metric_' in m:
+                raise ValueError('Provide metric names without the "metric_" prefix.')
+        all_metrics_columns = ['metric_' + m for m in metrics_list]
+
+        missing_columns = set(all_metrics_columns) - set(self.rosetta_docking_data.columns)
+        if missing_columns:
+            raise ValueError(f"Missing metric columns in data: {missing_columns}")
+
+        data = self.rosetta_docking_data[all_metrics_columns]
+        excluded_positions = set()
+        min_metric_labels = data.idxmin(axis=1)
+
+        if simple_exclusions:
+            for row_idx, metric_col_label in enumerate(min_metric_labels):
+                m = metric_col_label.replace('metric_', '')
+
+                for exclusion_group in exclusions:
+                    canonical_group = {_strip_prefix(x) for x in exclusion_group}
+                    if m in canonical_group:
+                        others = canonical_group - {m}
+                        for x in others:
+                            if x in metrics_indexes:
+                                col_idx = metrics_indexes[x]
+                                excluded_positions.add((row_idx, col_idx))
+
+                for metrics_group in combinations.values():
+                    canonical_group = [_strip_prefix(x) for x in metrics_group]
+                    if m in canonical_group:
+                        others = set(canonical_group) - {m}
+                        for y in others:
+                            if y in metrics_indexes:
+                                col_idx = metrics_indexes[y]
+                                excluded_positions.add((row_idx, col_idx))
+
+        data_array = data.to_numpy()
+
+        if by_metric_exclusions:
+            exclusions_map = {
+                _strip_prefix(metric): [_strip_prefix(x) for x in excluded]
+                for metric, excluded in exclusions.items()
+            }
+
+            for row_idx in range(data_array.shape[0]):
+                considered_metrics = set()
+
+                while True:
+                    min_value = np.inf
+                    min_col_idx = -1
+
+                    for col_idx, metric_value in enumerate(data_array[row_idx]):
+                        if col_idx not in considered_metrics and (row_idx, col_idx) not in excluded_positions:
+                            if metric_value < min_value:
+                                min_value = metric_value
+                                min_col_idx = col_idx
+
+                    if min_col_idx == -1:
+                        break
+
+                    considered_metrics.add(min_col_idx)
+
+                    min_metric_label = data.columns[min_col_idx]
+                    min_metric_name = _strip_prefix(min_metric_label)
+                    excluded_metrics = exclusions_map.get(min_metric_name, [])
+
+                    for excluded_metric in excluded_metrics:
+                        if excluded_metric in metrics_indexes:
+                            excluded_col_idx = metrics_indexes[excluded_metric]
+                            if (row_idx, excluded_col_idx) not in excluded_positions:
+                                excluded_positions.add((row_idx, excluded_col_idx))
+                                data_array[row_idx, excluded_col_idx] = np.inf
+
+        for new_metric_name, metrics_to_combine in combinations.items():
+            canonical_metrics = [_strip_prefix(m) for m in metrics_to_combine]
+            c_indexes = [metrics_indexes[m] for m in canonical_metrics if m in metrics_indexes]
+
+            if c_indexes:
+                combined_min = np.min(data_array[:, c_indexes], axis=1)
+
+                if np.all(np.isinf(combined_min)):
+                    print(f"Skipping combination for '{new_metric_name}' due to incompatible exclusions.")
+                    continue
+                self.rosetta_docking_data['metric_' + new_metric_name] = combined_min
+            else:
+                raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
+
+        if drop:
+            self.rosetta_docking_data.drop(columns=all_metrics_columns, inplace=True)
+
+        for new_metric_name, metrics_to_combine in combinations.items():
+            non_excluded_found = False
+            canonical_metrics = [_strip_prefix(m) for m in metrics_to_combine]
+
+            for metric in canonical_metrics:
+                col_idx = metrics_indexes.get(metric)
+                if col_idx is not None:
+                    column_values = data_array[:, col_idx]
+                    if not np.all(np.isinf(column_values)):
+                        non_excluded_found = True
+                        break
+
+            if not non_excluded_found:
+                print(f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'.")
 
     def rosettaDockingBindingEnergyLandscape(self, initial_threshold=3.5, vertical_line=None, xlim=None, ylim=None, clim=None, color=None,
                                              size=1.0, alpha=0.05, vertical_line_width=0.5, vertical_line_color='k', dataframe=None,
@@ -11091,6 +12022,198 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return best_poses_df
 
+    def getBestRosettaDockingPosesIteratively(
+        self,
+        metrics,
+        ligands=None,
+        distance_step=0.1,
+        angle_step=1.0,
+        fixed=None,
+        max_distance=None,
+        max_distance_step_shift=None,
+        verbose=False,
+        score_column='interface_delta_B',
+    ):
+        """
+        Iteratively select the best Rosetta docking poses for each model/ligand pair.
+
+        This mirrors :meth:`getBestDockingPosesIteratively`, but operates on
+        ``self.rosetta_docking`` and uses Rosetta metrics. Thresholds are gradually
+        relaxed (except for metrics listed in ``fixed``) until at least one pose is
+        accepted per model/ligand pair or no further relaxation is possible.
+        """
+
+        if self.rosetta_docking is None or self.rosetta_docking.empty:
+            raise ValueError("No Rosetta docking data available. Run analyseRosettaDocking first.")
+
+        if fixed is None:
+            fixed = []
+        elif isinstance(fixed, str):
+            fixed = [fixed]
+
+        metrics = metrics.copy()
+        non_fixed_metrics = set(metrics.keys()) - set(fixed)
+        if not non_fixed_metrics:
+            raise ValueError("You must leave at least one metric not fixed")
+
+        if ligands is not None:
+            data = self.rosetta_docking[self.rosetta_docking.index.get_level_values(1).isin(ligands)]
+        else:
+            data = self.rosetta_docking
+
+        protein_ligand_pairs = set(zip(
+            data.index.get_level_values(0),
+            data.index.get_level_values(1)
+        ))
+
+        # Ensure metric types are known for every requested metric
+        for metric in metrics.keys():
+            metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+            metric_type = self._get_rosetta_metric_type(metric_label)
+            if metric_type is None:
+                inferred_type = None
+                if metric_label in self.rosetta_docking.columns:
+                    if 'angle' in metric_label.lower() or 'torsion' in metric_label.lower():
+                        inferred_type = 'angle'
+                    else:
+                        inferred_type = 'distance'
+                if inferred_type is not None:
+                    self._set_rosetta_metric_type(metric_label, inferred_type)
+                else:
+                    raise ValueError(
+                        f"Metric type for {metric_label} not defined. "
+                        "Ensure metrics were created via combineRosettaDockingDistancesIntoMetrics "
+                        "or populate self.rosetta_docking_metric_type manually."
+                    )
+
+        extracted_pairs = set()
+        selected_indexes = []
+        current_distance_step = distance_step
+        step_shift_applied = False
+
+        while len(extracted_pairs) < len(protein_ligand_pairs):
+            if verbose:
+                ti = time.time()
+
+            best_poses = self.getBestRosettaDockingPoses(metrics, score_column=score_column)
+
+            new_selected_pairs = set()
+            for idx in best_poses.index:
+                pair = (idx[0], idx[1])
+                if pair not in extracted_pairs:
+                    selected_indexes.append(idx)
+                    new_selected_pairs.add(pair)
+
+            extracted_pairs.update(new_selected_pairs)
+
+            if len(extracted_pairs) >= len(protein_ligand_pairs):
+                break
+
+            remaining_pairs = protein_ligand_pairs - extracted_pairs
+            mask = [((idx[0], idx[1]) in remaining_pairs) for idx in data.index]
+            remaining_data = data[mask]
+
+            if remaining_data.empty:
+                break
+
+            metric_acceptance = {}
+            for metric in metrics:
+                if metric in fixed:
+                    continue
+                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+                metric_type = self._get_rosetta_metric_type(metric_label)
+                if metric_type is None:
+                    raise ValueError(f"Metric type for {metric_label} not defined.")
+
+                metric_values = remaining_data[metric_label]
+
+                threshold = metrics[metric]
+                if isinstance(threshold, (int, float)):
+                    if metric_type in ['distance', 'angle']:
+                        acceptance = metric_values <= threshold
+                    else:
+                        acceptance = metric_values >= threshold
+                elif isinstance(threshold, (tuple, list)):
+                    lower, upper = threshold
+                    acceptance = (metric_values >= lower) & (metric_values <= upper)
+                else:
+                    raise ValueError(f"Invalid threshold type for metric {metric}")
+
+                metric_acceptance[metric] = acceptance.sum()
+
+            ordered_metrics = sorted(
+                [(m, a) for m, a in metric_acceptance.items() if m not in fixed],
+                key=lambda x: x[1]
+            )
+
+            updated = False
+            for metric, _ in ordered_metrics:
+                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+                metric_type = self._get_rosetta_metric_type(metric_label)
+                if metric_type == 'distance':
+                    step = current_distance_step
+                elif metric_type == 'angle':
+                    step = angle_step
+                else:
+                    raise ValueError(f"Unknown metric type for {metric_label}")
+
+                threshold = metrics[metric]
+                if isinstance(threshold, (int, float)):
+                    new_value = threshold + step
+
+                    if metric_type == 'distance' and max_distance is not None:
+                        if not step_shift_applied and new_value >= max_distance:
+                            if max_distance_step_shift is not None:
+                                current_distance_step = max_distance_step_shift
+                                step_shift_applied = True
+                                if verbose:
+                                    print(
+                                        f"Max distance {max_distance} reached for metric {metric}. "
+                                        f"Applying step shift to {current_distance_step}."
+                                    )
+                            else:
+                                new_value = max_distance
+                                metrics[metric] = new_value
+                                if verbose:
+                                    print(
+                                        f"Max distance {max_distance} reached for metric {metric}. "
+                                        "Terminating iteration."
+                                    )
+                                updated = True
+                                break
+
+                    metrics[metric] = new_value
+                    updated = True
+                    break
+
+                elif isinstance(threshold, (tuple, list)):
+                    lower, upper = threshold
+                    metrics[metric] = (lower - step, upper + step)
+                    updated = True
+                    break
+                else:
+                    raise ValueError(f"Invalid threshold type for metric {metric}")
+
+            if not updated:
+                if verbose:
+                    print("No metrics were updated. Terminating iteration.")
+                break
+
+            if verbose:
+                elapsed_time = time.time() - ti
+                print(
+                    f"Selected pairs: {len(extracted_pairs)}/{len(protein_ligand_pairs)}, "
+                    f"Current thresholds: {metrics}, Time elapsed: {elapsed_time:.2f}s",
+                    end='\r'
+                )
+
+        if selected_indexes:
+            best_poses = data.loc[selected_indexes]
+        else:
+            best_poses = pd.DataFrame()
+
+        return best_poses
+
     def extractRosettaDockingModels(self, docking_folder, input_df, output_folder, separator='_'):
         """
         Extract models based on an input DataFrame with index ['Model', 'Ligand', 'Pose'].
@@ -11117,36 +12240,94 @@ make sure of reading the target sequences with the function readTargetSequences(
         models = []
         missing_models = []
 
-        # Check if params were given
-        params = {}
-        for ligand in self.rosetta_docking.index.levels[1]:
+        shared_params = []
+        params_folder = os.path.join(docking_folder, "params")
+        if os.path.isdir(params_folder):
+            for entry in sorted(os.listdir(params_folder)):
+                if entry.endswith(".params"):
+                    shared_params.append(os.path.join(params_folder, entry))
+
+        ligand_params = {}
+        if self.rosetta_docking is not None:
+            ligands = self.rosetta_docking.index.levels[1]
+        else:
+            ligands = []
+        for ligand in ligands:
             ligand_folder = os.path.join(docking_folder, "ligand_params", ligand)
             if os.path.exists(ligand_folder):
-                params[ligand] = os.path.join(ligand_folder, ligand+'.params')
+                ligand_params[ligand] = os.path.join(ligand_folder, f"{ligand}.params")
 
         for index, row in input_df.iterrows():
             model, ligand, pose = index
 
-            output_model_dir = os.path.join(docking_folder, "output_models", f"{model}{separator}{ligand}")
-            if not os.path.exists(output_model_dir):
-                missing_models.append(model)
+            output_models_root = os.path.join(docking_folder, "output_models")
+            sep_candidates = []
+            if separator:
+                sep_candidates.append(separator)
+            sep_candidates.extend(['-', '_'])
+            seen = set()
+            sep_candidates = [s for s in sep_candidates if not (s in seen or seen.add(s))]
+
+            output_model_dir = None
+            used_separator = None
+            for sep_candidate in sep_candidates:
+                candidate_dir = os.path.join(output_models_root, f"{model}{sep_candidate}{ligand}")
+                if os.path.exists(candidate_dir):
+                    output_model_dir = candidate_dir
+                    used_separator = sep_candidate
+                    break
+
+            if output_model_dir is None:
+                missing_models.append(f"{model}{separator}{ligand}")
                 continue
 
-            silent_file = os.path.join(output_model_dir, f"{model}{separator}{ligand}.out")
+            silent_file = os.path.join(output_model_dir, f"{model}{used_separator}{ligand}.out")
             if not os.path.exists(silent_file):
-                missing_models.append(model)
+                missing_models.append(f"{model}{used_separator}{ligand}")
                 continue
 
-            best_model_tag =  row['description']
+            def _sanitize_silent_file(path):
+                needs_clean = False
+                with open(path) as sf:
+                    for line in sf:
+                        if line.startswith("REMARK AddedChainName"):
+                            needs_clean = True
+                            break
+                if not needs_clean:
+                    return path, None
+                sanitized_path = path + "._clean"
+                with open(path) as src, open(sanitized_path, "w") as dst:
+                    for line in src:
+                        if line.startswith("REMARK AddedChainName"):
+                            continue
+                        dst.write(line)
+                return sanitized_path, sanitized_path
 
-            command = f"{executable} -silent {silent_file} -tags {best_model_tag}"
-            if params is not None:
-                command += f" -extra_res_fa {params[ligand]} "
-            os.system(command)
+            sanitized_silent_file, temp_silent_path = _sanitize_silent_file(silent_file)
+
+            if 'description' in row.index:
+                best_model_tag = row['description']
+            else:
+                pose_str = f"{int(pose):04d}" if isinstance(pose, (int, float)) else str(pose)
+                best_model_tag = f"{model}_{pose_str}"
+
+            command = f"{executable} -silent {sanitized_silent_file} -tags {best_model_tag}"
+            for param_file in shared_params:
+                command += f" -extra_res_fa {param_file} "
+            if ligand in ligand_params:
+                command += f" -extra_res_fa {ligand_params[ligand]} "
+            exit_code = os.system(command)
 
             pdb_filename = f"{best_model_tag}.pdb"
 
-            shutil.move(pdb_filename, output_folder+'/'+pdb_filename)
+            if exit_code == 0 and os.path.exists(pdb_filename):
+                shutil.move(pdb_filename, os.path.join(output_folder, pdb_filename))
+                models.append(os.path.join(output_folder, pdb_filename))
+            else:
+                print(f"Failed to extract pose '{best_model_tag}' from {silent_file}.")
+
+            if temp_silent_path and os.path.exists(temp_silent_path):
+                os.remove(temp_silent_path)
 
         self.getModelsSequences()
 
@@ -12429,6 +13610,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         return_jobs=False,
         verbose=False,
         skip_finished=False,
+        pyrosetta_env=None,
     ):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
@@ -12472,12 +13654,42 @@ make sure of reading the target sequences with the function readTargetSequences(
             number of calculations, so is off by default).
         binding_energy : str
             Comma-separated list of chains for which calculate the binding energy.
+        pyrosetta_env : str, optional
+            Name of the conda environment to activate before invoking the PyRosetta script.
+        param_files : Union[str, Sequence[str]], optional
+            Additional Rosetta params files or directories containing params files to
+            mirror into `docking_folder/params` before running the PyRosetta analysis.
         """
 
         if not os.path.exists(rosetta_folder):
             raise ValueError(
                 'The Rosetta calculation folder: "%s" does not exists!' % rosetta_folder
             )
+
+        if param_files is not None:
+            if isinstance(param_files, (str, os.PathLike)):
+                param_sources = [param_files]
+            else:
+                param_sources = list(param_files)
+
+            resolved_params: List[str] = []
+            for source in param_sources:
+                if os.path.isdir(source):
+                    for entry in os.listdir(source):
+                        if entry.endswith(".params"):
+                            resolved_params.append(os.path.join(source, entry))
+                else:
+                    resolved_params.append(source)
+
+            params_folder = os.path.join(rosetta_folder, "params")
+            os.makedirs(params_folder, exist_ok=True)
+            for param_path in resolved_params:
+                abs_param = os.path.abspath(param_path)
+                if not os.path.exists(abs_param):
+                    raise FileNotFoundError(f"Parameter file not found: {abs_param}")
+                destination = os.path.join(params_folder, os.path.basename(abs_param))
+                if os.path.abspath(destination) != abs_param:
+                    shutil.copyfile(abs_param, destination)
 
         # Write atom_pairs dictionary to json file
         if atom_pairs != None:
@@ -12517,7 +13729,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += "--cpus " + str(cpus) + " "
         if verbose:
             command += "--verbose "
-        command += "\n"
 
         # Compile individual models for each job
         if return_jobs:
@@ -12531,7 +13742,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if skip_finished and os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
                     continue
 
-                commands.append(command.replace("MODEL", m))
+                job_command = command.replace("MODEL", m)
+                if pyrosetta_env:
+                    job_command = _wrap_pyrosetta_command(job_command, pyrosetta_env)
+                commands.append(job_command)
 
             print("Returning jobs for running the analysis in parallel.")
             print(
@@ -12549,13 +13763,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                     count += 1
 
             if count:
-                required = {}
-                installed = {pkg.key for pkg in pkg_resources.working_set}
-                if 'pyrosetta' not in installed:
-                    raise ValueError('PyRosetta was not found in your Python environment.\
-                    Consider using return_jobs=True or activating an environment the does have it.')
-                else:
-                    os.system(command)
+                if not pyrosetta_env:
+                    installed = {pkg.key for pkg in pkg_resources.working_set}
+                    if 'pyrosetta' not in installed:
+                        raise ValueError('PyRosetta was not found in your Python environment.\
+                        Consider using return_jobs=True or activating an environment the does have it.')
+                exec_command = command
+                if pyrosetta_env:
+                    exec_command = _wrap_pyrosetta_command(exec_command, pyrosetta_env)
+                os.system(exec_command)
 
         # Compile dataframes into rosetta_data attributes
         self.rosetta_data = []

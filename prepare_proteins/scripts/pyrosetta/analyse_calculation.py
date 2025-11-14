@@ -2,10 +2,45 @@ from pyrosetta import *
 import argparse
 import json
 import numpy as np
+import os
 import pandas as pd
+import shlex
 from pyrosetta.rosetta.core.scoring import bb_rmsd
 
 from multiprocessing import Pool, cpu_count
+
+
+def _param_files_from_dir(params_dir):
+    if not params_dir:
+        return []
+    if isinstance(params_dir, (list, tuple, set)):
+        files = []
+        for directory in params_dir:
+            files.extend(_param_files_from_dir(directory))
+        return files
+    if not os.path.isdir(params_dir):
+        return []
+    entries = sorted(
+        entry
+        for entry in os.listdir(params_dir)
+        if entry.endswith('.params') or entry.endswith('.param')
+    )
+    return [os.path.join(params_dir, entry) for entry in entries]
+
+
+def _collect_param_dirs(rosetta_folder):
+    dirs = []
+    user_params = os.path.join(rosetta_folder, 'params')
+    if os.path.isdir(user_params):
+        dirs.append(user_params)
+
+    ligand_params_root = os.path.join(rosetta_folder, 'ligand_params')
+    if os.path.isdir(ligand_params_root):
+        for entry in sorted(os.listdir(ligand_params_root)):
+            ligand_dir = os.path.join(ligand_params_root, entry)
+            if os.path.isdir(ligand_dir):
+                dirs.append(ligand_dir)
+    return dirs
 
 # ## Define input variables
 parser = argparse.ArgumentParser()
@@ -50,8 +85,16 @@ if binding_energy != None:
     binding_energy_chains = binding_energy.split(',')
     binding_energy = True
 
-# Initialise PyRosetta environment
-init('-mute all')
+# Collect params directories before initializing PyRosetta
+params_dirs = _collect_param_dirs(rosetta_folder)
+param_files_for_init = _param_files_from_dir(params_dirs)
+extra_res_flag = " ".join(f"-extra_res_fa {shlex.quote(p)}" for p in param_files_for_init)
+init_args = "-mute all"
+if extra_res_flag:
+    init_args = f"{init_args} {extra_res_flag}"
+
+# Initialise PyRosetta environment with extra residue files if available
+init(init_args)
 
 # Get silent files
 silent_file = {}
@@ -74,10 +117,23 @@ if silent_file == {}:
     raise ValueError(message)
 
 
-# Check if params were given
-params = None
-if os.path.exists(rosetta_folder+'/params'):
-    params = rosetta_folder+'/params'
+params = params_dirs if params_dirs else None
+
+
+_LOADED_PARAM_FILES = set()
+
+
+def _ensure_params_loaded(param_files):
+    to_load = [p for p in param_files if p not in _LOADED_PARAM_FILES]
+    if not to_load:
+        return
+    tmp_pose = Pose()
+    generate_nonstandard_residue_set(tmp_pose, to_load)
+    _LOADED_PARAM_FILES.update(to_load)
+
+
+if params is not None:
+    _ensure_params_loaded(_param_files_from_dir(params))
 
 # Read atom_pairs dictionary
 if atom_pairs != None:
@@ -90,8 +146,8 @@ def getPoseFromTag(tag, silent_file, params_dir=None):
     # Get param files
     params = []
     if params_dir != None:
-        for p in os.listdir(params_dir):
-            params.append(params_dir+'/'+p)
+        params = _param_files_from_dir(params_dir)
+        _ensure_params_loaded(params)
 
     #Read silent file data
     sfd = pyrosetta.rosetta.core.io.silent.SilentFileData(pyrosetta.rosetta.core.io.silent.SilentFileOptions())
@@ -101,10 +157,6 @@ def getPoseFromTag(tag, silent_file, params_dir=None):
 
     #Create auxiliary pose to work with
     temp_pose = Pose()
-
-    # Read params files
-    if params_dir != None:
-        generate_nonstandard_residue_set(temp_pose, params)
 
     ss.fill_pose(temp_pose)
 
@@ -117,8 +169,8 @@ def getTagsFromSilent(silent_file, params_dir=None):
     # Get param files
     params = []
     if params_dir != None:
-        for p in os.listdir(params_dir):
-            params.append(params_dir+'/'+p)
+        params = _param_files_from_dir(params_dir)
+        _ensure_params_loaded(params)
 
     #Read silent file data
     sfd = pyrosetta.rosetta.core.io.silent.SilentFileData(pyrosetta.rosetta.core.io.silent.SilentFileOptions())
@@ -145,8 +197,8 @@ def readPosesFromSilent(silent_file, params_dir=None):
     # Get param files
     params = []
     if params_dir != None:
-        for p in os.listdir(params_dir):
-            params.append(params_dir+'/'+p)
+        params = _param_files_from_dir(params_dir)
+        _ensure_params_loaded(params)
 
     #Read silent file data
     sfd = pyrosetta.rosetta.core.io.silent.SilentFileData(pyrosetta.rosetta.core.io.silent.SilentFileOptions())
@@ -161,9 +213,6 @@ def readPosesFromSilent(silent_file, params_dir=None):
         temp_pose = Pose()
 
         # Read params files
-        if params_dir != None:
-            generate_nonstandard_residue_set(temp_pose, params)
-
         ss.fill_pose(temp_pose)
 
         #Assign tag as structure name
@@ -646,10 +695,8 @@ def calculate_rmsd_to_native(silent_file, reference_pdb, params_dir=None):
     rmsd = []
     initial = Pose()
     if params_dir:
-        params = []
-        for p in os.listdir(params_dir):
-            params.append(params_dir+'/'+p)
-        generate_nonstandard_residue_set(initial, params)
+        param_files = _param_files_from_dir(params_dir)
+        _ensure_params_loaded(param_files)
     pose_from_file(initial, reference_pdb)
     initial.pdb_info().name("native PDB")
     relaxed_structures = readPosesFromSilent(silent_file, params_dir)
