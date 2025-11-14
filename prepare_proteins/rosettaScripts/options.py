@@ -34,8 +34,18 @@ class flags:
         self.relax = False
         self.ligand_docking = False
 
-    def addOption(self, option, value=None):
-        self.others[option] = value
+    def addOption(self, option, value=None, append=False):
+        if append:
+            existing = self.others.get(option)
+            if existing is None:
+                self.others[option] = [value]
+            else:
+                if isinstance(existing, list):
+                    existing.append(value)
+                else:
+                    self.others[option] = [existing, value]
+        else:
+            self.others[option] = value
 
     def add_relax_options(self):
         self.relax = True
@@ -128,10 +138,13 @@ class flags:
 
             if self.others != {}:
                 for option in self.others:
-                    if self.others[option] == None:
-                        ff.write('-'+option+'\n')
-                    else:
-                        ff.write('-'+option+' '+self.others[option]+'\n')
+                    raw_value = self.others[option]
+                    values = raw_value if isinstance(raw_value, list) else [raw_value]
+                    for value in values:
+                        if value == None:
+                            ff.write('-'+option+'\n')
+                        else:
+                            ff.write('-'+option+' '+value+'\n')
 
             if self.flags_files != []:
                 for flag_file in self.flags_files:
