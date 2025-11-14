@@ -86,3 +86,11 @@ ZN              1
 [ atoms ]
 ; id    at type         res nr  residu name     at name  cg nr  charge
    1    Zn                  1       ZN             ZN      1    2.00000
+
+[ moleculetype ]
+; molname       nrexcl
+CU              1
+
+[ atoms ]
+; id    at type         res nr  residu name     at name  cg nr  charge
+   1    CU                  1       CU             CU      1    2.00000

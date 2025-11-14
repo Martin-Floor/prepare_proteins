@@ -1,5 +1,5 @@
 Br                79.90000	; bromine
-C                 12.01000	; sp2 C carbonyl group 
+C                 12.01000	; sp2 C carbonyl group
 CA                12.01000	; sp2 C pure aromatic (benzene)
 CB                12.01000	; sp2 aromatic C, 5&6 membered ring junction
 CC                12.01000	; sp2 aromatic C, 5 memb. ring HIS
@@ -37,7 +37,7 @@ NB                14.01000	; sp2 N in 5 memb.ring w/LP (HIS,ADE,GUA)
 NC                14.01000	; sp2 N in 6 memb.ring w/LP (ADE,GUA)
 N2                14.01000	; sp2 N in amino groups
 N3                14.01000	; sp3 N for charged amino groups (Lys, etc)
-N*                14.01000	; sp2 N 
+N*                14.01000	; sp2 N
 O                 16.00000	; carbonyl group oxygen
 OW                16.00000	; oxygen in TIP3P water
 OH                16.00000	; oxygen in hydroxyl group
