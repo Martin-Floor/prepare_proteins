@@ -5480,7 +5480,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             use_exp_torsion_angle_prefs=True, use_basic_knowledge=True, only_scorefile=False,
                             enforce_chirality=True, skip_conformers_if_found=False, grid_width=10.0,
                             n_jobs=1, python2_executable='python2.7', store_initial_placement=False,
-                            pdb_output=False, distances=None, angles=None, parallelisation="srun",
+                            pdb_output=False, atom_pairs=None, angles=None, parallelisation="srun",
                             executable='rosetta_scripts.mpi.linuxgccrelease', ligand_chain='B', nstruct=100):
 
         """
@@ -5541,10 +5541,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             Chain identifier for the ligand. Default is 'B'.
         nstruct : int, optional
             Number of output structures to generate. Default is 100.
-        distances : dict, optional
-            Per-model/ligand distance filters in the form {model: {ligand: ((chain, res, atom), (chain, res, atom))}}.
-            Atom tuples can omit the ligand chain/residue by specifying only the atom name; the function will assume
-            the ligand chain/residue constants defined in the method.
+        atom_pairs : dict, optional
+            Distance definitions matching the format accepted by :meth:`analyseRosettaDocking`:
+            ``{model: {ligand: [((chain, res, atom), ligand_atom), ...]}}`` where ``ligand_atom`` may be either a tuple
+            ``(chain, res, atom)`` or the ligand atom name. The function will create Rosetta ``AtomicDistance`` filters
+            for each pair and will resolve ligand atom names using the generated ligand params.
         angles : dict, optional
             Currently unsupported; RosettaScripts does not provide a convenient ``atomicAngle`` mover.
         cst_files : dict, optional
@@ -5993,6 +5994,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             for mol in suppl:
                 if mol is None:
                     continue
+                mol = Chem.AddHs(mol)
                 name = mol.GetProp("_Name")
                 ligand_dir = os.path.join(ligand_params_folder, name)
                 os.makedirs(ligand_dir, exist_ok=True)
@@ -6005,6 +6007,101 @@ make sure of reading the target sequences with the function readTargetSequences(
                                                           use_basic_knowledge=use_basic_knowledge,
                                                           enforce_chirality=enforce_chirality)
                 write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
+
+        model_ligand_residue_index: Dict[str, int] = {}
+        for model in self:
+            residue_count = 0
+            for residue in self.structures[model].get_residues():
+                if residue.get_resname() == "HOH":
+                    continue
+                residue_count += 1
+            if residue_count == 0:
+                raise ValueError(f"Model '{model}' has no residues to anchor the ligand.")
+            ligand_residue_index = residue_count + 1
+            model_ligand_residue_index[model] = ligand_residue_index
+
+        requested_atom_pairs: Dict[
+            Tuple[str, str],
+            List[Tuple[Tuple[str, int, str], Union[str, Tuple[str, int, str]]]],
+        ] = {}
+        ligand_atom_cache: Dict[str, Dict[str, Tuple[str, int, str]]] = {}
+        if atom_pairs is not None:
+            if not isinstance(atom_pairs, dict):
+                raise ValueError(
+                    "atom_pairs must be a dictionary structured as {model: {ligand: [(protein_atom, ligand_atom), ...]}}."
+                )
+
+            available_models = set(self.structures.keys())
+            available_ligands = set(ligands)
+
+            for model_name, ligand_dict in atom_pairs.items():
+                if model_name not in available_models:
+                    raise ValueError(
+                        f"Model '{model_name}' from atom_pairs is not part of the docking setup."
+                    )
+                if not isinstance(ligand_dict, dict):
+                    raise ValueError(f"atom_pairs[{model_name!r}] must map ligands to atom-pair lists.")
+
+                for ligand_name, pair_entries in ligand_dict.items():
+                    if ligand_name not in available_ligands:
+                        raise ValueError(
+                            f"Ligand '{ligand_name}' from atom_pairs is not part of the prepared ligand set."
+                        )
+                    if not pair_entries:
+                        continue
+                    normalized_pairs: List[
+                        Tuple[Tuple[str, int, str], Union[str, Tuple[str, int, str]]]
+                    ] = []
+                    for entry in pair_entries:
+                        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                            raise ValueError(
+                                "Each atom_pairs entry must be a 2-tuple: ((chain, residue, atom), ligand_atom)."
+                            )
+                        protein_atom, ligand_atom = entry
+                        if not (isinstance(protein_atom, (list, tuple)) and len(protein_atom) == 3):
+                            raise ValueError(
+                                "Protein atoms in atom_pairs must be (chain, residue, atom) tuples."
+                            )
+                        chain_id, resseq, atom_name = protein_atom
+                        try:
+                            resseq_int = int(resseq)
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"Residue index '{resseq}' in atom_pairs for model '{model_name}' "
+                                f"and ligand '{ligand_name}' is not an integer."
+                            ) from exc
+                        normalized_pairs.append(((str(chain_id), resseq_int, str(atom_name)), ligand_atom))
+                    if normalized_pairs:
+                        requested_atom_pairs[(model_name, ligand_name)] = normalized_pairs
+
+        def _resolve_ligand_atom_tuple(ligand_name: str, atom_identifier, override=None):
+            if isinstance(atom_identifier, str):
+                mapping = ligand_atom_cache.get(ligand_name)
+                if mapping is None:
+                    mapping = _parse_ligand_atom_map(docking_folder, ligand_name)
+                    ligand_atom_cache[ligand_name] = mapping
+                if atom_identifier not in mapping:
+                    available = ", ".join(sorted(mapping.keys())[:10])
+                    raise ValueError(
+                        f"Atom '{atom_identifier}' not found in ligand '{ligand_name}'. "
+                        f"Available atoms: {available}{'...' if len(mapping) > 10 else ''}"
+                    )
+                chain_id, resseq, atom_name = mapping[atom_identifier]
+                if override is not None:
+                    chain_id, resseq = override
+                return (str(chain_id), int(resseq), str(atom_name))
+            if isinstance(atom_identifier, (list, tuple)) and len(atom_identifier) == 3:
+                chain_id, resseq, atom_name = atom_identifier
+                try:
+                    resseq_int = int(resseq)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Residue index '{resseq}' in ligand atom tuple for ligand '{ligand_name}' is not an integer."
+                    ) from exc
+                return (str(chain_id), resseq_int, str(atom_name))
+            raise ValueError(
+                "Ligand atoms in atom_pairs must be either an atom name string or a (chain, residue, atom) tuple."
+            )
 
         has_external_params = False
         params_folder = os.path.join(docking_folder, "params")
@@ -6153,29 +6250,28 @@ make sure of reading the target sequences with the function readTargetSequences(
                 protocol.append(high_res_dock)
                 protocol.append(reporting)
 
-                # Add distance filters
-                if distances:
+                requested_pairs = requested_atom_pairs.get((model, ligand))
+                if requested_pairs:
+                    normalized_pairs = []
+                    for protein_atom, ligand_atom in requested_pairs:
+                        override = (ligand_chain, model_ligand_residue_index[model])
+                        ligand_tuple = _resolve_ligand_atom_tuple(ligand, ligand_atom, override=override)
+                        normalized_pairs.append((protein_atom, ligand_tuple))
 
-                    # Define ligand residue as the consecutive from the last residue
-                    for r in self.structures[model].get_residues():
-                        r
-                    ligand_residue = r.id[1]+1
-
-                    for atoms in distances[model][ligand]:
-
-                        if isinstance(atoms[0], str):
-                            atoms = ((ligand_chain, ligand_residue, atoms[0]), atoms[1])
-                        if isinstance(atoms[1], str):
-                            atoms = (atoms[0], (ligand_chain, ligand_residue, atoms[1]))
-
+                    for protein_atom, ligand_tuple in normalized_pairs:
                         label = "distance_"
-                        label += "_".join([str(x) for x in atoms[0]]) + "-"
-                        label += "_".join([str(x) for x in atoms[1]])
+                        label += "_".join([str(x) for x in protein_atom]) + "-"
+                        label += "_".join([str(x) for x in ligand_tuple])
 
-                        d = rosettaScripts.filters.atomicDistance(name=label,
-                            residue1=str(atoms[0][1])+atoms[0][0], atomname1=atoms[0][2],
-                            residue2=str(atoms[1][1])+atoms[1][0], atomname2=atoms[1][2],
-                            distance=5.0, confidence=0.0)
+                        d = rosettaScripts.filters.atomicDistance(
+                            name=label,
+                            residue1=f"{protein_atom[1]}{protein_atom[0]}",
+                            atomname1=protein_atom[2],
+                            residue2=f"{ligand_tuple[1]}{ligand_tuple[0]}",
+                            atomname2=ligand_tuple[2],
+                            distance=5.0,
+                            confidence=0.0,
+                        )
                         xml.addFilter(d)
                         protocol.append(d)
 
@@ -10820,6 +10916,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             if distance_columns:
                 distance_df = scores[distance_columns]
                 scores = scores.drop(columns=distance_columns)
+                if not distance_df.empty:
+                    distance_df = distance_df.sort_index(level=['Model', 'Ligand', 'Pose'])
             elif atom_pairs:
                 distance_file = os.path.join(distances_folder, f"{model_ligand}.csv")
                 if os.path.exists(distance_file):
@@ -10831,7 +10929,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             filtered = filtered[mask]
                         filtered['Ligand'] = ligand
                         filtered['Model'] = base_model
-                        distance_df = filtered.set_index(['Model', 'Ligand', 'Pose'])
+                        distance_df = filtered.set_index(['Model', 'Ligand', 'Pose']).sort_index(level=['Model', 'Ligand', 'Pose'])
 
             if not distance_df.empty:
                 self.rosetta_docking_distances.setdefault(base_model, {})[ligand] = distance_df
@@ -11937,7 +12035,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             exclude_models=None,
             exclude_ligands=None,
             exclude_pairs=None,
-            score_column='interface_delta_B'
+            score_column='interface_delta_B',
+            docking_df=None,
         ):
         """
         Get best docking poses based on the best SCORE and a set of metrics with specified thresholds.
@@ -11961,6 +12060,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         score_column : str, optional
             Column name to use for scoring. Default is 'interface_delta_B'.
 
+        Parameters
+        ==========
+        docking_df : pandas.DataFrame, optional
+            Custom Rosetta docking results to analyze. Must be indexed by (Model, Ligand, Pose)
+            and contain the requested metric columns. Defaults to ``self.rosetta_docking``.
+
         Returns
         =======
         pandas.DataFrame
@@ -11974,17 +12079,19 @@ make sure of reading the target sequences with the function readTargetSequences(
         if exclude_pairs is None:
             exclude_pairs = []
 
+        source_df = docking_df if docking_df is not None else self.rosetta_docking
+        if source_df is None or source_df.empty:
+            raise ValueError("No Rosetta docking data available. Run analyseRosettaDocking first.")
+
         best_poses = []
         failed = []
 
-        for model in self.rosetta_docking.index.get_level_values('Model').unique():
+        for model in source_df.index.get_level_values('Model').unique():
 
             if model in exclude_models:
                 continue
 
-            model_series = self.rosetta_docking[
-                self.rosetta_docking.index.get_level_values("Model") == model
-            ]
+            model_series = source_df[source_df.index.get_level_values("Model") == model]
 
             for ligand in model_series.index.get_level_values('Ligand').unique():
 
@@ -12024,7 +12131,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 best_pose_idx = ligand_data[score_column].idxmin()
                 best_poses.append(best_pose_idx)
 
-        best_poses_df = self.rosetta_docking.loc[best_poses]
+        best_poses_df = source_df.loc[best_poses]
 
         if return_failed:
             return failed, best_poses_df
@@ -12042,17 +12149,26 @@ make sure of reading the target sequences with the function readTargetSequences(
         max_distance_step_shift=None,
         verbose=False,
         score_column='interface_delta_B',
+        docking_df=None,
     ):
         """
         Iteratively select the best Rosetta docking poses for each model/ligand pair.
 
         This mirrors :meth:`getBestDockingPosesIteratively`, but operates on
-        ``self.rosetta_docking`` and uses Rosetta metrics. Thresholds are gradually
+        ``self.rosetta_docking`` (or a user-supplied DataFrame) and uses Rosetta metrics. Thresholds are gradually
         relaxed (except for metrics listed in ``fixed``) until at least one pose is
         accepted per model/ligand pair or no further relaxation is possible.
+
+        Parameters
+        ----------
+        docking_df : pandas.DataFrame, optional
+            Custom Rosetta docking results to analyze. Must be indexed by (Model, Ligand, Pose)
+            and contain the requested metric columns. Defaults to ``self.rosetta_docking``.
         """
 
-        if self.rosetta_docking is None or self.rosetta_docking.empty:
+        source_df = docking_df if docking_df is not None else self.rosetta_docking
+
+        if source_df is None or source_df.empty:
             raise ValueError("No Rosetta docking data available. Run analyseRosettaDocking first.")
 
         if fixed is None:
@@ -12066,9 +12182,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             raise ValueError("You must leave at least one metric not fixed")
 
         if ligands is not None:
-            data = self.rosetta_docking[self.rosetta_docking.index.get_level_values(1).isin(ligands)]
+            data = source_df[source_df.index.get_level_values(1).isin(ligands)]
         else:
-            data = self.rosetta_docking
+            data = source_df
 
         protein_ligand_pairs = set(zip(
             data.index.get_level_values(0),
@@ -12104,7 +12220,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if verbose:
                 ti = time.time()
 
-            best_poses = self.getBestRosettaDockingPoses(metrics, score_column=score_column)
+            best_poses = self.getBestRosettaDockingPoses(metrics, score_column=score_column, docking_df=data)
 
             new_selected_pairs = set()
             for idx in best_poses.index:
@@ -12266,6 +12382,31 @@ make sure of reading the target sequences with the function readTargetSequences(
             if os.path.exists(ligand_folder):
                 ligand_params[ligand] = os.path.join(ligand_folder, f"{ligand}.params")
 
+        pose_padding_cache: Dict[Tuple[str, str], int] = {}
+
+        def _infer_pose_padding(path: str, model_name: str) -> int:
+            """
+            Determine zero-padding by reading SCORE tags for this model.
+            """
+            padding = 4
+            try:
+                with open(path) as sf:
+                    for line in sf:
+                        if not line.startswith("SCORE:"):
+                            continue
+                        parts = line.strip().split()
+                        if not parts or parts[-1] == "description":
+                            continue
+                        tag = parts[-1]
+                        if not tag.startswith(f"{model_name}_"):
+                            continue
+                        suffix = tag[len(model_name) + 1 :]
+                        if suffix.isdigit():
+                            padding = max(padding, len(suffix))
+            except OSError:
+                return padding
+            return padding
+
         for index, row in input_df.iterrows():
             model, ligand, pose = index
 
@@ -12295,36 +12436,28 @@ make sure of reading the target sequences with the function readTargetSequences(
                 missing_models.append(f"{model}{used_separator}{ligand}")
                 continue
 
-            def _sanitize_silent_file(path):
-                needs_clean = False
-                with open(path) as sf:
-                    for line in sf:
-                        if line.startswith("REMARK AddedChainName"):
-                            needs_clean = True
-                            break
-                if not needs_clean:
-                    return path, None
-                sanitized_path = path + "._clean"
-                with open(path) as src, open(sanitized_path, "w") as dst:
-                    for line in src:
-                        if line.startswith("REMARK AddedChainName"):
-                            continue
-                        dst.write(line)
-                return sanitized_path, sanitized_path
-
-            sanitized_silent_file, temp_silent_path = _sanitize_silent_file(silent_file)
-
             if 'description' in row.index:
                 best_model_tag = row['description']
             else:
-                pose_str = f"{int(pose):04d}" if isinstance(pose, (int, float)) else str(pose)
+                padding_key = (silent_file, model)
+                pose_padding = pose_padding_cache.get(padding_key)
+                if pose_padding is None:
+                    pose_padding = _infer_pose_padding(silent_file, model)
+                    pose_padding_cache[padding_key] = pose_padding
+
+                if isinstance(pose, (int, float)) and not isinstance(pose, bool):
+                    pose_value = int(pose)
+                    pose_str = str(pose_value).zfill(pose_padding)
+                else:
+                    pose_str = str(pose)
                 best_model_tag = f"{model}_{pose_str}"
 
-            command = f"{executable} -silent {sanitized_silent_file} -tags {best_model_tag}"
+            command = f"{executable} -silent {silent_file} -tags {best_model_tag}"
             for param_file in shared_params:
                 command += f" -extra_res_fa {param_file} "
             if ligand in ligand_params:
                 command += f" -extra_res_fa {ligand_params[ligand]} "
+            command += " 2>/dev/null"
             exit_code = os.system(command)
 
             pdb_filename = f"{best_model_tag}.pdb"
@@ -12334,9 +12467,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 models.append(os.path.join(output_folder, pdb_filename))
             else:
                 print(f"Failed to extract pose '{best_model_tag}' from {silent_file}.")
-
-            if temp_silent_path and os.path.exists(temp_silent_path):
-                os.remove(temp_silent_path)
 
         self.getModelsSequences()
 
