@@ -12501,6 +12501,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Paths to the extracted PDB files.
         """
 
+        rosetta_folder = os.path.abspath(rosetta_folder)
+        output_folder = os.path.abspath(output_folder)
         os.makedirs(output_folder, exist_ok=True)
 
         executable = "extract_pdbs.linuxgccrelease"
@@ -12547,7 +12549,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             return padding
 
         extraction_jobs: Dict[str, List[str]] = {}
-        tag_destination: Dict[Tuple[str, str], str] = {}
 
         for index, row in input_df.iterrows():
             if isinstance(index, tuple):
@@ -12590,28 +12591,37 @@ make sure of reading the target sequences with the function readTargetSequences(
                 best_model_tag = f"{model}_{pose_str}"
 
             extraction_jobs.setdefault(silent_file, []).append(best_model_tag)
-            tag_destination[(silent_file, best_model_tag)] = os.path.join(
-                output_folder, f"{best_model_tag}.pdb"
-            )
 
         for silent_file, tags in extraction_jobs.items():
-            command = f"{executable} -silent {silent_file} -tags " + " ".join(tags)
+            if overwrite:
+                tags_to_extract = tags
+            else:
+                tags_to_extract = [
+                    tag
+                    for tag in tags
+                    if not os.path.exists(os.path.join(output_folder, f"{tag}.pdb"))
+                ]
+
+            if not tags_to_extract:
+                continue
+
+            command = f"{executable} -silent {silent_file} -tags " + " ".join(tags_to_extract)
             for param_file in extra_res_files:
                 command += f" -extra_res_fa {param_file}"
             command += " 2>/dev/null"
 
-            exit_code = os.system(command)
+            cwd = os.getcwd()
+            try:
+                os.chdir(output_folder)
+                exit_code = os.system(command)
+            finally:
+                os.chdir(cwd)
 
-            for tag in tags:
-                pdb_filename = f"{tag}.pdb"
-                destination = tag_destination[(silent_file, tag)]
-                if exit_code == 0 and os.path.exists(pdb_filename):
-                    if not overwrite and os.path.exists(destination):
-                        os.remove(pdb_filename)
-                        continue
-                    shutil.move(pdb_filename, destination)
-                    models.append(destination)
-                elif not os.path.exists(pdb_filename):
+            for tag in tags_to_extract:
+                pdb_path = os.path.join(output_folder, f"{tag}.pdb")
+                if exit_code == 0 and os.path.exists(pdb_path):
+                    models.append(pdb_path)
+                elif not os.path.exists(pdb_path):
                     print(f"Failed to extract pose '{tag}' from {silent_file}.")
 
         self.getModelsSequences()
