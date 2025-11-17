@@ -57,6 +57,8 @@ parser.add_argument('--query_residues',
 parser.add_argument('--decompose_bb_hb_into_pair_energies', action='store_true', default=False,
                     help='Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the number of calculations, so is off by default).')
 parser.add_argument('--verbose', action='store_true', default=False)
+parser.add_argument('--overwrite', action='store_true', default=False,
+                    help='Recalculate outputs even if previous CSV files exist.')
 
 # Store variables
 args=parser.parse_args()
@@ -67,6 +69,7 @@ interacting_residues = args.interacting_residues
 protonation_states = args.protonation_states
 binding_energy = args.binding_energy
 verbose = args.verbose
+overwrite = args.overwrite
 
 cpus = args.cpus
 if cpus != None:
@@ -795,7 +798,7 @@ for model in silent_file:
     # Check score files
 
     score_file = scores_folder+'/'+model+'.csv'
-    if not os.path.exists(score_file):
+    if overwrite or not os.path.exists(score_file):
         # Create dictionary entries for scores
         scores = readScoreFromSilent(silent_file[model])
         scores.to_csv(score_file, index=False)
@@ -805,7 +808,7 @@ for model in silent_file:
 
     if binding_energy:
         binding_energy_file = binding_energy_folder+'/'+model+'.csv'
-        if not os.path.exists(binding_energy_file):
+        if overwrite or not os.path.exists(binding_energy_file):
             be = {}
             be['Model'] = []
             be['Pose'] = []
@@ -821,7 +824,7 @@ for model in silent_file:
     if atom_pairs != None:
         # Check distance files
         distance_file = distances_folder+'/'+model+'.csv'
-        if not os.path.exists(distance_file):
+        if overwrite or not os.path.exists(distance_file):
             # Create dictionary entries for distances
             distances = {}
             distances['Model'] = []
@@ -835,7 +838,7 @@ for model in silent_file:
     if energy_by_residue:
         # Check ebr files
         ebr_file = ebr_folder+'/'+model+'.csv'
-        if not os.path.exists(ebr_file):
+        if overwrite or not os.path.exists(ebr_file):
             # Create dictionary entries for distances
             ebr = {}
             ebr['Model'] = []
@@ -851,7 +854,7 @@ for model in silent_file:
     if interacting_residues:
         # Check neighbours files
         neighbours_file = neighbours_folder+'/'+model+'.csv'
-        if not os.path.exists(neighbours_file):
+        if overwrite or not os.path.exists(neighbours_file):
             # Create scorefunction
             sfxn = get_fa_scorefxn()
             neighbours_data = {}
@@ -878,7 +881,7 @@ for model in silent_file:
     if protonation_states:
         # Check neighbours files
         protonation_file = protonation_folder+'/'+model+'.csv'
-        if not os.path.exists(protonation_file):
+        if overwrite or not os.path.exists(protonation_file):
             protonation_data = {}
             protonation_data['Model'] = []
             protonation_data['Pose'] = []

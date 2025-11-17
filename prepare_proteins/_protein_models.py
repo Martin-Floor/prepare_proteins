@@ -10853,6 +10853,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += f"--cpus {cpus} "
         if verbose:
             command += "--verbose "
+        if overwrite:
+            command += "--overwrite "
 
         if return_jobs:
             command += "--models MODEL "
@@ -12476,6 +12478,150 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return models
 
+    def extractRosettaModels(self, rosetta_folder, input_df, output_folder, overwrite=False):
+        """
+        Extract Rosetta models (e.g., relax runs) using an input DataFrame indexed by
+        ['Model', 'Pose'] as returned by :meth:`analyseRosettaCalculation`.
+
+        Parameters
+        ----------
+        rosetta_folder : str
+            Path to the Rosetta calculation folder containing ``output_models/<model>/*.out`` files.
+        input_df : pd.DataFrame
+            DataFrame listing the poses to extract. Its index must contain ``Model`` and ``Pose``.
+            Rows including a ``description`` column will use that tag directly.
+        output_folder : str
+            Destination directory where the extracted PDBs will be copied.
+        overwrite : bool, optional
+            If True, overwrite existing files in ``output_folder``. Otherwise, skip already extracted poses.
+
+        Returns
+        -------
+        list
+            Paths to the extracted PDB files.
+        """
+
+        os.makedirs(output_folder, exist_ok=True)
+
+        executable = "extract_pdbs.linuxgccrelease"
+        models = []
+        missing_models = []
+
+        extra_res_files = []
+        params_dir = os.path.join(rosetta_folder, "params")
+        if os.path.isdir(params_dir):
+            for entry in sorted(os.listdir(params_dir)):
+                if entry.endswith(".params"):
+                    extra_res_files.append(os.path.join(params_dir, entry))
+
+        ligand_params_root = os.path.join(rosetta_folder, "ligand_params")
+        if os.path.isdir(ligand_params_root):
+            for ligand in sorted(os.listdir(ligand_params_root)):
+                ligand_dir = os.path.join(ligand_params_root, ligand)
+                if not os.path.isdir(ligand_dir):
+                    continue
+                for entry in sorted(os.listdir(ligand_dir)):
+                    if entry.endswith(".params"):
+                        extra_res_files.append(os.path.join(ligand_dir, entry))
+
+        pose_padding_cache: Dict[Tuple[str, str], int] = {}
+
+        def _infer_pose_padding(path: str, model_name: str) -> int:
+            padding = 4
+            try:
+                with open(path) as sf:
+                    for line in sf:
+                        if not line.startswith("SCORE:"):
+                            continue
+                        parts = line.strip().split()
+                        if not parts or parts[-1] == "description":
+                            continue
+                        tag = parts[-1]
+                        if not tag.startswith(f"{model_name}_"):
+                            continue
+                        suffix = tag[len(model_name) + 1 :]
+                        if suffix.isdigit():
+                            padding = max(padding, len(suffix))
+            except OSError:
+                return padding
+            return padding
+
+        extraction_jobs: Dict[str, List[str]] = {}
+        tag_destination: Dict[Tuple[str, str], str] = {}
+
+        for index, row in input_df.iterrows():
+            if isinstance(index, tuple):
+                model = index[0]
+                pose = index[1]
+            else:
+                raise ValueError("Input dataframe index must contain (Model, Pose).")
+
+            model_dir = os.path.join(rosetta_folder, "output_models", str(model))
+            if not os.path.isdir(model_dir):
+                missing_models.append(str(model))
+                continue
+
+            preferred_silent = os.path.join(model_dir, f"{model}_relax.out")
+            silent_file = preferred_silent if os.path.exists(preferred_silent) else None
+            if silent_file is None:
+                for entry in sorted(os.listdir(model_dir)):
+                    if entry.endswith(".out"):
+                        silent_file = os.path.join(model_dir, entry)
+                        break
+
+            if silent_file is None:
+                missing_models.append(str(model))
+                continue
+
+            if "description" in row.index:
+                best_model_tag = row["description"]
+            else:
+                padding_key = (silent_file, str(model))
+                pose_padding = pose_padding_cache.get(padding_key)
+                if pose_padding is None:
+                    pose_padding = _infer_pose_padding(silent_file, str(model))
+                    pose_padding_cache[padding_key] = pose_padding
+
+                if isinstance(pose, (int, float)) and not isinstance(pose, bool):
+                    pose_value = int(pose)
+                    pose_str = str(pose_value).zfill(pose_padding)
+                else:
+                    pose_str = str(pose)
+                best_model_tag = f"{model}_{pose_str}"
+
+            extraction_jobs.setdefault(silent_file, []).append(best_model_tag)
+            tag_destination[(silent_file, best_model_tag)] = os.path.join(
+                output_folder, f"{best_model_tag}.pdb"
+            )
+
+        for silent_file, tags in extraction_jobs.items():
+            command = f"{executable} -silent {silent_file} -tags " + " ".join(tags)
+            for param_file in extra_res_files:
+                command += f" -extra_res_fa {param_file}"
+            command += " 2>/dev/null"
+
+            exit_code = os.system(command)
+
+            for tag in tags:
+                pdb_filename = f"{tag}.pdb"
+                destination = tag_destination[(silent_file, tag)]
+                if exit_code == 0 and os.path.exists(pdb_filename):
+                    if not overwrite and os.path.exists(destination):
+                        os.remove(pdb_filename)
+                        continue
+                    shutil.move(pdb_filename, destination)
+                    models.append(destination)
+                elif not os.path.exists(pdb_filename):
+                    print(f"Failed to extract pose '{tag}' from {silent_file}.")
+
+        self.getModelsSequences()
+
+        if missing_models:
+            print("Missing models in Rosetta folder:")
+            print("\t" + ", ".join(missing_models))
+
+        return models
+
     def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True, keep_pdbs=False):
         """
         Convert ligand PDBs into MAE files.
@@ -13750,6 +13896,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         verbose=False,
         skip_finished=False,
         pyrosetta_env=None,
+        param_files=None,
     ):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
@@ -13868,6 +14015,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += "--cpus " + str(cpus) + " "
         if verbose:
             command += "--verbose "
+        if overwrite:
+            command += "--overwrite "
 
         # Compile individual models for each job
         if return_jobs:
@@ -13878,7 +14027,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     print(f'Silent file for model {m} was not found!')
                     continue
 
-                if skip_finished and os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
+                if skip_finished and not overwrite and os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
                     continue
 
                 job_command = command.replace("MODEL", m)
@@ -13901,7 +14050,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if not os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
                     count += 1
 
-            if count:
+            if count or overwrite:
                 if not pyrosetta_env:
                     installed = {pkg.key for pkg in pkg_resources.working_set}
                     if 'pyrosetta' not in installed:
@@ -14080,6 +14229,182 @@ make sure of reading the target sequences with the function readTargetSequences(
                     values += md.min(axis=1).tolist()
 
                 rosetta_data["metric_" + name] = values
+                self._set_rosetta_metric_type(name, "distance")
+
+    def combineRosettaMetricsWithExclusions(self, combinations, exclusions, drop=True):
+        """
+        Combine mutually exclusive Rosetta metrics (from :meth:`analyseRosettaCalculation`)
+        into aggregate metrics while respecting exclusion rules.
+
+        Parameters
+        ----------
+        combinations : dict
+            Mapping of ``new_metric_name -> (metricA, metricB, ...)`` without the ``metric_`` prefix.
+        exclusions : list or dict
+            Either a list of tuples describing mutually exclusive metric names, or a dictionary
+            mapping a metric to the metrics that should be excluded whenever it is selected
+            as the minimum value.
+        drop : bool, optional
+            Drop the original metric columns after combining. Default True.
+        """
+
+        if self.rosetta_data is None or self.rosetta_data.empty:
+            raise ValueError(
+                "Rosetta data is empty. Run analyseRosettaCalculation before combining metrics."
+            )
+
+        if not hasattr(self, "rosetta_docking_metric_type") or self.rosetta_docking_metric_type is None:
+            self.rosetta_docking_metric_type = {}
+
+        def _with_prefix(name: str) -> str:
+            return name if name.startswith("metric_") else f"metric_{name}"
+
+        def _strip_prefix(name: str) -> str:
+            return name[7:] if name.startswith("metric_") else name
+
+        if isinstance(exclusions, list):
+            simple_exclusions = True
+            by_metric_exclusions = False
+        elif isinstance(exclusions, dict):
+            simple_exclusions = False
+            by_metric_exclusions = True
+        else:
+            raise ValueError("exclusions should be a list of tuples or a dictionary by metrics.")
+
+        unique_metrics = set()
+        for new_metric, metrics in combinations.items():
+            metric_types = []
+            for metric in metrics:
+                metric_label = _with_prefix(metric)
+                metric_type = self._get_rosetta_metric_type(metric_label)
+                if metric_type is None:
+                    inferred_type = None
+                    if metric_label in self.rosetta_data.columns:
+                        if "angle" in metric_label.lower() or "torsion" in metric_label.lower():
+                            inferred_type = "angle"
+                        else:
+                            inferred_type = "distance"
+                    if inferred_type is None:
+                        raise ValueError(
+                            f"Metric type for '{metric_label}' is not defined. "
+                            "Populate it via combineRosettaDistancesIntoMetric or _set_rosetta_metric_type."
+                        )
+                    self._set_rosetta_metric_type(metric_label, inferred_type)
+                    metric_type = inferred_type
+                metric_types.append(metric_type)
+            if len(set(metric_types)) != 1:
+                raise ValueError(
+                    "Attempting to combine different metric types (e.g., distances and angles) is not allowed."
+                )
+            self._set_rosetta_metric_type(new_metric, metric_types[0])
+            unique_metrics.update(_strip_prefix(metric) for metric in metrics)
+
+        metrics_list = list(unique_metrics)
+        metrics_indexes = {m: idx for idx, m in enumerate(metrics_list)}
+
+        for m in metrics_list:
+            if "metric_" in m:
+                raise ValueError('Provide metric names without the "metric_" prefix.')
+
+        all_metrics_columns = ["metric_" + m for m in metrics_list]
+        missing_columns = set(all_metrics_columns) - set(self.rosetta_data.columns)
+        if missing_columns:
+            raise ValueError(f"Missing metric columns in data: {missing_columns}")
+
+        data = self.rosetta_data[all_metrics_columns]
+        excluded_positions = set()
+        min_metric_labels = data.idxmin(axis=1)
+
+        if simple_exclusions:
+            for row_idx, metric_col_label in enumerate(min_metric_labels):
+                m = _strip_prefix(metric_col_label)
+
+                for exclusion_group in exclusions:
+                    canonical_group = {_strip_prefix(x) for x in exclusion_group}
+                    if m in canonical_group:
+                        others = canonical_group - {m}
+                        for x in others:
+                            if x in metrics_indexes:
+                                col_idx = metrics_indexes[x]
+                                excluded_positions.add((row_idx, col_idx))
+
+                for metrics_group in combinations.values():
+                    canonical_group = [_strip_prefix(x) for x in metrics_group]
+                    if m in canonical_group:
+                        others = set(canonical_group) - {m}
+                        for y in others:
+                            if y in metrics_indexes:
+                                col_idx = metrics_indexes[y]
+                                excluded_positions.add((row_idx, col_idx))
+
+        data_array = data.to_numpy()
+
+        if by_metric_exclusions:
+            exclusions_map = {
+                _strip_prefix(metric): [_strip_prefix(x) for x in excluded]
+                for metric, excluded in exclusions.items()
+            }
+
+            for row_idx in range(data_array.shape[0]):
+                considered_metrics = set()
+
+                while True:
+                    min_value = np.inf
+                    min_col_idx = -1
+
+                    for col_idx, metric_value in enumerate(data_array[row_idx]):
+                        if col_idx not in considered_metrics and (row_idx, col_idx) not in excluded_positions:
+                            if metric_value < min_value:
+                                min_value = metric_value
+                                min_col_idx = col_idx
+
+                    if min_col_idx == -1:
+                        break
+
+                    considered_metrics.add(min_col_idx)
+
+                    min_metric_label = data.columns[min_col_idx]
+                    min_metric_name = _strip_prefix(min_metric_label)
+                    excluded_metrics = exclusions_map.get(min_metric_name, [])
+
+                    for excluded_metric in excluded_metrics:
+                        if excluded_metric in metrics_indexes:
+                            excluded_col_idx = metrics_indexes[excluded_metric]
+                            if (row_idx, excluded_col_idx) not in excluded_positions:
+                                excluded_positions.add((row_idx, excluded_col_idx))
+                                data_array[row_idx, excluded_col_idx] = np.inf
+
+        for new_metric_name, metrics_to_combine in combinations.items():
+            canonical_metrics = [_strip_prefix(m) for m in metrics_to_combine]
+            c_indexes = [metrics_indexes[m] for m in canonical_metrics if m in metrics_indexes]
+
+            if c_indexes:
+                combined_min = np.min(data_array[:, c_indexes], axis=1)
+
+                if np.all(np.isinf(combined_min)):
+                    print(f"Skipping combination for '{new_metric_name}' due to incompatible exclusions.")
+                    continue
+                self.rosetta_data["metric_" + new_metric_name] = combined_min
+            else:
+                raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
+
+        if drop:
+            self.rosetta_data.drop(columns=all_metrics_columns, inplace=True)
+
+        for new_metric_name, metrics_to_combine in combinations.items():
+            non_excluded_found = False
+            canonical_metrics = [_strip_prefix(m) for m in metrics_to_combine]
+
+            for metric in canonical_metrics:
+                col_idx = metrics_indexes.get(metric)
+                if col_idx is not None:
+                    column_values = data_array[:, col_idx]
+                    if not np.all(np.isinf(column_values)):
+                        non_excluded_found = True
+                        break
+
+            if not non_excluded_found:
+                print(f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'.")
 
     def getBestRosettaModels(
         self, filter_values, n_models=1, return_failed=False, exclude_models=None
