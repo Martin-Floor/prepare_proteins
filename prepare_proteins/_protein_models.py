@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 import warnings
@@ -550,6 +551,7 @@ class proteinModels:
         collect_memory_every=None,
         only_hetatm_conects=False,
         wat_to_hoh=True,
+        maestro_export_options=None,
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -567,6 +569,11 @@ class proteinModels:
         msa : bool
             single-chain structures at startup, othewise look for the calculateMSA()
             method.
+        maestro_export_options : dict, optional
+            Extra options passed to the Maestro-to-PDB export script when the input
+            path is a .mae/.maegz file. Supported keys mirror the CLI arguments of
+            `scripts/export_maestro_models.py` (e.g. prefix, protein_ct,
+            ligand_chain, ligand_resnum, keep_original_ligand_ids, separator).
         """
 
         if ignore_biopython_warnings:
@@ -592,6 +599,17 @@ class proteinModels:
         elif not isinstance(exclude_models, (list, tuple, set)):
             raise ValueError(
                 "You must give excluded models as a list or a single model as a string!"
+            )
+
+        self._maestro_temp_dir = None
+        self._maestro_manifest = None
+        self._maestro_manifest_path = None
+        self._maestro_source_file = None
+        self.maestro_export_options = maestro_export_options
+
+        if isinstance(models_folder, str):
+            models_folder = self._maybe_prepare_maestro_models(
+                models_folder, maestro_export_options
             )
 
         self.models_folder = models_folder
@@ -15939,6 +15957,135 @@ make sure of reading the target sequences with the function readTargetSequences(
                     else:
                         atoms[index] = _atom
         return atoms
+
+    def _maybe_prepare_maestro_models(self, models_folder, maestro_export_options):
+        """
+        When the provided models_folder is a Maestro file, invoke the export script
+        to generate per-pose PDB files and return the path to the temporary folder.
+        """
+        path = Path(models_folder).expanduser()
+        if not path.is_file():
+            return models_folder
+        lowered = path.name.lower()
+        if not lowered.endswith((".mae", ".maegz")):
+            return models_folder
+
+        output_dir = tempfile.mkdtemp(prefix="maestro_models_")
+        manifest_path = os.path.join(output_dir, "maestro_manifest.json")
+        script_path = pkg_resources.resource_filename(
+            "prepare_proteins.scripts", "export_maestro_models.py"
+        )
+
+        schrodinger_root = os.environ.get("SCHRODINGER")
+        schrodinger_run = None
+        if schrodinger_root:
+            candidate = os.path.join(schrodinger_root, "run")
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                schrodinger_run = candidate
+
+        run_executable = shutil.which("run")
+        python_cmd = "python3" if shutil.which("python3") else "python"
+
+        if run_executable:
+            launcher = [run_executable, python_cmd]
+            launcher_name = run_executable
+        elif schrodinger_run:
+            launcher = [schrodinger_run, python_cmd]
+            launcher_name = schrodinger_run
+        else:
+            launcher = [sys.executable]
+            launcher_name = sys.executable
+
+        cmd = launcher + [
+            script_path,
+            str(path),
+            "--output-dir",
+            output_dir,
+            "--manifest",
+            manifest_path,
+        ]
+
+        option_map = {
+            "prefix": "--prefix",
+            "ligand_chain": "--ligand-chain",
+            "separator": "--separator",
+        }
+        int_option_map = {
+            "protein_ct": "--protein-ct",
+            "ligand_resnum": "--ligand-resnum",
+        }
+        bool_option_map = {"keep_original_ligand_ids": "--keep-original-ligand-ids"}
+        allowed_keys = set(option_map) | set(int_option_map) | set(bool_option_map)
+
+        if maestro_export_options:
+            for key, value in maestro_export_options.items():
+                if key not in allowed_keys:
+                    raise ValueError(
+                        f"Unsupported maestro_export_options key '{key}'. "
+                        "Valid keys are: prefix, protein_ct, ligand_chain, "
+                        "ligand_resnum, keep_original_ligand_ids, separator."
+                    )
+                if key in option_map and value is not None:
+                    cmd.extend([option_map[key], str(value)])
+                elif key in int_option_map and value is not None:
+                    cmd.extend([int_option_map[key], str(int(value))])
+                elif key in bool_option_map and value:
+                    cmd.append(bool_option_map[key])
+
+        used_run_launcher = launcher_name != sys.executable
+
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr or ""
+            stdout = exc.stdout or ""
+            extra = ""
+            if "No module named 'schrodinger'" in stderr:
+                extra = (
+                    " The invoked Python interpreter cannot import the 'schrodinger' "
+                    "module. Make sure the Schrodinger 'run' command is available "
+                    "(it is typically added to PATH after sourcing the Schrodinger "
+                    "environment) or set the SCHRODINGER environment variable so the "
+                    "launcher can be located automatically."
+                )
+            elif not used_run_launcher:
+                extra = (
+                    " Neither the 'run' command nor the SCHRODINGER environment "
+                    "variable were detected. The current Python interpreter was used "
+                    "instead, which typically cannot import the 'schrodinger' module. "
+                    "Ensure the Schrodinger environment is sourced so that 'run' is "
+                    "available on PATH."
+                )
+            raise RuntimeError(
+                "Failed to convert Maestro file into PDB models."
+                f"{extra}\nCommand: {' '.join(cmd)}\nStdout:\n{stdout}\nStderr:\n{stderr}"
+            ) from exc
+
+        pdb_files = [
+            entry
+            for entry in os.listdir(output_dir)
+            if entry.lower().endswith(".pdb")
+        ]
+        if not pdb_files:
+            raise RuntimeError(
+                f"No PDB files were produced from Maestro file {path}. "
+                "Check that the file contains at least one ligand pose."
+            )
+
+        manifest_data = None
+        if os.path.exists(manifest_path):
+            try:
+                with open(manifest_path) as mf:
+                    manifest_data = json.load(mf)
+            except json.JSONDecodeError:
+                manifest_data = None
+
+        self._maestro_temp_dir = output_dir
+        self._maestro_manifest = manifest_data
+        self._maestro_manifest_path = manifest_path if os.path.exists(manifest_path) else None
+        self._maestro_source_file = str(path)
+
+        return output_dir
 
     def _getModelsPaths(self, only_models=None, exclude_models=None):
         """
