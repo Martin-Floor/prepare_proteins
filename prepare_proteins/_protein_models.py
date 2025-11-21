@@ -5496,7 +5496,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             high_res_cycles=None, high_res_repack_every_Nth=None, num_conformers=50,
                             prune_rms_threshold=0.5, max_attempts=1000, rosetta_home=None, separator='-',
                             use_exp_torsion_angle_prefs=True, use_basic_knowledge=True, only_scorefile=False,
-                            enforce_chirality=True, skip_conformers_if_found=False, grid_width=10.0,
+                            enforce_chirality=True, skip_conformers_if_found=False, overwrite=False, skip_finished=False, grid_width=10.0,
                             n_jobs=1, python2_executable='python2.7', store_initial_placement=False,
                             pdb_output=False, atom_pairs=None, angles=None, parallelisation="srun",
                             executable='rosetta_scripts.mpi.linuxgccrelease', ligand_chain='B', nstruct=100):
@@ -5547,6 +5547,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             Enforce correct chiral centers during embedding. Default is True.
         skip_conformers_if_found : bool, optional
             Skip generating conformers if they are already found. Default is False.
+        overwrite : bool, optional
+            Re-generate conformers and parameter files even if expected outputs already exist. Default is False.
+        skip_finished : bool, optional
+            Skip setting up model/ligand combinations when expected docking outputs already exist. Default is False.
         grid_width : float, optional
             Width of the scoring grid. Default is 10.0.
         n_jobs : int, optional
@@ -5673,6 +5677,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.makedirs(ligand_dir, exist_ok=True)
             output_sdf_path = os.path.join(ligand_dir, f"{base_name}.sdf")
 
+            if (skip_conformers_if_found or not overwrite) and os.path.exists(output_sdf_path):
+                return base_name
+
             # Determine file type and load molecule
             if ligand_file_path.endswith('.pdb'):
                 mol = Chem.MolFromPDBFile(ligand_file_path, removeHs=False)
@@ -5721,27 +5728,84 @@ make sure of reading the target sequences with the function readTargetSequences(
             full_dir = os.path.join(output_dir, ligand_name)
             os.makedirs(full_dir, exist_ok=True)
 
+            output_param_path = f"{ligand_name}.params"
+            output_pdb_path = f"{ligand_name}.pdb"
+            output_conformer_path = f"{ligand_name}_conformers.pdb"
+
+            existing_param = os.path.join(full_dir, output_param_path)
+            existing_pdb = os.path.join(full_dir, output_pdb_path)
+            existing_conformers = os.path.join(full_dir, output_conformer_path)
+            expected_files_present = (
+                os.path.exists(existing_param)
+                and os.path.exists(existing_pdb)
+                and os.path.exists(existing_conformers)
+                and os.path.exists(input_sdf_path)
+            )
+            if not overwrite and expected_files_present:
+                return existing_param
+
             param_file_command = (
                 f"{rosetta_home}/main/source/scripts/python/public/molfile_to_params.py -n {ligand_name} "
                 f"--long-names --clobber --conformers-in-one-file --mm-as-virt {input_sdf_path}"
             )
 
-            output_param_path = f"{ligand_name}.params"
-            output_pdb_path = f"{ligand_name}.pdb"
-            output_conformer_path = f"{ligand_name}_conformers.pdb"
-
             subprocess.call(param_file_command, shell=True)
 
+            missing_files: List[str] = []
+            cwd = os.getcwd()
+
             try:
-                shutil.move(os.path.join(os.getcwd(), output_param_path), os.path.join(full_dir, output_param_path))
+                shutil.move(os.path.join(cwd, output_param_path), os.path.join(full_dir, output_param_path))
             except IOError:
-                print(f"Something went wrong with {ligand_name}")
+                missing_files.append(output_param_path)
+
+            try:
+                shutil.move(os.path.join(cwd, output_pdb_path), os.path.join(full_dir, output_pdb_path))
+            except IOError:
+                missing_files.append(output_pdb_path)
+
+            try:
+                shutil.move(os.path.join(cwd, output_conformer_path), os.path.join(full_dir, output_conformer_path))
+            except IOError:
+                missing_files.append(output_conformer_path)
+
+            # If conformers file exists but is empty, drop the PDB_ROTAMERS reference to avoid Rosetta errors
+            conformer_full_path = os.path.join(full_dir, output_conformer_path)
+            params_full_path = os.path.join(full_dir, output_param_path)
+            if os.path.exists(conformer_full_path) and os.path.getsize(conformer_full_path) == 0:
+                if os.path.exists(params_full_path):
+                    with open(params_full_path, "r") as pf:
+                        lines = pf.readlines()
+                    with open(params_full_path, "w") as pf:
+                        for line in lines:
+                            if line.strip().startswith("PDB_ROTAMERS"):
+                                continue
+                            pf.write(line)
+                    warnings.warn(
+                        f"Removed empty conformer reference from params for ligand '{ligand_name}' "
+                        f"({os.path.relpath(conformer_full_path, full_dir)} is empty).",
+                        UserWarning,
+                    )
+                else:
+                    warnings.warn(
+                        f"Conformer file for ligand '{ligand_name}' is empty but params file was not found.",
+                        UserWarning,
+                    )
+
+            sdf_name = os.path.basename(input_sdf_path)
+            if not os.path.exists(os.path.join(full_dir, sdf_name)):
+                missing_files.append(sdf_name)
+
+            if missing_files:
+                missing_list = ", ".join(sorted(set(missing_files)))
+                warnings.warn(
+                    f"molfile_to_params did not produce expected files for ligand '{ligand_name}' in {full_dir}: {missing_list}",
+                    UserWarning,
+                )
+
+            if output_param_path in missing_files:
                 return None
-            shutil.move(os.path.join(os.getcwd(), output_pdb_path), os.path.join(full_dir, output_pdb_path))
-            try:
-                shutil.move(os.path.join(os.getcwd(), output_conformer_path), os.path.join(full_dir, output_conformer_path))
-            except IOError:
-                print(f"No conformers for {ligand_name}")
+
             return os.path.join(full_dir, output_param_path)
 
         try:
@@ -5997,6 +6061,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ligand_dir = os.path.join(ligand_params_folder, name)
                     os.makedirs(ligand_dir, exist_ok=True)
                     output_sdf_path = os.path.join(ligand_dir, f"{name}.sdf")
+
+                    if (skip_conformers_if_found or not overwrite) and os.path.exists(output_sdf_path):
+                        ligands.append(name)
+                        continue
+
                     ligands.append(name)
                     mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
                                                               prune_rms_threshold=prune_rms_threshold,
@@ -6017,6 +6086,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 ligand_dir = os.path.join(ligand_params_folder, name)
                 os.makedirs(ligand_dir, exist_ok=True)
                 output_sdf_path = os.path.join(ligand_dir, f"{name}.sdf")
+
+                if (skip_conformers_if_found or not overwrite) and os.path.exists(output_sdf_path):
+                    ligands.append(name)
+                    continue
+
                 ligands.append(name)
                 mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
                                                           prune_rms_threshold=prune_rms_threshold,
@@ -6171,6 +6245,27 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Process each model
             for model in self:
 
+                # Determine expected output filenames for this model/ligand pair
+                expected_score_file = f'{model}{separator}{ligand}.sc'
+                expected_silent_file = None
+                if not only_scorefile and not pdb_output:
+                    expected_silent_file = f'{model}{separator}{ligand}.out'
+
+                model_output_folder = os.path.join(output_folder, model+separator+ligand)
+
+                if skip_finished:
+                    expected_score_path = os.path.join(model_output_folder, expected_score_file)
+                    expected_silent_path = os.path.join(model_output_folder, expected_silent_file) if expected_silent_file else None
+
+                    score_ok = os.path.exists(expected_score_path)
+                    silent_ok = (expected_silent_file is None) or (expected_silent_path and os.path.exists(expected_silent_path))
+                    pdb_ok = True
+                    if pdb_output and os.path.isdir(model_output_folder):
+                        pdb_ok = any(f.lower().endswith(".pdb") for f in os.listdir(model_output_folder))
+
+                    if score_ok and silent_ok and pdb_ok:
+                        continue
+
                 # Create xml ligand docking
                 xml = rosettaScripts.xmlScript()
 
@@ -6315,16 +6410,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 xml_output = os.path.join(xml_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.xml')
                 xml.write_xml(xml_output)
 
-                if not only_scorefile and not pdb_output:
-                    output_silent_file = f'{model}{separator}{ligand}.out'
-                else:
-                    output_silent_file = None
-
                 # Create flags files
                 flags = rosettaScripts.options.flags(f'../../xml/{docking_protocol}{separator}{ligand}{separator}{model}.xml',
                                                      nstruct=nstruct, s='../../input_models/'+model+'.pdb',
-                                                     output_silent_file=output_silent_file,
-                                                     output_score_file=f'{model}{separator}{ligand}.sc')
+                                                     output_silent_file=expected_silent_file,
+                                                     output_score_file=expected_score_file)
                 if only_scorefile:
                     flags.addOption('out:file:score_only')
 
@@ -6342,7 +6432,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 flags.write_flags(flags_output)
 
                 # Create output folder and execute commands
-                model_output_folder = os.path.join(output_folder, model+separator+ligand)
                 os.makedirs(model_output_folder, exist_ok=True)
                 command =  'cd '+model_output_folder+'\n'
                 if parallelisation:
@@ -6350,7 +6439,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += executable+' '
                 command += '@ ../../flags/'+f'{docking_protocol}{separator}{ligand}{separator}{model}.flags '
                 command += '\n'
-                command += 'cd ../../..'
+                command += 'cd ../../..\n'
                 jobs.append(command)
 
         return jobs
@@ -9495,8 +9584,8 @@ make sure of reading the target sequences with the function readTargetSequences(
           connectivity/chemistry while retaining ligand coordinates from the model PDB.
         - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
         - skip_models (list of str, optional): If provided, skip setup for these models.
-        - skip_ligand_charge_computation (bool, optional): If True, the OpenFF backend will reuse existing
-          partial charges from cached ligand templates (or the supplied SDF) instead of recomputing them.
+        - skip_ligand_charge_computation (bool, optional): If True, the parameterization backends will reuse
+          existing ligand charges (cached OpenFF templates or pre-existing MOL2 files) instead of recomputing them.
         """
 
         openmm_setup = _require_openmm_support("proteinModels.setUpOpenMMSimulations")
@@ -10075,6 +10164,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         strict_atom_name_check=strict_ligand_atom_check,
                         only_residues=selected_ligands_set,
                         build_full_system=False,
+                        ligand_sdf_files=ligand_sdf_files,
                     )
                 self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
                 packs = _collect_ligand_packs(ligand_parameters_folder)
@@ -10141,6 +10231,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     regenerate_amber_files=True,
                     non_standard_residues=non_standard_residues,
                     strict_atom_name_check=strict_ligand_atom_check,
+                    ligand_sdf_files=ligand_sdf_files,
                 )
 
             parameterization_result = backend.describe_model(self.openmm_md[model])
@@ -12047,6 +12138,93 @@ make sure of reading the target sequences with the function readTargetSequences(
         VB = VBox(VB)
 
         display(VB)
+
+    def computeRosettaDockingFreeEnergy(self, df=None, KT: float = 0.593,
+                                        binding_col: Optional[str] = None,
+                                        add_probabilities: bool = False) -> pd.DataFrame:
+        """
+        Compute Boltzmann-weighted binding free energy per (Model, Ligand) from docking poses.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame, optional
+            Rosetta docking dataframe indexed by (Model, Ligand, Pose). If None, uses
+            ``self.rosetta_docking_data``.
+        KT : float, optional
+            Thermal energy in kcal/mol. Default is 0.593 (298 K).
+        binding_col : str, optional
+            Column containing per-pose binding energies. If None, the first column whose
+            name starts with ``'interface_delta_'`` is used.
+        add_probabilities : bool, optional
+            If True, store Boltzmann probabilities per pose in a ``boltzmann_p`` column
+            on the provided dataframe (or ``self.rosetta_docking_data`` when df is None).
+
+        Returns
+        -------
+        pandas.DataFrame
+            DataFrame indexed by (Model, Ligand) with a single column ``free_energy``.
+        """
+        target_df = df if df is not None else getattr(self, "rosetta_docking_data", None)
+        if target_df is None:
+            raise ValueError("No docking dataframe provided and self.rosetta_docking_data is missing.")
+
+        if not isinstance(target_df.index, pd.MultiIndex) or len(target_df.index.names) != 3:
+            raise ValueError("Input must be a MultiIndex dataframe with levels (Model, Ligand, Pose).")
+
+        if KT <= 0:
+            raise ValueError("KT must be positive.")
+
+        if binding_col is None:
+            binding_col = next((c for c in target_df.columns if c.startswith("interface_delta_")), None)
+            if binding_col is None:
+                raise ValueError("Could not find a binding energy column starting with 'interface_delta_'.")
+            binding_col_display = binding_col if isinstance(binding_col, str) else repr(binding_col)
+            warnings.warn(f"Using binding energy column '{binding_col_display}'.", UserWarning)
+
+        if binding_col not in target_df.columns:
+            raise ValueError(f"Binding energy column '{binding_col}' not found in dataframe.")
+
+        # Mutate the caller only when probabilities are requested; otherwise work on a copy
+        df_for_probs = target_df if add_probabilities else target_df.copy()
+
+        energies = pd.to_numeric(df_for_probs[binding_col], errors='coerce')
+        if energies.isna().any():
+            warnings.warn("Binding energies contain NaNs; affected poses will be ignored in free energy calculation.", UserWarning)
+
+        free_energy_records = []
+        if add_probabilities and "boltzmann_p" not in df_for_probs.columns:
+            df_for_probs["boltzmann_p"] = np.nan
+
+        for (model, ligand), group in df_for_probs.groupby(level=[0, 1]):
+            e = pd.to_numeric(group[binding_col], errors='coerce')
+            finite_mask = np.isfinite(e)
+            if not finite_mask.any():
+                free_energy_records.append(((model, ligand), np.nan))
+                continue
+
+            valid_e = e[finite_mask].to_numpy(dtype=float)
+            e0 = valid_e.min()
+            shifted = valid_e - e0
+            weights = np.exp(-shifted / KT)
+            Z = weights.sum()
+            free_energy = e0 - KT * np.log(Z)
+            free_energy_records.append(((model, ligand), free_energy))
+
+            if add_probabilities:
+                probs = weights / Z
+                prob_series = pd.Series(probs, index=e[finite_mask].index)
+                df_for_probs.loc[prob_series.index, "boltzmann_p"] = prob_series
+
+        free_energy_df = pd.DataFrame.from_records(
+            [(idx[0], idx[1], val) for idx, val in free_energy_records],
+            columns=["Model", "Ligand", "free_energy"],
+        ).set_index(["Model", "Ligand"])
+
+        # If we updated self.rosetta_docking_data in-place, keep the changes
+        if add_probabilities and df is None:
+            self.rosetta_docking_data = df_for_probs
+
+        return free_energy_df
 
     def getBestRosettaDockingPoses(
             self,

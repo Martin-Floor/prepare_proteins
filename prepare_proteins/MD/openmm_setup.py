@@ -245,7 +245,8 @@ class openmm_md:
                                force_field='ff14SB', residue_names=None, metal_parameters=None, extra_frcmod=None,
                                extra_mol2=None, add_counterions=True, add_counterionsRand=False, save_amber_pdb=False, solvate=True,
                                regenerate_amber_files=False, non_standard_residues=None, strict_atom_name_check=True,
-                               only_residues=None, build_full_system=True):
+                               only_residues=None, build_full_system=True, skip_ligand_charge_computation=False,
+                               ligand_sdf_files=None):
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -372,6 +373,8 @@ class openmm_md:
                 only_residue_set = None
         else:
             only_residue_set = None
+
+        skip_ligand_charge_computation = bool(skip_ligand_charge_computation)
 
         if regenerate_amber_files:
             if os.path.exists(parameters_folder+'/'+self.pdb_name+'.prmtop'):
@@ -640,6 +643,33 @@ class openmm_md:
                 mol2_conversion_targets.add(res_upper)
             return dest_path
 
+        def _extract_sdf_block(source_path, dest_path, index=0):
+            """Write the selected molecule block from an SDF into dest_path."""
+            index = int(index) if index else 0
+            current = []
+            blocks = []
+            with open(source_path) as sf:
+                for line in sf:
+                    if line.strip() == "$$$$":
+                        blocks.append("".join(current))
+                        current = []
+                    else:
+                        current.append(line)
+                if current:
+                    blocks.append("".join(current))
+            if not blocks:
+                raise ValueError(f"No molecules found in SDF {source_path}")
+            if index < 0 or index >= len(blocks):
+                raise IndexError(
+                    f"SDF index {index} out of range for {source_path}; found {len(blocks)} entries."
+                )
+            content = blocks[index]
+            if not content.endswith("\n"):
+                content += "\n"
+            with open(dest_path, "w") as df:
+                df.write(content)
+                df.write("$$$$\n")
+
         for residue_name in par_folder:
             canonical_mol2 = os.path.join(parameters_folder, f"{residue_name}.mol2")
             if os.path.exists(canonical_mol2):
@@ -854,12 +884,15 @@ class openmm_md:
         skip_parameterization_residues = provided_mol2_residues & provided_frcmod_residues
 
         # Create parameters for each molecule
-        def _convert_staged_mol2(residue_name, ligand_charge):
+        def _convert_staged_mol2(residue_name, ligand_charge, skip_charge_computation=False):
             res_upper = residue_name.upper()
             if res_upper not in mol2_conversion_targets:
                 return
             mol2_path = os.path.join(par_folder[res_upper], f"{res_upper}.mol2")
             if not os.path.exists(mol2_path):
+                return
+            if skip_charge_computation:
+                # Keep user-provided charges/types; assume mol2 is already prepared.
                 return
             temp_output = mol2_path + '.tmp'
             if os.path.exists(temp_output):
@@ -905,10 +938,47 @@ class openmm_md:
             else:
                 charge = 0
 
+            sdf_entry = _get_case_insensitive(ligand_sdf_files or {}, residue)
+            if sdf_entry:
+                sdf_path = sdf_entry.get("path")
+                if not sdf_path or not os.path.exists(sdf_path):
+                    raise ValueError(f"SDF file for {residue} not found at {sdf_path}.")
+                sdf_index = sdf_entry.get("index", 0)
+                charge_method_override = sdf_entry.get("charge_method") or charge_model
+                staged_sdf = os.path.join(par_folder[residue], f"{residue}.sdf")
+                if not os.path.exists(staged_sdf) or overwrite:
+                    _extract_sdf_block(sdf_path, staged_sdf, sdf_index)
+                staged_mol2 = os.path.join(par_folder[residue], f"{residue}.mol2")
+                if not os.path.exists(staged_mol2) or overwrite:
+                    charge_flag = 'rc' if skip_ligand_charge_computation else charge_method_override
+                    command = (
+                        'antechamber '
+                        f'-i {shlex.quote(staged_sdf)} '
+                        '-fi mdl '
+                        f'-o {shlex.quote(staged_mol2)} '
+                        '-fo mol2 '
+                        '-pf y '
+                        f'-c {charge_flag} '
+                        f'-nc {charge} '
+                        f'-rn {residue} '
+                        '-s 2\n'
+                    )
+                    ret = _run_command(command, self.command_log)
+                    if ret != 0:
+                        raise RuntimeError(
+                            f'antechamber conversion from SDF failed for {staged_sdf} with exit code {ret}.'
+                        )
+                staged_path = _stage_external_mol2(residue, staged_mol2, mark_for_conversion=False)
+                if staged_path:
+                    provided_mol2_residues.add(residue)
+                    if residue in provided_frcmod_residues:
+                        skip_parameterization_residues.add(residue)
+                    _register_mol2_file(residue, staged_path)
+
             if residue in skip_parameterization_residues:
                 continue
 
-            _convert_staged_mol2(residue, charge)
+            _convert_staged_mol2(residue, charge, skip_ligand_charge_computation)
 
             if metal_parameters and residue in parameters_folders:
                 continue
@@ -921,7 +991,8 @@ class openmm_md:
 
             lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb, command_log=self.command_log)
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
-                                       metal_charge=metal_charge,charge_model=charge_model)
+                                       metal_charge=metal_charge,charge_model=charge_model,
+                                       skip_ligand_charge_computation=skip_ligand_charge_computation)
             os.chdir('../'*len(par_folder[residue].split('/')))
 
         # Copy newly generated parameters to the root folder so they can be reused directly.
@@ -1408,7 +1479,8 @@ class ligandParameters:
         if res_count != 1:
             raise ValueError('A PDB with a single residue must be given for parameterization!')
 
-    def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False):
+    def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False,
+                           skip_ligand_charge_computation=False):
         def _run_acdoctor_on_mol2(mol2_file):
             if not os.path.exists(mol2_file):
                 raise FileNotFoundError(f'acdoctor input {mol2_file} not found.')
@@ -1437,31 +1509,39 @@ class ligandParameters:
         # Run antechamber to create a mol2 file with the atomic charges
         mol2_path = self.resname+'.mol2'
         mol2_generated = False
-        if not os.path.exists(mol2_path) or overwrite:
-            command = 'antechamber '
-            command += '-i '+self.resname+'_renum.pdb '
-            command += '-fi pdb '
-            command += '-o '+self.resname+'.mol2 '
-            command += '-fo mol2 '
-            command += '-pf y '
-            command += '-c '+charge_model+' '
-            command += '-nc '+str(ligand_charge)+' '
-            command += '-s 2\n'
-            _run_command(command, self.command_log)
-            mol2_generated = True
+        if not skip_ligand_charge_computation or overwrite:
+            if not os.path.exists(mol2_path) or overwrite:
+                command = 'antechamber '
+                command += '-i '+self.resname+'_renum.pdb '
+                command += '-fi pdb '
+                command += '-o '+self.resname+'.mol2 '
+                command += '-fo mol2 '
+                command += '-pf y '
+                command += '-c '+charge_model+' '
+                command += '-nc '+str(ligand_charge)+' '
+                command += '-s 2\n'
+                _run_command(command, self.command_log)
+                mol2_generated = True
+        elif not os.path.exists(mol2_path):
+            raise FileNotFoundError(
+                f"skip_ligand_charge_computation=True but {mol2_path} is missing; "
+                "provide an existing mol2 with charges or disable the skip flag."
+            )
 
-        # Run antechamber to create a prepi file with the atomic charges
-        if not os.path.exists(self.resname+'.prepi') or overwrite:
-            command = 'antechamber '
-            command += '-i '+self.resname+'_renum.pdb '
-            command += '-fi pdb '
-            command += '-o '+self.resname+'.prepi '
-            command += '-fo prepi '
-            command += '-pf y '
-            command += '-c '+charge_model+' '
-            command += '-nc '+str(ligand_charge)+' '
-            command += '-s 2\n'
-            _run_command(command, self.command_log)
+        # Run antechamber to create a prepi file with the atomic charges when allowed
+        prepi_path = self.resname+'.prepi'
+        if not skip_ligand_charge_computation or overwrite:
+            if not os.path.exists(prepi_path) or overwrite:
+                command = 'antechamber '
+                command += '-i '+self.resname+'_renum.pdb '
+                command += '-fi pdb '
+                command += '-o '+prepi_path+' '
+                command += '-fo prepi '
+                command += '-pf y '
+                command += '-c '+charge_model+' '
+                command += '-nc '+str(ligand_charge)+' '
+                command += '-s 2\n'
+                _run_command(command, self.command_log)
 
         # Run parmchk to check which forcefield parameters will be used
         frcmod_path = self.resname+'.frcmod'
