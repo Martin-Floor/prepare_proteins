@@ -5496,7 +5496,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             high_res_cycles=None, high_res_repack_every_Nth=None, num_conformers=50,
                             prune_rms_threshold=0.5, max_attempts=1000, rosetta_home=None, separator='-',
                             use_exp_torsion_angle_prefs=True, use_basic_knowledge=True, only_scorefile=False,
-                            enforce_chirality=True, skip_conformers_if_found=False, overwrite=False, skip_finished=False, grid_width=10.0,
+                            enforce_chirality=True, skip_conformers_if_found=False, overwrite=False, skip_finished=False, skip_silent_file=False, grid_width=10.0,
                             n_jobs=1, python2_executable='python2.7', store_initial_placement=False,
                             pdb_output=False, atom_pairs=None, angles=None, parallelisation="srun",
                             executable='rosetta_scripts.mpi.linuxgccrelease', ligand_chain='B', nstruct=100):
@@ -5551,6 +5551,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Re-generate conformers and parameter files even if expected outputs already exist. Default is False.
         skip_finished : bool, optional
             Skip setting up model/ligand combinations when expected docking outputs already exist. Default is False.
+        skip_silent_file : bool, optional
+            Do not write silent (.out) files; only write score files. Default is False.
         grid_width : float, optional
             Width of the scoring grid. Default is 10.0.
         n_jobs : int, optional
@@ -6248,7 +6250,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Determine expected output filenames for this model/ligand pair
                 expected_score_file = f'{model}{separator}{ligand}.sc'
                 expected_silent_file = None
-                if not only_scorefile and not pdb_output:
+                if not only_scorefile and not pdb_output and not skip_silent_file:
                     expected_silent_file = f'{model}{separator}{ligand}.out'
 
                 model_output_folder = os.path.join(output_folder, model+separator+ligand)
@@ -6258,7 +6260,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     expected_silent_path = os.path.join(model_output_folder, expected_silent_file) if expected_silent_file else None
 
                     score_ok = os.path.exists(expected_score_path)
-                    silent_ok = (expected_silent_file is None) or (expected_silent_path and os.path.exists(expected_silent_path))
+                    silent_ok = True if skip_silent_file else ((expected_silent_file is None) or (expected_silent_path and os.path.exists(expected_silent_path)))
                     pdb_ok = True
                     if pdb_output and os.path.isdir(model_output_folder):
                         pdb_ok = any(f.lower().endswith(".pdb") for f in os.listdir(model_output_folder))
@@ -6415,7 +6417,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                                      nstruct=nstruct, s='../../input_models/'+model+'.pdb',
                                                      output_silent_file=expected_silent_file,
                                                      output_score_file=expected_score_file)
-                if only_scorefile:
+                if only_scorefile or skip_silent_file:
                     flags.addOption('out:file:score_only')
 
                 flags.add_ligand_docking_options()
@@ -12141,7 +12143,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def computeRosettaDockingFreeEnergy(self, df=None, KT: float = 0.593,
                                         binding_col: Optional[str] = None,
-                                        add_probabilities: bool = False) -> pd.DataFrame:
+                                        add_probabilities: bool = False,
+                                        skip_warnings: bool = False) -> pd.DataFrame:
         """
         Compute Boltzmann-weighted binding free energy per (Model, Ligand) from docking poses.
 
@@ -12158,6 +12161,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         add_probabilities : bool, optional
             If True, store Boltzmann probabilities per pose in a ``boltzmann_p`` column
             on the provided dataframe (or ``self.rosetta_docking_data`` when df is None).
+        skip_warnings : bool, optional
+            Suppress non-fatal warnings (auto-selected binding column, NaNs, empty conformers) when True.
 
         Returns
         -------
@@ -12174,12 +12179,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         if KT <= 0:
             raise ValueError("KT must be positive.")
 
-        if binding_col is None:
-            binding_col = next((c for c in target_df.columns if c.startswith("interface_delta_")), None)
             if binding_col is None:
-                raise ValueError("Could not find a binding energy column starting with 'interface_delta_'.")
-            binding_col_display = binding_col if isinstance(binding_col, str) else repr(binding_col)
-            warnings.warn(f"Using binding energy column '{binding_col_display}'.", UserWarning)
+                binding_col = next((c for c in target_df.columns if c.startswith("interface_delta_")), None)
+                if binding_col is None:
+                    raise ValueError("Could not find a binding energy column starting with 'interface_delta_'.")
+                binding_col_display = binding_col if isinstance(binding_col, str) else repr(binding_col)
+                if not skip_warnings:
+                    warnings.warn(f"Using binding energy column '{binding_col_display}'.", UserWarning)
 
         if binding_col not in target_df.columns:
             raise ValueError(f"Binding energy column '{binding_col}' not found in dataframe.")
@@ -12188,7 +12194,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         df_for_probs = target_df if add_probabilities else target_df.copy()
 
         energies = pd.to_numeric(df_for_probs[binding_col], errors='coerce')
-        if energies.isna().any():
+        if energies.isna().any() and not skip_warnings:
             warnings.warn("Binding energies contain NaNs; affected poses will be ignored in free energy calculation.", UserWarning)
 
         free_energy_records = []
