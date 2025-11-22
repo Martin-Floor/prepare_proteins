@@ -22,12 +22,12 @@ except Exception as exc:
         name = "openff"
         input_format = "amber"
 
-        def __init__(self, **options):  # type: ignore[override]
+        def __init__(self, _exc=exc, **options):  # type: ignore[override]
             raise RuntimeError(
                 "The 'openff' parameterization backend requires optional dependencies "
                 "(openmm, openmmforcefields, openff-toolkit, parmed). "
                 "Install them to enable this backend."
-            ) from exc  # <-- 'exc' is in-scope here
+            ) from _exc  # type: ignore[name-defined]
 
 __all__ = [
     "ParameterizationBackend",

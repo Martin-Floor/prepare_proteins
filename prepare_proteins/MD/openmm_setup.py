@@ -121,6 +121,14 @@ class openmm_md:
         saved_residues = []
         non_protein = []
         protein_set = set(aa3) - set(ions)
+        # Precompute per-residue internal bonds for non-protein residues so we
+        # can restore them after the protein-only hydrogen placement.
+        internal_bonds = {}
+        for bond in self.modeller.topology.bonds():
+            if bond[0].residue == bond[1].residue:
+                res = bond[0].residue
+                internal_bonds.setdefault(res, []).append((bond[0].name, bond[1].name))
+
         for residue in self.modeller.topology.residues():
             if residue.name not in protein_set:
                 atom_names = []
@@ -137,6 +145,7 @@ class openmm_md:
                     "atom_names": atom_names,
                     "atom_elements": atom_elements,
                     "positions": atom_positions,
+                    "bonds": internal_bonds.get(residue, []),
                 })
                 non_protein.append(residue)
 
@@ -165,21 +174,29 @@ class openmm_md:
                 continue
             chain = chain_objs[cid]
             for entry in by_chain.pop(cid):
-                residue = self.modeller.topology.addResidue(entry["residue_name"], chain)
+                residue = self.modeller.topology.addResidue(entry["residue_name"], chain, id=entry["residue_id"])
+                atom_objs = {}
                 for name, elem in zip(entry["atom_names"], entry["atom_elements"]):
-                    self.modeller.topology.addAtom(name, elem, residue)
+                    atom_objs[name] = self.modeller.topology.addAtom(name, elem, residue)
                 for pos in entry["positions"]:
                     self.modeller.positions.append(pos)
+                for a1, a2 in entry.get("bonds", []):
+                    if a1 in atom_objs and a2 in atom_objs:
+                        self.modeller.topology.addBond(atom_objs[a1], atom_objs[a2])
 
         # Then, create any missing chains and add their residues
         for cid, entries in by_chain.items():
             chain = self.modeller.topology.addChain(cid)
             for entry in entries:
-                residue = self.modeller.topology.addResidue(entry["residue_name"], chain)
+                residue = self.modeller.topology.addResidue(entry["residue_name"], chain, id=entry["residue_id"])
+                atom_objs = {}
                 for name, elem in zip(entry["atom_names"], entry["atom_elements"]):
-                    self.modeller.topology.addAtom(name, elem, residue)
+                    atom_objs[name] = self.modeller.topology.addAtom(name, elem, residue)
                 for pos in entry["positions"]:
                     self.modeller.positions.append(pos)
+                for a1, a2 in entry.get("bonds", []):
+                    if a1 in atom_objs and a2 in atom_objs:
+                        self.modeller.topology.addBond(atom_objs[a1], atom_objs[a2])
 
     def getProtonationStates(self, keep_ligands=False):
         """
@@ -246,7 +263,8 @@ class openmm_md:
                                extra_mol2=None, add_counterions=True, add_counterionsRand=False, save_amber_pdb=False, solvate=True,
                                regenerate_amber_files=False, non_standard_residues=None, strict_atom_name_check=True,
                                only_residues=None, build_full_system=True, skip_ligand_charge_computation=False,
-                               ligand_sdf_files=None):
+                               ligand_sdf_files=None, export_per_residue_ffxml=False,
+                               ligand_xml_files=None):
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -466,6 +484,19 @@ class openmm_md:
         if not cpus:
             cpus = cpu_count()
 
+        # Normalize ligand_xml_files mapping (RESNAME -> ffxml path)
+        normalized_ligand_xml = {}
+        if ligand_xml_files:
+            if not isinstance(ligand_xml_files, Mapping):
+                raise TypeError("ligand_xml_files must be a mapping of residue name -> FFXML path.")
+            for key, value in ligand_xml_files.items():
+                if not isinstance(key, str):
+                    raise TypeError("ligand_xml_files keys must be residue name strings.")
+                resname = key.strip().upper()
+                if not resname:
+                    continue
+                normalized_ligand_xml[resname] = os.fspath(value)
+
         # Modify protonation state names and save state
         for chain in self.modeller.topology.chains():
             for i,residue in enumerate(chain.residues()):
@@ -567,6 +598,66 @@ class openmm_md:
             if residue in parameters_mol2:
                 canonical_mol2 = os.path.join(parameters_folder, f'{residue}.mol2')
                 _copyfile_if_needed(parameters_mol2[residue], canonical_mol2)
+
+        # If FFXMLs are provided, generate mol2/frcmod for AmberTools (one per residue)
+        if normalized_ligand_xml:
+            try:
+                import parmed as pmd
+                from openmm.app import ForceField
+            except Exception as exc:
+                warnings.warn(f"[prepare_proteins] parmed/openmm unavailable for FFXML conversion: {exc}", RuntimeWarning)
+            else:
+                ffxml_converted = set()
+                for resname, pdb_path in generated_pdb_paths.items():
+                    if resname not in normalized_ligand_xml:
+                        continue
+                    ffxml_path = normalized_ligand_xml[resname]
+                    mol2_path = os.path.join(parameters_folder, f"{resname}.mol2")
+                    frcmod_path = os.path.join(parameters_folder, f"{resname}.frcmod")
+                    if os.path.exists(mol2_path):
+                        parameters_mol2[resname] = mol2_path
+                        continue
+                    try:
+                        lig_pdb = PDBFile(pdb_path)
+                        ff_local = ForceField(ffxml_path)
+                        lig_sys = ff_local.createSystem(lig_pdb.topology)
+                        lig_struct = pmd.openmm.load_topology(lig_pdb.topology, lig_sys, xyz=lig_pdb.positions)
+                        lig_struct.save(mol2_path, overwrite=True)
+                        parameters_mol2[resname] = mol2_path
+                        # Derive a frcmod directly from the OpenMM system parameters
+                        try:
+                            param_set = pmd.amber.AmberParameterSet.from_structure(lig_struct)
+                            param_set.write(frcmod_path, style="frcmod")
+                            parameters_frcmod[resname] = frcmod_path
+                            workdir = par_folder.get(resname)
+                            if workdir and os.path.isdir(workdir):
+                                dest = os.path.join(workdir, f"{resname}.frcmod")
+                                param_set.write(dest, style="frcmod")
+                        except Exception as exc:
+                            warnings.warn(
+                                f"[prepare_proteins] Failed to write frcmod from FFXML for {resname}: {exc}",
+                                RuntimeWarning,
+                            )
+                        # marker to skip acdoctor for ffxml-generated MOL2
+                        marker_path = os.path.join(parameters_folder, f".ffxml_generated_{resname.lower()}")
+                        try:
+                            with open(marker_path, "w") as mh:
+                                mh.write("ffxml")
+                        except OSError:
+                            pass
+                        # Also drop a marker inside the residue work folder if it exists
+                        work_marker = os.path.join(par_folder.get(resname, parameters_folder), f".ffxml_generated_{resname.lower()}")
+                        try:
+                            with open(work_marker, "w") as mh:
+                                mh.write("ffxml")
+                        except Exception:
+                            pass
+                        ffxml_converted.add(resname.upper())
+                    except Exception as exc:
+                        warnings.warn(
+                            f"[prepare_proteins] Failed to derive mol2/frcmod from {ffxml_path} for {resname}: {exc}",
+                            RuntimeWarning,
+                        )
 
         mol2_conversion_targets = set()
         provided_frcmod_residues = set()
@@ -883,6 +974,17 @@ class openmm_md:
 
         skip_parameterization_residues = provided_mol2_residues & provided_frcmod_residues
 
+        # Normalize export_per_residue_ffxml target set
+        export_ffxml_all = False
+        export_ffxml_targets = set()
+        if export_per_residue_ffxml:
+            if export_per_residue_ffxml is True:
+                export_ffxml_all = True
+            elif isinstance(export_per_residue_ffxml, (list, tuple, set)):
+                export_ffxml_targets = {str(x).strip().upper() for x in export_per_residue_ffxml if str(x).strip()}
+            else:
+                export_ffxml_targets = {str(export_per_residue_ffxml).strip().upper()}
+
         # Create parameters for each molecule
         def _convert_staged_mol2(residue_name, ligand_charge, skip_charge_computation=False):
             res_upper = residue_name.upper()
@@ -1038,6 +1140,130 @@ class openmm_md:
                     os.remove(mol2_manifest)
                 except OSError:
                     pass
+
+        # Export per-residue FFXML files when requested (AmberTools path)
+        if export_ffxml_all or export_ffxml_targets:
+            try:
+                import parmed as pmd
+            except ImportError:
+                raise RuntimeError("ParmEd is required for export_per_residue_ffxml when using the AmberTools backend.")
+
+            # Collect target residues
+            targets = set()
+            if export_ffxml_all:
+                targets.update(par_folder.keys())
+                if isinstance(extra_mol2, Mapping):
+                    targets.update(str(k).strip().upper() for k in extra_mol2.keys() if str(k).strip())
+                if extra_frcmod:
+                    if isinstance(extra_frcmod, Mapping):
+                        targets.update(str(k).strip().upper() for k in extra_frcmod.keys() if str(k).strip())
+            else:
+                targets.update({res for res in par_folder.keys() if res.upper() in export_ffxml_targets})
+                targets.update(export_ffxml_targets)
+            missing = export_ffxml_targets - set(r.upper() for r in par_folder.keys())
+            if missing:
+                warnings.warn(
+                    f"FFXML export requested for residues not parameterized in this model: {sorted(missing)}. "
+                    "Attempting export using provided extra_mol2/extra_frcmod entries when available.",
+                    RuntimeWarning,
+                )
+
+            for residue in sorted(targets):
+                # Resolve mol2 and frcmod paths
+                mol2_candidates = residue_mol2_files.get(residue) or []
+                if not mol2_candidates:
+                    mol2_path = os.path.join(parameters_folder, f"{residue}.mol2")
+                    if os.path.exists(mol2_path):
+                        mol2_candidates = [mol2_path]
+                    elif isinstance(extra_mol2, Mapping):
+                        # Try to stage extra_mol2 on-demand
+                        res_upper = residue.upper()
+                        hinted = extra_mol2.get(res_upper) or extra_mol2.get(res_upper.lower()) or extra_mol2.get(res_upper.capitalize())
+                        if hinted:
+                            try:
+                                _, source_path, _ = _resolve_mol2_source(res_upper, hinted)
+                                if res_upper in par_folder:
+                                    staged = _stage_external_mol2(res_upper, source_path, mark_for_conversion=False)
+                                    if staged:
+                                        _register_mol2_file(res_upper, staged)
+                                        mol2_candidates = [staged]
+                                else:
+                                    if os.path.exists(source_path):
+                                        dest_root = os.path.join(parameters_folder, f"{res_upper}.mol2")
+                                        _copyfile_if_needed(source_path, dest_root)
+                                        mol2_candidates = [dest_root]
+                            except Exception:
+                                pass
+                frcmod_candidates = residue_frcmod_files.get(residue) or []
+                if not frcmod_candidates:
+                    frcmod_path = os.path.join(parameters_folder, f"{residue}.frcmod")
+                    if os.path.exists(frcmod_path):
+                        frcmod_candidates = [frcmod_path]
+                    elif extra_frcmod:
+                        res_upper = residue.upper()
+                        try:
+                            # Reuse resolver to locate frcmod from user inputs
+                            source_entry = None
+                            if isinstance(extra_frcmod, Mapping):
+                                source_entry = extra_frcmod.get(res_upper) or extra_frcmod.get(res_upper.lower()) or extra_frcmod.get(res_upper.capitalize())
+                            elif isinstance(extra_frcmod, (list, tuple)):
+                                source_entry = extra_frcmod
+                            if source_entry is not None:
+                                if isinstance(source_entry, (list, tuple)):
+                                    source_entry = source_entry[0]
+                                res_hint, source_path = _resolve_frcmod_source(res_upper, source_entry)
+                                if source_path:
+                                    dest_root = _copy_into_par_folder(res_hint, source_path) or source_path
+                                    if res_hint not in par_folder:
+                                        dest_root = os.path.join(parameters_folder, f"{res_hint}.frcmod")
+                                        _copyfile_if_needed(source_path, dest_root)
+                                    _register_frcmod_file(res_hint, dest_root)
+                                    frcmod_candidates = [dest_root]
+                        except Exception:
+                            pass
+
+                if not mol2_candidates:
+                    warnings.warn(f"Skipping FFXML export for {residue}: no mol2 found.", RuntimeWarning)
+                    continue
+                if not frcmod_candidates:
+                    warnings.warn(f"Skipping FFXML export for {residue}: no frcmod found.", RuntimeWarning)
+                    continue
+
+                # Build a temporary tleap script to generate amber files for the residue alone
+                tmp_prmtop = os.path.join(parameters_folder, f"{residue}_ffxml.prmtop")
+                tmp_inpcrd = os.path.join(parameters_folder, f"{residue}_ffxml.inpcrd")
+                tlin = os.path.join(parameters_folder, f"{residue}_ffxml.leap")
+                with open(tlin, "w") as tl:
+                    tl.write("source leaprc.protein.ff14SB\n")
+                    tl.write("source leaprc.gaff\n")
+                    tl.write(f'loadamberparams "{frcmod_candidates[0]}"\n')
+                    tl.write(f'{residue} = loadmol2 "{mol2_candidates[0]}"\n')
+                    tl.write(f'saveamberparm {residue} "{tmp_prmtop}" "{tmp_inpcrd}"\n')
+                    tl.write("quit\n")
+                ret = _run_command(f"tleap -s -f \"{tlin}\"", self.command_log)
+                if ret != 0 or (not os.path.exists(tmp_prmtop) or not os.path.exists(tmp_inpcrd)):
+                    warnings.warn(f"tleap failed while generating FFXML inputs for {residue}", RuntimeWarning)
+                    continue
+
+                try:
+                    struct = pmd.load_file(tmp_prmtop, tmp_inpcrd)
+                    param_set = pmd.openmm.parameters.OpenMMParameterSet.from_structure(struct)
+                    from parmed.modeller.residue import ResidueTemplate
+                    for res in struct.residues:
+                        tmpl = ResidueTemplate.from_residue(res)
+                        # keep first occurrence per name
+                        if tmpl.name not in param_set.residues:
+                            param_set.residues[tmpl.name] = tmpl
+                    ffxml_path = os.path.join(parameters_folder, f"{residue}.ffxml")
+                    param_set.write(ffxml_path)
+                except Exception as exc:
+                    warnings.warn(f"Failed to save FFXML for {residue}: {exc}", RuntimeWarning)
+                finally:
+                    for path in (tmp_prmtop, tmp_inpcrd, tlin):
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
 
         # Renumber PDB
         renum_pdb = pdb_file.replace('.pdb', '_renum.pdb')
@@ -1482,6 +1708,9 @@ class ligandParameters:
     def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False,
                            skip_ligand_charge_computation=False):
         def _run_acdoctor_on_mol2(mol2_file):
+            marker_path = f".ffxml_generated_{self.resname.lower()}"
+            if os.path.exists(marker_path) or os.path.exists(os.path.join(os.getcwd(), marker_path)):
+                return
             if not os.path.exists(mol2_file):
                 raise FileNotFoundError(f'acdoctor input {mol2_file} not found.')
             command = (

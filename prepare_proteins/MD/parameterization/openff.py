@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 import shutil
+import os
+import tempfile
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 import warnings
 
@@ -20,8 +22,19 @@ try:
 except ImportError:  # pragma: no cover - openmm required at runtime
     PDBFile = None
 
-from openff.toolkit.topology import Molecule
-from openff.toolkit.utils import ToolkitRegistry, RDKitToolkitWrapper, AmberToolsToolkitWrapper
+try:
+    from openff.toolkit.topology import Molecule
+    from openff.toolkit.utils import ToolkitRegistry, RDKitToolkitWrapper, AmberToolsToolkitWrapper
+    try:
+        from openff.units import unit as off_unit  # type: ignore
+    except Exception:
+        off_unit = None  # type: ignore
+except ImportError:  # pragma: no cover - openff required at runtime
+    Molecule = None  # type: ignore
+    ToolkitRegistry = None  # type: ignore
+    RDKitToolkitWrapper = None  # type: ignore
+    AmberToolsToolkitWrapper = None  # type: ignore
+    off_unit = None  # type: ignore
 
 @register_backend
 class OpenFFBackend(ParameterizationBackend):
@@ -79,9 +92,46 @@ class OpenFFBackend(ParameterizationBackend):
         if options.get("build_full_system") is False:
             raise NotImplementedError("OpenFF backend currently prepares full protein+ligand systems only.")
 
+        extra_ffxml_entries: List[tuple[Optional[str], str]] = []
+        xml_map_raw = options.get("ligand_xml_files") or {}
+        legacy_ffxml = options.get("per_residue_ffxml")
+        if legacy_ffxml and not xml_map_raw:
+            xml_map_raw = legacy_ffxml
+
+        xml_residue_map: Dict[str, str] = {}
+        if xml_map_raw:
+            if isinstance(xml_map_raw, Mapping):
+                for key, val in xml_map_raw.items():
+                    resname = str(key).strip().upper()
+                    if not resname:
+                        continue
+                    path_str = os.fspath(val)
+                    xml_residue_map[resname] = path_str
+                    extra_ffxml_entries.append((resname, path_str))
+            elif isinstance(xml_map_raw, (str, Path)):
+                path_str = os.fspath(xml_map_raw)
+                extra_ffxml_entries.append((None, path_str))
+            elif isinstance(xml_map_raw, (list, tuple, set)):
+                for val in xml_map_raw:
+                    extra_ffxml_entries.append((None, os.fspath(val)))
+            else:
+                raise TypeError("ligand_xml_files must be a mapping or collection of FFXML paths.")
+
+        export_ffxml = options.get("export_per_residue_ffxml", False)
+        export_targets = set()
+        export_all = False
+        if export_ffxml is True:
+            export_all = True
+        elif isinstance(export_ffxml, str):
+            export_targets = {export_ffxml.strip().upper()}
+        elif isinstance(export_ffxml, (list, tuple, set)):
+            export_targets = {str(v).strip().upper() for v in export_ffxml if str(v).strip()}
+        elif export_ffxml not in (False, None):
+            raise TypeError("export_per_residue_ffxml must be True, False, a residue name, or a collection of residue names.")
+
         try:
             from openmm import unit as u
-            from openmm.app import ForceField, HBonds, Modeller, PME
+            from openmm.app import ForceField, HBonds, Modeller, PME, NoCutoff
         except ImportError as exc:
             raise RuntimeError("openmm is required for the OpenFF parameterization backend.") from exc
         try:
@@ -123,6 +173,63 @@ class OpenFFBackend(ParameterizationBackend):
                 protein_residues.add(entry.strip().upper())
 
         modeller = Modeller(openmm_md.modeller.topology, openmm_md.modeller.positions)
+
+        # Apply residue renaming if provided (chain id, residue id) -> new name
+        rename_map = options.get("residue_names") or {}
+        if rename_map:
+            if not isinstance(rename_map, Mapping):
+                raise TypeError("residue_names must be a mapping of (chain_id, residue_id) -> new residue name.")
+            for chain in modeller.topology.chains():
+                for res in chain.residues():
+                    try:
+                        res_id_int = int(res.id)
+                    except Exception:
+                        continue
+                    key = (chain.id, res_id_int)
+                    if key in rename_map:
+                        new_name = str(rename_map[key]).strip().upper()
+                        if new_name:
+                            res.name = new_name
+
+        # Apply user-defined bonds (chain_id, res_id, atom_name) tuples
+        add_bonds_opt = options.get("add_bonds")
+        if add_bonds_opt:
+            # Build lookup: (chain, resid int, atom name) -> atom
+            atom_lookup = {}
+            for atom in modeller.topology.atoms():
+                try:
+                    resid_int = int(atom.residue.id)
+                except Exception:
+                    continue
+                key = (atom.residue.chain.id, resid_int, atom.name.strip())
+                atom_lookup[key] = atom
+
+            def _locate(atom_spec):
+                if len(atom_spec) != 3:
+                    raise ValueError(f"add_bonds entries must be (chain, resid, atom), got {atom_spec}")
+                chain_id, resid, atom_name = atom_spec
+                try:
+                    resid_int = int(resid)
+                except Exception:
+                    resid_int = resid
+                key = (str(chain_id), resid_int, str(atom_name).strip())
+                atom = atom_lookup.get(key)
+                if atom is None:
+                    raise ValueError(f"Atom {atom_name} in residue {chain_id}:{resid} not found in topology.")
+                return atom
+
+            def _bond_exists(topology, a1, a2):
+                for b in topology.bonds():
+                    if (b[0] == a1 and b[1] == a2) or (b[0] == a2 and b[1] == a1):
+                        return True
+                return False
+
+            for bond in add_bonds_opt:
+                a1 = _locate(bond[0])
+                a2 = _locate(bond[1])
+                if not _bond_exists(modeller.topology, a1, a2):
+                    modeller.topology.addBond(a1, a2)
+
         self._remove_skip_residues(modeller, DEFAULT_PARAMETERIZATION_SKIP_RESIDUES)
         ligand_residues = self._collect_ligand_residues(
             modeller.topology.residues(),
@@ -130,6 +237,7 @@ class OpenFFBackend(ParameterizationBackend):
             skip_ligands=skip_ligands,
             only_residues=only_residues,
         )
+        xml_residue_names = set(xml_residue_map.keys())
 
         if not ligand_residues:
             warnings.warn(
@@ -147,7 +255,12 @@ class OpenFFBackend(ParameterizationBackend):
 
         # ---- Process each ligand residue group
         ligand_molecules: Dict[str, Molecule] = {}
+        residue_atom_names_map: Dict[str, list[str]] = {}
         for resname, residue_specs in ligand_residues.items():
+            # If the user provided an FFXML template for this residue and no SDF/SMILES, skip OpenFF templating.
+            if resname in xml_residue_names and resname not in ligand_sdf_map and resname not in ligand_smiles_map:
+                continue
+
             # Require a user-provided total charge for clarity and validation
             residue_charge = self._find_residue_charge(resname, provided_charges)
             if residue_charge is None:
@@ -334,6 +447,7 @@ class OpenFFBackend(ParameterizationBackend):
 
                 residues_to_delete.append(residue)
                 ligand_entries.append((ligand_instance, ligand_positions, pdb_order_names, residue))
+                residue_atom_names_map.setdefault(resname, pdb_order_names)
 
             if residues_to_delete:
                 modeller.delete(residues_to_delete)
@@ -384,8 +498,179 @@ class OpenFFBackend(ParameterizationBackend):
             ligand_molecules[resname] = Molecule(base_ligand)
 
         # ---- Register SMIRNOFF templates for all ligands
-        forcefield_files = tuple(options.get("forcefield_files") or ())
-        forcefield = ForceField(*forcefield_files)
+        base_forcefield_files = tuple(options.get("forcefield_files") or ())
+        if not base_forcefield_files:
+            raise ValueError("forcefield_files must include at least protein and water XML definitions.")
+        forcefield = ForceField(*base_forcefield_files)
+
+        # Load extra FFXMLs, stripping duplicate AtomType definitions to avoid collisions (e.g., H1)
+        if extra_ffxml_entries:
+            # Capture residue atom-name lists from the modeller to help align template atom names
+            residue_atom_names = {}
+            for res in modeller.topology.residues():
+                rname = res.name.strip().upper()
+                residue_atom_names.setdefault(rname, [])
+                residue_atom_names[rname] = [a.name for a in res.atoms()]
+
+            existing_types = set(forcefield._atomTypes.keys())  # type: ignore[attr-defined]
+            tmp_files: List[str] = []
+            try:
+                for target_residue, path in extra_ffxml_entries:
+                    src_path = os.fspath(path)
+                    if not os.path.exists(src_path):
+                        raise FileNotFoundError(f"FFXML file not found: {src_path}")
+                    import xml.etree.ElementTree as ET
+
+                    tree = ET.parse(src_path)
+                    root = tree.getroot()
+                    # Optionally rename residue templates to the requested name
+                    type_renames: Dict[str, str] = {}
+                    type_prefix = target_residue or Path(src_path).stem.upper()
+
+                    if target_residue:
+                        for res_elem in root.findall(".//Residue"):
+                            res_elem.set("name", target_residue)
+                            names = residue_atom_names.get(target_residue)
+                            atoms = res_elem.findall("Atom")
+                            template_names = [a.get("name") for a in atoms]
+                            # Only remap if template atom names differ from PDB names
+                            if names and set(template_names) != set(names):
+                                # heuristic mapping: try stripping trailing 'X'/'x'
+                                name_map = {}
+                                if all(tn and tn[:-1] in names for tn in template_names):
+                                    for atom_elem in atoms:
+                                        old_name = atom_elem.get("name")
+                                        new_name = old_name[:-1]
+                                        name_map[old_name] = new_name
+                                        atom_elem.set("name", new_name)
+                                elif len(names) == len(atoms):
+                                    for atom_elem, new_name in zip(atoms, names):
+                                        old_name = atom_elem.get("name")
+                                        if old_name:
+                                            name_map[old_name] = new_name
+                                        atom_elem.set("name", new_name)
+                                if name_map:
+                                    for bond_elem in res_elem.findall(".//Bond"):
+                                        for key in ("atomName1", "atomName2"):
+                                            if key in bond_elem.attrib and bond_elem.attrib[key] in name_map:
+                                                bond_elem.set(key, name_map[bond_elem.attrib[key]])
+                                    for vs in res_elem.findall(".//VirtualSite"):
+                                        if "atomName" in vs.attrib and vs.attrib["atomName"] in name_map:
+                                            vs.set("atomName", name_map[vs.attrib["atomName"]])
+                                        for idx in range(1, 5):
+                                            key = f"atomName{idx}"
+                                            if key in vs.attrib and vs.attrib[key] in name_map:
+                                                vs.set(key, name_map[vs.attrib[key]])
+
+                    type_block = root.find("AtomTypes")
+                    new_types = []
+                    class_renames: Dict[str, str] = {}
+                    if type_block is not None:
+                        for type_elem in list(type_block):
+                            name = type_elem.attrib.get("name")
+                            if not name:
+                                continue
+                            # Prefix atom type names to avoid collisions
+                            new_name = f"{type_prefix}_{name}"
+                            type_renames[name] = new_name
+                            type_elem.set("name", new_name)
+                            old_class = type_elem.attrib.get("class")
+                            if old_class:
+                                # Keep class names in sync with the renamed types
+                                new_class = f"{type_prefix}_{old_class}"
+                                class_renames[old_class] = new_class
+                                type_elem.set("class", new_class)
+                            new_types.append(new_name)
+                        if not new_types:
+                            # If nothing left, drop the block
+                            root.remove(type_block)
+                        else:
+                            # Update Atom type references
+                            for atom_elem in root.findall(".//Residue/Atom"):
+                                tname = atom_elem.attrib.get("type")
+                                if tname in type_renames:
+                                    atom_elem.set("type", type_renames[tname])
+                            for nb_atom in root.findall(".//NonbondedForce/Atom"):
+                                cname = nb_atom.attrib.get("class")
+                                if cname in class_renames:
+                                    nb_atom.set("class", class_renames[cname])
+                                elif cname in type_renames:
+                                    nb_atom.set("class", type_renames[cname])
+                            # Update any force parameter blocks that reference class*/type* attributes
+                            param_keys = {"class", "type", "class1", "class2", "class3", "class4", "type1", "type2", "type3", "type4"}
+                            for elem in root.iter():
+                                for key in param_keys:
+                                    val = elem.attrib.get(key)
+                                    if val is None:
+                                        continue
+                                    if val in class_renames:
+                                        elem.set(key, class_renames[val])
+                                    elif val in type_renames:
+                                        elem.set(key, type_renames[val])
+                            existing_types.update(new_types)
+                    # Normalize NonbondedForce 1-4 scales to match Amber defaults (0.833333/0.5)
+                    for nbforce in root.findall("NonbondedForce"):
+                        nbforce.set("coulomb14scale", "0.833333")
+                        nbforce.set("lj14scale", "0.5")
+                    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".ffxml", prefix="sanitized_", dir=str(parameters_folder))
+                    os.close(tmp_fd)
+                    tree.write(tmp_path)
+                    forcefield.loadFile(tmp_path)
+                    tmp_files.append(tmp_path)
+                    existing_types.update(new_types)
+            finally:
+                for tmp in tmp_files:
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+
+            # Validate that provided ligand XMLs actually define residue templates
+            missing_templates = []
+            for resname in xml_residue_map:
+                if resname not in forcefield._templates:  # type: ignore[attr-defined]
+                    missing_templates.append(resname)
+            if missing_templates:
+                raise ValueError(
+                    f"ligand_xml_files provided for residues {missing_templates}, but no residue templates were "
+                    "found in those FFXML files. Each FFXML must include <Residues>/<Residue> entries for the "
+                    "corresponding names. Regenerate the FFXML with residue templates (e.g., export_per_residue_ffxml) "
+                    "or supply mol2/frcmod instead."
+                )
+
+        # ---- Ensure topology bonds match provided templates to improve matching
+        def _enforce_template_bonds(modeller_obj, ff_obj, residue_mapping):
+            template_map = getattr(ff_obj, "_templates", {})
+            for residue in modeller_obj.topology.residues():
+                rname = residue.name.strip().upper()
+                if rname not in residue_mapping and rname not in template_map:
+                    continue
+                tmpl = template_map.get(rname)
+                if tmpl is None:
+                    continue
+                # Map atom names to atoms
+                atom_by_name = {}
+                for atom in residue.atoms():
+                    atom_by_name.setdefault(atom.name.strip(), []).append(atom)
+                # Ensure counts match
+                if len(tmpl.atoms) != sum(len(v) for v in atom_by_name.values()):
+                    continue
+                # Add missing bonds from template
+                for bond in tmpl.bonds:
+                    # bond may be Bond or tuple of atoms
+                    try:
+                        a1_name = bond[0].name
+                        a2_name = bond[1].name
+                    except Exception:
+                        continue
+                    if a1_name not in atom_by_name or a2_name not in atom_by_name:
+                        continue
+                    for a1 in atom_by_name[a1_name]:
+                        for a2 in atom_by_name[a2_name]:
+                            if modeller_obj.topology.getBond(a1, a2) is None:
+                                modeller_obj.addBond(a1, a2)
+
+        _enforce_template_bonds(modeller, forcefield, xml_residue_map)
         if ligand_molecules:
             generator = SMIRNOFFTemplateGenerator(
                 forcefield=options.get("smirnoff_forcefield", "openff-2.2.0.offxml"),
@@ -405,6 +690,19 @@ class OpenFFBackend(ParameterizationBackend):
                 neutralize=bool(options.get("neutralize", True)),
             )
 
+        def _build_residue_template_map(topology):
+            mapping = {}
+            template_map = getattr(forcefield, "_templates", {})
+            if not xml_residue_map or not template_map:
+                return mapping
+            for res in topology.residues():
+                rname = res.name.strip().upper()
+                if rname in xml_residue_map and rname in template_map:
+                    mapping[res] = rname
+            return mapping
+
+        residue_templates = _build_residue_template_map(modeller.topology)
+
         # ---- Build two systems: one "export" (no constraints) and one runtime (HBonds)
         cutoff = float(options.get("nonbonded_cutoff_nm", 1.0)) * u.nanometer
         export_system = forcefield.createSystem(
@@ -414,6 +712,7 @@ class OpenFFBackend(ParameterizationBackend):
             constraints=None,
             rigidWater=False,
             removeCMMotion=False,
+            residueTemplates=residue_templates,
         )
 
         # ---- Export AMBER files
@@ -430,6 +729,98 @@ class OpenFFBackend(ParameterizationBackend):
         openmm_md.positions = np.array([pos.value_in_unit(u.nanometer) for pos in modeller.positions])
         openmm_md.prmtop_file = str(prmtop_path)
         openmm_md.inpcrd_file = str(inpcrd_path)
+
+        # ---- Optional per-residue FFXML export (for reuse)
+        if export_all or export_targets:
+            if pmd is None:  # type: ignore[truthy-function]
+                raise RuntimeError(
+                    "ParmEd is required for export_per_residue_ffxml but is not available. "
+                    "Install parmed and retry."
+                )
+
+            target_residues = set(ligand_molecules.keys()) if export_all else export_targets & set(ligand_molecules.keys())
+            missing_export = export_targets - set(ligand_molecules.keys())
+            if missing_export:
+                warnings.warn(
+                    f"[prepare_proteins] export_per_residue_ffxml requested for residues not parameterized by OpenFF: "
+                    f"{sorted(missing_export)}",
+                    RuntimeWarning,
+                )
+
+            for resname in sorted(target_residues):
+                lig = ligand_molecules.get(resname)
+                if lig is None:
+                    continue
+                if not lig.conformers:
+                    warnings.warn(
+                        f"[prepare_proteins] Skipping FFXML export for {resname}: no conformer available.",
+                        RuntimeWarning,
+                    )
+                    continue
+                try:
+                    top = lig.to_topology().to_openmm()
+                except Exception as exc:
+                    warnings.warn(
+                        f"[prepare_proteins] Unable to build OpenMM topology for {resname} during FFXML export: {exc}",
+                        RuntimeWarning,
+                    )
+                    continue
+                try:
+                    raw_coords = lig.conformers[0]
+                    try:
+                        coords_nm = np.asarray(raw_coords.value_in_unit(u.nanometer), dtype=float)
+                    except Exception:
+                        try:
+                            if off_unit is not None and hasattr(raw_coords, "m_as"):
+                                coords_nm = np.asarray(raw_coords.m_as(off_unit.nanometer), dtype=float)  # type: ignore[attr-defined]
+                            else:
+                                coords_nm = np.asarray(raw_coords.to(u.nanometer), dtype=float)  # type: ignore[attr-defined]
+                        except Exception:
+                            # Assume raw array is in angstrom; convert to nm without units to avoid warnings
+                            coords_nm = np.asarray(raw_coords, dtype=float) / 10.0
+                except Exception as exc:
+                    warnings.warn(
+                        f"[prepare_proteins] Unable to read coordinates for {resname} during FFXML export: {exc}",
+                        RuntimeWarning,
+                    )
+                    continue
+                try:
+                    lig_system = forcefield.createSystem(
+                        top,
+                        nonbondedMethod=NoCutoff,
+                        constraints=None,
+                        rigidWater=False,
+                        removeCMMotion=False,
+                        residueTemplates=_build_residue_template_map(top),
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"[prepare_proteins] ForceField failed to create system for {resname} during FFXML export: {exc}",
+                        RuntimeWarning,
+                    )
+                    continue
+
+                try:
+                    lig_structure = pmd.openmm.load_topology(top, lig_system, xyz=coords_nm)
+                    pdb_names = residue_atom_names_map.get(resname)
+                    if pdb_names and len(pdb_names) == len(lig_structure.atoms):
+                        for atom, new_name in zip(lig_structure.atoms, pdb_names):
+                            atom.name = new_name
+                        for residue in lig_structure.residues:
+                            residue.name = resname
+                    param_set = pmd.openmm.parameters.OpenMMParameterSet.from_structure(lig_structure)
+                    from parmed.modeller.residue import ResidueTemplate
+                    for res in lig_structure.residues:
+                        tmpl = ResidueTemplate.from_residue(res)
+                        if tmpl.name not in param_set.residues:
+                            param_set.residues[tmpl.name] = tmpl
+                    ffxml_path = Path(parameters_folder) / f"{resname}.ffxml"
+                    param_set.write(str(ffxml_path))
+                except Exception as exc:
+                    warnings.warn(
+                        f"[prepare_proteins] Failed to save FFXML for {resname}: {exc}",
+                        RuntimeWarning,
+                    )
 
         result = ParameterizationResult(input_format="amber")
         result.with_file("prmtop", str(prmtop_path))

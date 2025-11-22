@@ -3502,7 +3502,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if params_folder != None:
                 command += "--params_folder " + params_folder + " "
             command += "\ncd " + "../" * len(output_folder.split("/")) + "\n"
-            jobs.append(command)
+            jobs.append(command.rstrip("\n") + "\n")
 
         return jobs
 
@@ -3683,7 +3683,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     + ".flags\n"
                 )
                 command += "cd ../../..\n"
-                jobs.append(command)
+                jobs.append(command.rstrip("\n") + "\n")
 
         return jobs
 
@@ -9551,7 +9551,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                only_models=None, skip_models=None,
                                ligand_smiles=None,
                                ligand_sdf_files=None,
+                               ligand_xml_files=None,
                                skip_ligand_charge_computation=False,
+                               export_per_residue_ffxml=False,
                                ):
         """
         Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
@@ -9584,10 +9586,16 @@ make sure of reading the target sequences with the function readTargetSequences(
         - ligand_sdf_files (dict, optional): Mapping from residue name to SDF file paths or option dictionaries
           (with optional ``index`` and ``charge_method`` keys). When provided, the OpenFF backend uses the SDF
           connectivity/chemistry while retaining ligand coordinates from the model PDB.
+        - ligand_xml_files (dict, optional): Mapping from residue name to FFXML files containing templates to add
+          to the OpenFF forcefield (e.g., {'HEM': 'path/HEM.ffxml'}). Ignored by the AmberTools backend.
         - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
         - skip_models (list of str, optional): If provided, skip setup for these models.
         - skip_ligand_charge_computation (bool, optional): If True, the parameterization backends will reuse
           existing ligand charges (cached OpenFF templates or pre-existing MOL2 files) instead of recomputing them.
+        - export_per_residue_ffxml (bool or str or list of str, optional): If True, export FFXML templates for all
+          ligands prepared by the OpenFF backend into the parameters folder; if a string or list, export only for the
+          specified residue names. The AmberTools backend will also export when requested, using available mol2/frcmod
+          inputs for the selected residues.
         """
 
         openmm_setup = _require_openmm_support("proteinModels.setUpOpenMMSimulations")
@@ -9642,6 +9650,27 @@ make sure of reading the target sequences with the function readTargetSequences(
                         "ligand_sdf_files values must be path strings or dictionaries with options."
                     )
             ligand_sdf_files = normalized_sdfs
+        if ligand_xml_files is not None:
+            if not isinstance(ligand_xml_files, dict):
+                raise TypeError("ligand_xml_files must be a dict mapping residue name to FFXML paths.")
+            normalized_xml = {}
+            for key, value in ligand_xml_files.items():
+                if not isinstance(key, str):
+                    raise TypeError("ligand_xml_files keys must be residue name strings.")
+                resname = key.strip().upper()
+                if not resname:
+                    continue
+                if not isinstance(value, (str, os.PathLike)):
+                    raise TypeError(f"ligand_xml_files[{key!r}] must be a path string.")
+                path_str = os.fspath(value)
+                normalized_xml[resname] = path_str
+            ligand_xml_files = normalized_xml
+
+        # Normalize export flag (OpenFF-only)
+        if isinstance(export_per_residue_ffxml, str):
+            export_per_residue_ffxml = [export_per_residue_ffxml]
+        elif isinstance(export_per_residue_ffxml, (list, tuple, set)):
+            export_per_residue_ffxml = [str(v) for v in export_per_residue_ffxml]
 
         def _select_backend_parameters_folder(base_folder: str, backend_label: str) -> str:
             if not backend_label:
@@ -9788,7 +9817,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             # script, which requires the flag, always receives a value.
             seed = int(fixed_seed) if fixed_seed is not None else int(np.random.randint(0, 2**31 - 1))
             cmd[-1] += f" --seed {seed}"
-            jobs.append("\n".join(cmd))
+            jobs.append("\n".join(cmd) + "\n")
 
             return jobs
 
@@ -9843,6 +9872,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             backend_options.setdefault("ligand_sdf_files", ligand_sdf_files)
         if skip_ligand_charge_computation:
             backend_options.setdefault("skip_ligand_charge_computation", True)
+        backend_name_lower = str(parameterization_method).lower()
+        if backend_name_lower == "openff":
+            if ligand_xml_files:
+                backend_options.setdefault("ligand_xml_files", ligand_xml_files)
+            if export_per_residue_ffxml:
+                backend_options.setdefault("export_per_residue_ffxml", export_per_residue_ffxml)
+        elif backend_name_lower == "ambertools":
+            if ligand_xml_files:
+                backend_options.setdefault("ligand_xml_files", ligand_xml_files)
         backend = get_backend(parameterization_method, **backend_options)
         backend_label = getattr(backend, "name", str(parameterization_method)).lower()
         ligand_parameters_folder = _select_backend_parameters_folder(ligand_parameters_folder, backend_label)
@@ -10141,33 +10179,42 @@ make sure of reading the target sequences with the function readTargetSequences(
                             lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
                         )
                     skip_argument = list(skip_for_param) if skip_for_param else None
+                prepare_kwargs = dict(
+                    charges=ligand_charges,
+                    metal_ligand=metal_ligand,
+                    add_bonds=add_bonds.get(model) if add_bonds else None,
+                    skip_ligands=sorted(skip_argument) if skip_argument else effective_skip_ligands,
+                    overwrite=False,
+                    metal_parameters=external_params,
+                    extra_frcmod=extra_frcmod,
+                    extra_mol2=extra_mol2,
+                    cpus=20,
+                    return_qm_jobs=True,
+                    extra_force_field=extra_force_field,
+                    force_field='ff14SB',
+                    residue_names=residue_names.get(model) if residue_names else None,
+                    add_counterions=True,
+                    add_counterionsRand=add_counterionsRand,
+                    save_amber_pdb=True,
+                    solvate=True,
+                    regenerate_amber_files=True,
+                    non_standard_residues=non_standard_residues,
+                    strict_atom_name_check=strict_ligand_atom_check,
+                    only_residues=selected_ligands_set,
+                    build_full_system=False,
+                    ligand_sdf_files=ligand_sdf_files,
+                )
+                if getattr(backend, "name", "").lower() == "openff":
+                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
+                elif getattr(backend, "name", "").lower() == "ambertools":
+                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
+                prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
+
                 backend.prepare_model(
-                        self.openmm_md[model],
-                        ligand_parameters_folder,
-                        charges=ligand_charges,
-                        metal_ligand=metal_ligand,
-                        add_bonds=add_bonds.get(model) if add_bonds else None,
-                        skip_ligands=sorted(skip_argument) if skip_argument else effective_skip_ligands,
-                        overwrite=False,
-                        metal_parameters=external_params,
-                        extra_frcmod=extra_frcmod,
-                        extra_mol2=extra_mol2,
-                        cpus=20,
-                        return_qm_jobs=True,
-                        extra_force_field=extra_force_field,
-                        force_field='ff14SB',
-                        residue_names=residue_names.get(model) if residue_names else None,
-                        add_counterions=True,
-                        add_counterionsRand=add_counterionsRand,
-                        save_amber_pdb=True,
-                        solvate=True,
-                        regenerate_amber_files=True,
-                        non_standard_residues=non_standard_residues,
-                        strict_atom_name_check=strict_ligand_atom_check,
-                        only_residues=selected_ligands_set,
-                        build_full_system=False,
-                        ligand_sdf_files=ligand_sdf_files,
-                    )
+                    self.openmm_md[model],
+                    ligand_parameters_folder,
+                    **prepare_kwargs,
+                )
                 self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
                 packs = _collect_ligand_packs(ligand_parameters_folder)
 
@@ -10210,13 +10257,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
             if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
                 external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
-                backend.prepare_model(
-                        self.openmm_md[model],
-                        ligand_parameters_folder,
-                        charges=ligand_charges,
-                        metal_ligand=metal_ligand,
-                        add_bonds=add_bonds.get(model) if add_bonds else None,
-                        skip_ligands=effective_skip_ligands,
+                prepare_kwargs = dict(
+                    charges=ligand_charges,
+                    metal_ligand=metal_ligand,
+                    add_bonds=add_bonds.get(model) if add_bonds else None,
+                    skip_ligands=effective_skip_ligands,
                     overwrite=False,
                     metal_parameters=external_params,
                     extra_frcmod=extra_frcmod,
@@ -10234,6 +10279,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                     non_standard_residues=non_standard_residues,
                     strict_atom_name_check=strict_ligand_atom_check,
                     ligand_sdf_files=ligand_sdf_files,
+                )
+                if getattr(backend, "name", "").lower() == "openff":
+                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
+                elif getattr(backend, "name", "").lower() == "ambertools":
+                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
+                prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
+
+                backend.prepare_model(
+                    self.openmm_md[model],
+                    ligand_parameters_folder,
+                    **prepare_kwargs,
                 )
 
             parameterization_result = backend.describe_model(self.openmm_md[model])
