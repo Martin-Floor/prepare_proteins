@@ -478,12 +478,17 @@ from .MD.parameterization.utils import DEFAULT_PARAMETERIZATION_SKIP_RESIDUES
 
 try:
     _BIOPYTHON_THREE_TO_ONE = PDB.Polypeptide.three_to_one
-
     def _three_to_one(resname):
         return _BIOPYTHON_THREE_TO_ONE(resname)
 
+    _BIOPYTHON_ONE_TO_THREE = PDB.Polypeptide.one_to_three
+
+    def _one_to_three(rescode):
+        return _BIOPYTHON_ONE_TO_THREE(rescode).upper()
+
 except AttributeError:
     from Bio.Data.PDBData import protein_letters_3to1_extended as _protein_letters_3to1_extended
+    from Bio.Data.IUPACData import protein_letters_1to3 as _protein_letters_1to3
 
     def _three_to_one(resname):
         """Biopython>=1.83 compatibility: map three-letter codes to one letter."""
@@ -494,6 +499,13 @@ except AttributeError:
         if key in _protein_letters_3to1_extended:
             return _protein_letters_3to1_extended[key]
         raise KeyError(resname)
+
+    def _one_to_three(rescode):
+        """Map one-letter amino acid code to three-letter code."""
+        key = f"{rescode}".strip().upper()
+        if len(key) != 1 or key not in _protein_letters_1to3:
+            raise KeyError(rescode)
+        return _protein_letters_1to3[key].upper()
 
 
 class proteinModels:
@@ -3510,13 +3522,15 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         self,
         job_folder,
         mutants,
+        variant_fastas=None,
         nstruct=100,
         relax_cycles=0,
         cst_optimization=True,
         executable="rosetta_scripts.mpi.linuxgccrelease",
         sugars=False,
         param_files=None,
-        mpi_command="slurm",
+        parallelisation="srun",
+        mpi_command=None,
         cpus=None,
     ):
         """
@@ -3530,7 +3544,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         job_folder : str
             Folder path where to place the mutation job.
         mutants : dict
-            Dictionary specify the mutants to generate.
+            Mutants specification. Two accepted formats (can be mixed per model):
+              1) Nested dict: {model: {mutant_name: [(resid, new_aa), ...]}, ...}
+              2) FASTA dict: {model: "/path/to/variants.fasta", ...} where each
+                 FASTA entry header becomes the mutant name. For multi-chain
+                 models, sequences must be separated by '/' per chain in chain
+                 order. Entries must match base length and only use standard AAs.
+                 Name collisions error.
+        variant_fastas : dict, optional
+            Same as FASTA dict above; kept for backwards compatibility. Collides
+            with a FASTA entry in `mutants` for the same model -> error.
         relax_cycles : int
             Apply this number of relax cycles (default:0, i.e., no relax).
         nstruct : int
@@ -3539,16 +3562,18 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Params file to use when reading model with Rosetta.
         sugars : bool
             Use carbohydrate aware Rosetta optimization
+        parallelisation : str, optional
+            How to launch Rosetta. "srun", "mpirun", or None for a single process.
+            Defaults to "srun". If using "mpirun", `cpus` must be provided.
+        mpi_command : str, optional
+            Deprecated compatibility alias. Accepted values: "slurm", "openmpi", or
+            None. When provided, it is translated to `parallelisation`.
         """
+        if mpi_command not in (None, "slurm", "openmpi"):
+            raise ValueError("mpi_command must be one of: None, 'slurm', 'openmpi'")
 
-        mpi_commands = ["slurm", "openmpi", None]
-        if mpi_command not in mpi_commands:
-            raise ValueError(
-                "Wrong mpi_command it should either: " + " ".join(mpi_commands)
-            )
-
-        if mpi_command == "openmpi" and not isinstance(cpus, int):
-            raise ValueError("You must define the number of CPU")
+        if not isinstance(mutants, dict):
+            raise ValueError("mutants must be a dictionary mapping model -> variants or model -> fasta")
 
         # Create mutation job folder
         if not os.path.exists(job_folder):
@@ -3562,9 +3587,160 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if not os.path.exists(job_folder + "/output_models"):
             os.mkdir(job_folder + "/output_models")
 
+        if variant_fastas is not None and not isinstance(variant_fastas, dict):
+            raise ValueError("variant_fastas must be a dictionary mapping model -> fasta path")
+
+        # Split inputs into explicit mutant dicts and fasta sources
+        explicit_mutants = {}
+        fasta_sources = {}
+        for model, spec in mutants.items():
+            if isinstance(spec, str):
+                fasta_sources[model] = spec
+            elif isinstance(spec, dict):
+                explicit_mutants[model] = spec
+            else:
+                raise ValueError(
+                    f"Invalid mutants entry for model {model}: expected dict of variants or fasta path string"
+                )
+
+        if variant_fastas:
+            for model, fasta_path in variant_fastas.items():
+                if model in fasta_sources:
+                    raise ValueError(
+                        f"FASTA source for model {model} provided both in mutants and variant_fastas"
+                    )
+                fasta_sources[model] = fasta_path
+
+        # Ensure sequences are available for comparison
+        requested_models = set(explicit_mutants.keys()) | set(fasta_sources.keys())
+        if (
+            not getattr(self, "sequences", None)
+            or not getattr(self, "chain_sequences", None)
+            or any(m not in self.sequences for m in requested_models)
+        ):
+            self.getModelsSequences()
+
+        # Augment mutants with variants defined in fasta files
+        all_mutants = copy.deepcopy(explicit_mutants)
+        if fasta_sources:
+            standard_aas = set("ACDEFGHIKLMNPQRSTVWY")
+
+            def _ensure_model_sequences(model):
+                if model not in self.sequences:
+                    raise ValueError(f"Model {model} is not loaded; cannot read sequences for FASTA variants.")
+                # When sequences are stored per chain, drop chains with empty/non-protein sequences
+                if isinstance(self.sequences[model], dict):
+                    chain_ids = []
+                    chain_seqs = []
+                    for cid, seq in self.chain_sequences[model].items():
+                        if seq:
+                            chain_ids.append(cid)
+                            chain_seqs.append(seq)
+                    if not chain_ids:
+                        raise ValueError(f"No protein chains with sequences found for model {model}")
+                    # If only one valid chain remains, treat it as single-chain for FASTA parsing
+                    if len(chain_ids) == 1:
+                        return [None], [chain_seqs[0]]
+                    return chain_ids, chain_seqs
+                return [None], [self.sequences[model]]
+
+            for model, fasta_path in fasta_sources.items():
+                if not os.path.exists(fasta_path):
+                    raise FileNotFoundError(f"FASTA file for model {model} not found: {fasta_path}")
+
+                chain_ids, chain_sequences = _ensure_model_sequences(model)
+                variant_entries = alignment.readFastaFile(fasta_path)
+                if not variant_entries:
+                    raise ValueError(f"No sequences found in FASTA file for model {model}: {fasta_path}")
+
+                if model not in all_mutants:
+                    all_mutants[model] = {}
+
+                seen_names = set()
+                for variant_name, raw_seq in variant_entries.items():
+                    if variant_name in seen_names:
+                        raise ValueError(f"Duplicate variant name '{variant_name}' in FASTA for model {model}")
+                    if variant_name in all_mutants[model]:
+                        raise ValueError(
+                            f"Variant name collision for model {model}: '{variant_name}' already defined in mutants dict"
+                        )
+                    seen_names.add(variant_name)
+
+                    seq = raw_seq.upper()
+                    if len(chain_ids) == 1:
+                        if "/" in seq:
+                            raise ValueError(
+                                f"Unexpected '/' chain separator in single-chain model {model} for variant {variant_name}"
+                            )
+                        if len(seq) != len(chain_sequences[0]):
+                            raise ValueError(
+                                f"Length mismatch for model {model} variant {variant_name}: "
+                                f"{len(seq)} vs base {len(chain_sequences[0])}"
+                            )
+                        if any(res not in standard_aas for res in seq):
+                            raise ValueError(
+                                f"Non-standard amino acid found in variant {variant_name} for model {model}"
+                            )
+                        diffs = [
+                            (idx + 1, v_res)
+                            for idx, (ref_res, v_res) in enumerate(zip(chain_sequences[0], seq))
+                            if ref_res != v_res
+                        ]
+                    else:
+                        split_seq = seq.split("/")
+                        if len(split_seq) != len(chain_ids):
+                            raise ValueError(
+                                f"Chain count mismatch for model {model} variant {variant_name}: "
+                                f"found {len(split_seq)} chains, expected {len(chain_ids)}"
+                            )
+                        diffs = []
+                        offset = 0
+                        for chain_idx, (ref_chain_seq, var_chain_seq) in enumerate(zip(chain_sequences, split_seq)):
+                            if len(var_chain_seq) != len(ref_chain_seq):
+                                raise ValueError(
+                                    f"Length mismatch in chain {chain_ids[chain_idx]} for model {model} variant {variant_name}: "
+                                    f"{len(var_chain_seq)} vs base {len(ref_chain_seq)}"
+                                )
+                            if any(res not in standard_aas for res in var_chain_seq):
+                                raise ValueError(
+                                    f"Non-standard amino acid in chain {chain_ids[chain_idx]} for model {model} variant {variant_name}"
+                                )
+                            for pos, (ref_res, v_res) in enumerate(zip(ref_chain_seq, var_chain_seq)):
+                                if ref_res != v_res:
+                                    diffs.append((offset + pos + 1, v_res))
+                            offset += len(ref_chain_seq)
+
+                    all_mutants[model][variant_name] = diffs
+
         # Save considered models
-        considered_models = list(mutants.keys())
+        considered_models = list(all_mutants.keys())
         self.saveModels(job_folder + "/input_models", models=considered_models)
+
+        # Prepare params files if provided (support folder of params)
+        params_output_dir = None
+        param_paths = []
+        if param_files is not None:
+            params_output_dir = Path(job_folder) / "params"
+            params_output_dir.mkdir(exist_ok=True)
+
+            if isinstance(param_files, (str, os.PathLike)) and Path(param_files).is_dir():
+                param_dir = Path(param_files)
+                param_paths = sorted(param_dir.glob("*.params"))
+                if not param_paths:
+                    raise ValueError(f"No .params files found in directory {param_files}")
+                # Copy accompanying PDBs if present (e.g., conformers)
+                for pdb_file in param_dir.glob("*.pdb"):
+                    shutil.copyfile(pdb_file, params_output_dir / pdb_file.name)
+            else:
+                if isinstance(param_files, (str, os.PathLike)):
+                    param_paths = [Path(param_files)]
+                else:
+                    param_paths = [Path(p) for p in param_files]
+
+            for p in param_paths:
+                if not p.exists():
+                    raise FileNotFoundError(f"Params file not found: {p}")
+                shutil.copyfile(p, params_output_dir / p.name)
 
         jobs = []
 
@@ -3574,15 +3750,38 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             score_fxn_name, weights_file=score_fxn_name
         )
 
-        # Create and append execution command
-        if mpi_command == None:
-            mpi_command = ""
-        elif mpi_command == "slurm":
-            mpi_command = "srun "
-        elif mpi_command == "openmpi":
-            mpi_command = "mpirun -np " + str(cpus) + " "
+        # Resolve parallelisation / mpi_command compatibility
+        user_disabled_parallelisation = parallelisation is None
+        if not user_disabled_parallelisation:
+            # Allow legacy mpi_command to override when provided
+            if parallelisation == "srun" and mpi_command == "openmpi":
+                parallelisation = "mpirun"
+            elif parallelisation == "mpirun" and mpi_command == "slurm":
+                parallelisation = "srun"
+
+        if user_disabled_parallelisation:
+            if cpus is not None:
+                raise ValueError("cpus is only used when parallelisation='mpirun'")
+            mpi_prefix = ""
         else:
-            mpi_command = mpi_command + " "
+            if parallelisation is None and mpi_command == "openmpi":
+                parallelisation = "mpirun"
+            elif parallelisation is None and mpi_command == "slurm":
+                parallelisation = "srun"
+
+            if parallelisation not in (None, "srun", "mpirun"):
+                raise ValueError("parallelisation must be one of: None, 'srun', 'mpirun'")
+
+            if parallelisation == "mpirun":
+                if not isinstance(cpus, int):
+                    raise ValueError("You must define the number of CPU when using mpirun")
+                mpi_prefix = f"mpirun -np {cpus} "
+            elif parallelisation == "srun":
+                if cpus is not None:
+                    raise ValueError("CPUs can only be set when using mpirun parallelisation")
+                mpi_prefix = "srun "
+            else:
+                mpi_prefix = ""
 
         for model in self.models_names:
 
@@ -3594,9 +3793,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 os.mkdir(job_folder + "/output_models/" + model)
 
             # Iterate each mutant
-            for mutant in mutants[model]:
+            for mutant in all_mutants[model]:
 
-                if not isinstance(mutants[model][mutant], list):
+                if not isinstance(all_mutants[model][mutant], list):
                     raise ValueError('Mutations for a particular variant should be given as a list of tuples!')
 
                 # Create xml mutation (and minimization) protocol
@@ -3606,11 +3805,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 # Add score function
                 xml.addScorefunction(sfxn)
 
-                for m in mutants[model][mutant]:
+                for m in all_mutants[model][mutant]:
                     mutate = rosettaScripts.movers.mutate(
                         name="mutate_" + str(m[0]),
                         target_residue=m[0],
-                        new_residue=PDB.Polypeptide.one_to_three(m[1]),
+                        new_residue=_one_to_three(m[1]),
                     )
                     xml.addMover(mutate)
                     protocol.append(mutate)
@@ -3650,14 +3849,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     flags.add_relax_options()
 
                 # Add path to params files
-                if param_files != None:
-                    if not os.path.exists(job_folder + "/params"):
-                        os.mkdir(job_folder + "/params")
-                    if isinstance(param_files, str):
-                        param_files = [param_files]
-                    for param in param_files:
-                        param_name = param.split("/")[-1]
-                        shutil.copyfile(param, job_folder + "/params/" + param_name)
+                if param_paths:
                     flags.addOption("in:file:extra_res_path", "../../params")
 
                 if sugars:
@@ -3673,7 +3865,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
                 command = "cd " + job_folder + "/output_models/" + model + "\n"
                 command += (
-                    mpi_command
+                    mpi_prefix
                     + executable
                     + " @ "
                     + "../../flags/"
@@ -3896,6 +4088,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         ligand_chain=None,
         hoh_to_wat=True,
         pdb_output=False,
+        interaction_ligand_chains=None,
     ):
         """
         Set up minimizations using Rosetta FastRelax protocol.
@@ -3908,6 +4101,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Insert an Idealize mover before FastRelax.
         idealize_only : bool, optional
             Run only the Idealize mover and skip FastRelax entirely (mutually exclusive with idealize_before_relax).
+        interaction_ligand_chains : list or str, optional
+            Chain IDs to report interface scores against (InterfaceAnalyzerMover).
+            Not supported with symmetry or membrane.
         """
 
         # Create minimization job folders
@@ -3935,6 +4131,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 "CPUs can only be set up when using mpirun parallelisation!"
             )
 
+        if symmetry and interaction_ligand_chains:
+            raise ValueError("interaction_ligand_chains is not implemented for symmetry runs.")
+        if membrane and interaction_ligand_chains:
+            raise ValueError("interaction_ligand_chains is not implemented for membrane runs.")
+
         nstruct_provided = nstruct is not _MISSING
         if not nstruct_provided:
             nstruct = 1000
@@ -3958,6 +4159,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 % nstruct
             )
             print("Consider running 100 or less structures.")
+
+        if interaction_ligand_chains is not None:
+            if isinstance(interaction_ligand_chains, str):
+                interaction_chain_list = [interaction_ligand_chains]
+            else:
+                interaction_chain_list = list(interaction_ligand_chains)
+            if not interaction_chain_list:
+                raise ValueError("interaction_ligand_chains cannot be empty.")
+        else:
+            interaction_chain_list = []
 
         # Save all models
         self.saveModels(relax_folder + "/input_models", models=models)
@@ -4050,6 +4261,9 @@ has been carried out. Please run compareSequences() function before setting muta
                     raise ValueError(
                         f"No .params files found in directory {param_dir}"
                     )
+                # Copy accompanying PDBs if present (e.g., conformers)
+                for pdb_file in param_dir.glob("*.pdb"):
+                    shutil.copyfile(pdb_file, params_output_dir / pdb_file.name)
                 for params_path in param_paths:
                     ligand_name = _read_ligand_name(params_path)
                     destination = params_output_dir / f"{ligand_name}.params"
@@ -4084,6 +4298,15 @@ has been carried out. Please run compareSequences() function before setting muta
                     scores = _readRosettaScoreFile(score_file, skip_empty=True)
                     if not isinstance(scores, type(None)) and scores.shape[0] >= nstruct:
                         continue
+
+            # Validate requested interaction chains exist
+            model_chain_ids = {c.id for c in self.structures[model].get_chains()}
+            if interaction_chain_list:
+                missing = [c for c in interaction_chain_list if c not in model_chain_ids]
+                if missing:
+                    raise ValueError(
+                        f"Ligand chain(s) {missing} not found in model {model}"
+                    )
 
             if ca_constraint:
                 if not os.path.exists(relax_folder + "/cst_files"):
@@ -4163,7 +4386,7 @@ has been carried out. Please run compareSequences() function before setting muta
                         mutate = rosettaScripts.movers.mutate(
                             name="mutate_" + str(m[0]),
                             target_residue=m[0],
-                            new_residue=PDB.Polypeptide.one_to_three(m[1]),
+                        new_residue=_one_to_three(m[1]),
                         )
                         xml.addMover(mutate)
                         protocol.append(mutate)
@@ -4230,6 +4453,18 @@ has been carried out. Please run compareSequences() function before setting muta
 
                 if not null:
                     protocol.append(relax)
+
+            # Add interface analysis movers for requested ligand chains
+            if interaction_chain_list:
+                for chain_id in interaction_chain_list:
+                    iam = rosettaScripts.movers.interfaceAnalyzerMover(
+                        name=f"interface_anl_{chain_id}",
+                        scorefxn=sfxn.name,
+                        ligandchain=chain_id,
+                        scorefile_reporting_prefix=f"interface_score_{chain_id}",
+                    )
+                    xml.addMover(iam)
+                    protocol.append(iam)
 
             # Set protocol
             xml.setProtocol(protocol)

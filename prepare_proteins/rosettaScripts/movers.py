@@ -1087,6 +1087,9 @@ class movers:
             if self.ligandchain != None:
                 self.root.set('ligandchain', self.ligandchain)
 
+            if self.scorefile_reporting_prefix is not None:
+                self.root.set('scorefile_reporting_prefix', self.scorefile_reporting_prefix)
+
 
     class rigidBodyPerturbNoCenterMover:
 
