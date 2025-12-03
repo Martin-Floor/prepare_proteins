@@ -315,6 +315,172 @@ def _collect_requested_ligands(atom_pairs) -> Set[str]:
     return {ligand for _, ligand in _collect_requested_model_ligand_pairs(atom_pairs)}
 
 
+def _locate_relax_input_model(rosetta_folder: str, model: str) -> Optional[Path]:
+    """
+    Locate the Rosetta input PDB corresponding to `model` inside `rosetta_folder`.
+    """
+    input_dir = Path(rosetta_folder) / "input_models"
+    candidates = [
+        input_dir / f"{model}.pdb",
+        input_dir / f"{model}_INPUT.pdb",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _parse_input_model_ligand_atoms(pdb_path: Path, ligand: str) -> Dict[str, Tuple[str, int, str]]:
+    """
+    Build a map of atom-name -> (chain, residue_number, atom_name) entries for `ligand`.
+    """
+    mapping: Dict[str, Tuple[str, int, str]] = {}
+    if not pdb_path or not pdb_path.exists():
+        return mapping
+
+    ligand_name = ligand.strip().upper()
+    if not ligand_name:
+        return mapping
+
+    with pdb_path.open() as handle:
+        for line in handle:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            resname = line[17:20].strip().upper()
+            if resname != ligand_name:
+                continue
+            atom_name = line[12:16].strip()
+            if not atom_name:
+                continue
+            chain = line[21].strip() or " "
+            resseq_str = line[22:26].strip()
+            try:
+                resseq = int(resseq_str)
+            except ValueError:
+                continue
+            mapping[atom_name] = (chain, resseq, atom_name)
+
+    return mapping
+
+
+def _normalize_relax_atom_pairs(atom_pairs: Dict[str, Any], rosetta_folder: str) -> Dict[str, List[List[Any]]]:
+    """
+    Normalise atom pair definitions for relax calculations.
+
+    Supports either the legacy structure
+        {model: [((chain, resid, atom), (chain, resid, atom)), ...]}
+    or a ligand-aware structure
+        {model: {ligand: [((chain, resid, atom), ligand_atom_name_or_tuple), ...]}}
+    where ligand atoms can be specified by their atom names. In the latter case the
+    atom coordinates are resolved from the Rosetta input PDB files.
+    """
+
+    if not isinstance(atom_pairs, dict):
+        raise TypeError("atom_pairs must be a dictionary keyed by model name.")
+
+    def _normalize_atom_spec(atom_spec):
+        if (
+            isinstance(atom_spec, (list, tuple))
+            and len(atom_spec) == 3
+        ):
+            chain = str(atom_spec[0]).strip() or " "
+            atom_name = str(atom_spec[2]).strip()
+            if not atom_name:
+                raise ValueError("Atom names in atom_pairs cannot be empty.")
+            try:
+                resseq = int(atom_spec[1])
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"Residue index '{atom_spec[1]}' in atom_pairs should be an integer."
+                )
+            return [chain, resseq, atom_name]
+        raise ValueError(
+            "Each atom_pairs entry must be defined as (chain, residue_index, atom_name)."
+        )
+
+    normalized: Dict[str, List[List[Any]]] = {}
+    missing_atoms: Dict[Tuple[str, str], Set[str]] = {}
+    pdb_cache: Dict[str, Optional[Path]] = {}
+    ligand_atom_cache: Dict[Tuple[str, str], Dict[str, Tuple[str, int, str]]] = {}
+
+    for model, entries in atom_pairs.items():
+        if isinstance(entries, dict):
+            expanded: List[List[Any]] = []
+            for ligand, pair_list in entries.items():
+                if not pair_list:
+                    continue
+                mapping = None
+
+                for protein_atom, ligand_atom in pair_list:
+                    protein_spec = _normalize_atom_spec(protein_atom)
+
+                    if isinstance(ligand_atom, str):
+                        if mapping is None:
+                            cache_key = (model, ligand)
+                            if cache_key not in ligand_atom_cache:
+                                if model not in pdb_cache:
+                                    pdb_cache[model] = _locate_relax_input_model(rosetta_folder, model)
+                                pdb_path = pdb_cache[model]
+                                if pdb_path is None:
+                                    raise FileNotFoundError(
+                                        f"Could not locate input model for '{model}' inside "
+                                        f"{rosetta_folder}/input_models."
+                                    )
+                                ligand_atom_cache[cache_key] = _parse_input_model_ligand_atoms(
+                                    pdb_path, ligand
+                                )
+                            mapping = ligand_atom_cache[cache_key]
+
+                        if not mapping:
+                            missing_atoms.setdefault((model, ligand), set()).add("<ligand_not_found>")
+                            continue
+
+                        ligand_tuple = mapping.get(ligand_atom)
+                        if ligand_tuple is None:
+                            missing_atoms.setdefault((model, ligand), set()).add(ligand_atom)
+                            continue
+                        ligand_spec = list(ligand_tuple)
+                    else:
+                        ligand_spec = _normalize_atom_spec(ligand_atom)
+
+                    expanded.append([protein_spec, ligand_spec])
+
+            if expanded or model not in normalized:
+                normalized[model] = expanded
+
+        else:
+            pair_list = entries or []
+            normalized_pairs: List[List[Any]] = []
+            for pair in pair_list:
+                if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+                    raise ValueError(
+                        "atom_pairs entries must be 2-tuples: (protein_atom, ligand_atom)."
+                    )
+                normalized_pairs.append([
+                    _normalize_atom_spec(pair[0]),
+                    _normalize_atom_spec(pair[1]),
+                ])
+            normalized[model] = normalized_pairs
+
+    if missing_atoms:
+        missing_messages = []
+        for (model, ligand), atoms in sorted(missing_atoms.items()):
+            if "<ligand_not_found>" in atoms:
+                missing_messages.append(
+                    f"{model}: ligand '{ligand}' was not found in the Rosetta input model."
+                )
+                atoms = atoms - {"<ligand_not_found>"}
+            if atoms:
+                atom_list = ", ".join(sorted(atoms))
+                missing_messages.append(f"{model}/{ligand}: missing atoms {atom_list}")
+        raise ValueError(
+            "Unable to match the requested ligand atoms against the Rosetta input models:\n"
+            + "\n".join(missing_messages)
+        )
+
+    return normalized
+
+
 def _prepare_expanded_atom_pairs(
     atom_pairs,
     docking_folder,
@@ -14480,10 +14646,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if os.path.abspath(destination) != abs_param:
                     shutil.copyfile(abs_param, destination)
 
+        atom_pairs_payload = None
         # Write atom_pairs dictionary to json file
-        if atom_pairs != None:
+        if atom_pairs is not None:
+            atom_pairs_payload = _normalize_relax_atom_pairs(atom_pairs, rosetta_folder)
             with open(rosetta_folder + "/._atom_pairs.json", "w") as jf:
-                json.dump(atom_pairs, jf)
+                json.dump(atom_pairs_payload, jf)
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(rosetta_folder, "analyse_calculation.py", subfolder="pyrosetta")
@@ -14499,7 +14667,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if binding_energy:
             command += "--binding_energy " + binding_energy + " "
-        if atom_pairs != None:
+        if atom_pairs_payload is not None:
             command += "--atom_pairs " + rosetta_folder + "/._atom_pairs.json "
         if return_jobs:
             command += "--models MODEL "
