@@ -15138,52 +15138,210 @@ make sure of reading the target sequences with the function readTargetSequences(
         return self.rosetta_data[self.rosetta_data.index.isin(bp)]
 
     def getBestRosettaModelsIteratively(
-        self, metrics, min_threshold=3.5, max_threshold=5.0, step_size=0.1
+        self,
+        metrics,
+        n_models=1,
+        distance_step=0.1,
+        angle_step=1.0,
+        fixed=None,
+        max_distance=None,
+        max_distance_step_shift=None,
+        verbose=False,
+        rosetta_df=None,
     ):
         """
-        Extract the best rosetta poses by iterating the metrics thresholds from low values to high values.
-        At each iteration the poses are filtered by the current metric threshold and the lowest scoring poses
-        are selected. Further iterations at higher metric thresholds are applied to those model that do not
-        had poses passing all the metric filters. A current limitation of the method is that at each iteration
-        it uses the same theshold value for all the metrics.
+        Iteratively select the best Rosetta poses per model by progressively relaxing metric thresholds.
+
+        This mirrors :meth:`getBestRosettaDockingPosesIteratively`, but operates on
+        ``self.rosetta_data`` (or a user-provided DataFrame) and reuses
+        :meth:`getBestRosettaModels` to pick the best-scoring poses as soon as each model
+        satisfies the current thresholds. After every iteration the metric that is filtering
+        out the most unsatisfied models is relaxed by ``distance_step`` or ``angle_step``.
 
         Parameters
-        ==========
-        metrics : list
-            A list of the metrics to be used as filters
-        min_threshold : float
-            The lowest threshold to apply for filtering poses by the metric values.
+        ----------
+        metrics : dict
+            Mapping of metric name -> threshold (scalar upper limit or (lower, upper) range).
+        n_models : int, optional
+            Number of poses to retain per model when a filter passes. Default 1.
+        distance_step : float, optional
+            Increment applied to distance metrics when relaxing thresholds.
+        angle_step : float, optional
+            Increment applied to angle metrics when relaxing thresholds.
+        fixed : sequence or str, optional
+            Metrics that must not be relaxed.
+        max_distance : float, optional
+            Cap distance metrics at this value. When reached, optionally switch to ``max_distance_step_shift``.
+        max_distance_step_shift : float, optional
+            Distance step size to adopt once ``max_distance`` is reached.
+        verbose : bool, optional
+            Print progress messages during the relaxation loop.
+        rosetta_df : pandas.DataFrame, optional
+            DataFrame indexed by (Model, Pose) to operate on. Defaults to ``self.rosetta_data``.
         """
 
-        extracted = []
+        data = rosetta_df if rosetta_df is not None else self.rosetta_data
+        if data is None or data.empty:
+            raise ValueError("No Rosetta model data available. Run analyseRosettaCalculation first.")
+
+        if fixed is None:
+            fixed = []
+        elif isinstance(fixed, str):
+            fixed = [fixed]
+
+        metrics = metrics.copy()
+        non_fixed_metrics = set(metrics.keys()) - set(fixed)
+        if not non_fixed_metrics:
+            raise ValueError("You must leave at least one metric not fixed")
+
+        # Ensure metric types are known
+        for metric in metrics.keys():
+            metric_label = metric if metric.startswith("metric_") else "metric_" + metric
+            metric_type = self._get_rosetta_metric_type(metric_label)
+            if metric_type is None:
+                inferred_type = None
+                if metric_label in data.columns:
+                    if "angle" in metric_label.lower() or "torsion" in metric_label.lower():
+                        inferred_type = "angle"
+                    else:
+                        inferred_type = "distance"
+                if inferred_type is not None:
+                    self._set_rosetta_metric_type(metric_label, inferred_type)
+                else:
+                    raise ValueError(
+                        f"Metric type for {metric_label} not defined. "
+                        "Ensure metrics were registered via combineRosettaDistancesIntoMetric or "
+                        "_set_rosetta_metric_type."
+                    )
+
+        models = list(data.index.get_level_values(0).unique())
+        satisfied_models: Set[str] = set()
         selected_indexes = []
+        current_distance_step = distance_step
+        step_shift_applied = False
 
-        # Iterate the threshold values to be employed as filters
-        for t in np.arange(min_threshold, max_threshold + (step_size / 10), step_size):
+        while len(satisfied_models) < len(models):
+            if verbose:
+                ti = time.time()
 
-            # Get models already selected
-            excluded_models = [m for m in extracted]
-
-            # Append metric_ prefic if needed
-            filter_values = {
-                (m if m.startswith("metric_") else "metric_" + m): t for m in metrics
-            }
-
-            # Filter poses at the current threshold
             best_poses = self.getBestRosettaModels(
-                filter_values, n_models=1, exclude_models=excluded_models
+                metrics, n_models=n_models, exclude_models=list(satisfied_models)
             )
 
-            # Save selected indexes not saved in previous iterations
-            for row in best_poses.index:
-                if row[0] not in extracted:
-                    selected_indexes.append(row)
-                if row[0] not in extracted:
-                    extracted.append(row[0])
+            newly_selected = set()
+            for idx in best_poses.index:
+                model = idx[0]
+                if model not in satisfied_models:
+                    selected_indexes.append(idx)
+                    newly_selected.add(model)
 
-        best_poses = self.rosetta_data[self.rosetta_data.index.isin(selected_indexes)]
+            satisfied_models.update(newly_selected)
 
-        return best_poses
+            if len(satisfied_models) >= len(models):
+                break
+
+            remaining_models = set(models) - satisfied_models
+            remaining_mask = data.index.get_level_values(0).isin(remaining_models)
+            remaining_data = data[remaining_mask]
+
+            if remaining_data.empty:
+                if verbose:
+                    print("No remaining data to relax thresholds on. Terminating iteration.")
+                break
+
+            metric_acceptance = {}
+            for metric in metrics:
+                if metric in fixed:
+                    continue
+                metric_label = metric if metric.startswith("metric_") else "metric_" + metric
+                metric_type = self._get_rosetta_metric_type(metric_label)
+                if metric_type is None:
+                    raise ValueError(f"Metric type for {metric_label} not defined.")
+                metric_values = remaining_data[metric_label]
+                threshold = metrics[metric]
+
+                if isinstance(threshold, (int, float)):
+                    if metric_type in ["distance", "angle"]:
+                        acceptance = metric_values <= threshold
+                    else:
+                        acceptance = metric_values >= threshold
+                elif isinstance(threshold, (tuple, list)):
+                    lower, upper = threshold
+                    acceptance = (metric_values >= lower) & (metric_values <= upper)
+                else:
+                    raise ValueError(f"Invalid threshold type for metric {metric}")
+
+                metric_acceptance[metric] = acceptance.sum()
+
+            ordered_metrics = sorted(
+                [(m, a) for m, a in metric_acceptance.items() if m not in fixed],
+                key=lambda x: x[1],
+            )
+
+            updated = False
+            for metric, _ in ordered_metrics:
+                metric_label = metric if metric.startswith("metric_") else "metric_" + metric
+                metric_type = self._get_rosetta_metric_type(metric_label)
+                if metric_type == "distance":
+                    step = current_distance_step
+                elif metric_type == "angle":
+                    step = angle_step
+                else:
+                    raise ValueError(f"Unknown metric type for {metric_label}")
+
+                threshold = metrics[metric]
+                if isinstance(threshold, (int, float)):
+                    new_value = threshold + step
+
+                    if metric_type == "distance" and max_distance is not None:
+                        if not step_shift_applied and new_value >= max_distance:
+                            if max_distance_step_shift is not None:
+                                current_distance_step = max_distance_step_shift
+                                step_shift_applied = True
+                                if verbose:
+                                    print(
+                                        f"Max distance {max_distance} reached for metric {metric}. "
+                                        f"Applying step shift to {current_distance_step}."
+                                    )
+                            else:
+                                new_value = max_distance
+                                metrics[metric] = new_value
+                                if verbose:
+                                    print(
+                                        f"Max distance {max_distance} reached for metric {metric}. "
+                                        "Terminating iteration."
+                                    )
+                                updated = True
+                                break
+
+                    metrics[metric] = new_value
+                    updated = True
+                    break
+
+                elif isinstance(threshold, (tuple, list)):
+                    lower, upper = threshold
+                    metrics[metric] = (lower - step, upper + step)
+                    updated = True
+                    break
+                else:
+                    raise ValueError(f"Invalid threshold type for metric {metric}")
+
+            if not updated:
+                if verbose:
+                    print("No metrics were updated. Terminating iteration.")
+                break
+
+            if verbose:
+                elapsed_time = time.time() - ti
+                print(
+                    f"Selected models: {len(satisfied_models)}/{len(models)}, "
+                    f"Current thresholds: {metrics}, Time elapsed: {elapsed_time:.2f}s",
+                    end="\r",
+                )
+
+        if selected_indexes:
+            return data.loc[selected_indexes]
+        return pd.DataFrame()
 
     def rosettaFilterByProtonationStates(self, residue_states=None, inplace=False):
         """
