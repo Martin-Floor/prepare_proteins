@@ -627,7 +627,7 @@ import matplotlib.pyplot as plt
 import mdtraj as md
 import numpy as np
 import pandas as pd
-from Bio import PDB, BiopythonWarning
+from Bio import PDB, BiopythonWarning, pairwise2
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3, is_aa
 from ipywidgets import interactive_output, VBox, IntSlider, Checkbox, interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
@@ -673,6 +673,917 @@ except AttributeError:
             raise KeyError(rescode)
         return _protein_letters_1to3[key].upper()
 
+
+class MutationVariabilityAnalyzer:
+    """Summarise mutational variability across models relative to a wild-type reference."""
+
+    _SPECIAL_RESNAME_MAP = {
+        "HIE": "HIS",
+        "HID": "HIS",
+        "HIP": "HIS",
+        "CYX": "CYS",
+        "ASH": "ASP",
+        "GLH": "GLU",
+    }
+
+    _DEFAULT_ALIGNMENT = {
+        "match": 2.0,
+        "mismatch": -1.0,
+        "gap_open": -10.0,
+        "gap_extend": -0.5,
+    }
+
+    _MUTATION_COLUMNS = [
+        "Model",
+        "Chain",
+        "Category",
+        "ChangeKind",
+        "Mutation",
+        "WT_residue",
+        "Mutant_residue",
+        "WT_resseq",
+        "WT_icode",
+        "Variant_resseq",
+        "Variant_icode",
+        "WT_position",
+        "Variant_position",
+        "Location",
+        "Contact_total",
+        "Ligand_contacts",
+        "SiteID",
+    ]
+
+    _HYDROPHOBIC = {"A", "V", "I", "L", "M", "F", "W", "Y", "P"}
+    _POLAR = {"S", "T", "N", "Q", "C"}
+    _CHARGED = {"K", "R", "H", "D", "E"}
+    _SPECIAL = {"G"}
+
+    _CATEGORY_COLOR_MAP = {
+        "HH": "#1f77b4",
+        "HP": "#ff7f0e",
+        "PH": "#2ca02c",
+        "PP": "#d62728",
+        "HC": "#9467bd",
+        "CH": "#8c564b",
+        "CC": "#e377c2",
+        "PC": "#7f7f7f",
+        "CP": "#bcbd22",
+        "HS": "#17becf",
+        "SH": "#393b79",
+        "PS": "#ff9896",
+        "SP": "#98df8a",
+        "CS": "#c5b0d5",
+        "SC": "#c49c94",
+        "SS": "#f7b6d2",
+        "HU": "#9edae5",
+        "UH": "#ad494a",
+        "PU": "#a55194",
+        "UP": "#637939",
+        "CU": "#8ca252",
+        "UC": "#bd9e39",
+    }
+
+    def __init__(
+        self,
+        protein_models: "proteinModels",
+        wild_type: str,
+        *,
+        chains: Optional[Union[str, Iterable[str], Dict[str, Iterable[str]]]] = None,
+        alignment_params: Optional[Dict[str, float]] = None,
+        residue_annotations: Optional[Union[Dict[Any, str], pd.DataFrame]] = None,
+        contact_results: Optional[Dict[str, Any]] = None,
+        auto_classify_locations: bool = True,
+        core_contact_threshold: int = 12,
+        surface_contact_threshold: int = 4,
+        pocket_neighbor_kinds: Optional[Iterable[str]] = None,
+    ):
+        self.models = protein_models
+        if wild_type not in getattr(self.models, "models_names", []):
+            raise ValueError(f"Wild-type model '{wild_type}' is not available in the current session.")
+        self.wt_model = wild_type
+
+        self._align_params = dict(self._DEFAULT_ALIGNMENT)
+        if alignment_params:
+            self._align_params.update({k: float(v) for k, v in alignment_params.items() if k in self._DEFAULT_ALIGNMENT})
+
+        if self.models.chain_sequences == {} and getattr(self.models, "structures", None):
+            self.models.getModelsSequences()
+
+        raw_selection = self.models._resolve_chain_selection(chains=chains, models=self.models.models_names)
+        wt_chains = raw_selection.get(self.wt_model, [])
+        if not wt_chains:
+            raise ValueError(f"No analyzable chains were found for the wild-type model '{self.wt_model}'.")
+        wt_set = set(wt_chains)
+
+        self.chain_selection: Dict[str, List[str]] = {}
+        dropped_models: List[str] = []
+        for model, model_chains in raw_selection.items():
+            shared = [c for c in model_chains if c in wt_set]
+            if not shared:
+                dropped_models.append(model)
+                continue
+            self.chain_selection[model] = shared
+        if dropped_models:
+            warnings.warn(
+                "Ignoring models without overlapping chains relative to the WT selection: "
+                + ", ".join(sorted(dropped_models)),
+                RuntimeWarning,
+            )
+
+        self.core_contact_threshold = max(int(core_contact_threshold), 0)
+        self.surface_contact_threshold = max(int(surface_contact_threshold), 0)
+        if self.core_contact_threshold < self.surface_contact_threshold:
+            self.core_contact_threshold = self.surface_contact_threshold
+
+        default_pocket = {"organic", "cofactor", "ligand", "metal", "ion"}
+        if pocket_neighbor_kinds is None:
+            self.pocket_neighbor_kinds = default_pocket
+        else:
+            self.pocket_neighbor_kinds = {str(kind).lower() for kind in pocket_neighbor_kinds}
+            if not self.pocket_neighbor_kinds:
+                self.pocket_neighbor_kinds = default_pocket
+
+        self._chain_sequences: Dict[str, Dict[str, str]] = {}
+        self._chain_metadata: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        self._model_residue_counts: Dict[str, int] = {}
+
+        for model, chains_for_model in self.chain_selection.items():
+            per_chain_sequences = {}
+            per_chain_metadata = {}
+            for chain_id in chains_for_model:
+                seq, metadata = self._extract_chain_sequence(model, chain_id)
+                if not seq:
+                    continue
+                per_chain_sequences[chain_id] = seq
+                per_chain_metadata[chain_id] = metadata
+            if per_chain_sequences:
+                self._chain_sequences[model] = per_chain_sequences
+                self._chain_metadata[model] = per_chain_metadata
+                self._model_residue_counts[model] = sum(len(meta) for meta in per_chain_metadata.values())
+
+        if self.wt_model not in self._chain_sequences:
+            raise ValueError("Wild-type chains could not be parsed; ensure the reference contains protein residues.")
+        self._wt_chain_sequences = self._chain_sequences[self.wt_model]
+
+        contact_results = contact_results or getattr(self.models, "models_contacts", None) or {}
+        self._contact_summary = self._build_contact_summary(contact_results)
+
+        self._location_map = self._normalize_location_annotations(residue_annotations)
+        if auto_classify_locations and self._contact_summary:
+            self.infer_locations_from_contacts(overwrite=False)
+
+        self._mutation_table: Optional[pd.DataFrame] = None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def build_mutation_table(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_wt: bool = False,
+        recompute: bool = False,
+    ) -> pd.DataFrame:
+        """Return a per-mutation table for the selected models."""
+
+        if self._mutation_table is None or recompute:
+            self._mutation_table = self._compute_mutation_table()
+
+        df = self._mutation_table
+        selected = set(self._select_models(models=models, include_wt=include_wt))
+        if not selected:
+            return df.iloc[0:0].copy()
+
+        mask = df["Model"].isin(selected)
+        return df.loc[mask].reset_index(drop=True)
+
+    def summarize_models(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_wt: bool = False,
+    ) -> pd.DataFrame:
+        """Return per-model mutation counts, percentages, and load metrics."""
+
+        selected_models = self._select_models(models=models, include_wt=include_wt)
+        table = self.build_mutation_table(models=selected_models, include_wt=include_wt)
+
+        if table.empty:
+            summary = pd.DataFrame({"Model": selected_models})
+            summary["total_mutations"] = 0
+            summary["substitutions"] = 0
+            summary["insertions"] = 0
+            summary["deletions"] = 0
+            summary["unique_sites"] = 0
+        else:
+            classified = table.assign(
+                is_substitution=table["ChangeKind"].eq("substitution"),
+                is_insertion=table["ChangeKind"].eq("insertion"),
+                is_deletion=table["ChangeKind"].eq("deletion"),
+            )
+            summary = (
+                classified.groupby("Model")
+                .agg(
+                    total_mutations=("Mutation", "count"),
+                    substitutions=("is_substitution", "sum"),
+                    insertions=("is_insertion", "sum"),
+                    deletions=("is_deletion", "sum"),
+                )
+                .reset_index()
+            )
+            unique_sites = (
+                table.loc[table["SiteID"].notna()]
+                .groupby("Model")["SiteID"]
+                .nunique()
+                .reset_index(name="unique_sites")
+            )
+            summary = summary.merge(unique_sites, on="Model", how="left").fillna({"unique_sites": 0})
+            summary["unique_sites"] = summary["unique_sites"].astype(int)
+
+        summary = summary.set_index("Model").reindex(selected_models).fillna(0).reset_index()
+        summary["total_residues"] = summary["Model"].map(self._model_residue_counts).fillna(0).astype(int)
+        summary["percent_mutated"] = summary.apply(
+            lambda row: (row["unique_sites"] / row["total_residues"]) * 100 if row["total_residues"] else 0.0,
+            axis=1,
+        )
+        columns = [
+            "Model",
+            "total_mutations",
+            "percent_mutated",
+            "unique_sites",
+            "substitutions",
+            "insertions",
+            "deletions",
+            "total_residues",
+        ]
+        return summary[columns]
+
+    def mutation_type_counts(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        collapse_positions: bool = False,
+    ) -> pd.DataFrame:
+        """Return counts of mutation types per model."""
+
+        table = self.build_mutation_table(models=models)
+        subs = table[table["ChangeKind"].eq("substitution")].copy()
+        if subs.empty:
+            columns = ["Model", "Mutation", "Count"] if not collapse_positions else ["Model", "From", "To", "Count"]
+            return pd.DataFrame(columns=columns)
+
+        if collapse_positions:
+            subs["From"] = subs["WT_residue"].fillna("?")
+            subs["To"] = subs["Mutant_residue"].fillna("?")
+            counts = (
+                subs.groupby(["Model", "From", "To"], dropna=False)
+                .size()
+                .reset_index(name="Count")
+                .sort_values(["Model", "Count"], ascending=[True, False])
+            )
+            return counts
+
+        counts = (
+            subs.groupby(["Model", "Mutation"], dropna=False)
+            .size()
+            .reset_index(name="Count")
+            .sort_values(["Model", "Count"], ascending=[True, False])
+        )
+        return counts
+
+    def mutation_presence_matrix(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_insertions: bool = False,
+        include_deletions: bool = False,
+        model_order: Optional[Iterable[str]] = None,
+    ) -> pd.DataFrame:
+        """Return a mutation (rows) × model (columns) presence/absence matrix."""
+
+        table = self.build_mutation_table(models=models)
+        if table.empty:
+            return pd.DataFrame()
+
+        allowed = {"substitution"}
+        if include_insertions:
+            allowed.add("insertion")
+        if include_deletions:
+            allowed.add("deletion")
+
+        data = table.reset_index(drop=False)
+        data = data[data["ChangeKind"].isin(allowed)].copy()
+        if data.empty:
+            return pd.DataFrame(columns=sorted(data["Model"].unique()))
+
+        data["MutationLabel"] = data.apply(self._format_mutation_label, axis=1)
+
+        matrix = (
+            data.assign(value=1)
+            .groupby(["MutationLabel", "Model"])["value"]
+            .max()
+            .unstack(fill_value=0)
+            .astype(int)
+        )
+
+        if model_order is not None:
+            ordered = [m for m in model_order if m in matrix.columns]
+            remaining = [c for c in matrix.columns if c not in ordered]
+            matrix = matrix[ordered + remaining]
+
+        totals = matrix.sum(axis=1)
+        order = totals.sort_values(ascending=False).index
+        matrix = matrix.loc[order]
+        matrix["#Designs"] = totals.loc[order].astype(int)
+
+        design_totals = matrix.drop(columns=["#Designs"], errors="ignore").sum(axis=0).astype(int)
+        summary_row = design_totals.rename("#Mutations")
+        summary_row["#Designs"] = int(matrix["#Designs"].sum())
+        matrix = pd.concat([matrix, summary_row.to_frame().T])
+        return matrix
+
+    def plot_mutation_presence_matrix(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_insertions: bool = False,
+        include_deletions: bool = False,
+        ax: Optional[plt.Axes] = None,
+        cmap: str = "Blues",
+        model_order: Optional[Iterable[str]] = None,
+        color_by_category: bool = False,
+    ) -> plt.Axes:
+        """Visualise the mutation presence matrix as a heatmap."""
+
+        matrix = self.mutation_presence_matrix(
+            models=models,
+            include_insertions=include_insertions,
+            include_deletions=include_deletions,
+        )
+        if matrix.empty:
+            if ax is None:
+                _, ax = plt.subplots(figsize=(4, 2))
+            ax.set_axis_off()
+            ax.set_title("No mutations to display")
+            return ax
+
+        heatmap_data = matrix.drop(index=["#Mutations"], errors="ignore").drop(columns=["#Designs"], errors="ignore")
+        if model_order is not None:
+            order = [m for m in model_order if m in heatmap_data.columns]
+            remaining = [c for c in heatmap_data.columns if c not in order]
+            heatmap_data = heatmap_data[order + remaining]
+        if heatmap_data.empty:
+            if ax is None:
+                _, ax = plt.subplots(figsize=(4, 2))
+            ax.set_axis_off()
+            ax.set_title("No mutations to display")
+            return ax
+
+        if ax is None:
+            height = max(3, heatmap_data.shape[0] * 0.25)
+            width = max(3, heatmap_data.shape[1] * 0.4)
+            _, ax = plt.subplots(figsize=(width, height))
+
+        if color_by_category:
+            table = self.build_mutation_table(models=models)
+            allowed = {"substitution"}
+            if include_insertions:
+                allowed.add("insertion")
+            if include_deletions:
+                allowed.add("deletion")
+            table_df = table.reset_index().copy()
+            table_df = table_df[table_df["ChangeKind"].isin(allowed)]
+            table_df["MutationLabel"] = table_df.apply(self._format_mutation_label, axis=1)
+            category_lookup = {
+                (row.MutationLabel, row.Model): row.Category
+                for row in table_df.itertuples()
+            }
+            categories = sorted({cat for cat in category_lookup.values() if cat})
+            if not categories:
+                color_by_category = False
+            else:
+                cat_to_idx = {cat: idx + 1 for idx, cat in enumerate(categories)}
+                color_matrix = np.zeros(heatmap_data.shape, dtype=int)
+                for i, mut in enumerate(heatmap_data.index):
+                    for j, model_name in enumerate(heatmap_data.columns):
+                        if heatmap_data.iat[i, j]:
+                            cat = category_lookup.get((mut, model_name))
+                            if cat:
+                                color_matrix[i, j] = cat_to_idx.get(cat, 0)
+                colors = ["#f8f8f8"]
+                palette = [
+                    "#393b79",
+                    "#637939",
+                    "#8c6d31",
+                    "#843c39",
+                    "#7b4173",
+                    "#3182bd",
+                    "#e6550d",
+                    "#31a354",
+                    "#756bb1",
+                    "#636363",
+                ]
+                if isinstance(cmap, str):
+                    base = mpl.colormaps.get_cmap(cmap) if hasattr(mpl, "colormaps") else plt.get_cmap(cmap)
+                else:
+                    base = cmap
+
+                assigned: List[str] = []
+                palette_idx = 0
+                for cat in categories:
+                    color = self._CATEGORY_COLOR_MAP.get(cat)
+                    if color is None:
+                        if palette_idx < len(palette):
+                            color = palette[palette_idx]
+                            palette_idx += 1
+                        else:
+                            sample_pos = 0.1 + 0.8 * (palette_idx - len(palette)) / max(len(categories), 1)
+                            color = base(sample_pos)
+                            palette_idx += 1
+                    assigned.append(color)
+                colors.extend(assigned)
+                categorical_cmap = mpl.colors.ListedColormap(colors)
+                bounds = np.arange(len(colors) + 1) - 0.5
+                im = ax.imshow(color_matrix, aspect="auto", cmap=categorical_cmap, vmin=-0.5, vmax=len(colors) - 1.5)
+                cbar = plt.colorbar(
+                    im,
+                    ax=ax,
+                    fraction=0.046,
+                    pad=0.04,
+                    boundaries=bounds,
+                    ticks=np.arange(len(colors)),
+                )
+                cbar.set_ticklabels(["absent"] + categories)
+                cbar.set_label("Mutation class")
+
+        if not color_by_category:
+            if isinstance(cmap, str):
+                base_cmap = mpl.colormaps.get_cmap(cmap) if hasattr(mpl, "colormaps") else plt.get_cmap(cmap)
+            else:
+                base_cmap = cmap
+            discrete_cmap = mpl.colors.ListedColormap([base_cmap(0.0), base_cmap(0.8)])
+            im = ax.imshow(heatmap_data.values, aspect="auto", cmap=discrete_cmap, vmin=0, vmax=1)
+            cbar = plt.colorbar(
+                im,
+                ax=ax,
+                fraction=0.046,
+                pad=0.04,
+                boundaries=[-0.5, 0.5, 1.5],
+                ticks=[0, 1],
+            )
+            cbar.set_label("Presence")
+
+        ax.set_xticks(np.arange(heatmap_data.shape[1]))
+        ax.set_xticklabels(heatmap_data.columns, rotation=90, ha="center")
+        ax.set_yticks(np.arange(heatmap_data.shape[0]))
+        ax.set_yticklabels(heatmap_data.index)
+        ax.set_xlabel("Model")
+        ax.set_ylabel("Mutation")
+        ax.set_title("Mutation presence across designs")
+        plt.tight_layout()
+        return ax
+
+    def location_breakdown(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        normalize: bool = False,
+    ) -> pd.DataFrame:
+        """Return counts (or fractions) of mutations per location class."""
+
+        table = self.build_mutation_table(models=models)
+        if table.empty:
+            cols = ["Model", "Location", "Count"]
+            if normalize:
+                cols.append("Fraction")
+            return pd.DataFrame(columns=cols)
+
+        grouped = (
+            table.groupby(["Model", "Location"], dropna=False)
+            .size()
+            .reset_index(name="Count")
+        )
+        if normalize:
+            totals = grouped.groupby("Model")["Count"].transform(lambda x: x.sum() if x.sum() else 1)
+            grouped["Fraction"] = grouped["Count"] / totals
+        return grouped
+
+    def plot_mutation_counts(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_percent: bool = False,
+        ax: Optional[plt.Axes] = None,
+    ) -> plt.Axes:
+        """Bar plot showing the number of mutations per model."""
+
+        summary = self.summarize_models(models=models)
+        if ax is None:
+            _, ax = plt.subplots(figsize=(max(4, len(summary) * 0.6), 4))
+
+        x = np.arange(len(summary))
+        ax.bar(x, summary["total_mutations"], color="#1f77b4")
+        ax.set_xticks(x)
+        ax.set_xticklabels(summary["Model"], rotation=45, ha="right")
+        ax.set_ylabel("Number of mutations")
+        ax.set_title("Mutation load per model")
+
+        if include_percent:
+            for xpos, (_, row) in zip(x, summary.iterrows()):
+                ax.text(
+                    xpos,
+                    row["total_mutations"] + 0.05,
+                    f"{row['percent_mutated']:.1f}%",
+                    ha="center",
+                    va="bottom",
+                    fontsize=9,
+                )
+        ax.margins(y=0.2)
+        return ax
+
+    def plot_location_breakdown(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        ax: Optional[plt.Axes] = None,
+    ) -> plt.Axes:
+        """Stacked bar chart showing mutation locations (core/surface/pocket)."""
+
+        breakdown = self.location_breakdown(models=models)
+        if ax is None:
+            _, ax = plt.subplots(figsize=(max(4, len(breakdown["Model"].unique()) * 0.6), 4))
+
+        if breakdown.empty:
+            ax.set_axis_off()
+            ax.set_title("No mutations to plot")
+            return ax
+
+        pivot = breakdown.pivot(index="Model", columns="Location", values="Count").fillna(0)
+        models_idx = pivot.index.tolist()
+        x = np.arange(len(models_idx))
+        bottom = np.zeros(len(models_idx))
+        for location in pivot.columns:
+            values = pivot[location].values
+            ax.bar(x, values, bottom=bottom, label=location)
+            bottom += values
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(models_idx, rotation=45, ha="right")
+        ax.set_ylabel("Mutation count")
+        ax.set_title("Mutation locations")
+        ax.legend()
+        ax.margins(y=0.1)
+        return ax
+
+    def update_residue_annotations(
+        self,
+        annotations: Union[Dict[Any, str], pd.DataFrame],
+        *,
+        overwrite: bool = True,
+    ) -> None:
+        """Update manual residue location annotations."""
+
+        normalized = self._normalize_location_annotations(annotations)
+        for key, value in normalized.items():
+            if not overwrite and key in self._location_map:
+                continue
+            self._location_map[key] = value
+
+    def infer_locations_from_contacts(self, *, overwrite: bool = False) -> None:
+        """Populate location map based on contact heuristics."""
+
+        for model, residues in self._contact_summary.items():
+            for (chain, resseq, icode), stats in residues.items():
+                location = self._classify_location_from_stats(stats)
+                key = (model, chain, resseq, icode)
+                if not location:
+                    continue
+                if not overwrite and key in self._location_map:
+                    continue
+                self._location_map[key] = location
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _select_models(
+        self,
+        models: Optional[Union[str, Iterable[str]]],
+        *,
+        include_wt: bool = False,
+    ) -> List[str]:
+        available = [m for m in self._chain_sequences.keys() if include_wt or m != self.wt_model]
+        if models is None:
+            return available
+        if isinstance(models, str):
+            requested = [models]
+        else:
+            requested = [str(m) for m in models]
+        missing = [m for m in requested if m not in available and not (include_wt and m == self.wt_model)]
+        if missing:
+            warnings.warn(
+                "Requested models were not part of the analysis set: " + ", ".join(sorted(missing)),
+                RuntimeWarning,
+            )
+        return [m for m in requested if (m in available) or (include_wt and m == self.wt_model)]
+
+    def _extract_chain_sequence(self, model: str, chain_id: str) -> Tuple[str, List[Dict[str, Any]]]:
+        sequence: List[str] = []
+        metadata: List[Dict[str, Any]] = []
+        structure = self.models.structures.get(model)
+        if structure is None:
+            return "", []
+        chain_obj = None
+        for pdb_model in structure:
+            if chain_id in pdb_model.child_dict:
+                chain_obj = pdb_model[chain_id]
+                break
+        if chain_obj is None:
+            warnings.warn(f"Chain {chain_id} not found in model {model}; skipping.", RuntimeWarning)
+            return "", []
+        seq_idx = 0
+        for residue in chain_obj:
+            if residue.id[0] != " ":
+                continue
+            resname = self._SPECIAL_RESNAME_MAP.get(residue.resname.strip().upper(), residue.resname.strip().upper())
+            try:
+                one_letter = _three_to_one(resname)
+            except Exception:
+                one_letter = "X"
+            seq_idx += 1
+            metadata.append(
+                {
+                    "seq_index": seq_idx,
+                    "resseq": int(residue.id[1]),
+                    "icode": (residue.id[2] or " ").strip() or " ",
+                    "resname": resname,
+                    "chain": chain_id,
+                }
+            )
+            sequence.append(one_letter)
+        return "".join(sequence), metadata
+
+    def _build_contact_summary(self, contact_results: Dict[str, Any]) -> Dict[str, Dict[Tuple[str, int, str], Dict[str, Any]]]:
+        summary: Dict[str, Dict[Tuple[str, int, str], Dict[str, Any]]] = {}
+        if not contact_results:
+            return summary
+
+        for model, result in contact_results.items():
+            table = None
+            if isinstance(result, pd.DataFrame):
+                table = result
+            elif isinstance(result, dict):
+                table = result.get("table") if isinstance(result.get("table"), pd.DataFrame) else None
+            if table is None or table.empty:
+                continue
+            df = table.copy()
+            if "query_chain" not in df.columns or "query_resseq" not in df.columns:
+                continue
+            if "n_atom_contacts" not in df.columns:
+                df["n_atom_contacts"] = 1
+            per_residue: Dict[Tuple[str, int, str], Dict[str, Any]] = {}
+            for row in df.itertuples():
+                chain = str(row.query_chain)
+                resseq = int(row.query_resseq)
+                icode = getattr(row, "query_icode", " ") or " "
+                key = (chain, resseq, icode)
+                entry = per_residue.setdefault(
+                    key,
+                    {
+                        "total_contacts": 0,
+                        "ligand_contacts": 0,
+                        "neighbor_kinds": set(),
+                        "min_distance": float("inf"),
+                    },
+                )
+                contacts = getattr(row, "n_atom_contacts", 1) or 1
+                entry["total_contacts"] += contacts
+                neighbor_kind = str(getattr(row, "neighbor_kind", "")).lower()
+                if neighbor_kind in self.pocket_neighbor_kinds:
+                    entry["ligand_contacts"] += contacts
+                entry["neighbor_kinds"].add(neighbor_kind)
+                entry["min_distance"] = min(entry["min_distance"], float(getattr(row, "min_distance", np.inf)))
+            if per_residue:
+                summary[model] = per_residue
+        return summary
+
+    def _normalize_location_annotations(
+        self, annotations: Optional[Union[Dict[Any, str], pd.DataFrame]]
+    ) -> Dict[Tuple[str, str, int, str], str]:
+        mapping: Dict[Tuple[str, str, int, str], str] = {}
+        if annotations is None:
+            return mapping
+
+        if isinstance(annotations, pd.DataFrame):
+            required = {"Model", "Chain", "Resseq", "Location"}
+            missing = required - set(annotations.columns)
+            if missing:
+                raise ValueError(f"Residue annotation DataFrame is missing columns: {', '.join(sorted(missing))}")
+            for row in annotations.itertuples():
+                key = (
+                    str(row.Model),
+                    str(row.Chain),
+                    int(row.Resseq),
+                    getattr(row, "Icode", " ") or " ",
+                )
+                mapping[key] = str(row.Location).strip().lower() or "unknown"
+            return mapping
+
+        if isinstance(annotations, dict):
+            for raw_key, value in annotations.items():
+                if not isinstance(raw_key, (list, tuple)) or len(raw_key) not in (3, 4):
+                    raise ValueError("Residue annotation keys must be (model, chain, resseq[, icode]).")
+                model, chain, resseq = raw_key[:3]
+                icode = raw_key[3] if len(raw_key) == 4 else " "
+                mapping[(str(model), str(chain), int(resseq), (icode or " "))] = str(value).strip().lower() or "unknown"
+            return mapping
+
+        raise TypeError("Residue annotations must be provided as a dict or a pandas DataFrame.")
+
+    def _compute_mutation_table(self) -> pd.DataFrame:
+        records: List[Dict[str, Any]] = []
+        models = self._select_models(models=None, include_wt=False)
+        for model in models:
+            for chain_id in self.chain_selection.get(model, []):
+                if chain_id not in self._wt_chain_sequences:
+                    continue
+                wt_seq = self._wt_chain_sequences[chain_id]
+                variant_seq = self._chain_sequences.get(model, {}).get(chain_id)
+                if not variant_seq:
+                    continue
+                wt_meta = self._chain_metadata[self.wt_model][chain_id]
+                var_meta = self._chain_metadata[model][chain_id]
+                wt_aln, var_aln = self._align_sequences(wt_seq, variant_seq)
+                records.extend(
+                    self._records_from_alignment(model, chain_id, wt_aln, var_aln, wt_meta, var_meta)
+                )
+        if not records:
+            empty_df = pd.DataFrame(columns=self._MUTATION_COLUMNS)
+            return empty_df.set_index(pd.MultiIndex.from_arrays([[], []], names=["Model", "Chain"]))
+
+        df = pd.DataFrame.from_records(records, columns=self._MUTATION_COLUMNS)
+        return df.set_index(["Model", "Chain"], drop=False)
+
+    def _align_sequences(self, wt_seq: str, variant_seq: str) -> Tuple[str, str]:
+        alignment = pairwise2.align.globalms(
+            wt_seq,
+            variant_seq,
+            self._align_params["match"],
+            self._align_params["mismatch"],
+            self._align_params["gap_open"],
+            self._align_params["gap_extend"],
+            one_alignment_only=True,
+        )
+        if not alignment:
+            raise ValueError("Failed to align sequences; please verify the selected chains.")
+        wt_aln, var_aln = alignment[0][:2]
+        return wt_aln, var_aln
+
+    def _records_from_alignment(
+        self,
+        model: str,
+        chain_id: str,
+        wt_aln: str,
+        var_aln: str,
+        wt_meta: List[Dict[str, Any]],
+        var_meta: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        records: List[Dict[str, Any]] = []
+        wt_idx = -1
+        var_idx = -1
+        for wt_res, var_res in zip(wt_aln, var_aln):
+            wt_info = None
+            var_info = None
+            if wt_res != "-":
+                wt_idx += 1
+                wt_info = wt_meta[wt_idx] if wt_idx < len(wt_meta) else None
+            if var_res != "-":
+                var_idx += 1
+                var_info = var_meta[var_idx] if var_idx < len(var_meta) else None
+            if wt_res == var_res:
+                continue
+            change_kind = "substitution"
+            if wt_res == "-":
+                change_kind = "insertion"
+            elif var_res == "-":
+                change_kind = "deletion"
+
+            mutation_str = self._format_mutation_string(wt_info, wt_res, var_res)
+            location, stats = self._resolve_location_context(model, var_info, wt_info)
+            category = self._mutation_category_label(wt_res, var_res)
+
+            record = {
+                "Model": model,
+                "Chain": chain_id,
+                "Category": category,
+                "ChangeKind": change_kind,
+                "Mutation": mutation_str,
+                "WT_residue": wt_res,
+                "Mutant_residue": var_res,
+                "WT_resseq": wt_info["resseq"] if wt_info else None,
+                "WT_icode": wt_info["icode"] if wt_info else None,
+                "Variant_resseq": var_info["resseq"] if var_info else None,
+                "Variant_icode": var_info["icode"] if var_info else None,
+                "WT_position": wt_info["seq_index"] if wt_info else None,
+                "Variant_position": var_info["seq_index"] if var_info else None,
+                "Location": location or "unknown",
+                "Contact_total": stats.get("total_contacts") if stats else None,
+                "Ligand_contacts": stats.get("ligand_contacts") if stats else None,
+                "SiteID": self._site_identifier(chain_id, wt_info),
+            }
+            records.append(record)
+        return records
+
+    def _format_mutation_string(
+        self,
+        wt_info: Optional[Dict[str, Any]],
+        wt_res: str,
+        var_res: str,
+    ) -> str:
+        pos = wt_info["resseq"] if wt_info else "?"
+        icode = wt_info["icode"].strip() if wt_info and wt_info["icode"] else ""
+        return f"{wt_res}{pos}{icode}{var_res}"
+
+    def _format_mutation_label(self, row: pd.Series) -> str:  # type: ignore[name-defined]
+        chain = row.get("Chain")
+        mutation = row.get("Mutation")
+        if mutation and len(mutation) >= 2:
+            try:
+                prefix = mutation[0]
+                suffix = mutation[-1]
+                digits = ''.join(ch for ch in mutation[1:-1] if ch.isdigit())
+                mutation_simple = f"{prefix}{digits}{suffix}" if digits else mutation
+            except Exception:
+                mutation_simple = mutation
+        else:
+            mutation_simple = mutation or "?"
+        return f"{chain}:{mutation_simple}"
+
+    def _site_identifier(self, chain_id: str, meta: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not meta:
+            return None
+        return f"{chain_id}:{meta['resseq']}{meta['icode'].strip()}"
+
+    def _resolve_location_context(
+        self,
+        model: str,
+        variant_meta: Optional[Dict[str, Any]],
+        wt_meta: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        for candidate_model, meta in (
+            (model, variant_meta),
+            (self.wt_model if model != self.wt_model else model, wt_meta),
+        ):
+            if meta is None:
+                continue
+            location, stats = self._location_and_stats(candidate_model, meta)
+            if location or stats:
+                return location, stats
+        return None, None
+
+    def _location_and_stats(
+        self,
+        model: str,
+        meta: Dict[str, Any],
+    ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+        key = (model, meta["chain"], meta["resseq"], meta["icode"])
+        location = self._location_map.get(key)
+        stats = self._contact_summary.get(model, {}).get((meta["chain"], meta["resseq"], meta["icode"]))
+        if location:
+            return location, stats
+        if stats:
+            return self._classify_location_from_stats(stats), stats
+        return None, None
+
+    def _classify_location_from_stats(self, stats: Dict[str, Any]) -> Optional[str]:
+        if stats.get("ligand_contacts", 0) > 0:
+            return "pocket"
+        total = stats.get("total_contacts", 0)
+        if total >= self.core_contact_threshold:
+            return "core"
+        if total <= self.surface_contact_threshold:
+            return "surface"
+        return "boundary"
+
+    def _residue_category_code(self, residue: str) -> str:
+        if not residue or residue == "-":
+            return "-"
+        r = residue.upper()
+        if r in self._HYDROPHOBIC:
+            return "H"
+        if r in self._POLAR:
+            return "P"
+        if r in self._CHARGED:
+            return "C"
+        if r in self._SPECIAL:
+            return "S"
+        return "U"
+
+    def _mutation_category_label(self, wt_res: str, var_res: str) -> str:
+        wt_code = self._residue_category_code(wt_res)
+        var_code = self._residue_category_code(var_res)
+        if "-" in (wt_code, var_code):
+            return "gap"
+        return f"{wt_code}{var_code}"
 
 class proteinModels:
     """
@@ -5627,6 +6538,45 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         self.models_contacts = results
         return results
+
+    def buildMutationAnalyzer(
+        self,
+        wild_type: str,
+        *,
+        chains: Optional[Union[str, Iterable[str], Dict[str, Iterable[str]]]] = None,
+        alignment_params: Optional[Dict[str, float]] = None,
+        residue_annotations: Optional[Union[Dict[Any, str], pd.DataFrame]] = None,
+        contact_results: Optional[Dict[str, Any]] = None,
+        auto_classify_locations: bool = True,
+        core_contact_threshold: int = 12,
+        surface_contact_threshold: int = 4,
+        pocket_neighbor_kinds: Optional[Iterable[str]] = None,
+    ) -> MutationVariabilityAnalyzer:
+        """Convenience wrapper to instantiate :class:`MutationVariabilityAnalyzer`.
+
+        Parameters mirror the analyzer constructor; pass ``contact_results`` to override
+        cached neighbour data (defaults to ``self.models_contacts``).
+        """
+
+        if contact_results is not None:
+            analysis_contacts = contact_results
+        else:
+            analysis_contacts = self.models_contacts
+            if not analysis_contacts:
+                self.computeModelContacts(chains=chains)
+                analysis_contacts = self.models_contacts
+        return MutationVariabilityAnalyzer(
+            self,
+            wild_type,
+            chains=chains,
+            alignment_params=alignment_params,
+            residue_annotations=residue_annotations,
+            contact_results=analysis_contacts,
+            auto_classify_locations=auto_classify_locations,
+            core_contact_threshold=core_contact_threshold,
+            surface_contact_threshold=surface_contact_threshold,
+            pocket_neighbor_kinds=pocket_neighbor_kinds,
+        )
 
     def setUprDockGrid(
         self,
