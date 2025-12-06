@@ -87,6 +87,18 @@ class OpenFFBackend(ParameterizationBackend):
         options = dict(self.options)
         options.update(kwargs)
         strict_atom_name_check = bool(options.get("strict_atom_name_check", True))
+        solvate_enabled = bool(options.get("solvate", True))
+        verbose_flag = options.get("verbose")
+        if verbose_flag is None:
+            verbose_flag = self.options.get("verbose", False)
+        verbose = bool(verbose_flag)
+        model_label = getattr(openmm_md, "pdb_name", "model")
+
+        def _log(message: str) -> None:
+            if verbose:
+                print(f"[prepare_proteins][openff][{model_label}] {message}")
+
+        _log("Starting OpenFF parameterization.")
 
         # We currently only prepare full systems in this backend
         if options.get("build_full_system") is False:
@@ -152,6 +164,7 @@ class OpenFFBackend(ParameterizationBackend):
         ligand_sdf_map = self._normalize_ligand_sdfs(options.get("ligand_sdf_files"))
         default_charge_method = options.get("ligand_charge_method", "am1bcc")
         skip_charge = bool(options.get("skip_ligand_charge_computation", False))
+        force_recompute_charges = bool(options.get("force_recompute_charges", False))
         provided_charges = options.get("charges")  # {RESNAME: total_charge}
 
         # Skip list and filters
@@ -237,6 +250,7 @@ class OpenFFBackend(ParameterizationBackend):
             skip_ligands=skip_ligands,
             only_residues=only_residues,
         )
+        _log(f"Detected {len(ligand_residues)} ligand residue group(s).")
         xml_residue_names = set(xml_residue_map.keys())
 
         if not ligand_residues:
@@ -252,6 +266,21 @@ class OpenFFBackend(ParameterizationBackend):
         toolkit_registry = ToolkitRegistry()
         toolkit_registry.register_toolkit(rdkit)
         toolkit_registry.register_toolkit(ambertools)
+
+        def _extract_partial_charges(mol: Optional[Molecule]):
+            if mol is None:
+                return None
+            try:
+                charges = mol.partial_charges
+            except Exception:
+                return None
+            if charges is None:
+                return None
+            try:
+                length = len(charges)
+            except Exception:
+                return None
+            return charges if length == mol.n_atoms else None
 
         # ---- Process each ligand residue group
         ligand_molecules: Dict[str, Molecule] = {}
@@ -278,6 +307,8 @@ class OpenFFBackend(ParameterizationBackend):
                     f"No ligand definition provided for residue '{resname}'. "
                     "Supply either a SMILES string or an SDF entry."
                 )
+            source_desc = "SDF" if sdf_entry is not None else "SMILES"
+            _log(f"Templating ligand {resname} from {source_desc}.")
 
             # Per-residue charge method (optional override in SDF map)
             entry_charge_method = default_charge_method
@@ -297,6 +328,7 @@ class OpenFFBackend(ParameterizationBackend):
             # Cache
             offmol_path = pack_dir / f"{resname}.offmol.json"
             base_ligand: Optional[Molecule] = None
+            cached_partial_charges = None
             if offmol_path.exists():
                 try:
                     cached_ligand = Molecule.from_json(offmol_path.read_text())
@@ -305,6 +337,8 @@ class OpenFFBackend(ParameterizationBackend):
                     warnings.warn(f"[prepare_proteins] Ignoring corrupt cache {offmol_path.name}: {exc}", RuntimeWarning)
                 if cached_ligand is not None and cached_ligand.n_atoms == first_topology.getNumAtoms():
                     base_ligand = cached_ligand
+                    cached_partial_charges = _extract_partial_charges(cached_ligand)
+                    _log(f"Found cached ligand template for {resname}.")
                 elif cached_ligand is not None:
                     (pack_dir / f"{resname}_cached_mismatch.offmol.json").write_text(cached_ligand.to_json())
                     base_ligand = None
@@ -361,8 +395,6 @@ class OpenFFBackend(ParameterizationBackend):
                             lig.generate_conformers(n_conformers=1)
                     base_ligand = lig
 
-            # Persist cache
-            offmol_path.write_text(base_ligand.to_json())
             base_ligand.properties.setdefault("residue_name", resname)
 
             # ---- Validate user-provided total charge vs formal charge from the molecule
@@ -382,8 +414,7 @@ class OpenFFBackend(ParameterizationBackend):
                     warnings.warn(
                         f"[prepare_proteins] Ligand {resname}: provided total charge {int(residue_charge)} "
                         f"differs from molecule formal charge {formal_charge} ({src}). "
-                        "Continuing with skip_ligand_charge_computation=True; "
-                        "assigning dummy charges that sum to the formal charge.",
+                        "Continuing with skip_ligand_charge_computation=True.",
                         RuntimeWarning,
                     )
                 else:
@@ -394,21 +425,35 @@ class OpenFFBackend(ParameterizationBackend):
                     )
 
             # --- Assign charges now ---
+            reuse_cached = cached_partial_charges is not None and not force_recompute_charges
             if skip_charge:
-                # Fast placeholder: uniform charges summing to the **formal** charge
-                import numpy as _np
-                n = base_ligand.n_atoms
-                target_sum = float(formal_charge if formal_charge is not None else 0.0)
-                arr = _np.zeros(n, dtype=float)
-                if n > 0:
-                    arr[:] = target_sum / n
-                try:
-                    from openff.units import unit as _u
-                except Exception:
-                    from openmm import unit as _u
-                base_ligand.partial_charges = arr * _u.elementary_charge
+                if cached_partial_charges is None:
+                    warnings.warn(
+                        f"[prepare_proteins] skip_ligand_charge_computation=True requested for {resname} "
+                        "but no cached charges were found; assigning zero placeholder charges for debugging. "
+                        "Disable the skip flag to generate physical charges.",
+                        RuntimeWarning,
+                    )
+                    zero_charges = np.zeros(base_ligand.n_atoms, dtype=float)
+                    if off_unit is not None:  # pragma: no cover - requires openff.units
+                        zero_charges = zero_charges * off_unit.elementary_charge  # type: ignore[assignment]
+                    else:
+                        zero_charges = zero_charges * u.elementary_charge
+                    _log(f"No cached charges for {resname}; assigning zero placeholder charges.")
+                    base_ligand.partial_charges = zero_charges
+                else:
+                    _log(f"Reusing cached partial charges for {resname}.")
+                    base_ligand.partial_charges = cached_partial_charges
+            elif reuse_cached:
+                _log(f"Reusing cached partial charges for {resname}.")
+                base_ligand.partial_charges = cached_partial_charges
             else:
+                _log(f"Assigning {entry_charge_method} charges for {resname}.")
                 base_ligand.assign_partial_charges(entry_charge_method, toolkit_registry=toolkit_registry)
+                cached_partial_charges = _extract_partial_charges(base_ligand)
+
+            # Persist cache (now containing partial charges for future skip runs)
+            offmol_path.write_text(base_ligand.to_json())
 
             # ---- Write a template SDF for inspection
             self._write_ligand_file(pack_dir / f"{resname}_template.sdf", base_ligand, rdkit)
@@ -501,10 +546,12 @@ class OpenFFBackend(ParameterizationBackend):
         base_forcefield_files = tuple(options.get("forcefield_files") or ())
         if not base_forcefield_files:
             raise ValueError("forcefield_files must include at least protein and water XML definitions.")
+        _log("Loading base OpenMM force fields.")
         forcefield = ForceField(*base_forcefield_files)
 
         # Load extra FFXMLs, stripping duplicate AtomType definitions to avoid collisions (e.g., H1)
         if extra_ffxml_entries:
+            _log(f"Processing {len(extra_ffxml_entries)} custom FFXML file(s).")
             # Capture residue atom-name lists from the modeller to help align template atom names
             residue_atom_names = {}
             for res in modeller.topology.residues():
@@ -679,7 +726,8 @@ class OpenFFBackend(ParameterizationBackend):
             forcefield.registerTemplateGenerator(generator.generator)
 
         # ---- Solvate / ions
-        if options.get("solvate", True):
+        if solvate_enabled:
+            _log("Adding solvent/ions (Modeller.addSolvent).")
             modeller.addSolvent(
                 forcefield,
                 model=str(options.get("water_model", "tip3p")),
@@ -689,6 +737,8 @@ class OpenFFBackend(ParameterizationBackend):
                 negativeIon=str(options.get("negative_ion", "Cl-")),
                 neutralize=bool(options.get("neutralize", True)),
             )
+        else:
+            _log("Skipping solvent/ions (solvate=False).")
 
         def _build_residue_template_map(topology):
             mapping = {}
@@ -704,16 +754,20 @@ class OpenFFBackend(ParameterizationBackend):
         residue_templates = _build_residue_template_map(modeller.topology)
 
         # ---- Build two systems: one "export" (no constraints) and one runtime (HBonds)
-        cutoff = float(options.get("nonbonded_cutoff_nm", 1.0)) * u.nanometer
-        export_system = forcefield.createSystem(
-            modeller.topology,
-            nonbondedMethod=PME,
-            nonbondedCutoff=cutoff,
+        cutoff_val = float(options.get("nonbonded_cutoff_nm", 1.0)) * u.nanometer
+        nonbonded_method = PME if solvate_enabled else NoCutoff
+        system_kwargs = dict(
+            topology=modeller.topology,
+            nonbondedMethod=nonbonded_method,
             constraints=None,
             rigidWater=False,
             removeCMMotion=False,
             residueTemplates=residue_templates,
         )
+        if solvate_enabled:
+            system_kwargs["nonbondedCutoff"] = cutoff_val
+        _log("Creating OpenMM System and exporting AMBER files.")
+        export_system = forcefield.createSystem(**system_kwargs)
 
         # ---- Export AMBER files
         structure = pmd.openmm.load_topology(modeller.topology, export_system, xyz=modeller.positions)
@@ -729,6 +783,7 @@ class OpenFFBackend(ParameterizationBackend):
         openmm_md.positions = np.array([pos.value_in_unit(u.nanometer) for pos in modeller.positions])
         openmm_md.prmtop_file = str(prmtop_path)
         openmm_md.inpcrd_file = str(inpcrd_path)
+        _log("Finished OpenFF parameterization and exported AMBER inputs.")
 
         # ---- Optional per-residue FFXML export (for reuse)
         if export_all or export_targets:

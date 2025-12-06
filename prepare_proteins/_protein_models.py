@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import fileinput
 import gc
 import io
@@ -10895,6 +10897,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                equilibration_data_report_time=1.0, equilibration_dcd_report_time=0.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
                                extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
+                               solvate=True,
+                               verbose=False,
                                strict_ligand_atom_check=True,
                                ligand_parameters_source=None,
                                parameterization_method='ambertools',
@@ -10918,6 +10922,8 @@ make sure of reading the target sequences with the function readTargetSequences(
           Must be at least 1 and cannot exceed the number of MD steps derived from `npt_time` and `time_step`.
         - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
           but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
+        - solvate (bool, optional): When False, request the backends to skip solvent/ion addition (defaults to True).
+        - verbose (bool, optional): When True, emit detailed progress information from the parameterization backends.
         - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
           same atom-name set as the ligand extracted from the PDB; mismatches raise an error. Disable to downgrade to warnings.
         - ligand_only (bool or str or list of str, optional): If set, skip protein + ligand simulations and instead
@@ -10941,8 +10947,10 @@ make sure of reading the target sequences with the function readTargetSequences(
           to the OpenFF forcefield (e.g., {'HEM': 'path/HEM.ffxml'}). Ignored by the AmberTools backend.
         - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
         - skip_models (list of str, optional): If provided, skip setup for these models.
-        - skip_ligand_charge_computation (bool, optional): If True, the parameterization backends will reuse
-          existing ligand charges (cached OpenFF templates or pre-existing MOL2 files) instead of recomputing them.
+        - skip_ligand_charge_computation (bool, optional): If True, the parameterization backends reuse
+          existing ligand charges (OpenFF expects cached ``<RES>.offmol.json`` templates, AmberTools relies on
+          existing MOL2/PREPI files). Missing caches trigger debugging placeholders for OpenFF (zero charges with
+          a warning) and hard errors for AmberTools to guard realistic runs.
         - export_per_residue_ffxml (bool or str or list of str, optional): If True, export FFXML templates for all
           ligands prepared by the OpenFF backend into the parameters folder; if a string or list, export only for the
           specified residue names. The AmberTools backend will also export when requested, using available mol2/frcmod
@@ -11223,6 +11231,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             backend_options.setdefault("ligand_sdf_files", ligand_sdf_files)
         if skip_ligand_charge_computation:
             backend_options.setdefault("skip_ligand_charge_computation", True)
+        backend_options.setdefault("solvate", bool(solvate))
+        if "verbose" not in backend_options:
+            backend_options["verbose"] = bool(verbose)
         backend_name_lower = str(parameterization_method).lower()
         if backend_name_lower == "openff":
             if ligand_xml_files:
@@ -11547,7 +11558,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     add_counterions=True,
                     add_counterionsRand=add_counterionsRand,
                     save_amber_pdb=True,
-                    solvate=True,
+                    solvate=bool(solvate),
                     regenerate_amber_files=True,
                     non_standard_residues=non_standard_residues,
                     strict_atom_name_check=strict_ligand_atom_check,
@@ -11560,6 +11571,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 elif getattr(backend, "name", "").lower() == "ambertools":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
                 prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
+                if "verbose" not in prepare_kwargs:
+                    prepare_kwargs["verbose"] = bool(verbose)
 
                 backend.prepare_model(
                     self.openmm_md[model],
@@ -11625,7 +11638,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     add_counterions=True,
                     add_counterionsRand=add_counterionsRand,
                     save_amber_pdb=True,
-                    solvate=True,
+                    solvate=bool(solvate),
                     regenerate_amber_files=True,
                     non_standard_residues=non_standard_residues,
                     strict_atom_name_check=strict_ligand_atom_check,
@@ -11636,6 +11649,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 elif getattr(backend, "name", "").lower() == "ambertools":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
                 prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
+                if "verbose" not in prepare_kwargs:
+                    prepare_kwargs["verbose"] = bool(verbose)
 
                 backend.prepare_model(
                     self.openmm_md[model],
