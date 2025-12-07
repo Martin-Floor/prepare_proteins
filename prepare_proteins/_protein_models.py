@@ -7278,6 +7278,26 @@ make sure of reading the target sequences with the function readTargetSequences(
         ligand_hard_rep.addReweight('hbond_sc', weight=1.3)
         ligand_hard_rep.addReweight('rama', weight=0.2)
 
+        # Clone the hard rep scorefunction but silence constraint terms so ligand metrics
+        # can be computed without bias from ligand constraints.
+        ligand_hard_rep_no_cst = rosettaScripts.scorefunctions.new_scorefunction(
+            'ligand_hard_rep_no_cst', weights_file='ligand'
+        )
+        ligand_hard_rep_no_cst.addReweight('fa_intra_rep', weight=0.004)
+        ligand_hard_rep_no_cst.addReweight('fa_elec', weight=0.42)
+        ligand_hard_rep_no_cst.addReweight('hbond_bb_sc', weight=1.3)
+        ligand_hard_rep_no_cst.addReweight('hbond_sc', weight=1.3)
+        ligand_hard_rep_no_cst.addReweight('rama', weight=0.2)
+        for constraint_term in (
+            'atom_pair_constraint',
+            'coordinate_constraint',
+            'angle_constraint',
+            'dihedral_constraint',
+            'res_type_constraint',
+            'metalbinding_constraint',
+        ):
+            ligand_hard_rep_no_cst.addReweight(constraint_term, weight=0.0)
+
         # Create ligand areas
         docking_sidechain = rosettaScripts.ligandArea('docking_sidechain',
                                                        chain=ligand_chain,
@@ -7361,11 +7381,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create final minimization mover
         finalMinimizer = rosettaScripts.movers.finalMinimizer(scorefxn=ligand_hard_rep, movemap_builder=final)
 
-        # Add mover for reporting metrics
-        interfaceScoreCalculator = rosettaScripts.movers.interfaceScoreCalculator(chains=ligand_chain,
-                                                                                  scorefxn=ligand_hard_rep,
-                                                                                  compute_grid_scores=False)
-
         ### Create combined protocols
 
         # Create low-resolution mover
@@ -7375,10 +7390,6 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create high-resolution mover
         high_res_dock_movers = [highResDocker, finalMinimizer]
         high_res_dock = rosettaScripts.movers.parsedProtocol('high_res_dock', high_res_dock_movers)
-
-        # Create reporting combined mover
-        reporting_movers = [interfaceScoreCalculator]
-        reporting = rosettaScripts.movers.parsedProtocol('reporting', reporting_movers)
 
         # Convert ligand input to conformers
         ligands = []
@@ -7627,6 +7638,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Add score functions
                 xml.addScorefunction(ligand_soft_rep)
                 xml.addScorefunction(ligand_hard_rep)
+                xml.addScorefunction(ligand_hard_rep_no_cst)
 
                 # Add ligand areas
                 xml.addLigandArea(docking_sidechain)
@@ -7644,6 +7656,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 # Prepare constraint movers list
                 constraint_movers = []
+                ligand_constraints_applied = False
 
                 # Add constraint movers
                 if cst_files is not None:
@@ -7673,6 +7686,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         os.makedirs(cst_root, exist_ok=True)
                         model_cst_dir = os.path.join(cst_root, model)
                         os.makedirs(model_cst_dir, exist_ok=True)
+                        ligand_constraints_applied = True
 
                         for cst_file in ligand_cst_files:
                             cst_name = os.path.basename(cst_file)
@@ -7698,6 +7712,25 @@ make sure of reading the target sequences with the function readTargetSequences(
                 xml.addMover(transform)
                 xml.addMover(highResDocker)
                 xml.addMover(finalMinimizer)
+
+                # Select a constraint-free score function for reporting when ligand
+                # constraints were applied so interface metrics ignore penalty terms.
+                if ligand_constraints_applied:
+                    interface_scorefxn = ligand_hard_rep_no_cst
+                    interface_score_mover_name = 'interfaceScoreCalculator_no_cst'
+                else:
+                    interface_scorefxn = ligand_hard_rep
+                    interface_score_mover_name = 'interfaceScoreCalculator'
+
+                interfaceScoreCalculator = rosettaScripts.movers.interfaceScoreCalculator(
+                    name=interface_score_mover_name,
+                    chains=ligand_chain,
+                    scorefxn=interface_scorefxn,
+                    compute_grid_scores=False,
+                )
+                reporting = rosettaScripts.movers.parsedProtocol(
+                    'reporting', [interfaceScoreCalculator]
+                )
 
                 # Add scoring movers
                 xml.addMover(interfaceScoreCalculator)
@@ -16487,38 +16520,63 @@ make sure of reading the target sequences with the function readTargetSequences(
         sugars=False,
         conect_update=False,
         output_folder=None,
+        rosetta_df=None,
+        covalent_check=False,
     ):
         """
-        Load the best energy models from a set of silent files inside a specific folder.
-        Useful to get the best models from a relaxation run.
+        Load the best-scoring poses from a Rosetta relax run and either add them to
+        the current library or dump them to an ``output_folder``.
 
-        If output_folder is provided, the best model is extracted and saved there
-        (with the pose index removed from the filename) rather than loaded into the class.
+        By default the method scans every ``<model>_relax.out`` file under
+        ``optimization_folder/output_models/<model>`` and picks the pose with the
+        lowest value of ``filter_score_term`` (set ``min_value=False`` to pick the
+        highest). When ``rosetta_df`` is supplied the search is restricted to the
+        rows present in that dataframe, allowing the user to pre-filter
+        ``self.rosetta_data`` (e.g., by metric thresholds) and then feed the subset
+        back into this loader. The same ``filter_score_term`` column in
+        ``rosetta_df`` is used to choose the minimum/maximum pose per model before
+        mapping back to the silent-file tags.
+
+        If ``output_folder`` is provided the extracted pose is saved there after
+        removing the pose index from the filename; otherwise the pose is loaded
+        into ``self.structures`` directly. Passing ``return_missing=True`` makes the
+        function return the set of models that could not be retrieved.
 
         Parameters
         ==========
         optimization_folder : str
-            Path to folder where the Rosetta optimization files are contained
+            Path to the folder containing ``output_models/<model>`` subdirectories
+            with the relax silent files.
         filter_score_term : str
-            Score term used to filter models
+            Name of the score column (from the silent file or ``rosetta_df``) used
+            to decide which pose to keep.
         min_value : bool
-            Grab the minimum score value. Set false to grab the maximum scored value.
-        tags : dict
-            The tag of a specific pose to be loaded for the given model. Each model
-            must have a single tag in the tags dictionary. If a model is not found
-            in the tags dictionary, normal processing will follow to select
-            the loaded pose.
+            Select the minimum column value when True; select the maximum when
+            False.
+        tags : dict or None
+            Optional mapping ``model -> silent_tag`` to force extraction of a
+            specific pose. When present, the tags take precedence over all other
+            selection mechanisms.
         wat_to_hoh : bool
-            Change water names from WAT to HOH when loading.
+            Convert water residue names from WAT to HOH when loading into the
+            class.
         return_missing : bool
-            Return missing models from the optimization_folder.
+            When True, return the set of models that were not found/extracted.
         sugars : bool
-            Additional flag for sugar handling.
+            Enable Rosetta sugar extraction flags.
         conect_update : bool
-            Flag to update CONECT lines.
+            Update CONECT records in the resulting PDBs.
         output_folder : str or None
-            If provided, extracted PDB files (with pose index removed from filename) are written
-            into this folder instead of being loaded into the class.
+            Destination folder to place the extracted PDBs instead of loading
+            them into the class. The pose index is stripped from the filename.
+        rosetta_df : pandas.DataFrame, optional
+            DataFrame indexed by (Model, Pose) that limits the poses considered
+            for extraction. Typically a filtered subset of ``self.rosetta_data``;
+            the same ``filter_score_term`` column is minimized/maximized within
+            this dataframe before resolving the corresponding silent tag.
+        covalent_check : bool, optional
+            Whether to run the covalent-ligand detection that re-sorts residues
+            by index after loading (defaults to False to preserve ligand order).
         """
 
         def getConectLines(pdb_file, format_for_prepwizard=True):
@@ -16760,6 +16818,42 @@ make sure of reading the target sequences with the function readTargetSequences(
             if keep_conects:
                 writeConectLines(conect_lines, pdb_file)
 
+        def _build_pose_tag_lookup(score_index):
+            lookup = {}
+            for tag in score_index:
+                suffix = tag.split("_")[-1]
+                lookup[suffix] = tag
+                try:
+                    lookup[int(suffix)] = tag
+                except ValueError:
+                    pass
+            return lookup
+
+        rosetta_subset = None
+        rosetta_subset_models: Optional[Set[str]] = None
+        if rosetta_df is not None:
+            if not isinstance(rosetta_df, pd.DataFrame) or rosetta_df.empty:
+                raise ValueError(
+                    "rosetta_df must be a non-empty pandas.DataFrame indexed by (Model, Pose)."
+                )
+            if filter_score_term not in rosetta_df.columns:
+                raise ValueError(
+                    f"Column '{filter_score_term}' not found in provided rosetta_df."
+                )
+            if not isinstance(rosetta_df.index, pd.MultiIndex):
+                raise ValueError(
+                    "rosetta_df index must be a MultiIndex with 'Model' and 'Pose' levels."
+                )
+            index_names = list(rosetta_df.index.names)
+            if "Model" not in index_names or "Pose" not in index_names:
+                raise ValueError(
+                    "rosetta_df index must include 'Model' and 'Pose' levels."
+                )
+            rosetta_subset = rosetta_df
+            rosetta_subset_models = set(
+                rosetta_subset.index.get_level_values("Model")
+            )
+
         executable = "extract_pdbs.linuxgccrelease"
         models = []
 
@@ -16787,10 +16881,45 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if model not in self.models_names:
                             continue
 
+                        if rosetta_subset_models is not None and model not in rosetta_subset_models:
+                            continue
+
                         scores = readSilentScores(os.path.join(subfolder, f))
                         if tags is not None and model in tags:
                             print("Reading model %s from the given tag %s" % (model, tags[model]))
                             best_model_tag = tags[model]
+                        elif rosetta_subset is not None:
+                            try:
+                                model_subset = rosetta_subset.xs(model, level="Model")
+                            except KeyError:
+                                continue
+
+                            if model_subset.empty:
+                                continue
+
+                            score_series = model_subset[filter_score_term].dropna()
+                            if score_series.empty:
+                                continue
+
+                            pose_identifier = (
+                                score_series.idxmin()
+                                if min_value
+                                else score_series.idxmax()
+                            )
+                            if isinstance(pose_identifier, tuple):
+                                pose_key = pose_identifier[-1]
+                            else:
+                                pose_key = pose_identifier
+
+                            pose_lookup = _build_pose_tag_lookup(scores.index)
+                            best_model_tag = pose_lookup.get(pose_key)
+                            if best_model_tag is None:
+                                pose_str = str(pose_key)
+                                best_model_tag = pose_lookup.get(pose_str)
+                            if best_model_tag is None:
+                                raise ValueError(
+                                    f"Pose {pose_key} for model {model} was not found in {f}."
+                                )
                         elif min_value:
                             best_model_tag = scores.idxmin()[filter_score_term]
                         else:
@@ -16823,13 +16952,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 best_model_tag + ".pdb",
                                 wat_to_hoh=wat_to_hoh,
                                 conect_update=conect_update,
+                                covalent_check=covalent_check,
                             )
                             os.remove(best_model_tag + ".pdb")
                         models.append(model)
 
         self.getModelsSequences()
 
-        missing_models = set(self.models_names) - set(models)
+        expected_models = set(self.models_names)
+        if rosetta_subset_models is not None:
+            expected_models &= rosetta_subset_models
+
+        missing_models = expected_models - set(models)
         if missing_models:
             print("Missing models in relaxation folder:")
             print("\t" + ", ".join(missing_models))
