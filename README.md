@@ -5,6 +5,10 @@ A Python package developed for the BSC-EAPM group to set up protein models calcu
 
 For instructions, please check the README file located in the dependencies folder.
 
+If the ParmBSC1 forcefield is used in OpenMM MD simulations, it should be properly cited with this [paper](https://www.nature.com/articles/nmeth.3658).
+
+Ivani, I., Dans, P. D., Noy, A., Pérez, A., Faustino, I., Hospital, A., ... & Orozco, M. (2016). Parmbsc1: a refined force field for DNA simulations. Nature methods, 13(1), 55-58.
+
 ## Tutorials
 
 A tutorial for basic usage is available in the docs folder:

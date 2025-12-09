@@ -22,6 +22,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple, Union
 
+
 # --- Debug printing helper (no-op if debug=False) ---
 def _dbg(debug: bool, msg: str = "", *args):
     if debug:
@@ -30,6 +31,7 @@ def _dbg(debug: bool, msg: str = "", *args):
         except Exception:
             # Be resilient to bad formats/objects
             print(msg)
+
 
 def _mask_runs(mask):
     """Return list of (start, end, value) for contiguous runs in a boolean mask."""
@@ -45,6 +47,7 @@ def _mask_runs(mask):
             cur = v
     runs.append((start, len(mask) - 1, cur))
     return runs
+
 
 def _longest_true_run(bool_list):
     """
@@ -66,6 +69,7 @@ def _longest_true_run(bool_list):
         else:
             cur_len = 0
     return best
+
 
 def _term_anchored_core(mapping_pairs, chain_idx_list):
     """
@@ -98,6 +102,7 @@ def _term_anchored_core(mapping_pairs, chain_idx_list):
     core_end = max(first_tgt, last_tgt)
     return (core_start, core_end)
 
+
 def _wrap_pyrosetta_command(command: str, pyrosetta_env: Optional[str]) -> str:
     """
     Wrap the command in a conda environment activation if `pyrosetta_env` is given.
@@ -129,7 +134,7 @@ def _wrap_pyrosetta_command(command: str, pyrosetta_env: Optional[str]) -> str:
         f"conda activate {pyrosetta_env} >/dev/null 2>&1 &&"
     )
 
-    return f"bash -lc \"{conda_prefix} {command.strip()}\""
+    return f'bash -lc "{conda_prefix} {command.strip()}"'
 
 
 def _sync_ligand_params_to_shared_folder(docking_folder: str):
@@ -178,7 +183,9 @@ def _parse_ligand_atom_map(
                 chain = " "
             resseq_str = line[22:26].strip()
             if not resseq_str.isdigit():
-                raise ValueError(f"Unexpected residue number '{resseq_str}' in {ligand_pdb}")
+                raise ValueError(
+                    f"Unexpected residue number '{resseq_str}' in {ligand_pdb}"
+                )
             resseq = int(resseq_str)
             if chain_override is not None:
                 chain = chain_override
@@ -280,7 +287,9 @@ def _collect_ligand_chain_overrides(
         base_chains = _list_pdb_chains(base_pdb)
         out_path = os.path.join(output_models_path, model_ligand, f"{model_ligand}.out")
         if not os.path.exists(out_path):
-            sc_path = os.path.join(output_models_path, model_ligand, f"{model_ligand}.sc")
+            sc_path = os.path.join(
+                output_models_path, model_ligand, f"{model_ligand}.sc"
+            )
             out_path = sc_path if os.path.exists(sc_path) else None
         if out_path is None:
             continue
@@ -332,7 +341,9 @@ def _locate_relax_input_model(rosetta_folder: str, model: str) -> Optional[Path]
     return None
 
 
-def _parse_input_model_ligand_atoms(pdb_path: Path, ligand: str) -> Dict[str, Tuple[str, int, str]]:
+def _parse_input_model_ligand_atoms(
+    pdb_path: Path, ligand: str
+) -> Dict[str, Tuple[str, int, str]]:
     """
     Build a map of atom-name -> (chain, residue_number, atom_name) entries for `ligand`.
     """
@@ -365,7 +376,9 @@ def _parse_input_model_ligand_atoms(pdb_path: Path, ligand: str) -> Dict[str, Tu
     return mapping
 
 
-def _normalize_relax_atom_pairs(atom_pairs: Dict[str, Any], rosetta_folder: str) -> Dict[str, List[List[Any]]]:
+def _normalize_relax_atom_pairs(
+    atom_pairs: Dict[str, Any], rosetta_folder: str
+) -> Dict[str, List[List[Any]]]:
     """
     Normalise atom pair definitions for relax calculations.
 
@@ -381,10 +394,7 @@ def _normalize_relax_atom_pairs(atom_pairs: Dict[str, Any], rosetta_folder: str)
         raise TypeError("atom_pairs must be a dictionary keyed by model name.")
 
     def _normalize_atom_spec(atom_spec):
-        if (
-            isinstance(atom_spec, (list, tuple))
-            and len(atom_spec) == 3
-        ):
+        if isinstance(atom_spec, (list, tuple)) and len(atom_spec) == 3:
             chain = str(atom_spec[0]).strip() or " "
             atom_name = str(atom_spec[2]).strip()
             if not atom_name:
@@ -421,25 +431,31 @@ def _normalize_relax_atom_pairs(atom_pairs: Dict[str, Any], rosetta_folder: str)
                             cache_key = (model, ligand)
                             if cache_key not in ligand_atom_cache:
                                 if model not in pdb_cache:
-                                    pdb_cache[model] = _locate_relax_input_model(rosetta_folder, model)
+                                    pdb_cache[model] = _locate_relax_input_model(
+                                        rosetta_folder, model
+                                    )
                                 pdb_path = pdb_cache[model]
                                 if pdb_path is None:
                                     raise FileNotFoundError(
                                         f"Could not locate input model for '{model}' inside "
                                         f"{rosetta_folder}/input_models."
                                     )
-                                ligand_atom_cache[cache_key] = _parse_input_model_ligand_atoms(
-                                    pdb_path, ligand
+                                ligand_atom_cache[cache_key] = (
+                                    _parse_input_model_ligand_atoms(pdb_path, ligand)
                                 )
                             mapping = ligand_atom_cache[cache_key]
 
                         if not mapping:
-                            missing_atoms.setdefault((model, ligand), set()).add("<ligand_not_found>")
+                            missing_atoms.setdefault((model, ligand), set()).add(
+                                "<ligand_not_found>"
+                            )
                             continue
 
                         ligand_tuple = mapping.get(ligand_atom)
                         if ligand_tuple is None:
-                            missing_atoms.setdefault((model, ligand), set()).add(ligand_atom)
+                            missing_atoms.setdefault((model, ligand), set()).add(
+                                ligand_atom
+                            )
                             continue
                         ligand_spec = list(ligand_tuple)
                     else:
@@ -458,10 +474,12 @@ def _normalize_relax_atom_pairs(atom_pairs: Dict[str, Any], rosetta_folder: str)
                     raise ValueError(
                         "atom_pairs entries must be 2-tuples: (protein_atom, ligand_atom)."
                     )
-                normalized_pairs.append([
-                    _normalize_atom_spec(pair[0]),
-                    _normalize_atom_spec(pair[1]),
-                ])
+                normalized_pairs.append(
+                    [
+                        _normalize_atom_spec(pair[0]),
+                        _normalize_atom_spec(pair[1]),
+                    ]
+                )
             normalized[model] = normalized_pairs
 
     if missing_atoms:
@@ -491,7 +509,9 @@ def _prepare_expanded_atom_pairs(
     ligand_chain_overrides=None,
 ):
     """Return the full atom pair list expected by the PyRosetta script."""
-    ligand_atom_cache: Dict[Tuple[str, Optional[str], Optional[int]], Dict[str, Tuple[str, int, str]]] = {}
+    ligand_atom_cache: Dict[
+        Tuple[str, Optional[str], Optional[int]], Dict[str, Tuple[str, int, str]]
+    ] = {}
     expanded = {}
     missing_ligand_atoms: Dict[Tuple[str, str], Set[str]] = defaultdict(set)
     models_without_pairs = []
@@ -554,8 +574,12 @@ def _prepare_expanded_atom_pairs(
 
     return expanded, missing_ligand_atoms, models_without_pairs
 
-def _analyze_mapping_pairs(mapping, r_ca_coord, t_ca_coord, max_ca_ca, verbose_limit=40):
+
+def _analyze_mapping_pairs(
+    mapping, r_ca_coord, t_ca_coord, max_ca_ca, verbose_limit=40
+):
     import numpy as np, bisect
+
     if not mapping:
         print("[mapdiag] no pairs")
         return
@@ -584,13 +608,20 @@ def _analyze_mapping_pairs(mapping, r_ca_coord, t_ca_coord, max_ca_ca, verbose_l
     d = np.array(d, float)
     d_med = float(np.median(d)) if d.size else float("nan")
     d_max = float(np.max(d)) if d.size else float("nan")
-    frac_loose = float((d > 0.75 * max_ca_ca).sum() / d.size) if d.size else float("nan")
+    frac_loose = (
+        float((d > 0.75 * max_ca_ca).sum() / d.size) if d.size else float("nan")
+    )
 
     print(f"[mapdiag] pairs={len(mapping)}  inversions={inversions}  LIS_len={lis_len}")
-    print(f"[mapdiag] dists: median={d_med:.2f}  max={d_max:.2f}  frac(>0.75*cutoff)={frac_loose:.2f}")
+    print(
+        f"[mapdiag] dists: median={d_med:.2f}  max={d_max:.2f}  frac(>0.75*cutoff)={frac_loose:.2f}"
+    )
 
     for i, (r, t) in enumerate(pairs[:verbose_limit]):
-        print(f"  {i:03d}: ref={r} -> tgt={t}  | d={np.linalg.norm(t_ca_coord[t]-r_ca_coord[r]):.2f}")
+        print(
+            f"  {i:03d}: ref={r} -> tgt={t}  | d={np.linalg.norm(t_ca_coord[t]-r_ca_coord[r]):.2f}"
+        )
+
 
 _MISSING = object()
 
@@ -632,7 +663,17 @@ import pandas as pd
 from Bio import PDB, BiopythonWarning, pairwise2
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3, is_aa
-from ipywidgets import interactive_output, VBox, IntSlider, Checkbox, interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
+from ipywidgets import (
+    interactive_output,
+    VBox,
+    IntSlider,
+    Checkbox,
+    interact,
+    fixed,
+    Dropdown,
+    FloatSlider,
+    FloatRangeSlider,
+)
 from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
 from scipy.spatial.distance import cdist
@@ -646,6 +687,7 @@ from .MD.parameterization.utils import DEFAULT_PARAMETERIZATION_SKIP_RESIDUES
 
 try:
     _BIOPYTHON_THREE_TO_ONE = PDB.Polypeptide.three_to_one
+
     def _three_to_one(resname):
         return _BIOPYTHON_THREE_TO_ONE(resname)
 
@@ -655,7 +697,9 @@ try:
         return _BIOPYTHON_ONE_TO_THREE(rescode).upper()
 
 except AttributeError:
-    from Bio.Data.PDBData import protein_letters_3to1_extended as _protein_letters_3to1_extended
+    from Bio.Data.PDBData import (
+        protein_letters_3to1_extended as _protein_letters_3to1_extended,
+    )
     from Bio.Data.IUPACData import protein_letters_1to3 as _protein_letters_1to3
 
     def _three_to_one(resname):
@@ -761,20 +805,34 @@ class MutationVariabilityAnalyzer:
     ):
         self.models = protein_models
         if wild_type not in getattr(self.models, "models_names", []):
-            raise ValueError(f"Wild-type model '{wild_type}' is not available in the current session.")
+            raise ValueError(
+                f"Wild-type model '{wild_type}' is not available in the current session."
+            )
         self.wt_model = wild_type
 
         self._align_params = dict(self._DEFAULT_ALIGNMENT)
         if alignment_params:
-            self._align_params.update({k: float(v) for k, v in alignment_params.items() if k in self._DEFAULT_ALIGNMENT})
+            self._align_params.update(
+                {
+                    k: float(v)
+                    for k, v in alignment_params.items()
+                    if k in self._DEFAULT_ALIGNMENT
+                }
+            )
 
-        if self.models.chain_sequences == {} and getattr(self.models, "structures", None):
+        if self.models.chain_sequences == {} and getattr(
+            self.models, "structures", None
+        ):
             self.models.getModelsSequences()
 
-        raw_selection = self.models._resolve_chain_selection(chains=chains, models=self.models.models_names)
+        raw_selection = self.models._resolve_chain_selection(
+            chains=chains, models=self.models.models_names
+        )
         wt_chains = raw_selection.get(self.wt_model, [])
         if not wt_chains:
-            raise ValueError(f"No analyzable chains were found for the wild-type model '{self.wt_model}'.")
+            raise ValueError(
+                f"No analyzable chains were found for the wild-type model '{self.wt_model}'."
+            )
         wt_set = set(wt_chains)
 
         self.chain_selection: Dict[str, List[str]] = {}
@@ -801,7 +859,9 @@ class MutationVariabilityAnalyzer:
         if pocket_neighbor_kinds is None:
             self.pocket_neighbor_kinds = default_pocket
         else:
-            self.pocket_neighbor_kinds = {str(kind).lower() for kind in pocket_neighbor_kinds}
+            self.pocket_neighbor_kinds = {
+                str(kind).lower() for kind in pocket_neighbor_kinds
+            }
             if not self.pocket_neighbor_kinds:
                 self.pocket_neighbor_kinds = default_pocket
 
@@ -821,13 +881,19 @@ class MutationVariabilityAnalyzer:
             if per_chain_sequences:
                 self._chain_sequences[model] = per_chain_sequences
                 self._chain_metadata[model] = per_chain_metadata
-                self._model_residue_counts[model] = sum(len(meta) for meta in per_chain_metadata.values())
+                self._model_residue_counts[model] = sum(
+                    len(meta) for meta in per_chain_metadata.values()
+                )
 
         if self.wt_model not in self._chain_sequences:
-            raise ValueError("Wild-type chains could not be parsed; ensure the reference contains protein residues.")
+            raise ValueError(
+                "Wild-type chains could not be parsed; ensure the reference contains protein residues."
+            )
         self._wt_chain_sequences = self._chain_sequences[self.wt_model]
 
-        contact_results = contact_results or getattr(self.models, "models_contacts", None) or {}
+        contact_results = (
+            contact_results or getattr(self.models, "models_contacts", None) or {}
+        )
         self._contact_summary = self._build_contact_summary(contact_results)
 
         self._location_map = self._normalize_location_annotations(residue_annotations)
@@ -899,13 +965,23 @@ class MutationVariabilityAnalyzer:
                 .nunique()
                 .reset_index(name="unique_sites")
             )
-            summary = summary.merge(unique_sites, on="Model", how="left").fillna({"unique_sites": 0})
+            summary = summary.merge(unique_sites, on="Model", how="left").fillna(
+                {"unique_sites": 0}
+            )
             summary["unique_sites"] = summary["unique_sites"].astype(int)
 
-        summary = summary.set_index("Model").reindex(selected_models).fillna(0).reset_index()
-        summary["total_residues"] = summary["Model"].map(self._model_residue_counts).fillna(0).astype(int)
+        summary = (
+            summary.set_index("Model").reindex(selected_models).fillna(0).reset_index()
+        )
+        summary["total_residues"] = (
+            summary["Model"].map(self._model_residue_counts).fillna(0).astype(int)
+        )
         summary["percent_mutated"] = summary.apply(
-            lambda row: (row["unique_sites"] / row["total_residues"]) * 100 if row["total_residues"] else 0.0,
+            lambda row: (
+                (row["unique_sites"] / row["total_residues"]) * 100
+                if row["total_residues"]
+                else 0.0
+            ),
             axis=1,
         )
         columns = [
@@ -931,7 +1007,11 @@ class MutationVariabilityAnalyzer:
         table = self.build_mutation_table(models=models)
         subs = table[table["ChangeKind"].eq("substitution")].copy()
         if subs.empty:
-            columns = ["Model", "Mutation", "Count"] if not collapse_positions else ["Model", "From", "To", "Count"]
+            columns = (
+                ["Model", "Mutation", "Count"]
+                if not collapse_positions
+                else ["Model", "From", "To", "Count"]
+            )
             return pd.DataFrame(columns=columns)
 
         if collapse_positions:
@@ -998,7 +1078,9 @@ class MutationVariabilityAnalyzer:
         matrix = matrix.loc[order]
         matrix["#Designs"] = totals.loc[order].astype(int)
 
-        design_totals = matrix.drop(columns=["#Designs"], errors="ignore").sum(axis=0).astype(int)
+        design_totals = (
+            matrix.drop(columns=["#Designs"], errors="ignore").sum(axis=0).astype(int)
+        )
         summary_row = design_totals.rename("#Mutations")
         summary_row["#Designs"] = int(matrix["#Designs"].sum())
         matrix = pd.concat([matrix, summary_row.to_frame().T])
@@ -1029,7 +1111,9 @@ class MutationVariabilityAnalyzer:
             ax.set_title("No mutations to display")
             return ax
 
-        heatmap_data = matrix.drop(index=["#Mutations"], errors="ignore").drop(columns=["#Designs"], errors="ignore")
+        heatmap_data = matrix.drop(index=["#Mutations"], errors="ignore").drop(
+            columns=["#Designs"], errors="ignore"
+        )
         if model_order is not None:
             order = [m for m in model_order if m in heatmap_data.columns]
             remaining = [c for c in heatmap_data.columns if c not in order]
@@ -1055,7 +1139,9 @@ class MutationVariabilityAnalyzer:
                 allowed.add("deletion")
             table_df = table.reset_index().copy()
             table_df = table_df[table_df["ChangeKind"].isin(allowed)]
-            table_df["MutationLabel"] = table_df.apply(self._format_mutation_label, axis=1)
+            table_df["MutationLabel"] = table_df.apply(
+                self._format_mutation_label, axis=1
+            )
             category_lookup = {
                 (row.MutationLabel, row.Model): row.Category
                 for row in table_df.itertuples()
@@ -1086,7 +1172,11 @@ class MutationVariabilityAnalyzer:
                     "#636363",
                 ]
                 if isinstance(cmap, str):
-                    base = mpl.colormaps.get_cmap(cmap) if hasattr(mpl, "colormaps") else plt.get_cmap(cmap)
+                    base = (
+                        mpl.colormaps.get_cmap(cmap)
+                        if hasattr(mpl, "colormaps")
+                        else plt.get_cmap(cmap)
+                    )
                 else:
                     base = cmap
 
@@ -1099,14 +1189,22 @@ class MutationVariabilityAnalyzer:
                             color = palette[palette_idx]
                             palette_idx += 1
                         else:
-                            sample_pos = 0.1 + 0.8 * (palette_idx - len(palette)) / max(len(categories), 1)
+                            sample_pos = 0.1 + 0.8 * (palette_idx - len(palette)) / max(
+                                len(categories), 1
+                            )
                             color = base(sample_pos)
                             palette_idx += 1
                     assigned.append(color)
                 colors.extend(assigned)
                 categorical_cmap = mpl.colors.ListedColormap(colors)
                 bounds = np.arange(len(colors) + 1) - 0.5
-                im = ax.imshow(color_matrix, aspect="auto", cmap=categorical_cmap, vmin=-0.5, vmax=len(colors) - 1.5)
+                im = ax.imshow(
+                    color_matrix,
+                    aspect="auto",
+                    cmap=categorical_cmap,
+                    vmin=-0.5,
+                    vmax=len(colors) - 1.5,
+                )
                 cbar = plt.colorbar(
                     im,
                     ax=ax,
@@ -1120,11 +1218,17 @@ class MutationVariabilityAnalyzer:
 
         if not color_by_category:
             if isinstance(cmap, str):
-                base_cmap = mpl.colormaps.get_cmap(cmap) if hasattr(mpl, "colormaps") else plt.get_cmap(cmap)
+                base_cmap = (
+                    mpl.colormaps.get_cmap(cmap)
+                    if hasattr(mpl, "colormaps")
+                    else plt.get_cmap(cmap)
+                )
             else:
                 base_cmap = cmap
             discrete_cmap = mpl.colors.ListedColormap([base_cmap(0.0), base_cmap(0.8)])
-            im = ax.imshow(heatmap_data.values, aspect="auto", cmap=discrete_cmap, vmin=0, vmax=1)
+            im = ax.imshow(
+                heatmap_data.values, aspect="auto", cmap=discrete_cmap, vmin=0, vmax=1
+            )
             cbar = plt.colorbar(
                 im,
                 ax=ax,
@@ -1166,7 +1270,9 @@ class MutationVariabilityAnalyzer:
             .reset_index(name="Count")
         )
         if normalize:
-            totals = grouped.groupby("Model")["Count"].transform(lambda x: x.sum() if x.sum() else 1)
+            totals = grouped.groupby("Model")["Count"].transform(
+                lambda x: x.sum() if x.sum() else 1
+            )
             grouped["Fraction"] = grouped["Count"] / totals
         return grouped
 
@@ -1213,14 +1319,18 @@ class MutationVariabilityAnalyzer:
 
         breakdown = self.location_breakdown(models=models)
         if ax is None:
-            _, ax = plt.subplots(figsize=(max(4, len(breakdown["Model"].unique()) * 0.6), 4))
+            _, ax = plt.subplots(
+                figsize=(max(4, len(breakdown["Model"].unique()) * 0.6), 4)
+            )
 
         if breakdown.empty:
             ax.set_axis_off()
             ax.set_title("No mutations to plot")
             return ax
 
-        pivot = breakdown.pivot(index="Model", columns="Location", values="Count").fillna(0)
+        pivot = breakdown.pivot(
+            index="Model", columns="Location", values="Count"
+        ).fillna(0)
         models_idx = pivot.index.tolist()
         x = np.arange(len(models_idx))
         bottom = np.zeros(len(models_idx))
@@ -1273,22 +1383,35 @@ class MutationVariabilityAnalyzer:
         *,
         include_wt: bool = False,
     ) -> List[str]:
-        available = [m for m in self._chain_sequences.keys() if include_wt or m != self.wt_model]
+        available = [
+            m for m in self._chain_sequences.keys() if include_wt or m != self.wt_model
+        ]
         if models is None:
             return available
         if isinstance(models, str):
             requested = [models]
         else:
             requested = [str(m) for m in models]
-        missing = [m for m in requested if m not in available and not (include_wt and m == self.wt_model)]
+        missing = [
+            m
+            for m in requested
+            if m not in available and not (include_wt and m == self.wt_model)
+        ]
         if missing:
             warnings.warn(
-                "Requested models were not part of the analysis set: " + ", ".join(sorted(missing)),
+                "Requested models were not part of the analysis set: "
+                + ", ".join(sorted(missing)),
                 RuntimeWarning,
             )
-        return [m for m in requested if (m in available) or (include_wt and m == self.wt_model)]
+        return [
+            m
+            for m in requested
+            if (m in available) or (include_wt and m == self.wt_model)
+        ]
 
-    def _extract_chain_sequence(self, model: str, chain_id: str) -> Tuple[str, List[Dict[str, Any]]]:
+    def _extract_chain_sequence(
+        self, model: str, chain_id: str
+    ) -> Tuple[str, List[Dict[str, Any]]]:
         sequence: List[str] = []
         metadata: List[Dict[str, Any]] = []
         structure = self.models.structures.get(model)
@@ -1300,13 +1423,18 @@ class MutationVariabilityAnalyzer:
                 chain_obj = pdb_model[chain_id]
                 break
         if chain_obj is None:
-            warnings.warn(f"Chain {chain_id} not found in model {model}; skipping.", RuntimeWarning)
+            warnings.warn(
+                f"Chain {chain_id} not found in model {model}; skipping.",
+                RuntimeWarning,
+            )
             return "", []
         seq_idx = 0
         for residue in chain_obj:
             if residue.id[0] != " ":
                 continue
-            resname = self._SPECIAL_RESNAME_MAP.get(residue.resname.strip().upper(), residue.resname.strip().upper())
+            resname = self._SPECIAL_RESNAME_MAP.get(
+                residue.resname.strip().upper(), residue.resname.strip().upper()
+            )
             try:
                 one_letter = _three_to_one(resname)
             except Exception:
@@ -1324,7 +1452,9 @@ class MutationVariabilityAnalyzer:
             sequence.append(one_letter)
         return "".join(sequence), metadata
 
-    def _build_contact_summary(self, contact_results: Dict[str, Any]) -> Dict[str, Dict[Tuple[str, int, str], Dict[str, Any]]]:
+    def _build_contact_summary(
+        self, contact_results: Dict[str, Any]
+    ) -> Dict[str, Dict[Tuple[str, int, str], Dict[str, Any]]]:
         summary: Dict[str, Dict[Tuple[str, int, str], Dict[str, Any]]] = {}
         if not contact_results:
             return summary
@@ -1334,7 +1464,11 @@ class MutationVariabilityAnalyzer:
             if isinstance(result, pd.DataFrame):
                 table = result
             elif isinstance(result, dict):
-                table = result.get("table") if isinstance(result.get("table"), pd.DataFrame) else None
+                table = (
+                    result.get("table")
+                    if isinstance(result.get("table"), pd.DataFrame)
+                    else None
+                )
             if table is None or table.empty:
                 continue
             df = table.copy()
@@ -1363,7 +1497,9 @@ class MutationVariabilityAnalyzer:
                 if neighbor_kind in self.pocket_neighbor_kinds:
                     entry["ligand_contacts"] += contacts
                 entry["neighbor_kinds"].add(neighbor_kind)
-                entry["min_distance"] = min(entry["min_distance"], float(getattr(row, "min_distance", np.inf)))
+                entry["min_distance"] = min(
+                    entry["min_distance"], float(getattr(row, "min_distance", np.inf))
+                )
             if per_residue:
                 summary[model] = per_residue
         return summary
@@ -1379,7 +1515,9 @@ class MutationVariabilityAnalyzer:
             required = {"Model", "Chain", "Resseq", "Location"}
             missing = required - set(annotations.columns)
             if missing:
-                raise ValueError(f"Residue annotation DataFrame is missing columns: {', '.join(sorted(missing))}")
+                raise ValueError(
+                    f"Residue annotation DataFrame is missing columns: {', '.join(sorted(missing))}"
+                )
             for row in annotations.itertuples():
                 key = (
                     str(row.Model),
@@ -1393,13 +1531,19 @@ class MutationVariabilityAnalyzer:
         if isinstance(annotations, dict):
             for raw_key, value in annotations.items():
                 if not isinstance(raw_key, (list, tuple)) or len(raw_key) not in (3, 4):
-                    raise ValueError("Residue annotation keys must be (model, chain, resseq[, icode]).")
+                    raise ValueError(
+                        "Residue annotation keys must be (model, chain, resseq[, icode])."
+                    )
                 model, chain, resseq = raw_key[:3]
                 icode = raw_key[3] if len(raw_key) == 4 else " "
-                mapping[(str(model), str(chain), int(resseq), (icode or " "))] = str(value).strip().lower() or "unknown"
+                mapping[(str(model), str(chain), int(resseq), (icode or " "))] = (
+                    str(value).strip().lower() or "unknown"
+                )
             return mapping
 
-        raise TypeError("Residue annotations must be provided as a dict or a pandas DataFrame.")
+        raise TypeError(
+            "Residue annotations must be provided as a dict or a pandas DataFrame."
+        )
 
     def _compute_mutation_table(self) -> pd.DataFrame:
         records: List[Dict[str, Any]] = []
@@ -1416,11 +1560,15 @@ class MutationVariabilityAnalyzer:
                 var_meta = self._chain_metadata[model][chain_id]
                 wt_aln, var_aln = self._align_sequences(wt_seq, variant_seq)
                 records.extend(
-                    self._records_from_alignment(model, chain_id, wt_aln, var_aln, wt_meta, var_meta)
+                    self._records_from_alignment(
+                        model, chain_id, wt_aln, var_aln, wt_meta, var_meta
+                    )
                 )
         if not records:
             empty_df = pd.DataFrame(columns=self._MUTATION_COLUMNS)
-            return empty_df.set_index(pd.MultiIndex.from_arrays([[], []], names=["Model", "Chain"]))
+            return empty_df.set_index(
+                pd.MultiIndex.from_arrays([[], []], names=["Model", "Chain"])
+            )
 
         df = pd.DataFrame.from_records(records, columns=self._MUTATION_COLUMNS)
         return df.set_index(["Model", "Chain"], drop=False)
@@ -1436,7 +1584,9 @@ class MutationVariabilityAnalyzer:
             one_alignment_only=True,
         )
         if not alignment:
-            raise ValueError("Failed to align sequences; please verify the selected chains.")
+            raise ValueError(
+                "Failed to align sequences; please verify the selected chains."
+            )
         wt_aln, var_aln = alignment[0][:2]
         return wt_aln, var_aln
 
@@ -1512,7 +1662,7 @@ class MutationVariabilityAnalyzer:
             try:
                 prefix = mutation[0]
                 suffix = mutation[-1]
-                digits = ''.join(ch for ch in mutation[1:-1] if ch.isdigit())
+                digits = "".join(ch for ch in mutation[1:-1] if ch.isdigit())
                 mutation_simple = f"{prefix}{digits}{suffix}" if digits else mutation
             except Exception:
                 mutation_simple = mutation
@@ -1520,7 +1670,9 @@ class MutationVariabilityAnalyzer:
             mutation_simple = mutation or "?"
         return f"{chain}:{mutation_simple}"
 
-    def _site_identifier(self, chain_id: str, meta: Optional[Dict[str, Any]]) -> Optional[str]:
+    def _site_identifier(
+        self, chain_id: str, meta: Optional[Dict[str, Any]]
+    ) -> Optional[str]:
         if not meta:
             return None
         return f"{chain_id}:{meta['resseq']}{meta['icode'].strip()}"
@@ -1549,7 +1701,9 @@ class MutationVariabilityAnalyzer:
     ) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
         key = (model, meta["chain"], meta["resseq"], meta["icode"])
         location = self._location_map.get(key)
-        stats = self._contact_summary.get(model, {}).get((meta["chain"], meta["resseq"], meta["icode"]))
+        stats = self._contact_summary.get(model, {}).get(
+            (meta["chain"], meta["resseq"], meta["icode"])
+        )
         if location:
             return location, stats
         if stats:
@@ -1586,6 +1740,7 @@ class MutationVariabilityAnalyzer:
         if "-" in (wt_code, var_code):
             return "gap"
         return f"{wt_code}{var_code}"
+
 
 class proteinModels:
     """
@@ -1915,9 +2070,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             return
         atom_key_set = set(atom_keys)
         self.conects[model] = [
-            conect
-            for conect in conects
-            if atom_key_set.isdisjoint(conect)
+            conect for conect in conects if atom_key_set.isdisjoint(conect)
         ]
 
     def removeModelAtoms(self, model, atoms_list, verbose=True):
@@ -2139,7 +2292,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         for (chain_id, residue_id), chain_obj in residues_to_detach.items():
             if verbose:
                 resseq = residue_id[1]
-                icode = residue_id[2].strip() if isinstance(residue_id[2], str) else residue_id[2]
+                icode = (
+                    residue_id[2].strip()
+                    if isinstance(residue_id[2], str)
+                    else residue_id[2]
+                )
                 if icode:
                     print(
                         f"Removing residue: ({chain_id}, {resseq}{icode}) from model {model}"
@@ -2185,7 +2342,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             try:
                 selector_entries = list(chains)
             except TypeError as exc:
-                raise TypeError("chains must be a chain ID, Chain object, or iterable.") from exc
+                raise TypeError(
+                    "chains must be a chain ID, Chain object, or iterable."
+                ) from exc
 
         if not selector_entries:
             raise ValueError("No chain identifiers were supplied.")
@@ -2294,16 +2453,18 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         found_map = {}
         for old_name, new_name in atom_names.items():
             if not isinstance(old_name, str) or not isinstance(new_name, str):
-                raise ValueError("Atom name mappings must use strings as keys and values.")
+                raise ValueError(
+                    "Atom name mappings must use strings as keys and values."
+                )
 
             if len(old_name) != 4:
                 raise ValueError(
-                    f'Atom name mapping keys must be exactly four characters long (including padding); '
+                    f"Atom name mapping keys must be exactly four characters long (including padding); "
                     f'received "{old_name}".'
                 )
             if len(new_name) != 4:
                 raise ValueError(
-                    f'Atom name mapping values must be exactly four characters long (including padding); '
+                    f"Atom name mapping values must be exactly four characters long (including padding); "
                     f'received "{new_name}".'
                 )
 
@@ -2315,7 +2476,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if not stripped_new:
                 raise ValueError("Atom name mapping values cannot be empty.")
 
-            if stripped_old in normalized_map and normalized_map[stripped_old] != stripped_new:
+            if (
+                stripped_old in normalized_map
+                and normalized_map[stripped_old] != stripped_new
+            ):
                 raise ValueError(
                     f'Conflicting mappings supplied for atom "{stripped_old}".'
                 )
@@ -2338,7 +2502,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         missing_models = [m for m in target_models if m not in self.structures]
         if missing_models:
             raise KeyError(
-                "Requested models are not loaded: %s" % ", ".join(sorted(missing_models))
+                "Requested models are not loaded: %s"
+                % ", ".join(sorted(missing_models))
             )
 
         total_replacements = 0
@@ -2358,7 +2523,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                         atoms = list(residue.get_atoms())
                         atoms_by_name = {a.get_name().strip(): a for a in atoms}
                         target_names = [
-                            old_name for old_name in normalized_map if old_name in atoms_by_name
+                            old_name
+                            for old_name in normalized_map
+                            if old_name in atoms_by_name
                         ]
                         if not target_names:
                             continue
@@ -2378,12 +2545,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                             ):
                                 raise ValueError(
                                     f'Renaming atom "{old_name}" to "{new_atom_name}" '
-                                    f'would overwrite an existing atom in residue {chain.id}:{residue_id} '
+                                    f"would overwrite an existing atom in residue {chain.id}:{residue_id} "
                                     f'of model "{model_name}".'
                                 )
 
-                        new_names_for_targets = [normalized_map[name] for name in target_names]
-                        if len(new_names_for_targets) != len(set(new_names_for_targets)):
+                        new_names_for_targets = [
+                            normalized_map[name] for name in target_names
+                        ]
+                        if len(new_names_for_targets) != len(
+                            set(new_names_for_targets)
+                        ):
                             raise ValueError(
                                 f"Atom name mapping produces duplicates for residue {chain.id}:{residue_id} "
                                 f'of model "{model_name}".'
@@ -2428,8 +2599,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                             residue_child_dict.pop(temp_name, None)
                             if verbose:
                                 print(
-                                    f'[{model_name}] chain {chain.id} residue {residue_id}: '
-                                    f'{old_name} -> {new_atom_name}'
+                                    f"[{model_name}] chain {chain.id} residue {residue_id}: "
+                                    f"{old_name} -> {new_atom_name}"
                                 )
 
                             atom.name = new_atom_name
@@ -2481,12 +2652,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if summary:
             if total_replacements:
                 print(
-                    f'Renamed {total_replacements} atom(s) across {len(summary_records)} residue(s).'
+                    f"Renamed {total_replacements} atom(s) across {len(summary_records)} residue(s)."
                 )
                 for key, count in sorted(summary_records.items()):
                     model_name, chain_id, residue_id = key
                     print(
-                        f'  [{model_name}] chain {chain_id} residue {residue_id}: {count} atom(s) renamed.'
+                        f"  [{model_name}] chain {chain_id} residue {residue_id}: {count} atom(s) renamed."
                     )
             else:
                 print("No atom names were updated.")
@@ -2523,12 +2694,28 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if verbose:
                 print(f"Removed {count} from conect lines of model {model}")
 
-    def addCappingGroups(self, rosetta_style_caps=False, prepwizard_style_caps=False,
-                         openmm_style_caps=False, stdout=False, stderr=False,
-                         conect_update=True, only_hetatoms=False):
+    def addCappingGroups(
+        self,
+        rosetta_style_caps=False,
+        prepwizard_style_caps=False,
+        openmm_style_caps=False,
+        stdout=False,
+        stderr=False,
+        conect_update=True,
+        only_hetatoms=False,
+    ):
 
-        if sum([bool(rosetta_style_caps), bool(prepwizard_style_caps), bool(openmm_style_caps)]) > 1:
-            raise ValueError('You must give only on cap style option!')
+        if (
+            sum(
+                [
+                    bool(rosetta_style_caps),
+                    bool(prepwizard_style_caps),
+                    bool(openmm_style_caps),
+                ]
+            )
+            > 1
+        ):
+            raise ValueError("You must give only on cap style option!")
 
         # Manage stdout and stderr
         if stdout:
@@ -2541,34 +2728,39 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         else:
             stderr = subprocess.DEVNULL
 
-        if not os.path.exists('_capping_'):
-            os.mkdir('_capping_')
+        if not os.path.exists("_capping_"):
+            os.mkdir("_capping_")
 
-        if not os.path.exists('_capping_/input_models'):
-            os.mkdir('_capping_/input_models')
+        if not os.path.exists("_capping_/input_models"):
+            os.mkdir("_capping_/input_models")
 
-        if not os.path.exists('_capping_/output_models'):
-            os.mkdir('_capping_/output_models')
+        if not os.path.exists("_capping_/output_models"):
+            os.mkdir("_capping_/output_models")
 
-        self.saveModels('_capping_/input_models')
+        self.saveModels("_capping_/input_models")
 
-        _copyScriptFile('_capping_', "addCappingGroups.py")
-        command =  'run python3 _capping_/._addCappingGroups.py '
-        command += '_capping_/input_models/ '
-        command += '_capping_/output_models/ '
+        _copyScriptFile("_capping_", "addCappingGroups.py")
+        command = "run python3 _capping_/._addCappingGroups.py "
+        command += "_capping_/input_models/ "
+        command += "_capping_/output_models/ "
         if rosetta_style_caps:
-            command += '--rosetta_style_caps '
+            command += "--rosetta_style_caps "
         elif prepwizard_style_caps:
-            command += '--prepwizard_style_caps '
+            command += "--prepwizard_style_caps "
         elif openmm_style_caps:
-            command += '--openmm_style_caps '
+            command += "--openmm_style_caps "
 
         subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
 
-        for f in os.listdir('_capping_/output_models'):
-            model = f.replace('.pdb', '')
-            self.readModelFromPDB(model, '_capping_/output_models/'+f, conect_update=conect_update, only_hetatoms=only_hetatoms)
-        shutil.rmtree('_capping_')
+        for f in os.listdir("_capping_/output_models"):
+            model = f.replace(".pdb", "")
+            self.readModelFromPDB(
+                model,
+                "_capping_/output_models/" + f,
+                conect_update=conect_update,
+                only_hetatoms=only_hetatoms,
+            )
+        shutil.rmtree("_capping_")
 
     def removeCaps(self, models=None, remove_ace=True, remove_nma=True):
         """
@@ -2887,9 +3079,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         """
 
         # Normalize chain selection (requires a single chain per model)
-        chain_selection = self._resolve_chain_selection(
-            chains, require_single=True
-        )
+        chain_selection = self._resolve_chain_selection(chains, require_single=True)
 
         sequences = {}
         for model in self.models_names:
@@ -3004,7 +3194,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
     import mdtraj as md
 
-    def calculateSecondaryStructure(self, simplified=True, chains=None, _save_structure=False):
+    def calculateSecondaryStructure(
+        self, simplified=True, chains=None, _save_structure=False
+    ):
         """
         Calculate secondary structure information for each model using MDTraj.
 
@@ -3036,9 +3228,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Contains the secondary structure strings for each model.
         """
 
-        chain_selection = self._resolve_chain_selection(
-            chains, require_single=False
-        )
+        chain_selection = self._resolve_chain_selection(chains, require_single=False)
 
         self.ss = {}
         self.chain_secondary_structure = {}
@@ -3097,7 +3287,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         self.getModelsSequences()
 
-    def removeTerminalUnstructuredRegions(self, n_hanging=3, chains=None, verbose=False):
+    def removeTerminalUnstructuredRegions(
+        self, n_hanging=3, chains=None, verbose=False
+    ):
         """
         Remove unstructured terminal regions from models.
 
@@ -3114,9 +3306,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if not self.chain_secondary_structure:
             self.calculateSecondaryStructure()
 
-        chain_selection = self._resolve_chain_selection(
-            chains, require_single=False
-        )
+        chain_selection = self._resolve_chain_selection(chains, require_single=False)
 
         def _resolve_n_hanging(model, chain_id):
             if isinstance(n_hanging, dict):
@@ -3234,7 +3424,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         ur=None,
         renumber=False,
         verbose=True,
-        output=None):
+        output=None,
+    ):
         """
         Remove terminal regions with low confidence scores and optionally trim residues by range.
 
@@ -3274,9 +3465,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             for chain in self.structures[model].get_chains():
                 chain_id = chain.get_id()
                 polymer_atoms = [
-                    atom
-                    for atom in chain.get_atoms()
-                    if atom.get_parent().id[0] == " "
+                    atom for atom in chain.get_atoms() if atom.get_parent().id[0] == " "
                 ]
 
                 if not polymer_atoms:
@@ -3500,18 +3689,18 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     if len(parts) < 12:
                         continue
                     rec = {
-                        "query":   parts[0],
-                        "target":  os.path.basename(parts[1]),
-                        "prob":    float(parts[2]),
-                        "qstart":  int(parts[3]),
-                        "qend":    int(parts[4]),
-                        "tstart":  int(parts[5]),
-                        "tend":    int(parts[6]),
-                        "alnlen":  int(parts[7]),
-                        "qaln":    parts[8],
-                        "taln":    parts[9],
-                        "qlen":    int(parts[10]),
-                        "tlen":    int(parts[11]),
+                        "query": parts[0],
+                        "target": os.path.basename(parts[1]),
+                        "prob": float(parts[2]),
+                        "qstart": int(parts[3]),
+                        "qend": int(parts[4]),
+                        "tstart": int(parts[5]),
+                        "tend": int(parts[6]),
+                        "alnlen": int(parts[7]),
+                        "qaln": parts[8],
+                        "taln": parts[9],
+                        "qlen": int(parts[10]),
+                        "tlen": int(parts[11]),
                     }
                     cur = best_by_target.get(rec["target"])
                     if (cur is None) or (rec["prob"] > cur["prob"]):
@@ -3522,7 +3711,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 prob = rec["prob"]
                 if prob < min_prob:
                     if verbose:
-                        print(f"[foldseek] {tgt_bn}: prob={prob:.2f} < {min_prob} → skipped")
+                        print(
+                            f"[foldseek] {tgt_bn}: prob={prob:.2f} < {min_prob} → skipped"
+                        )
                     continue
 
                 qaln, taln = rec["qaln"], rec["taln"]
@@ -3554,7 +3745,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 results[tgt_bn] = mapping
 
                 if verbose:
-                    print(f"[foldseek] {tgt_bn}: prob={prob:.2f}  mapped={len(mapping)}")
+                    print(
+                        f"[foldseek] {tgt_bn}: prob={prob:.2f}  mapped={len(mapping)}"
+                    )
 
                 p = basename_to_obj.get(tgt_bn)
                 if p is not None:
@@ -3572,7 +3765,6 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         finally:
             if tmpdir_cm is not None:
                 tmpdir_cm.cleanup()
-
 
     def removeNotAlignedRegions(
         self,
@@ -3637,7 +3829,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             - Calls self.getModelsSequences() at the end.
         """
         debug: bool = kwargs.pop("debug", False)
-        dry_run: bool = kwargs.pop("dry_run", False)  # if True, compute but do not modify models
+        dry_run: bool = kwargs.pop(
+            "dry_run", False
+        )  # if True, compute but do not modify models
         tmp_dir: str | None = kwargs.pop("tmp_dir", None)
 
         if kwargs:
@@ -3648,16 +3842,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         reference_input = ref_structure
 
         if isinstance(ref_structure, str):
-            if ref_structure.endswith('.pdb'):
-                ref_structure = prepare_proteins._readPDB('ref', ref_structure)
+            if ref_structure.endswith(".pdb"):
+                ref_structure = prepare_proteins._readPDB("ref", ref_structure)
             else:
                 if ref_structure in self.models_names:
                     ref_structure = self.structures[ref_structure]
                 else:
-                    raise ValueError('Reference structure was not found in models')
+                    raise ValueError("Reference structure was not found in models")
         elif not isinstance(ref_structure, PDB.Structure.Structure):
             raise ValueError(
-                'ref_structure should be a  Bio.PDB.Structure.Structure or string object'
+                "ref_structure should be a  Bio.PDB.Structure.Structure or string object"
             )
 
         reference_label = (
@@ -3670,19 +3864,31 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         _dbg(debug, "[options] max_ca_ca: {}", max_ca_ca)
         _dbg(debug, "[options] confidence_threshold: {}", confidence_threshold)
         _dbg(debug, "[options] min_loop_length: {}", min_loop_length)
-        _dbg(debug, "[options] remove_low_confidence_unaligned_loops: {}", remove_low_confidence_unaligned_loops)
-        _dbg(debug, "[options] keep_aligned_fold_until_low_confidence: {}", keep_aligned_fold_until_low_confidence)
+        _dbg(
+            debug,
+            "[options] remove_low_confidence_unaligned_loops: {}",
+            remove_low_confidence_unaligned_loops,
+        )
+        _dbg(
+            debug,
+            "[options] keep_aligned_fold_until_low_confidence: {}",
+            keep_aligned_fold_until_low_confidence,
+        )
         _dbg(debug, "[options] dry_run: {}", dry_run)
         if tmp_dir:
             _dbg(debug, "[options] foldseek tmp_dir: {}", tmp_dir)
 
         # --- Conservative terminal-seed clipping thresholds (local to this function) ---
-        EDGE_SEED_MAX = 12        # max residues in a terminal "seed" to consider clipping
-        EDGE_GAP_MIN = 20         # min gap (in target indices) separating seed from main cluster
-        MAIN_MIN = 120            # main cluster must have at least this many aligned residues
-        REF_EDGE_WINDOW = 25      # first/last N reference residues = "edges"
-        REF_EDGE_MIN_HITS = 8     # need >= this many hits in a ref edge to keep that seed
-        REQUIRE_REF_EDGE_SUPPORT = True  # if True, weak ref-edge support allows clipping
+        EDGE_SEED_MAX = 12  # max residues in a terminal "seed" to consider clipping
+        EDGE_GAP_MIN = (
+            20  # min gap (in target indices) separating seed from main cluster
+        )
+        MAIN_MIN = 120  # main cluster must have at least this many aligned residues
+        REF_EDGE_WINDOW = 25  # first/last N reference residues = "edges"
+        REF_EDGE_MIN_HITS = 8  # need >= this many hits in a ref edge to keep that seed
+        REQUIRE_REF_EDGE_SUPPORT = (
+            True  # if True, weak ref-edge support allows clipping
+        )
         # ------------------------------------------------------------------------------
 
         ref_ca_atoms = [a for a in ref_structure.get_atoms() if a.name == "CA"]
@@ -3750,7 +3956,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if not mapping:
                 mapping = dict(foldseek_mappings_by_stem.get(model, {}))
             if debug and not mapping:
-                _dbg(debug, "[foldseek] model {}: no mapping retrieved; treating as unaligned", model)
+                _dbg(
+                    debug,
+                    "[foldseek] model {}: no mapping retrieved; treating as unaligned",
+                    model,
+                )
 
             aligned_mask = np.zeros(len(polymer_positions), dtype=bool)
             out_of_range = []
@@ -3800,7 +4010,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if indices
             }
 
-            def _clip_terminal_seed_hits_for_chain(chain_pairs_sorted_by_tgt, ref_len, label=""):
+            def _clip_terminal_seed_hits_for_chain(
+                chain_pairs_sorted_by_tgt, ref_len, label=""
+            ):
                 """
                 chain_pairs_sorted_by_tgt: list of (ref_idx, tgt_idx) *for this chain*, sorted by tgt_idx.
                 Returns (core_start, core_end, decision_info, dropped_t_indices_set).
@@ -3846,7 +4058,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
                 def seed_ref_hits_in_window(t_lo, t_hi, ref_lo, ref_hi):
                     c = 0
-                    for (r, t) in chain_pairs_sorted_by_tgt:
+                    for r, t in chain_pairs_sorted_by_tgt:
                         if t_lo <= t <= t_hi and ref_lo <= r <= ref_hi:
                             c += 1
                     return c
@@ -3858,12 +4070,20 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 if main_idx > 0:
                     n_cs, n_ce, n_cnt = clusters[0]
                     gap_to_main = max(0, main_cs - n_ce)
-                    ref_hits_N = seed_ref_hits_in_window(n_cs, n_ce, 0, max(0, REF_EDGE_WINDOW - 1))
+                    ref_hits_N = seed_ref_hits_in_window(
+                        n_cs, n_ce, 0, max(0, REF_EDGE_WINDOW - 1)
+                    )
                     ok_ref_seed = (
-                        ref_hits_N < REF_EDGE_MIN_HITS
-                    ) if REQUIRE_REF_EDGE_SUPPORT else True
-                    if n_cnt <= EDGE_SEED_MAX and gap_to_main >= EDGE_GAP_MIN and ok_ref_seed:
-                        for (r, t) in chain_pairs_sorted_by_tgt:
+                        (ref_hits_N < REF_EDGE_MIN_HITS)
+                        if REQUIRE_REF_EDGE_SUPPORT
+                        else True
+                    )
+                    if (
+                        n_cnt <= EDGE_SEED_MAX
+                        and gap_to_main >= EDGE_GAP_MIN
+                        and ok_ref_seed
+                    ):
+                        for r, t in chain_pairs_sorted_by_tgt:
                             if n_cs <= t <= n_ce:
                                 dropped.add(t)
                         core_start = main_cs
@@ -3876,10 +4096,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                         c_cs, c_ce, max(0, ref_len - REF_EDGE_WINDOW), ref_len - 1
                     )
                     ok_ref_seed = (
-                        ref_hits_C < REF_EDGE_MIN_HITS
-                    ) if REQUIRE_REF_EDGE_SUPPORT else True
-                    if c_cnt <= EDGE_SEED_MAX and gap_to_main >= EDGE_GAP_MIN and ok_ref_seed:
-                        for (r, t) in chain_pairs_sorted_by_tgt:
+                        (ref_hits_C < REF_EDGE_MIN_HITS)
+                        if REQUIRE_REF_EDGE_SUPPORT
+                        else True
+                    )
+                    if (
+                        c_cnt <= EDGE_SEED_MAX
+                        and gap_to_main >= EDGE_GAP_MIN
+                        and ok_ref_seed
+                    ):
+                        for r, t in chain_pairs_sorted_by_tgt:
                             if c_cs <= t <= c_ce:
                                 dropped.add(t)
                         core_end = main_ce
@@ -3963,7 +4189,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             except Exception:
                 pass
 
-            mask_list = aligned_mask.tolist() if hasattr(aligned_mask, "tolist") else list(aligned_mask)
+            mask_list = (
+                aligned_mask.tolist()
+                if hasattr(aligned_mask, "tolist")
+                else list(aligned_mask)
+            )
             runs = _mask_runs(mask_list)
 
             # Compute residue deletions per chain
@@ -4063,9 +4293,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                         for run_idx_list in internal_runs:
                             if len(run_idx_list) < int(min_loop_length):
                                 continue
-                            residues_in_run = [polymer_positions[k][1] for k in run_idx_list]
+                            residues_in_run = [
+                                polymer_positions[k][1] for k in run_idx_list
+                            ]
                             run_conf = float(
-                                np.mean([_mean_residue_bfactor(r) for r in residues_in_run])
+                                np.mean(
+                                    [_mean_residue_bfactor(r) for r in residues_in_run]
+                                )
                             )
                             if run_conf < float(confidence_threshold):
                                 idxs_to_remove.update(run_idx_list)
@@ -4077,7 +4311,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 # Pick, per chain, the target residues aligned to the smallest and largest
                 # reference indices; keep the contiguous span between them. Trim only termini.
                 default_mode = True
-                default_run_spans = []  # (start,end) terminal spans to drop across all chains
+                default_run_spans = (
+                    []
+                )  # (start,end) terminal spans to drop across all chains
 
                 for cid, idx_list in per_chain_indices.items():
                     if not idx_list:
@@ -4089,7 +4325,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                         for k in idx_list:
                             indices_to_remove_by_chain[cid].add(k)
                         default_run_spans.append((idx_list[0], idx_list[-1]))
-                        _dbg(debug, "[default-core] chain {}: no aligned anchors; dropping {}..{}", cid, idx_list[0], idx_list[-1])
+                        _dbg(
+                            debug,
+                            "[default-core] chain {}: no aligned anchors; dropping {}..{}",
+                            cid,
+                            idx_list[0],
+                            idx_list[-1],
+                        )
                         continue
 
                     core_start, core_end = core
@@ -4124,8 +4366,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     )
 
                     if chain_pairs_tgt_sorted:
-                        c_start2, c_end2, info2, dropped = _clip_terminal_seed_hits_for_chain(
-                            chain_pairs_tgt_sorted, ref_poly_len, label=f"{model}:{cid}"
+                        c_start2, c_end2, info2, dropped = (
+                            _clip_terminal_seed_hits_for_chain(
+                                chain_pairs_tgt_sorted,
+                                ref_poly_len,
+                                label=f"{model}:{cid}",
+                            )
                         )
                         if (
                             c_start2 is not None
@@ -4184,9 +4430,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     if idx != prev_idx + 1:
                         start_res = polymer_positions[start_idx][1]
                         end_res = polymer_positions[prev_idx][1]
-                        unaligned_regions.append(
-                            (cid, start_res.id[1], end_res.id[1])
-                        )
+                        unaligned_regions.append((cid, start_res.id[1], end_res.id[1]))
                         start_idx = idx
                     prev_idx = idx
                 # flush final range
@@ -4230,16 +4474,20 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
             try:
                 drop_by_chain = {}
-                for (chain_id, start_idx, end_idx) in unaligned_regions:
+                for chain_id, start_idx, end_idx in unaligned_regions:
                     drop_by_chain.setdefault(chain_id, 0)
-                    drop_by_chain[chain_id] += (end_idx - start_idx + 1)
+                    drop_by_chain[chain_id] += end_idx - start_idx + 1
                 for ch, n in drop_by_chain.items():
                     _dbg(debug, "[trim] chain {}: dropping {} residues", ch, n)
             except Exception:
                 pass
 
             if dry_run:
-                _dbg(debug, "[trim] dry_run=True — skipping structure mutation for model {}", model)
+                _dbg(
+                    debug,
+                    "[trim] dry_run=True — skipping structure mutation for model {}",
+                    model,
+                )
             else:
                 # Apply deletions on the correct chain objects
                 chains_map = {c.id: c for c in structure.get_chains()}
@@ -4252,7 +4500,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
                 try:
                     new_total = sum(1 for _ in structure.get_residues())
-                    _dbg(debug, "[post] model {} residues after trim: {}", model, new_total)
+                    _dbg(
+                        debug,
+                        "[post] model {} residues after trim: {}",
+                        model,
+                        new_total,
+                    )
                 except Exception:
                     pass
 
@@ -4283,7 +4536,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         for model in list(self.models_names):
             if model not in ranges:
                 if verbose:
-                    print(f"trimByRanges: skipping model '{model}' (no ranges provided)")
+                    print(
+                        f"trimByRanges: skipping model '{model}' (no ranges provided)"
+                    )
                 continue
 
             model_ranges = ranges[model]
@@ -4652,7 +4907,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             raise ValueError("mpi_command must be one of: None, 'slurm', 'openmpi'")
 
         if not isinstance(mutants, dict):
-            raise ValueError("mutants must be a dictionary mapping model -> variants or model -> fasta")
+            raise ValueError(
+                "mutants must be a dictionary mapping model -> variants or model -> fasta"
+            )
 
         # Create mutation job folder
         if not os.path.exists(job_folder):
@@ -4667,7 +4924,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             os.mkdir(job_folder + "/output_models")
 
         if variant_fastas is not None and not isinstance(variant_fastas, dict):
-            raise ValueError("variant_fastas must be a dictionary mapping model -> fasta path")
+            raise ValueError(
+                "variant_fastas must be a dictionary mapping model -> fasta path"
+            )
 
         # Split inputs into explicit mutant dicts and fasta sources
         explicit_mutants = {}
@@ -4706,7 +4965,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
             def _ensure_model_sequences(model):
                 if model not in self.sequences:
-                    raise ValueError(f"Model {model} is not loaded; cannot read sequences for FASTA variants.")
+                    raise ValueError(
+                        f"Model {model} is not loaded; cannot read sequences for FASTA variants."
+                    )
                 # When sequences are stored per chain, drop chains with empty/non-protein sequences
                 if isinstance(self.sequences[model], dict):
                     chain_ids = []
@@ -4716,7 +4977,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                             chain_ids.append(cid)
                             chain_seqs.append(seq)
                     if not chain_ids:
-                        raise ValueError(f"No protein chains with sequences found for model {model}")
+                        raise ValueError(
+                            f"No protein chains with sequences found for model {model}"
+                        )
                     # If only one valid chain remains, treat it as single-chain for FASTA parsing
                     if len(chain_ids) == 1:
                         return [None], [chain_seqs[0]]
@@ -4725,12 +4988,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
             for model, fasta_path in fasta_sources.items():
                 if not os.path.exists(fasta_path):
-                    raise FileNotFoundError(f"FASTA file for model {model} not found: {fasta_path}")
+                    raise FileNotFoundError(
+                        f"FASTA file for model {model} not found: {fasta_path}"
+                    )
 
                 chain_ids, chain_sequences = _ensure_model_sequences(model)
                 variant_entries = alignment.readFastaFile(fasta_path)
                 if not variant_entries:
-                    raise ValueError(f"No sequences found in FASTA file for model {model}: {fasta_path}")
+                    raise ValueError(
+                        f"No sequences found in FASTA file for model {model}: {fasta_path}"
+                    )
 
                 if model not in all_mutants:
                     all_mutants[model] = {}
@@ -4738,7 +5005,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 seen_names = set()
                 for variant_name, raw_seq in variant_entries.items():
                     if variant_name in seen_names:
-                        raise ValueError(f"Duplicate variant name '{variant_name}' in FASTA for model {model}")
+                        raise ValueError(
+                            f"Duplicate variant name '{variant_name}' in FASTA for model {model}"
+                        )
                     if variant_name in all_mutants[model]:
                         raise ValueError(
                             f"Variant name collision for model {model}: '{variant_name}' already defined in mutants dict"
@@ -4762,7 +5031,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                             )
                         diffs = [
                             (idx + 1, v_res)
-                            for idx, (ref_res, v_res) in enumerate(zip(chain_sequences[0], seq))
+                            for idx, (ref_res, v_res) in enumerate(
+                                zip(chain_sequences[0], seq)
+                            )
                             if ref_res != v_res
                         ]
                     else:
@@ -4774,7 +5045,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                             )
                         diffs = []
                         offset = 0
-                        for chain_idx, (ref_chain_seq, var_chain_seq) in enumerate(zip(chain_sequences, split_seq)):
+                        for chain_idx, (ref_chain_seq, var_chain_seq) in enumerate(
+                            zip(chain_sequences, split_seq)
+                        ):
                             if len(var_chain_seq) != len(ref_chain_seq):
                                 raise ValueError(
                                     f"Length mismatch in chain {chain_ids[chain_idx]} for model {model} variant {variant_name}: "
@@ -4784,7 +5057,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                 raise ValueError(
                                     f"Non-standard amino acid in chain {chain_ids[chain_idx]} for model {model} variant {variant_name}"
                                 )
-                            for pos, (ref_res, v_res) in enumerate(zip(ref_chain_seq, var_chain_seq)):
+                            for pos, (ref_res, v_res) in enumerate(
+                                zip(ref_chain_seq, var_chain_seq)
+                            ):
                                 if ref_res != v_res:
                                     diffs.append((offset + pos + 1, v_res))
                             offset += len(ref_chain_seq)
@@ -4802,11 +5077,16 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             params_output_dir = Path(job_folder) / "params"
             params_output_dir.mkdir(exist_ok=True)
 
-            if isinstance(param_files, (str, os.PathLike)) and Path(param_files).is_dir():
+            if (
+                isinstance(param_files, (str, os.PathLike))
+                and Path(param_files).is_dir()
+            ):
                 param_dir = Path(param_files)
                 param_paths = sorted(param_dir.glob("*.params"))
                 if not param_paths:
-                    raise ValueError(f"No .params files found in directory {param_files}")
+                    raise ValueError(
+                        f"No .params files found in directory {param_files}"
+                    )
                 # Copy accompanying PDBs if present (e.g., conformers)
                 for pdb_file in param_dir.glob("*.pdb"):
                     shutil.copyfile(pdb_file, params_output_dir / pdb_file.name)
@@ -4849,15 +5129,21 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 parallelisation = "srun"
 
             if parallelisation not in (None, "srun", "mpirun"):
-                raise ValueError("parallelisation must be one of: None, 'srun', 'mpirun'")
+                raise ValueError(
+                    "parallelisation must be one of: None, 'srun', 'mpirun'"
+                )
 
             if parallelisation == "mpirun":
                 if not isinstance(cpus, int):
-                    raise ValueError("You must define the number of CPU when using mpirun")
+                    raise ValueError(
+                        "You must define the number of CPU when using mpirun"
+                    )
                 mpi_prefix = f"mpirun -np {cpus} "
             elif parallelisation == "srun":
                 if cpus is not None:
-                    raise ValueError("CPUs can only be set when using mpirun parallelisation")
+                    raise ValueError(
+                        "CPUs can only be set when using mpirun parallelisation"
+                    )
                 mpi_prefix = "srun "
             else:
                 mpi_prefix = ""
@@ -4875,7 +5161,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             for mutant in all_mutants[model]:
 
                 if not isinstance(all_mutants[model][mutant], list):
-                    raise ValueError('Mutations for a particular variant should be given as a list of tuples!')
+                    raise ValueError(
+                        "Mutations for a particular variant should be given as a list of tuples!"
+                    )
 
                 # Create xml mutation (and minimization) protocol
                 xml = rosettaScripts.xmlScript()
@@ -5211,9 +5499,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             )
 
         if symmetry and interaction_ligand_chains:
-            raise ValueError("interaction_ligand_chains is not implemented for symmetry runs.")
+            raise ValueError(
+                "interaction_ligand_chains is not implemented for symmetry runs."
+            )
         if membrane and interaction_ligand_chains:
-            raise ValueError("interaction_ligand_chains is not implemented for membrane runs.")
+            raise ValueError(
+                "interaction_ligand_chains is not implemented for membrane runs."
+            )
 
         nstruct_provided = nstruct is not _MISSING
         if not nstruct_provided:
@@ -5261,8 +5553,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if hoh_to_wat:
             for model in self:
                 for r in self.structures[model].get_residues():
-                    if r.id[0] == 'W':
-                        r.resname = 'WAT'
+                    if r.id[0] == "W":
+                        r.resname = "WAT"
 
         if symmetry:
             for m in self.models_names:
@@ -5330,16 +5622,15 @@ has been carried out. Please run compareSequences() function before setting muta
                     f"Could not determine ligand name from params file: {params_path}"
                 )
 
-            if isinstance(param_files, (str, os.PathLike)) and Path(
-                param_files
-            ).is_dir():
+            if (
+                isinstance(param_files, (str, os.PathLike))
+                and Path(param_files).is_dir()
+            ):
                 param_directory_mode = True
                 param_dir = Path(param_files)
                 param_paths = sorted(param_dir.glob("*.params"))
                 if not param_paths:
-                    raise ValueError(
-                        f"No .params files found in directory {param_dir}"
-                    )
+                    raise ValueError(f"No .params files found in directory {param_dir}")
                 # Copy accompanying PDBs if present (e.g., conformers)
                 for pdb_file in param_dir.glob("*.pdb"):
                     shutil.copyfile(pdb_file, params_output_dir / pdb_file.name)
@@ -5371,17 +5662,27 @@ has been carried out. Please run compareSequences() function before setting muta
             if skip_finished:
                 # Check if model has already been calculated and finished
                 score_file = (
-                    relax_folder + "/output_models/" + model + "/" + model + "_relax.out"
+                    relax_folder
+                    + "/output_models/"
+                    + model
+                    + "/"
+                    + model
+                    + "_relax.out"
                 )
                 if os.path.exists(score_file):
                     scores = _readRosettaScoreFile(score_file, skip_empty=True)
-                    if not isinstance(scores, type(None)) and scores.shape[0] >= nstruct:
+                    if (
+                        not isinstance(scores, type(None))
+                        and scores.shape[0] >= nstruct
+                    ):
                         continue
 
             # Validate requested interaction chains exist
             model_chain_ids = {c.id for c in self.structures[model].get_chains()}
             if interaction_chain_list:
-                missing = [c for c in interaction_chain_list if c not in model_chain_ids]
+                missing = [
+                    c for c in interaction_chain_list if c not in model_chain_ids
+                ]
                 if missing:
                     raise ValueError(
                         f"Ligand chain(s) {missing} not found in model {model}"
@@ -5465,7 +5766,7 @@ has been carried out. Please run compareSequences() function before setting muta
                         mutate = rosettaScripts.movers.mutate(
                             name="mutate_" + str(m[0]),
                             target_residue=m[0],
-                        new_residue=_one_to_three(m[1]),
+                            new_residue=_one_to_three(m[1]),
                         )
                         xml.addMover(mutate)
                         protocol.append(mutate)
@@ -5569,7 +5870,7 @@ has been carried out. Please run compareSequences() function before setting muta
                 "../../xml/" + model + "_relax.xml",
                 nstruct=nstruct,
                 s="../../input_models/" + input_model,
-                output_silent_file=output_silent_file
+                output_silent_file=output_silent_file,
             )
 
             # Add extra flags
@@ -5591,8 +5892,14 @@ has been carried out. Please run compareSequences() function before setting muta
             if param_files != None:
 
                 for r in self.structures[model].get_residues():
-                    if r.resname == 'NMA':
-                        _copyScriptFile(relax_folder+"/params", 'NMA.params', subfolder='rosetta_params', path='prepare_proteins', hidden=False)
+                    if r.resname == "NMA":
+                        _copyScriptFile(
+                            relax_folder + "/params",
+                            "NMA.params",
+                            subfolder="rosetta_params",
+                            path="prepare_proteins",
+                            hidden=False,
+                        )
 
                 patch_entries = []
                 if param_directory_mode:
@@ -6085,7 +6392,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             exclude_models = [exclude_models]
 
         # Save all input models
-        self.saveModels(grid_folder + "/input_models", convert_to_mae=mae_input, models=models)
+        self.saveModels(
+            grid_folder + "/input_models", convert_to_mae=mae_input, models=models
+        )
 
         # Check that inner and outerbox values are given as integers
         for v in innerbox:
@@ -6366,10 +6675,21 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for substrate in substrates_paths:
 
-                if failed_map is not None and substrate not in failed_map.get(grid, set()):
+                if failed_map is not None and substrate not in failed_map.get(
+                    grid, set()
+                ):
                     continue
 
-                output_path = docking_folder+"/output_models/"+grid+'/'+grid+"_"+ substrate+'_pv.maegz'
+                output_path = (
+                    docking_folder
+                    + "/output_models/"
+                    + grid
+                    + "/"
+                    + grid
+                    + "_"
+                    + substrate
+                    + "_pv.maegz"
+                )
                 if skip_finished and os.path.exists(output_path):
                     continue
 
@@ -6405,7 +6725,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if fragments:
                             dif.write("[CONSTRAINT_GROUP:1]\n")
                             use_cons = ", ".join(
-                                [f"position{k}:{k}" for k in range(1, len(fragments) + 1)]
+                                [
+                                    f"position{k}:{k}"
+                                    for k in range(1, len(fragments) + 1)
+                                ]
                             )
                             dif.write("\tUSE_CONS  " + use_cons + "\n")
                             dif.write("\tNREQUIRED_CONS ALL\n")
@@ -6583,7 +6906,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     def setUprDockGrid(
         self,
         grid_folder,
-        center=(10,10,10),
+        center=(10, 10, 10),
         mol2_input=True,
         models=None,
         exclude_models=None,
@@ -6616,7 +6939,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         for model in self.models_names:
             if not os.path.exists(grid_folder + "/output_models/" + model):
-                os.mkdir(grid_folder + "/output_models/"+model)
+                os.mkdir(grid_folder + "/output_models/" + model)
 
         if isinstance(models, str):
             models = [models]
@@ -6628,7 +6951,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         strip_center = center_string.replace(" ", "")
 
         # Save all input models
-        self.saveModels(grid_folder + "/input_models", convert_to_mol2=mol2_input, models=models)
+        self.saveModels(
+            grid_folder + "/input_models", convert_to_mol2=mol2_input, models=models
+        )
 
         # Create grid input files
         jobs = []
@@ -6640,20 +6965,26 @@ make sure of reading the target sequences with the function readTargetSequences(
             if exclude_models and model in exclude_models:
                 continue
             # Write grid input file
-            with open(grid_folder + "/output_models/"+model+"/" + model + ".prm", "w") as gif:
+            with open(
+                grid_folder + "/output_models/" + model + "/" + model + ".prm", "w"
+            ) as gif:
 
                 gif.write("RBT_PARAMETER_FILE_V1.00 \n")
                 gif.write("TITLE rdock \n")
                 gif.write(" \n")
-                gif.write("RECEPTOR_FILE "+"../../input_models/"+model+".mol2 \n")
+                gif.write("RECEPTOR_FILE " + "../../input_models/" + model + ".mol2 \n")
                 gif.write("RECEPTOR_FLEX 3.0 \n")
                 gif.write(" \n")
-                gif.write("##################################################################\n")
+                gif.write(
+                    "##################################################################\n"
+                )
                 gif.write("### CAVITY DEFINITION:\n")
-                gif.write("##################################################################\n")
+                gif.write(
+                    "##################################################################\n"
+                )
                 gif.write("SECTION MAPPER\n")
                 gif.write("    SITE_MAPPER RbtSphereSiteMapper\n")
-                gif.write("    CENTER "+strip_center+" \n")
+                gif.write("    CENTER " + strip_center + " \n")
                 gif.write("    RADIUS 10\n")
                 gif.write("    SMALL_SPHERE 1.0\n")
                 gif.write("    MIN_VOLUME 100\n")
@@ -6670,13 +7001,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 gif.write("    WEIGHT 1.0\n")
                 gif.write("END_SECTION\n")
 
-
-            command = 'module load rdock \n'
-            command += "cd " + grid_folder + "/output_models/"+model+"\n"
+            command = "module load rdock \n"
+            command += "cd " + grid_folder + "/output_models/" + model + "\n"
 
             # Add grid generation command
 
-            command += "rbcavity -was -d -r " + model + ".prm > " + model+".log \n"
+            command += "rbcavity -was -d -r " + model + ".prm > " + model + ".log \n"
             command += "cd ../../.. \n"
             jobs.append(command)
 
@@ -6711,7 +7041,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         if isinstance(exclude_models, str):
             exclude_models = [exclude_models]
 
-        #Get the ligand in the ligand folder
+        # Get the ligand in the ligand folder
         ### ADD to get only .sd
         folder_path = str(ligand_folder)
         ligand_files = [f for f in os.listdir(folder_path) if f.endswith(".sd")]
@@ -6721,17 +7051,30 @@ make sure of reading the target sequences with the function readTargetSequences(
         for model in self.models_names:
             for ligand in ligand_files:
 
-                command = 'module load rdock \n'
-                command += "cd " + grid_folder + "/output_models/"+model+"\n"
+                command = "module load rdock \n"
+                command += "cd " + grid_folder + "/output_models/" + model + "\n"
 
                 # Add docking command
-                command += "rbdock -i ../../../" + ligand_folder+"/"+ligand+ " -o "+ model + "_results.out -r " + model+".prm " + "-p dock.prm -n " + str(n) + " -allH \n"
+                command += (
+                    "rbdock -i ../../../"
+                    + ligand_folder
+                    + "/"
+                    + ligand
+                    + " -o "
+                    + model
+                    + "_results.out -r "
+                    + model
+                    + ".prm "
+                    + "-p dock.prm -n "
+                    + str(n)
+                    + " -allH \n"
+                )
                 command += "cd ../../.. \n"
                 jobs.append(command)
 
         return jobs
 
-    def analyseRdockDockings(self, docking_folder,protocol="score"):
+    def analyseRdockDockings(self, docking_folder, protocol="score"):
         """
         Analyse rDock calculations. Only protocol "score" works for now
         It generates a folder with all the .csv files
@@ -6744,11 +7087,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         import csv
-        if protocol == 'dock':
+
+        if protocol == "dock":
 
             # Folder path containing the files
             folder_path = str(docking_folder)
-            storage_path = str(docking_folder)+"results"
+            storage_path = str(docking_folder) + "results"
             # Create grid job folders
             if not os.path.exists(storage_path):
                 os.mkdir(storage_path)
@@ -6756,8 +7100,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             data = []
             for model in self.models_names:
 
-                for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
-                    folder_path_model = docking_folder +"output_models/" + model
+                for filename in [
+                    x
+                    for x in os.listdir(docking_folder + "/output_models/" + model)
+                    if x.endswith("_results.out.sd")
+                ]:
+                    folder_path_model = docking_folder + "output_models/" + model
                     file_path = os.path.join(folder_path_model, filename)
 
                     counter = 1
@@ -6765,49 +7113,66 @@ make sure of reading the target sequences with the function readTargetSequences(
                     conformer_bool = False
 
                     # Open the file
-                    with open(file_path, 'r') as file:
+                    with open(file_path, "r") as file:
                         for line in file:
                             if score_bool:
                                 score = line.split()[0]
                             if conformer_bool:
-                                ligand, conformer = line.split('-')
+                                ligand, conformer = line.split("-")
                                 data.append(
-                                    [filename, counter, ligand, conformer, score])
-                            if '$$$$' in line:
+                                    [filename, counter, ligand, conformer, score]
+                                )
+                            if "$$$$" in line:
                                 counter += 1
-                            if '>  <SCORE>' in line:
+                            if ">  <SCORE>" in line:
                                 score_bool = True
                             else:
                                 score_bool = False
-                            if '>  <s_lp_Variant>' in line:
+                            if ">  <s_lp_Variant>" in line:
                                 conformer_bool = True
                             else:
                                 conformer_bool = False
                 # Write the extracted data to a CSV file
-                output_file = '{}_rDock_data.csv'.format(model)
-                #print(storage_path, output_file)
-                with open(os.path.join(storage_path, output_file), 'w', newline='') as csvfile:
+                output_file = "{}_rDock_data.csv".format(model)
+                # print(storage_path, output_file)
+                with open(
+                    os.path.join(storage_path, output_file), "w", newline=""
+                ) as csvfile:
                     writer = csv.writer(csvfile)
-                    writer.writerow(['file_name', 'file_entry', 'ligand',
-                                 'conformer', 'rdock_score'])
+                    writer.writerow(
+                        [
+                            "file_name",
+                            "file_entry",
+                            "ligand",
+                            "conformer",
+                            "rdock_score",
+                        ]
+                    )
                     writer.writerows(data)
 
-                print(' - rDock data extraction completed.')
-                print(' - Data saved in {}'.format(os.path.join(storage_path, output_file)))
+                print(" - rDock data extraction completed.")
+                print(
+                    " - Data saved in {}".format(
+                        os.path.join(storage_path, output_file)
+                    )
+                )
 
-        elif protocol == 'score':
+        elif protocol == "score":
 
             # Folder path containing the files
             folder_path = str(docking_folder)
-            storage_path = str(docking_folder)+"results"
+            storage_path = str(docking_folder) + "results"
             # Create grid job folders
             if not os.path.exists(storage_path):
                 os.mkdir(storage_path)
 
-
             for model in self.models_names:
-                for filename in [x for x in os.listdir(docking_folder +"/output_models/" + model) if x.endswith("_results.out.sd")]:
-                    folder_path_model = docking_folder +"output_models/" + model
+                for filename in [
+                    x
+                    for x in os.listdir(docking_folder + "/output_models/" + model)
+                    if x.endswith("_results.out.sd")
+                ]:
+                    folder_path_model = docking_folder + "output_models/" + model
                     file_path = os.path.join(folder_path_model, filename)
 
                     ligand = filename
@@ -6816,44 +7181,76 @@ make sure of reading the target sequences with the function readTargetSequences(
                     score_bool = False
                     conformer_bool = False
 
-                # Open the file
+                    # Open the file
                     data = []
-                    with open(file_path, 'r') as file:
+                    with open(file_path, "r") as file:
                         for line in file:
                             if score_bool:
                                 score = line.split()[0]
-                                data.append(
-                                [filename, counter, ligand, score])
-                            if '$$$$' in line:
+                                data.append([filename, counter, ligand, score])
+                            if "$$$$" in line:
                                 counter += 1
-                            if '>  <SCORE>' in line:
+                            if ">  <SCORE>" in line:
                                 score_bool = True
                             else:
                                 score_bool = False
 
                 # Write the extracted data to a CSV file
-                output_file = '{}_rDock_data.csv'.format(model)
-                with open(os.path.join(storage_path, output_file), 'w', newline='') as csvfile:
+                output_file = "{}_rDock_data.csv".format(model)
+                with open(
+                    os.path.join(storage_path, output_file), "w", newline=""
+                ) as csvfile:
                     writer = csv.writer(csvfile)
                     writer.writerow(
-                        ['file_name', 'file_entry', 'ligand', 'rdock_score'])
+                        ["file_name", "file_entry", "ligand", "rdock_score"]
+                    )
                     writer.writerows(data)
 
-                print(' - rDock data extraction completed.')
-                print(' - Data saved in {}'.format(os.path.join(storage_path, output_file)))
+                print(" - rDock data extraction completed.")
+                print(
+                    " - Data saved in {}".format(
+                        os.path.join(storage_path, output_file)
+                    )
+                )
 
-
-    def setUpRosettaDocking(self, docking_folder, ligands_pdb_folder=None, ligands_sdf_folder=None,
-                            param_files=None, cst_files=None,
-                            coordinates=None, smiles_file=None, sdf_file=None, docking_protocol='repack',
-                            high_res_cycles=None, high_res_repack_every_Nth=None, num_conformers=50,
-                            prune_rms_threshold=0.5, max_attempts=1000, rosetta_home=None, separator='-',
-                            use_exp_torsion_angle_prefs=True, use_basic_knowledge=True, only_scorefile=False,
-                            enforce_chirality=True, skip_conformers_if_found=False, overwrite=False, skip_finished=False, skip_silent_file=False, grid_width=10.0,
-                            n_jobs=1, python2_executable='python2.7', store_initial_placement=False,
-                            pdb_output=False, atom_pairs=None, angles=None, parallelisation="srun",
-                            executable='rosetta_scripts.mpi.linuxgccrelease', ligand_chain='B', nstruct=100):
-
+    def setUpRosettaDocking(
+        self,
+        docking_folder,
+        ligands_pdb_folder=None,
+        ligands_sdf_folder=None,
+        param_files=None,
+        cst_files=None,
+        coordinates=None,
+        smiles_file=None,
+        sdf_file=None,
+        docking_protocol="repack",
+        high_res_cycles=None,
+        high_res_repack_every_Nth=None,
+        num_conformers=50,
+        prune_rms_threshold=0.5,
+        max_attempts=1000,
+        rosetta_home=None,
+        separator="-",
+        use_exp_torsion_angle_prefs=True,
+        use_basic_knowledge=True,
+        only_scorefile=False,
+        enforce_chirality=True,
+        skip_conformers_if_found=False,
+        overwrite=False,
+        skip_finished=False,
+        skip_silent_file=False,
+        grid_width=10.0,
+        n_jobs=1,
+        python2_executable="python2.7",
+        store_initial_placement=False,
+        pdb_output=False,
+        atom_pairs=None,
+        angles=None,
+        parallelisation="srun",
+        executable="rosetta_scripts.mpi.linuxgccrelease",
+        ligand_chain="B",
+        nstruct=100,
+    ):
         """
         Set up docking calculations using Rosetta.
 
@@ -6948,9 +7345,15 @@ make sure of reading the target sequences with the function readTargetSequences(
         The generated XML script is saved in the specified docking folder.
         """
 
-        def generate_conformers(mol, num_conformers=50, prune_rms_threshold=0.5, max_attempts=1000,
-                                use_exp_torsion_angle_prefs=True, use_basic_knowledge=True,
-                                enforce_chirality=True):
+        def generate_conformers(
+            mol,
+            num_conformers=50,
+            prune_rms_threshold=0.5,
+            max_attempts=1000,
+            use_exp_torsion_angle_prefs=True,
+            use_basic_knowledge=True,
+            enforce_chirality=True,
+        ):
             """
             Generate and optimize conformers for a molecule.
 
@@ -6991,7 +7394,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             params.useBasicKnowledge = use_basic_knowledge
             params.enforceChirality = enforce_chirality
 
-            conformers = AllChem.EmbedMultipleConfs(mol, numConfs=num_conformers, params=params)
+            conformers = AllChem.EmbedMultipleConfs(
+                mol, numConfs=num_conformers, params=params
+            )
 
             # Optimize each conformer using UFF
             for conf_id in conformers:
@@ -7032,13 +7437,15 @@ make sure of reading the target sequences with the function readTargetSequences(
             os.makedirs(ligand_dir, exist_ok=True)
             output_sdf_path = os.path.join(ligand_dir, f"{base_name}.sdf")
 
-            if (skip_conformers_if_found or not overwrite) and os.path.exists(output_sdf_path):
+            if (skip_conformers_if_found or not overwrite) and os.path.exists(
+                output_sdf_path
+            ):
                 return base_name
 
             # Determine file type and load molecule
-            if ligand_file_path.endswith('.pdb'):
+            if ligand_file_path.endswith(".pdb"):
                 mol = Chem.MolFromPDBFile(ligand_file_path, removeHs=False)
-            elif ligand_file_path.endswith('.sdf'):
+            elif ligand_file_path.endswith(".sdf"):
                 mol_supplier = Chem.SDMolSupplier(ligand_file_path, removeHs=False)
                 mol = mol_supplier[0]
             else:
@@ -7048,12 +7455,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                 raise ValueError(f"Could not read file: {ligand_file_path}")
 
             # Generate conformers
-            mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
-                                                      prune_rms_threshold=prune_rms_threshold,
-                                                      max_attempts=max_attempts,
-                                                      use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
-                                                      use_basic_knowledge=use_basic_knowledge,
-                                                      enforce_chirality=enforce_chirality)
+            mol_with_conformers = generate_conformers(
+                mol,
+                num_conformers=num_conformers,
+                prune_rms_threshold=prune_rms_threshold,
+                max_attempts=max_attempts,
+                use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
+                use_basic_knowledge=use_basic_knowledge,
+                enforce_chirality=enforce_chirality,
+            )
 
             # Set the molecule name
             mol_with_conformers.SetProp("_Name", base_name)
@@ -7110,24 +7520,36 @@ make sure of reading the target sequences with the function readTargetSequences(
             cwd = os.getcwd()
 
             try:
-                shutil.move(os.path.join(cwd, output_param_path), os.path.join(full_dir, output_param_path))
+                shutil.move(
+                    os.path.join(cwd, output_param_path),
+                    os.path.join(full_dir, output_param_path),
+                )
             except IOError:
                 missing_files.append(output_param_path)
 
             try:
-                shutil.move(os.path.join(cwd, output_pdb_path), os.path.join(full_dir, output_pdb_path))
+                shutil.move(
+                    os.path.join(cwd, output_pdb_path),
+                    os.path.join(full_dir, output_pdb_path),
+                )
             except IOError:
                 missing_files.append(output_pdb_path)
 
             try:
-                shutil.move(os.path.join(cwd, output_conformer_path), os.path.join(full_dir, output_conformer_path))
+                shutil.move(
+                    os.path.join(cwd, output_conformer_path),
+                    os.path.join(full_dir, output_conformer_path),
+                )
             except IOError:
                 missing_files.append(output_conformer_path)
 
             # If conformers file exists but is empty, drop the PDB_ROTAMERS reference to avoid Rosetta errors
             conformer_full_path = os.path.join(full_dir, output_conformer_path)
             params_full_path = os.path.join(full_dir, output_param_path)
-            if os.path.exists(conformer_full_path) and os.path.getsize(conformer_full_path) == 0:
+            if (
+                os.path.exists(conformer_full_path)
+                and os.path.getsize(conformer_full_path) == 0
+            ):
                 if os.path.exists(params_full_path):
                     with open(params_full_path, "r") as pf:
                         lines = pf.readlines()
@@ -7168,14 +7590,20 @@ make sure of reading the target sequences with the function readTargetSequences(
             from rdkit import Chem
             from rdkit.Chem import AllChem
         except ImportError as e:
-            raise ImportError("RDKit is not installed. Please install it to use the setUpRosettaDocking function.")
+            raise ImportError(
+                "RDKit is not installed. Please install it to use the setUpRosettaDocking function."
+            )
 
         def _load_rosetta_from_bashrc():
             bashrc = os.path.expanduser("~/.bashrc")
             if not os.path.exists(bashrc):
                 return None
             result = subprocess.run(
-                ["bash", "-lc", f"source {bashrc} >/dev/null 2>&1 && printf '%s' \"$ROSETTA_HOME\""],
+                [
+                    "bash",
+                    "-lc",
+                    f"source {bashrc} >/dev/null 2>&1 && printf '%s' \"$ROSETTA_HOME\"",
+                ],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -7191,7 +7619,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             env_rosetta_home = _load_rosetta_from_bashrc()
 
         final_rosetta_home = env_rosetta_home
-        if env_rosetta_home and rosetta_home and os.path.abspath(rosetta_home) != os.path.abspath(env_rosetta_home):
+        if (
+            env_rosetta_home
+            and rosetta_home
+            and os.path.abspath(rosetta_home) != os.path.abspath(env_rosetta_home)
+        ):
             warnings.warn(
                 "ROSETTA_HOME environment variable is already set and will be used; the `rosetta_home` argument is ignored.",
                 UserWarning,
@@ -7200,23 +7632,41 @@ make sure of reading the target sequences with the function readTargetSequences(
             final_rosetta_home = rosetta_home
 
         if not final_rosetta_home:
-            raise ValueError("The ROSETTA_HOME environment variable is not set; please export it before calling setUpRosettaDocking.")
+            raise ValueError(
+                "The ROSETTA_HOME environment variable is not set; please export it before calling setUpRosettaDocking."
+            )
 
         os.environ["ROSETTA_HOME"] = final_rosetta_home
 
         rosetta_home = final_rosetta_home
 
         if angles:
-            raise ValueError('Angles has not being implemented. Rosetta scripts do not have an easy function to compute angles. Perhaps with CreateAngleConstraint mover?')
+            raise ValueError(
+                "Angles has not being implemented. Rosetta scripts do not have an easy function to compute angles. Perhaps with CreateAngleConstraint mover?"
+            )
 
         # Check for mutually exclusive inputs
-        if sum([bool(ligands_pdb_folder), bool(ligands_sdf_folder), bool(smiles_file), bool(sdf_file)]) != 1:
-            raise ValueError('Specify exactly one of ligands_pdb_folder, ligands_sdf_folder, smiles_file, or sdf_file.')
+        if (
+            sum(
+                [
+                    bool(ligands_pdb_folder),
+                    bool(ligands_sdf_folder),
+                    bool(smiles_file),
+                    bool(sdf_file),
+                ]
+            )
+            != 1
+        ):
+            raise ValueError(
+                "Specify exactly one of ligands_pdb_folder, ligands_sdf_folder, smiles_file, or sdf_file."
+            )
 
         # Check given separator compatibility
         for model in self:
             if separator in model:
-                raise ValueError(f'The given separator {separator} was found in model {model}. Please use a different one.')
+                raise ValueError(
+                    f"The given separator {separator} was found in model {model}. Please use a different one."
+                )
 
         # Warn if coordinates were not provided
         if coordinates is None:
@@ -7235,106 +7685,133 @@ make sure of reading the target sequences with the function readTargetSequences(
                 tmp = {model: [coordinates] for model in self}
                 coordinates = tmp
             else:
-                raise ValueError('Check your given coordinates format')
+                raise ValueError("Check your given coordinates format")
         elif not isinstance(coordinates, dict):
-            raise ValueError('Check your given coordinates format')
+            raise ValueError("Check your given coordinates format")
 
         # Check given protocol
-        available_protocols = ['repack', 'mcm', 'custom']
+        available_protocols = ["repack", "mcm", "custom"]
         if docking_protocol not in available_protocols:
-            raise ValueError(f'Invalid protocol. Available protocols are: {available_protocols}')
+            raise ValueError(
+                f"Invalid protocol. Available protocols are: {available_protocols}"
+            )
 
-        if docking_protocol == 'custom' and (not high_res_cycles or not high_res_repack_every_Nth):
-            raise ValueError('You must provide high_res_cycles and high_res_repack_every_Nth for the custom protocol.')
+        if docking_protocol == "custom" and (
+            not high_res_cycles or not high_res_repack_every_Nth
+        ):
+            raise ValueError(
+                "You must provide high_res_cycles and high_res_repack_every_Nth for the custom protocol."
+            )
 
         # Create docking job folders
         os.makedirs(docking_folder, exist_ok=True)
-        xml_folder = os.path.join(docking_folder, 'xml')
-        ligand_params_folder = os.path.join(docking_folder, 'ligand_params')
-        input_models_folder = os.path.join(docking_folder, 'input_models')
-        flags_folder = os.path.join(docking_folder, 'flags')
-        output_folder = os.path.join(docking_folder, 'output_models')
+        xml_folder = os.path.join(docking_folder, "xml")
+        ligand_params_folder = os.path.join(docking_folder, "ligand_params")
+        input_models_folder = os.path.join(docking_folder, "input_models")
+        flags_folder = os.path.join(docking_folder, "flags")
+        output_folder = os.path.join(docking_folder, "output_models")
 
-        for folder in [xml_folder, ligand_params_folder, input_models_folder,
-                       flags_folder, output_folder]:
+        for folder in [
+            xml_folder,
+            ligand_params_folder,
+            input_models_folder,
+            flags_folder,
+            output_folder,
+        ]:
             os.makedirs(folder, exist_ok=True)
 
         # Write model structures
         self.saveModels(input_models_folder)
 
         # Create score functions
-        ligand_soft_rep = rosettaScripts.scorefunctions.new_scorefunction('ligand_soft_rep',
-                                                                          weights_file='ligand_soft_rep')
-        ligand_soft_rep.addReweight('fa_elec', weight=0.42)
-        ligand_soft_rep.addReweight('hbond_bb_sc', weight=1.3)
-        ligand_soft_rep.addReweight('hbond_sc', weight=1.3)
-        ligand_soft_rep.addReweight('rama', weight=0.2)
+        ligand_soft_rep = rosettaScripts.scorefunctions.new_scorefunction(
+            "ligand_soft_rep", weights_file="ligand_soft_rep"
+        )
+        ligand_soft_rep.addReweight("fa_elec", weight=0.42)
+        ligand_soft_rep.addReweight("hbond_bb_sc", weight=1.3)
+        ligand_soft_rep.addReweight("hbond_sc", weight=1.3)
+        ligand_soft_rep.addReweight("rama", weight=0.2)
 
-        ligand_hard_rep = rosettaScripts.scorefunctions.new_scorefunction('ligand_hard_rep',
-                                                                          weights_file='ligand')
-        ligand_hard_rep.addReweight('fa_intra_rep', weight=0.004)
-        ligand_hard_rep.addReweight('fa_elec', weight=0.42)
-        ligand_hard_rep.addReweight('hbond_bb_sc', weight=1.3)
-        ligand_hard_rep.addReweight('hbond_sc', weight=1.3)
-        ligand_hard_rep.addReweight('rama', weight=0.2)
+        ligand_hard_rep = rosettaScripts.scorefunctions.new_scorefunction(
+            "ligand_hard_rep", weights_file="ligand"
+        )
+        ligand_hard_rep.addReweight("fa_intra_rep", weight=0.004)
+        ligand_hard_rep.addReweight("fa_elec", weight=0.42)
+        ligand_hard_rep.addReweight("hbond_bb_sc", weight=1.3)
+        ligand_hard_rep.addReweight("hbond_sc", weight=1.3)
+        ligand_hard_rep.addReweight("rama", weight=0.2)
 
         # Clone the hard rep scorefunction but silence constraint terms so ligand metrics
         # can be computed without bias from ligand constraints.
         ligand_hard_rep_no_cst = rosettaScripts.scorefunctions.new_scorefunction(
-            'ligand_hard_rep_no_cst', weights_file='ligand'
+            "ligand_hard_rep_no_cst", weights_file="ligand"
         )
-        ligand_hard_rep_no_cst.addReweight('fa_intra_rep', weight=0.004)
-        ligand_hard_rep_no_cst.addReweight('fa_elec', weight=0.42)
-        ligand_hard_rep_no_cst.addReweight('hbond_bb_sc', weight=1.3)
-        ligand_hard_rep_no_cst.addReweight('hbond_sc', weight=1.3)
-        ligand_hard_rep_no_cst.addReweight('rama', weight=0.2)
+        ligand_hard_rep_no_cst.addReweight("fa_intra_rep", weight=0.004)
+        ligand_hard_rep_no_cst.addReweight("fa_elec", weight=0.42)
+        ligand_hard_rep_no_cst.addReweight("hbond_bb_sc", weight=1.3)
+        ligand_hard_rep_no_cst.addReweight("hbond_sc", weight=1.3)
+        ligand_hard_rep_no_cst.addReweight("rama", weight=0.2)
         for constraint_term in (
-            'atom_pair_constraint',
-            'coordinate_constraint',
-            'angle_constraint',
-            'dihedral_constraint',
-            'res_type_constraint',
-            'metalbinding_constraint',
+            "atom_pair_constraint",
+            "coordinate_constraint",
+            "angle_constraint",
+            "dihedral_constraint",
+            "res_type_constraint",
+            "metalbinding_constraint",
         ):
             ligand_hard_rep_no_cst.addReweight(constraint_term, weight=0.0)
 
         # Create ligand areas
-        docking_sidechain = rosettaScripts.ligandArea('docking_sidechain',
-                                                       chain=ligand_chain,
-                                                       cutoff=6.0,
-                                                       add_nbr_radius=True,
-                                                       all_atom_mode=True,
-                                                       minimize_ligand=10)
+        docking_sidechain = rosettaScripts.ligandArea(
+            "docking_sidechain",
+            chain=ligand_chain,
+            cutoff=6.0,
+            add_nbr_radius=True,
+            all_atom_mode=True,
+            minimize_ligand=10,
+        )
 
-        final_sidechain = rosettaScripts.ligandArea('final_sidechain',
-                                                     chain=ligand_chain,
-                                                     cutoff=6.0,
-                                                     add_nbr_radius=True,
-                                                     all_atom_mode=True)
+        final_sidechain = rosettaScripts.ligandArea(
+            "final_sidechain",
+            chain=ligand_chain,
+            cutoff=6.0,
+            add_nbr_radius=True,
+            all_atom_mode=True,
+        )
 
-        final_backbone = rosettaScripts.ligandArea('final_backbone',
-                                                    chain=ligand_chain,
-                                                    cutoff=7.0,
-                                                    add_nbr_radius=True,
-                                                    all_atom_mode=True,
-                                                    calpha_restraints=0.3)
+        final_backbone = rosettaScripts.ligandArea(
+            "final_backbone",
+            chain=ligand_chain,
+            cutoff=7.0,
+            add_nbr_radius=True,
+            all_atom_mode=True,
+            calpha_restraints=0.3,
+        )
 
         # Set interface builders
-        side_chain_for_docking = rosettaScripts.interfaceBuilder('side_chain_for_docking',
-                                                                 ligand_areas=docking_sidechain)
-        side_chain_for_final = rosettaScripts.interfaceBuilder('side_chain_for_final',
-                                                               ligand_areas=final_sidechain)
-        backbone = rosettaScripts.interfaceBuilder('final_backbone',
-                                                   ligand_areas=final_backbone,
-                                                   extension_window=3)
+        side_chain_for_docking = rosettaScripts.interfaceBuilder(
+            "side_chain_for_docking", ligand_areas=docking_sidechain
+        )
+        side_chain_for_final = rosettaScripts.interfaceBuilder(
+            "side_chain_for_final", ligand_areas=final_sidechain
+        )
+        backbone = rosettaScripts.interfaceBuilder(
+            "final_backbone", ligand_areas=final_backbone, extension_window=3
+        )
 
         # Set movemap builders
-        docking = rosettaScripts.movemapBuilder('docking', sc_interface=side_chain_for_docking)
-        final = rosettaScripts.movemapBuilder('final', sc_interface=side_chain_for_final,
-                                              bb_interface=backbone, minimize_water=True)
+        docking = rosettaScripts.movemapBuilder(
+            "docking", sc_interface=side_chain_for_docking
+        )
+        final = rosettaScripts.movemapBuilder(
+            "final",
+            sc_interface=side_chain_for_final,
+            bb_interface=backbone,
+            minimize_water=True,
+        )
 
         # Set up scoring grid
-        vdw = rosettaScripts.scoringGrid.classicGrid('vdw', weight=1.0)
+        vdw = rosettaScripts.scoringGrid.classicGrid("vdw", weight=1.0)
 
         ### Create docking movers
 
@@ -7343,53 +7820,71 @@ make sure of reading the target sequences with the function readTargetSequences(
         for model in coordinates:
             for coordinate in coordinates[model]:
                 model_xyz = {}
-                model_xyz['file_name'] = '../../input_models/'+model+'.pdb'
-                model_xyz['x'] = coordinate[0]
-                model_xyz['y'] = coordinate[1]
-                model_xyz['z'] = coordinate[2]
+                model_xyz["file_name"] = "../../input_models/" + model + ".pdb"
+                model_xyz["x"] = coordinate[0]
+                model_xyz["y"] = coordinate[1]
+                model_xyz["z"] = coordinate[2]
                 xyz.append(model_xyz)
-        with open(docking_folder+'/coordinates.json', 'w') as jf:
+        with open(docking_folder + "/coordinates.json", "w") as jf:
             json.dump(xyz, jf)
 
         # Create start from mover for initial ligand positioning
         startFrom = rosettaScripts.movers.startFrom(chain=ligand_chain)
-        startFrom.addFile('../../coordinates.json')
+        startFrom.addFile("../../coordinates.json")
 
         if store_initial_placement:
-            store_initial_placement = rosettaScripts.movers.dumpPdb(name='store_initial_placement', file_name='initial_placement.pdb')
+            store_initial_placement = rosettaScripts.movers.dumpPdb(
+                name="store_initial_placement", file_name="initial_placement.pdb"
+            )
 
         # Create transform mover
-        transform = rosettaScripts.movers.transform(chain=ligand_chain, box_size=5.0, move_distance=0.1, angle=5,
-                                                    cycles=500, repeats=1, temperature=5, initial_perturb=5.0)
+        transform = rosettaScripts.movers.transform(
+            chain=ligand_chain,
+            box_size=5.0,
+            move_distance=0.1,
+            angle=5,
+            cycles=500,
+            repeats=1,
+            temperature=5,
+            initial_perturb=5.0,
+        )
 
         # Create high-resolution docking mover according to the employed docking protocol
-        if docking_protocol == 'repack':
+        if docking_protocol == "repack":
             cycles = 1
             repack_every_Nth = 1
-        elif docking_protocol == 'mcm':
+        elif docking_protocol == "mcm":
             cycles = 6
             repack_every_Nth = 3
-        elif docking_protocol == 'custom':
+        elif docking_protocol == "custom":
             cycles = high_res_cycles
             repack_every_Nth = high_res_repack_every_Nth
 
-        highResDocker = rosettaScripts.movers.highResDocker(cycles=cycles,
-                                                            repack_every_Nth=repack_every_Nth,
-                                                            scorefxn=ligand_soft_rep,
-                                                            movemap_builder=docking)
+        highResDocker = rosettaScripts.movers.highResDocker(
+            cycles=cycles,
+            repack_every_Nth=repack_every_Nth,
+            scorefxn=ligand_soft_rep,
+            movemap_builder=docking,
+        )
 
         # Create final minimization mover
-        finalMinimizer = rosettaScripts.movers.finalMinimizer(scorefxn=ligand_hard_rep, movemap_builder=final)
+        finalMinimizer = rosettaScripts.movers.finalMinimizer(
+            scorefxn=ligand_hard_rep, movemap_builder=final
+        )
 
         ### Create combined protocols
 
         # Create low-resolution mover
         low_res_dock_movers = [transform]
-        low_res_dock = rosettaScripts.movers.parsedProtocol('low_res_dock', low_res_dock_movers)
+        low_res_dock = rosettaScripts.movers.parsedProtocol(
+            "low_res_dock", low_res_dock_movers
+        )
 
         # Create high-resolution mover
         high_res_dock_movers = [highResDocker, finalMinimizer]
-        high_res_dock = rosettaScripts.movers.parsedProtocol('high_res_dock', high_res_dock_movers)
+        high_res_dock = rosettaScripts.movers.parsedProtocol(
+            "high_res_dock", high_res_dock_movers
+        )
 
         # Convert ligand input to conformers
         ligands = []
@@ -7397,26 +7892,30 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Handle PDB ligand files
         if ligands_pdb_folder:
             for ligand_file in os.listdir(ligands_pdb_folder):
-                if not ligand_file.endswith('.pdb'):
+                if not ligand_file.endswith(".pdb"):
                     continue
                 ligand_file_path = os.path.join(ligands_pdb_folder, ligand_file)
                 base_name = os.path.splitext(ligand_file)[0]
                 ligand_dir = os.path.join(ligand_params_folder, base_name)
-                ligands.append(process_ligand_file(ligand_file_path, base_name, ligand_dir))
+                ligands.append(
+                    process_ligand_file(ligand_file_path, base_name, ligand_dir)
+                )
 
         # Handle SDF ligand files
         elif ligands_sdf_folder:
             for ligand_file in os.listdir(ligands_sdf_folder):
-                if not ligand_file.endswith('.sdf'):
+                if not ligand_file.endswith(".sdf"):
                     continue
                 ligand_file_path = os.path.join(ligands_sdf_folder, ligand_file)
                 base_name = os.path.splitext(ligand_file)[0]
                 ligand_dir = os.path.join(ligand_params_folder, base_name)
-                ligands.append(process_ligand_file(ligand_file_path, base_name, ligand_dir))
+                ligands.append(
+                    process_ligand_file(ligand_file_path, base_name, ligand_dir)
+                )
 
         # Handle SMILES input
         elif smiles_file:
-            with open(smiles_file, 'r') as f:
+            with open(smiles_file, "r") as f:
                 for line in f:
                     smi, name = line.strip().split()
                     mol = Chem.MolFromSmiles(smi)
@@ -7428,17 +7927,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                     os.makedirs(ligand_dir, exist_ok=True)
                     output_sdf_path = os.path.join(ligand_dir, f"{name}.sdf")
 
-                    if (skip_conformers_if_found or not overwrite) and os.path.exists(output_sdf_path):
+                    if (skip_conformers_if_found or not overwrite) and os.path.exists(
+                        output_sdf_path
+                    ):
                         ligands.append(name)
                         continue
 
                     ligands.append(name)
-                    mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
-                                                              prune_rms_threshold=prune_rms_threshold,
-                                                              max_attempts=max_attempts,
-                                                              use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
-                                                              use_basic_knowledge=use_basic_knowledge,
-                                                              enforce_chirality=enforce_chirality)
+                    mol_with_conformers = generate_conformers(
+                        mol,
+                        num_conformers=num_conformers,
+                        prune_rms_threshold=prune_rms_threshold,
+                        max_attempts=max_attempts,
+                        use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
+                        use_basic_knowledge=use_basic_knowledge,
+                        enforce_chirality=enforce_chirality,
+                    )
                     write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
 
         # Handle SDF input
@@ -7453,17 +7957,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                 os.makedirs(ligand_dir, exist_ok=True)
                 output_sdf_path = os.path.join(ligand_dir, f"{name}.sdf")
 
-                if (skip_conformers_if_found or not overwrite) and os.path.exists(output_sdf_path):
+                if (skip_conformers_if_found or not overwrite) and os.path.exists(
+                    output_sdf_path
+                ):
                     ligands.append(name)
                     continue
 
                 ligands.append(name)
-                mol_with_conformers = generate_conformers(mol, num_conformers=num_conformers,
-                                                          prune_rms_threshold=prune_rms_threshold,
-                                                          max_attempts=max_attempts,
-                                                          use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
-                                                          use_basic_knowledge=use_basic_knowledge,
-                                                          enforce_chirality=enforce_chirality)
+                mol_with_conformers = generate_conformers(
+                    mol,
+                    num_conformers=num_conformers,
+                    prune_rms_threshold=prune_rms_threshold,
+                    max_attempts=max_attempts,
+                    use_exp_torsion_angle_prefs=use_exp_torsion_angle_prefs,
+                    use_basic_knowledge=use_basic_knowledge,
+                    enforce_chirality=enforce_chirality,
+                )
                 write_molecule_to_sdf(mol_with_conformers, output_sdf_path)
 
         model_ligand_residue_index: Dict[str, int] = {}
@@ -7474,7 +7983,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
                 residue_count += 1
             if residue_count == 0:
-                raise ValueError(f"Model '{model}' has no residues to anchor the ligand.")
+                raise ValueError(
+                    f"Model '{model}' has no residues to anchor the ligand."
+                )
             ligand_residue_index = residue_count + 1
             model_ligand_residue_index[model] = ligand_residue_index
 
@@ -7498,7 +8009,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         f"Model '{model_name}' from atom_pairs is not part of the docking setup."
                     )
                 if not isinstance(ligand_dict, dict):
-                    raise ValueError(f"atom_pairs[{model_name!r}] must map ligands to atom-pair lists.")
+                    raise ValueError(
+                        f"atom_pairs[{model_name!r}] must map ligands to atom-pair lists."
+                    )
 
                 for ligand_name, pair_entries in ligand_dict.items():
                     if ligand_name not in available_ligands:
@@ -7516,7 +8029,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 "Each atom_pairs entry must be a 2-tuple: ((chain, residue, atom), ligand_atom)."
                             )
                         protein_atom, ligand_atom = entry
-                        if not (isinstance(protein_atom, (list, tuple)) and len(protein_atom) == 3):
+                        if not (
+                            isinstance(protein_atom, (list, tuple))
+                            and len(protein_atom) == 3
+                        ):
                             raise ValueError(
                                 "Protein atoms in atom_pairs must be (chain, residue, atom) tuples."
                             )
@@ -7528,11 +8044,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 f"Residue index '{resseq}' in atom_pairs for model '{model_name}' "
                                 f"and ligand '{ligand_name}' is not an integer."
                             ) from exc
-                        normalized_pairs.append(((str(chain_id), resseq_int, str(atom_name)), ligand_atom))
+                        normalized_pairs.append(
+                            ((str(chain_id), resseq_int, str(atom_name)), ligand_atom)
+                        )
                     if normalized_pairs:
-                        requested_atom_pairs[(model_name, ligand_name)] = normalized_pairs
+                        requested_atom_pairs[(model_name, ligand_name)] = (
+                            normalized_pairs
+                        )
 
-        def _resolve_ligand_atom_tuple(ligand_name: str, atom_identifier, override=None):
+        def _resolve_ligand_atom_tuple(
+            ligand_name: str, atom_identifier, override=None
+        ):
             if isinstance(atom_identifier, str):
                 mapping = ligand_atom_cache.get(ligand_name)
                 if mapping is None:
@@ -7600,8 +8122,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         for ligand in ligands:
 
             # Add chain mover
-            ligand_pdb = '../../ligand_params/'+ligand+'/'+ligand+'.pdb'
-            addLigand = rosettaScripts.movers.addChain(name='addLigand', update_PDBInfo=True, file_name=ligand_pdb)
+            ligand_pdb = "../../ligand_params/" + ligand + "/" + ligand + ".pdb"
+            addLigand = rosettaScripts.movers.addChain(
+                name="addLigand", update_PDBInfo=True, file_name=ligand_pdb
+            )
 
             # make params
             input_sdf_path = os.path.join(ligand_params_folder, ligand, f"{ligand}.sdf")
@@ -7612,22 +8136,43 @@ make sure of reading the target sequences with the function readTargetSequences(
             for model in self:
 
                 # Determine expected output filenames for this model/ligand pair
-                expected_score_file = f'{model}{separator}{ligand}.sc'
+                expected_score_file = f"{model}{separator}{ligand}.sc"
                 expected_silent_file = None
                 if not only_scorefile and not pdb_output and not skip_silent_file:
-                    expected_silent_file = f'{model}{separator}{ligand}.out'
+                    expected_silent_file = f"{model}{separator}{ligand}.out"
 
-                model_output_folder = os.path.join(output_folder, model+separator+ligand)
+                model_output_folder = os.path.join(
+                    output_folder, model + separator + ligand
+                )
 
                 if skip_finished:
-                    expected_score_path = os.path.join(model_output_folder, expected_score_file)
-                    expected_silent_path = os.path.join(model_output_folder, expected_silent_file) if expected_silent_file else None
+                    expected_score_path = os.path.join(
+                        model_output_folder, expected_score_file
+                    )
+                    expected_silent_path = (
+                        os.path.join(model_output_folder, expected_silent_file)
+                        if expected_silent_file
+                        else None
+                    )
 
                     score_ok = os.path.exists(expected_score_path)
-                    silent_ok = True if skip_silent_file else ((expected_silent_file is None) or (expected_silent_path and os.path.exists(expected_silent_path)))
+                    silent_ok = (
+                        True
+                        if skip_silent_file
+                        else (
+                            (expected_silent_file is None)
+                            or (
+                                expected_silent_path
+                                and os.path.exists(expected_silent_path)
+                            )
+                        )
+                    )
                     pdb_ok = True
                     if pdb_output and os.path.isdir(model_output_folder):
-                        pdb_ok = any(f.lower().endswith(".pdb") for f in os.listdir(model_output_folder))
+                        pdb_ok = any(
+                            f.lower().endswith(".pdb")
+                            for f in os.listdir(model_output_folder)
+                        )
 
                     if score_ok and silent_ok and pdb_ok:
                         continue
@@ -7661,7 +8206,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Add constraint movers
                 if cst_files is not None:
                     if model not in cst_files:
-                        raise ValueError(f"Model {model} is not in the cst_files dictionary!")
+                        raise ValueError(
+                            f"Model {model} is not in the cst_files dictionary!"
+                        )
 
                     model_csts = cst_files[model]
                     if isinstance(model_csts, dict):
@@ -7717,19 +8264,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # constraints were applied so interface metrics ignore penalty terms.
                 if ligand_constraints_applied:
                     interface_scorefxn = ligand_hard_rep_no_cst
-                    interface_score_mover_name = 'interfaceScoreCalculator_no_cst'
+                    interface_score_mover_name = "interfaceScoreCalculator_no_cst"
                 else:
                     interface_scorefxn = ligand_hard_rep
-                    interface_score_mover_name = 'interfaceScoreCalculator'
+                    interface_score_mover_name = "interfaceScoreCalculator"
 
-                interfaceScoreCalculator = rosettaScripts.movers.interfaceScoreCalculator(
-                    name=interface_score_mover_name,
-                    chains=ligand_chain,
-                    scorefxn=interface_scorefxn,
-                    compute_grid_scores=False,
+                interfaceScoreCalculator = (
+                    rosettaScripts.movers.interfaceScoreCalculator(
+                        name=interface_score_mover_name,
+                        chains=ligand_chain,
+                        scorefxn=interface_scorefxn,
+                        compute_grid_scores=False,
+                    )
                 )
                 reporting = rosettaScripts.movers.parsedProtocol(
-                    'reporting', [interfaceScoreCalculator]
+                    "reporting", [interfaceScoreCalculator]
                 )
 
                 # Add scoring movers
@@ -7756,7 +8305,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     normalized_pairs = []
                     for protein_atom, ligand_atom in requested_pairs:
                         override = (ligand_chain, model_ligand_residue_index[model])
-                        ligand_tuple = _resolve_ligand_atom_tuple(ligand, ligand_atom, override=override)
+                        ligand_tuple = _resolve_ligand_atom_tuple(
+                            ligand, ligand_atom, override=override
+                        )
                         normalized_pairs.append((protein_atom, ligand_tuple))
 
                     for protein_atom, ligand_tuple in normalized_pairs:
@@ -7776,63 +8327,84 @@ make sure of reading the target sequences with the function readTargetSequences(
                         xml.addFilter(d)
                         protocol.append(d)
 
-    #             # Add angle filters
-    #             if angles:
-    #                 for atoms in angles[model][ligand]:
-    #                     label = "angle_"
-    #                     label += "_".join([str(x) for x in atoms[0]]) + "-"
-    #                     label += "_".join([str(x) for x in atoms[1]]) + "-"
-    #                     label += "_".join([str(x) for x in atoms[2]])
-    #                     a = rosettaScripts.filters.atomicAngle(name=label, # There is no atomicAngle function in rosetta scripts
-    #                         residue1=atoms[0][0]+str(atoms[0][1]), atomname1=atoms[0][2],
-    #                         residue2=atoms[1][0]+str(atoms[1][1]), atomname2=atoms[1][2],
-    #                         residue3=atoms[2][0]+str(atoms[2][1]), atomname3=atoms[2][2],
-    #                         angle=120.0, confidence=0.0)
-    #                     xml.addFilter(a)
-    #                     protocol.append(a)
+                #             # Add angle filters
+                #             if angles:
+                #                 for atoms in angles[model][ligand]:
+                #                     label = "angle_"
+                #                     label += "_".join([str(x) for x in atoms[0]]) + "-"
+                #                     label += "_".join([str(x) for x in atoms[1]]) + "-"
+                #                     label += "_".join([str(x) for x in atoms[2]])
+                #                     a = rosettaScripts.filters.atomicAngle(name=label, # There is no atomicAngle function in rosetta scripts
+                #                         residue1=atoms[0][0]+str(atoms[0][1]), atomname1=atoms[0][2],
+                #                         residue2=atoms[1][0]+str(atoms[1][1]), atomname2=atoms[1][2],
+                #                         residue3=atoms[2][0]+str(atoms[2][1]), atomname3=atoms[2][2],
+                #                         angle=120.0, confidence=0.0)
+                #                     xml.addFilter(a)
+                #                     protocol.append(a)
 
                 # Set protocol
                 xml.setProtocol(protocol)
 
                 # Write XML protocol file
-                xml_output = os.path.join(xml_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.xml')
+                xml_output = os.path.join(
+                    xml_folder,
+                    f"{docking_protocol}{separator}{ligand}{separator}{model}.xml",
+                )
                 xml.write_xml(xml_output)
 
                 # Create flags files
-                flags = rosettaScripts.options.flags(f'../../xml/{docking_protocol}{separator}{ligand}{separator}{model}.xml',
-                                                     nstruct=nstruct, s='../../input_models/'+model+'.pdb',
-                                                     output_silent_file=expected_silent_file,
-                                                     output_score_file=expected_score_file)
+                flags = rosettaScripts.options.flags(
+                    f"../../xml/{docking_protocol}{separator}{ligand}{separator}{model}.xml",
+                    nstruct=nstruct,
+                    s="../../input_models/" + model + ".pdb",
+                    output_silent_file=expected_silent_file,
+                    output_score_file=expected_score_file,
+                )
                 if only_scorefile or skip_silent_file:
-                    flags.addOption('out:file:score_only')
+                    flags.addOption("out:file:score_only")
 
                 flags.add_ligand_docking_options()
                 if has_external_params:
                     flags.addOption("in:file:extra_res_path", "../../params")
-                ligand_params_file = os.path.join(ligand_params_folder, ligand, f"{ligand}.params")
+                ligand_params_file = os.path.join(
+                    ligand_params_folder, ligand, f"{ligand}.params"
+                )
                 if os.path.exists(ligand_params_file):
                     flags.addOption(
                         "in:file:extra_res_fa",
                         f"../../ligand_params/{ligand}/{ligand}.params",
                         append=True,
                     )
-                flags_output = os.path.join(flags_folder, f'{docking_protocol}{separator}{ligand}{separator}{model}.flags')
+                flags_output = os.path.join(
+                    flags_folder,
+                    f"{docking_protocol}{separator}{ligand}{separator}{model}.flags",
+                )
                 flags.write_flags(flags_output)
 
                 # Create output folder and execute commands
                 os.makedirs(model_output_folder, exist_ok=True)
-                command =  'cd '+model_output_folder+'\n'
+                command = "cd " + model_output_folder + "\n"
                 if parallelisation:
-                    command += parallelisation+' '
-                command += executable+' '
-                command += '@ ../../flags/'+f'{docking_protocol}{separator}{ligand}{separator}{model}.flags '
-                command += '\n'
-                command += 'cd ../../..\n'
+                    command += parallelisation + " "
+                command += executable + " "
+                command += (
+                    "@ ../../flags/"
+                    + f"{docking_protocol}{separator}{ligand}{separator}{model}.flags "
+                )
+                command += "\n"
+                command += "cd ../../..\n"
                 jobs.append(command)
 
         return jobs
 
-    def generatePointsAroundAtoms(self, atom_tuples, radii, num_points_per_radius, threshold_distance, verbose=False):
+    def generatePointsAroundAtoms(
+        self,
+        atom_tuples,
+        radii,
+        num_points_per_radius,
+        threshold_distance,
+        verbose=False,
+    ):
         """
         Generates equidistant points around atoms on the surfaces of spheres with different radii using the Fibonacci lattice method.
         Only stores points that are farther than a threshold distance from any heavy atom.
@@ -7857,13 +8429,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if chain.id == chain_id:
                     for residue in chain.get_residues():
                         for atom in residue.get_atoms():
-                            if atom.element != 'H':  # Exclude hydrogen atoms
+                            if atom.element != "H":  # Exclude hydrogen atoms
                                 heavy_atom_coords.append(atom.coord)
                             if residue.id[1] == residue_id and atom.name == atom_name:
                                 target_atom = atom
 
             if not target_atom:
-                raise ValueError(f"Target atom not found in the structure for model {model}")
+                raise ValueError(
+                    f"Target atom not found in the structure for model {model}"
+                )
 
             target_atom_coord = target_atom.coord
             all_points = []
@@ -7871,7 +8445,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Convert heavy atom coordinates to numpy array for distance calculations
             heavy_atom_coords = np.array(heavy_atom_coords)
             if verbose:
-                print(f"Model: {model}, Heavy atom coordinates shape: {heavy_atom_coords.shape}")
+                print(
+                    f"Model: {model}, Heavy atom coordinates shape: {heavy_atom_coords.shape}"
+                )
 
             for radius in radii:
                 points = []
@@ -7881,7 +8457,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 theta = np.pi * (1 + 5**0.5) * indices
 
                 if verbose:
-                    print(f"Model: {model}, Generated points before filtering for radius {radius}:")
+                    print(
+                        f"Model: {model}, Generated points before filtering for radius {radius}:"
+                    )
                 for i in range(num_points_per_radius):
                     x = radius * np.sin(phi[i]) * np.cos(theta[i])
                     y = radius * np.sin(phi[i]) * np.sin(theta[i])
@@ -7894,14 +8472,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if heavy_atom_coords.size > 0:
                         distances = cdist([point], heavy_atom_coords)
                         if verbose:
-                            print(f"Model: {model}, Distances for point {i} at radius {radius}: {distances}")
+                            print(
+                                f"Model: {model}, Distances for point {i} at radius {radius}: {distances}"
+                            )
                         if np.all(distances > threshold_distance):
                             points.append(point)
                     else:
                         points.append(point)
 
                 if verbose:
-                    print(f"Model: {model}, Points after filtering for radius {radius}: {points}")
+                    print(
+                        f"Model: {model}, Points after filtering for radius {radius}: {points}"
+                    )
                 all_points.extend(points)
 
             if verbose:
@@ -7910,13 +8492,32 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return all_model_points
 
-    def visualizePointsOnStructure(self, points_by_model, output_folder, chain_id='A', residue_name="SPH", verbose=False):
-        def addResidueToStructure(structure, chain_id, resname, atom_names, coordinates, new_resid=None, elements=None, hetatom=True, water=False):
+    def visualizePointsOnStructure(
+        self,
+        points_by_model,
+        output_folder,
+        chain_id="A",
+        residue_name="SPH",
+        verbose=False,
+    ):
+        def addResidueToStructure(
+            structure,
+            chain_id,
+            resname,
+            atom_names,
+            coordinates,
+            new_resid=None,
+            elements=None,
+            hetatom=True,
+            water=False,
+        ):
             """
             Add a new residue with given atoms to the structure.
             """
             model = structure[0]
-            chain = next((chain for chain in model.get_chains() if chain_id == chain.id), None)
+            chain = next(
+                (chain for chain in model.get_chains() if chain_id == chain.id), None
+            )
             if not chain:
                 if verbose:
                     print(f"Chain ID {chain_id} not found. Creating a new chain.")
@@ -7932,13 +8533,26 @@ make sure of reading the target sequences with the function readTargetSequences(
                     print(f"Coordinates: {coordinates}")
                 raise ValueError("Mismatch between atom names and coordinates.")
 
-            new_resid = new_resid or max((r.id[1] for r in chain.get_residues()), default=0) + 1
-            rt_flag = 'H' if hetatom else 'W' if water else ' '
-            residue = PDB.Residue.Residue((rt_flag, new_resid, ' '), resname, ' ')
+            new_resid = (
+                new_resid or max((r.id[1] for r in chain.get_residues()), default=0) + 1
+            )
+            rt_flag = "H" if hetatom else "W" if water else " "
+            residue = PDB.Residue.Residue((rt_flag, new_resid, " "), resname, " ")
 
-            serial_number = max((a.serial_number for a in chain.get_atoms()), default=0) + 1
+            serial_number = (
+                max((a.serial_number for a in chain.get_atoms()), default=0) + 1
+            )
             for i, atnm in enumerate(atom_names):
-                atom = PDB.Atom.Atom(atnm, coordinates[i], 0, 1.0, " ", f"{atnm: <4}", serial_number + i, elements[i] if elements else "H")
+                atom = PDB.Atom.Atom(
+                    atnm,
+                    coordinates[i],
+                    0,
+                    1.0,
+                    " ",
+                    f"{atnm: <4}",
+                    serial_number + i,
+                    elements[i] if elements else "H",
+                )
                 residue.add(atom)
             chain.add(residue)
             return new_resid
@@ -7949,18 +8563,28 @@ make sure of reading the target sequences with the function readTargetSequences(
             """
             atom_names = [f"SP{i+1}" for i in range(len(points))]
             coordinates = np.array(points)
-            elements = ['H'] * len(points)
+            elements = ["H"] * len(points)
             if verbose:
                 print(f"Number of points: {len(points)}")
                 print(f"Number of atom names: {len(atom_names)}")
-            addResidueToStructure(structure, chain_id, residue_name, atom_names, coordinates, elements=elements, hetatom=True)
+            addResidueToStructure(
+                structure,
+                chain_id,
+                residue_name,
+                atom_names,
+                coordinates,
+                elements=elements,
+                hetatom=True,
+            )
             return structure
 
         if not os.path.exists(output_folder):
             os.mkdir(output_folder)
 
         for model, points in points_by_model.items():
-            structure = copy.deepcopy(self.structures[model])  # Make a copy of the structure
+            structure = copy.deepcopy(
+                self.structures[model]
+            )  # Make a copy of the structure
 
             # Add points to structure
             structure = addPointsToStructure(structure, points, chain_id, residue_name)
@@ -8537,26 +9161,26 @@ make sure of reading the target sequences with the function readTargetSequences(
                     model_name = model
 
                 # Get input PDB
-                input_pdb = f'{sitemap_folder}/input_models/{model}.pdb'
+                input_pdb = f"{sitemap_folder}/input_models/{model}.pdb"
 
                 if not os.path.exists(input_pdb):
-                    raise ValueError(f'Input file {input_pdb} not found!')
+                    raise ValueError(f"Input file {input_pdb} not found!")
 
                 residues.setdefault(model, {})
 
                 # Check if the volume points model file exists
-                output_path = f'{sitemap_folder}/output_models/{model}'
+                output_path = f"{sitemap_folder}/output_models/{model}"
 
                 for resp in os.listdir(output_path):
 
-                    if not bool(re.search(r'\d+$', resp)):
+                    if not bool(re.search(r"\d+$", resp)):
                         continue
 
-                    resp_path = output_path+"/"+resp
+                    resp_path = output_path + "/" + resp
                     volpts_file = None
                     for pdb in os.listdir(resp_path):
-                        if pdb.endswith('volpts.pdb'):
-                            volpts_file =  resp_path+"/"+pdb
+                        if pdb.endswith("volpts.pdb"):
+                            volpts_file = resp_path + "/" + pdb
 
                     if not volpts_file:
                         print(
@@ -8566,7 +9190,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         continue
 
                     # Combine input and volpts pdbs
-                    tmp_file = volpts_file.replace('.pdb', '.tmp.pdb')
+                    tmp_file = volpts_file.replace(".pdb", ".tmp.pdb")
                     merge_pdbs_one_model(input_pdb, volpts_file, tmp_file)
 
                     # Compute neighbours
@@ -8574,7 +9198,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     os.remove(tmp_file)
 
                     if sidechain_only:
-                        protein = traj.topology.select("protein and sidechain and not resname vpt")
+                        protein = traj.topology.select(
+                            "protein and sidechain and not resname vpt"
+                        )
                     else:
                         protein = traj.topology.select("protein and not resname vpt")
 
@@ -8946,7 +9572,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         regional_best_fraction=0.2,
         constraint_level=1,
         restore_input_coordinates=False,
-        skip_connect_rewritting=False
+        skip_connect_rewritting=False,
     ):
         """
         Generates a PELE calculation for extracted poses. The function reads all the
@@ -9162,8 +9788,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                     'You must give either "Total Energy" or "Binding Energy" to bias the regional spawning simulation!'
                 )
 
-            if (regional_combinations or regional_exclusions) and not (regional_combinations and regional_exclusions):
-                raise ValueError('You must give both, regional_combinations and regional_exclusions not just one of them.')
+            if (regional_combinations or regional_exclusions) and not (
+                regional_combinations and regional_exclusions
+            ):
+                raise ValueError(
+                    "You must give both, regional_combinations and regional_exclusions not just one of them."
+                )
 
             regional_spawning = True
             spawning = "independent"
@@ -9282,9 +9912,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                         prefix = "distance"
                                     elif len(v.split("_")) == 3:
                                         prefix = "angle"
-                                    v =  prefix+'_'+v
+                                    v = prefix + "_" + v
                                 else:
-                                    prefix = v.split('_')[0]
+                                    prefix = v.split("_")[0]
                                 reg_met[m].append(v)
                                 metric_types.setdefault(m, prefix)
 
@@ -9324,14 +9954,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                             for new_metric, metrics in regional_combinations.items():
                                 metric_metric_types = [metric_types[m] for m in reg_met]
                                 if len(set(metric_metric_types)) != 1:
-                                    raise ValueError('For regional spawning, you are attempting to combine different metric types (e.g., distances and angles) is not allowed.')
+                                    raise ValueError(
+                                        "For regional spawning, you are attempting to combine different metric types (e.g., distances and angles) is not allowed."
+                                    )
                                 unique_metrics.update(metrics)
                                 metrics_list = list(unique_metrics)
 
                             # Ensure all required metric columns were given in the regional metrics list
-                            missing_columns = set(metrics_list) - set(regional_metrics.keys())
+                            missing_columns = set(metrics_list) - set(
+                                regional_metrics.keys()
+                            )
                             if missing_columns:
-                                raise ValueError(f"Missing combination metrics in regional metrics: {missing_columns}")
+                                raise ValueError(
+                                    f"Missing combination metrics in regional metrics: {missing_columns}"
+                                )
 
                             # Check all exclusion metrics are defined in the combinations metrics
                             excusion_metrics = []
@@ -9340,14 +9976,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if isinstance(regional_exclusions, list):
                                     excusion_metrics += [x for x in exclusion]
                                 elif isinstance(regional_exclusions, dict):
-                                    excusion_metrics += [x for x in regional_exclusions[exclusion]]
+                                    excusion_metrics += [
+                                        x for x in regional_exclusions[exclusion]
+                                    ]
 
                             missing_columns = set(excusion_metrics) - set(metrics_list)
                             if missing_columns:
-                                raise ValueError(f"Missing exclusion metrics in combination metrics: {missing_columns}")
+                                raise ValueError(
+                                    f"Missing exclusion metrics in combination metrics: {missing_columns}"
+                                )
 
                             with open(
-                                protein_ligand_folder + "/regional_combinations.json", "w"
+                                protein_ligand_folder + "/regional_combinations.json",
+                                "w",
                             ) as jf:
                                 json.dump(regional_combinations, jf)
 
@@ -9401,13 +10042,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 chain.add(residue)
 
                     if skip_connect_rewritting:
-                        print(f'The structure {f} has pre-defined CONECT lines probably from extractPELEPoses() function. Skipping saving structure and re-writting them. Directly copying structure to PELE folder..')
+                        print(
+                            f"The structure {f} has pre-defined CONECT lines probably from extractPELEPoses() function. Skipping saving structure and re-writting them. Directly copying structure to PELE folder.."
+                        )
                         # Specify the source file path
-                        source_file = f'{models_folder}/{d}/{f}'
+                        source_file = f"{models_folder}/{d}/{f}"
                         # Specify the destination file path
-                        destination_folder = f'{protein_ligand_folder}/{f}'
+                        destination_folder = f"{protein_ligand_folder}/{f}"
                         # Perform the copy operation
-                        print(f'Copying the structure {f} from source folder: {models_folder}/{d}/{f} to destination_folder: {protein_ligand_folder}')
+                        print(
+                            f"Copying the structure {f} from source folder: {models_folder}/{d}/{f} to destination_folder: {protein_ligand_folder}"
+                        )
                         shutil.copyfile(source_file, destination_folder)
 
                     else:
@@ -9490,9 +10135,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     )
             else:
                 if covalent_base_aa == None:
-                    message = (
-                        "You must give the base AA upon which each covalently"
-                    )
+                    message = "You must give the base AA upon which each covalently"
                     message += "attached ligand is bound. E.g., covalent_base_aa=base_aa={'FAD':'CYS', 'NAD':'ASP', etc.}"
                     raise ValueError(message)
 
@@ -9553,12 +10196,18 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(protein_ligand_folder + "/" + "input.yaml", "w") as iyf:
                 if energy_by_residue or nonbonded_energy != None:
                     # Use new PELE version with implemented energy_by_residue
-                    iyf.write('pele_exec: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/bin/PELE_mpi"\n')
-                    iyf.write('pele_data: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Data"\n')
-                    iyf.write('pele_documents: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Documents/"\n')
+                    iyf.write(
+                        'pele_exec: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/bin/PELE_mpi"\n'
+                    )
+                    iyf.write(
+                        'pele_data: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Data"\n'
+                    )
+                    iyf.write(
+                        'pele_documents: "/gpfs/projects/bsc72/PELE++/mnv/1.8.1b1/Documents/"\n'
+                    )
                 elif ninety_degrees_version:
                     # Use new PELE version with implemented 90 degrees fix
-                    print('paths of PELE version should be changed')
+                    print("paths of PELE version should be changed")
                     iyf.write(
                         'pele_exec: "/gpfs/projects/bsc72/PELE++/mniv/V1.8_pre_degree_fix/bin/PELE-1.8_mpi"\n'
                     )
@@ -9585,22 +10234,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 iyf.write("cpus: " + str(cpus) + "\n")
                 if equilibration:
                     iyf.write("equilibration: true\n")
-                    iyf.write(
-                        "equilibration_mode: '" + equilibration_mode + "'\n"
-                    )
-                    iyf.write(
-                        "equilibration_steps: "
-                        + str(equilibration_steps)
-                        + "\n"
-                    )
+                    iyf.write("equilibration_mode: '" + equilibration_mode + "'\n")
+                    iyf.write("equilibration_steps: " + str(equilibration_steps) + "\n")
                 else:
                     iyf.write("equilibration: false\n")
                 if spawning != None:
                     iyf.write("spawning: '" + str(spawning) + "'\n")
                 if constraint_level:
-                    iyf.write(
-                        "constraint_level: " + str(constraint_level) + "\n"
-                    )
+                    iyf.write("constraint_level: " + str(constraint_level) + "\n")
                 if rescoring:
                     iyf.write("rescoring: true\n")
 
@@ -9637,15 +10278,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     )
                 if not isinstance(box_centers, type(None)):
                     if (
-                        not all(
-                            isinstance(x, float) for x in box_centers[model]
-                        )
+                        not all(isinstance(x, float) for x in box_centers[model])
+                        and not all(isinstance(x, int) for x in box_centers[model])
                         and not all(
-                            isinstance(x, int) for x in box_centers[model]
-                        )
-                        and not all(
-                            isinstance(x, np.float32)
-                            for x in box_centers[model]
+                            isinstance(x, np.float32) for x in box_centers[model]
                         )
                     ):
                         # get coordinates from tuple
@@ -9655,10 +10291,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 for r in chain:
                                     if r.id[1] == box_centers[model][1]:
                                         for atom in r:
-                                            if (
-                                                atom.name
-                                                == box_centers[model][2]
-                                            ):
+                                            if atom.name == box_centers[model][2]:
                                                 coordinates = atom.coord
                         if isinstance(coordinates, type(None)):
                             raise ValueError(
@@ -9698,9 +10331,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     iyf.write("atom_dist:\n")
                     for d in distances[protein][ligand]:
                         if isinstance(d[0], str):
-                            d1 = (
-                                "- 'L:" + str(ligand_index) + ":" + d[0] + "'\n"
-                            )
+                            d1 = "- 'L:" + str(ligand_index) + ":" + d[0] + "'\n"
                         else:
                             d1 = (
                                 "- '"
@@ -9712,9 +10343,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 + "'\n"
                             )
                         if isinstance(d[1], str):
-                            d2 = (
-                                "- 'L:" + str(ligand_index) + ":" + d[1] + "'\n"
-                            )
+                            d2 = "- 'L:" + str(ligand_index) + ":" + d[1] + "'\n"
                         else:
                             d2 = (
                                 "- '"
@@ -9809,19 +10438,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if protein in membrane_residues:
                 _copyScriptFile(pele_folder, "addMembraneConstraints.py")
-                mem_res_script = (
-                    "._addMembraneConstraints.py"  # I have added the _
-                )
+                mem_res_script = "._addMembraneConstraints.py"  # I have added the _
 
             if nonbonded_energy != None:
-                _copyScriptFile(
-                    pele_folder, "addAtomNonBondedEnergyToPELEconf.py"
-                )
+                _copyScriptFile(pele_folder, "addAtomNonBondedEnergyToPELEconf.py")
                 nbe_script_name = "._addAtomNonBondedEnergyToPELEconf.py"
                 if not isinstance(nonbonded_energy, dict):
-                    raise ValueError(
-                        "nonbonded_energy, must be given as a dictionary"
-                    )
+                    raise ValueError("nonbonded_energy, must be given as a dictionary")
                 with open(
                     protein_ligand_folder + "/nonbonded_energy_atoms.json", "w"
                 ) as jf:
@@ -9844,19 +10467,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                 peptide_script_name = "._modifyPelePlatformForPeptide.py"
 
             if ligand_equilibration_cst:
-                _copyScriptFile(
-                    pele_folder, "addLigandConstraintsToPELEconf.py"
-                )
-                equilibration_script_name = (
-                    "._addLigandConstraintsToPELEconf.py"
-                )
+                _copyScriptFile(pele_folder, "addLigandConstraintsToPELEconf.py")
+                equilibration_script_name = "._addLigandConstraintsToPELEconf.py"
                 _copyScriptFile(pele_folder, "changeAdaptiveIterations.py")
                 adaptive_script_name = "._changeAdaptiveIterations.py"
 
             if restore_input_coordinates:
-                _copyScriptFile(
-                    pele_folder, 'restoreChangedCoordinates.py'
-                )
+                _copyScriptFile(pele_folder, "restoreChangedCoordinates.py")
                 restore_coordinates_script_name = "._restoreChangedCoordinates.py"
 
             # Create command
@@ -9899,9 +10516,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if angles:
                     # Copy individual angle definitions to each protein and ligand folder
                     if protein in angles and ligand in angles[protein]:
-                        with open(
-                            protein_ligand_folder + "/._angles.json", "w"
-                        ) as jf:
+                        with open(protein_ligand_folder + "/._angles.json", "w") as jf:
                             json.dump(angles[protein][ligand], jf)
 
                     # Copy script to add angles to pele.conf
@@ -9923,9 +10538,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if constraint_level:
                     # Copy script to add angles to pele.conf
-                    _copyScriptFile(
-                        pele_folder, "correctPositionalConstraints.py"
-                    )
+                    _copyScriptFile(pele_folder, "correctPositionalConstraints.py")
                     command += (
                         "python "
                         + rel_path_to_root
@@ -9951,9 +10564,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         + new_version
                     )
                     if isinstance(ligand_energy_groups, dict):
-                        command += (
-                            " --ligand_energy_groups ligand_energy_groups.json"
-                        )
+                        command += " --ligand_energy_groups ligand_energy_groups.json"
                         command += " --ligand_index " + str(ligand_index)
                     if ebr_new_flag:
                         command += " --new_version "
@@ -9971,14 +10582,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                         command += "\n"
 
                 if protein in membrane_residues:
-                    command += (
-                        "python " + rel_path_to_root + mem_res_script + " "
-                    )
+                    command += "python " + rel_path_to_root + mem_res_script + " "
                     command += "output "  # I think we should change this for a variable
                     command += "--membrane_residues "
                     command += (
-                        ",".join([str(x) for x in membrane_residues[protein]])
-                        + "\n"
+                        ",".join([str(x) for x in membrane_residues[protein]]) + "\n"
                     )  # 1,2,3,4,5
                     continuation = True
 
@@ -9995,14 +10603,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 if protein in com_bias1 and ligand in com_bias1[protein]:
                     # Write both COM groups as json files
-                    with open(
-                        protein_ligand_folder + "/._com_group1.json", "w"
-                    ) as jf:
+                    with open(protein_ligand_folder + "/._com_group1.json", "w") as jf:
                         json.dump(com_bias1[protein][ligand], jf)
 
-                    with open(
-                        protein_ligand_folder + "/._com_group2.json", "w"
-                    ) as jf:
+                    with open(protein_ligand_folder + "/._com_group2.json", "w") as jf:
                         json.dump(com_bias2[protein][ligand], jf)
 
                     command += "python " + rel_path_to_root + cbs_script + " "
@@ -10012,11 +10616,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += "--epsilon " + str(epsilon) + "\n"
                     continuation = True
 
-                if protein in com_residue_pairs and ligand in com_residue_pairs[protein]:
+                if (
+                    protein in com_residue_pairs
+                    and ligand in com_residue_pairs[protein]
+                ):
                     # Write COM groups as json file
-                    with open(
-                        protein_ligand_folder + "/._com_groups.json", "w"
-                    ) as jf:
+                    with open(protein_ligand_folder + "/._com_groups.json", "w") as jf:
                         json.dump(com_residue_pairs[protein][ligand], jf)
 
                     command += "python " + rel_path_to_root + cds_script + " "
@@ -10029,9 +10634,22 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continuation = True
 
                 if restore_input_coordinates:
-                    command += "python "+ rel_path_to_root+restore_coordinates_script_name+" "
-                    command += "output/input/"+protein_ligand+separator+pose+".pdb "
-                    command += "output/input/"+protein_ligand+separator+pose+"_processed.pdb\n"
+                    command += (
+                        "python "
+                        + rel_path_to_root
+                        + restore_coordinates_script_name
+                        + " "
+                    )
+                    command += (
+                        "output/input/" + protein_ligand + separator + pose + ".pdb "
+                    )
+                    command += (
+                        "output/input/"
+                        + protein_ligand
+                        + separator
+                        + pose
+                        + "_processed.pdb\n"
+                    )
                     continuation = True
 
                 if ligand_equilibration_cst:
@@ -10063,16 +10681,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Add commands for adding ligand constraints
                     command += "cp output/pele.conf output/pele.conf.backup\n"
-                    command += (
-                        "cp output/adaptive.conf output/adaptive.conf.backup\n"
-                    )
+                    command += "cp output/adaptive.conf output/adaptive.conf.backup\n"
 
                     # Modify pele.conf to add ligand constraints
                     command += (
-                        "python "
-                        + rel_path_to_root
-                        + equilibration_script_name
-                        + " "
+                        "python " + rel_path_to_root + equilibration_script_name + " "
                     )
                     command += "output "  # I think we should change this for a variable
                     if (
@@ -10085,12 +10698,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += "\n"
 
                     # Modify adaptive.conf to remove simulation steps
-                    command += (
-                        "python "
-                        + rel_path_to_root
-                        + adaptive_script_name
-                        + " "
-                    )
+                    command += "python " + rel_path_to_root + adaptive_script_name + " "
                     command += "output "  # I think we should change this for a variable
                     command += "--iterations 1 "
                     command += "--steps 1\n"
@@ -10100,9 +10708,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Recover conf files
                     command += "cp output/pele.conf.backup output/pele.conf\n"
-                    command += (
-                        "cp output/adaptive.conf.backup output/adaptive.conf\n"
-                    )
+                    command += "cp output/adaptive.conf.backup output/adaptive.conf\n"
                     continuation = True
 
             if continuation:
@@ -10136,15 +10742,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                         + extend_script_name
                         + " output "  # I think we should change this for a variable
                         + "--iterations "
-                        + str(iterations)+' '
+                        + str(iterations)
+                        + " "
                         + "--steps "
-                        + str(steps)+' '
+                        + str(steps)
+                        + " "
                         + "\n"
                     )
                 if not energy_by_residue:
-                    command += (
-                        "python -m pele_platform.main input_restart.yaml\n"
-                    )
+                    command += "python -m pele_platform.main input_restart.yaml\n"
 
                 if (
                     any(
@@ -10175,17 +10781,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                 with open(
                     protein_ligand_folder + "/" + "input_restart.yaml", "w"
                 ) as oyml:
-                    with open(
-                        protein_ligand_folder + "/" + "input.yaml"
-                    ) as iyml:
+                    with open(protein_ligand_folder + "/" + "input.yaml") as iyml:
                         for l in iyml:
                             if "debug: true" in l:
                                 l = "restart: true\n"
                             oyml.write(l)
                 if nonbonded_energy == None:
-                    command += (
-                        "python -m pele_platform.main input_restart.yaml\n"
-                    )
+                    command += "python -m pele_platform.main input_restart.yaml\n"
 
             elif extend_iterations and not continuation:
                 raise ValueError(
@@ -10215,9 +10817,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     with open(
                         protein_ligand_folder + "/" + "input_restart.yaml", "w"
                     ) as oyml:
-                        with open(
-                            protein_ligand_folder + "/" + "input.yaml"
-                        ) as iyml:
+                        with open(protein_ligand_folder + "/" + "input.yaml") as iyml:
                             for l in iyml:
                                 if "debug: true" in l:
                                     l = "restart: true\n"
@@ -10226,12 +10826,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Remove debug line from input.yaml for covalent setup (otherwise the Data folder is not copied!)
             if covalent_setup:
-                with open(
-                    protein_ligand_folder + "/" + "input.yaml.tmp", "w"
-                ) as oyf:
-                    with open(
-                        protein_ligand_folder + "/" + "input.yaml"
-                    ) as iyf:
+                with open(protein_ligand_folder + "/" + "input.yaml.tmp", "w") as oyf:
+                    with open(protein_ligand_folder + "/" + "input.yaml") as iyf:
                         for l in iyf:
                             if not "debug: true" in l:
                                 oyf.write(l)
@@ -10251,18 +10847,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 command += "--separator " + separator + " "
                 command += '--energy_bias "' + regional_energy_bias + '" '
                 command += (
-                    "--regional_best_fraction "
-                    + str(regional_best_fraction)
-                    + " "
+                    "--regional_best_fraction " + str(regional_best_fraction) + " "
                 )
                 if max_regional_iterations:
-                    command += (
-                        "--max_iterations " + str(max_regional_iterations) + " "
-                    )
+                    command += "--max_iterations " + str(max_regional_iterations) + " "
                 if angles:
                     command += "--angles "
                 if restore_input_coordinates:
-                    command += '--restore_coordinates '
+                    command += "--restore_coordinates "
                 command += "\n"
 
             command += "cd ../../"
@@ -10270,10 +10862,29 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
-    def setUpMDSimulations(self, md_folder, sim_time, nvt_time=2, npt_time=0.2, equilibration_dt=2, production_dt=2,
-                           temperature=298.15, frags=1, local_command_name=None, remote_command_name="${GMXBIN}",
-                           ff="amber99sb-star-ildn", ligand_chains=None, ion_chains=None, replicas=1, charge=None,
-                           system_output="System", models=None, overwrite=False, remove_backups=False,constantph=False):
+    def setUpMDSimulations(
+        self,
+        md_folder,
+        sim_time,
+        nvt_time=2,
+        npt_time=0.2,
+        equilibration_dt=2,
+        production_dt=2,
+        temperature=298.15,
+        frags=1,
+        local_command_name=None,
+        remote_command_name="${GMXBIN}",
+        ff="amber99sb-star-ildn",
+        ligand_chains=None,
+        ion_chains=None,
+        replicas=1,
+        charge=None,
+        system_output="System",
+        models=None,
+        overwrite=False,
+        remove_backups=False,
+        constantph=False,
+    ):
         """
         Sets up MD simulations for each model. The current state only allows to set
         up simulations using the Gromacs software.
@@ -10324,38 +10935,61 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         def _copyScriptFile(dest_folder, file, subfolder=None):
-            source = resource_stream(Requirement.parse("prepare_proteins"), f"prepare_proteins/scripts/{subfolder}/{file}")
+            source = resource_stream(
+                Requirement.parse("prepare_proteins"),
+                f"prepare_proteins/scripts/{subfolder}/{file}",
+            )
             if not os.path.exists(dest_folder):
                 os.makedirs(dest_folder)
-            with open(os.path.join(dest_folder, file), 'wb') as dest_file:
+            with open(os.path.join(dest_folder, file), "wb") as dest_file:
                 shutil.copyfileobj(source, dest_file)
 
         def _readGromacsIndexFile(file):
-            with open(file, 'r') as f:
-                groups = [x.replace('[', '').replace(']', '').replace('\n', '').strip() for x in f.readlines() if x.startswith('[')]
+            with open(file, "r") as f:
+                groups = [
+                    x.replace("[", "").replace("]", "").replace("\n", "").strip()
+                    for x in f.readlines()
+                    if x.startswith("[")
+                ]
             return {g: str(i) for i, g in enumerate(groups)}
 
-        def _getLigandParameters(structure, ligand_chains, struct_path, params_path, charge=None):
+        def _getLigandParameters(
+            structure, ligand_chains, struct_path, params_path, charge=None
+        ):
             class chainSelect(PDB.Select):
                 def accept_chain(self, chain):
                     return chain.get_id() not in ligand_chains
 
             charge = charge or {}
-            ligand_res = {chain.get_id(): residue.resname for mdl in structure for chain in mdl for residue in chain if chain.get_id() in ligand_chains}
+            ligand_res = {
+                chain.get_id(): residue.resname
+                for mdl in structure
+                for chain in mdl
+                for residue in chain
+                if chain.get_id() in ligand_chains
+            }
             if not ligand_res:
                 raise ValueError(f"Ligand was not found at chains {str(ligand_chains)}")
 
             io = PDB.PDBIO()
             pdb_chains = list(structure.get_chains())
             if len(pdb_chains) < 2:
-                raise ValueError("Input pdb has only one chain. Protein and ligand should be separated in individual chains.")
+                raise ValueError(
+                    "Input pdb has only one chain. Protein and ligand should be separated in individual chains."
+                )
 
             io.set_structure(structure)
             io.save(f"{struct_path}/protein.pdb", chainSelect())
 
-            ligand_coords = {chain.get_id(): [a.coord for a in chain.get_atoms()] for chain in pdb_chains if chain.get_id() in ligand_chains}
+            ligand_coords = {
+                chain.get_id(): [a.coord for a in chain.get_atoms()]
+                for chain in pdb_chains
+                if chain.get_id() in ligand_chains
+            }
             for chain_id, coords in ligand_coords.items():
-                io.set_structure([chain for chain in pdb_chains if chain.get_id() == chain_id][0])
+                io.set_structure(
+                    [chain for chain in pdb_chains if chain.get_id() == chain_id][0]
+                )
                 io.save(f"{struct_path}/{ligand_res[chain_id]}.pdb")
 
             lig_counter = 0
@@ -10363,7 +10997,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 lig_counter += 1
                 if ligand_name not in os.listdir(params_path) or overwrite:
                     os.makedirs(f"{params_path}/{ligand_name}", exist_ok=True)
-                    shutil.copyfile(f"{struct_path}/{ligand_name}.pdb", f"{params_path}/{ligand_name}/{ligand_name}.pdb")
+                    shutil.copyfile(
+                        f"{struct_path}/{ligand_name}.pdb",
+                        f"{params_path}/{ligand_name}/{ligand_name}.pdb",
+                    )
                     os.chdir(f"{params_path}/{ligand_name}")
 
                     command = f"acpype -i {ligand_name}.pdb"
@@ -10423,7 +11060,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     os.chdir("../../..")
 
                 parser = PDB.PDBParser()
-                ligand_structure = parser.get_structure("ligand", f"{params_path}/{ligand_name}/{ligand_name}.acpype/{ligand_name}_NEW.pdb")
+                ligand_structure = parser.get_structure(
+                    "ligand",
+                    f"{params_path}/{ligand_name}/{ligand_name}.acpype/{ligand_name}_NEW.pdb",
+                )
                 for i, atom in enumerate(ligand_structure.get_atoms()):
                     atom.coord = ligand_coords[lig_chain][i]
                 io.set_structure(ligand_structure)
@@ -10446,7 +11086,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 if atom.name == "HE2":
                                     HE2 = True
                         if HD1 or HE2:
-                            number = 0 if HD1 and not HE2 else 1 if HE2 and not HD1 else 2
+                            number = (
+                                0 if HD1 and not HE2 else 1 if HE2 and not HD1 else 2
+                            )
                             gmx_codes.append(number)
             return str(gmx_codes)[1:-1].replace(",", ""), ion_residues
 
@@ -10470,10 +11112,24 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if ca_atom != None:
                         ca_coordinate = list(ca_atom.coord)
                         cst_line = f"CoordinateConstraint CA {res}{chain} CA {ref_res}{ref_chain} "
-                        cst_line += " ".join([f"{c:.4f}" for c in ca_coordinate]) + f" HARMONIC 0 {sd}\n"
+                        cst_line += (
+                            " ".join([f"{c:.4f}" for c in ca_coordinate])
+                            + f" HARMONIC 0 {sd}\n"
+                        )
                         f.write(cst_line)
 
-        def _generateLocalCommand(command_name, model, i, ligand_chains, ligand_res, ion_residues, ion_chains, md_folder, ff, his_pro):
+        def _generateLocalCommand(
+            command_name,
+            model,
+            i,
+            ligand_chains,
+            ligand_res,
+            ion_residues,
+            ion_chains,
+            md_folder,
+            ff,
+            his_pro,
+        ):
             command_local = f"cd {md_folder}\nexport GMXLIB=$(pwd)/FF\nmkdir -p output_models/{model}/{i}/topol\n"
             command_local += f"cp input_models/{model}/protein.pdb output_models/{model}/{i}/topol/protein.pdb\n"
 
@@ -10486,29 +11142,44 @@ make sure of reading the target sequences with the function readTargetSequences(
             command_local += f"echo {his_pro} | {command_name} pdb2gmx -f protein.pdb -o prot.pdb -p topol.top -his -ignh -ff {ff} -water tip3p -vsite hydrogens\n"
 
             if ligand_chains:
-                lig_files = " ".join([f" ../../../../input_models/{model}/{ligand_name}.pdb " for ligand_name in ligand_res.values()])
+                lig_files = " ".join(
+                    [
+                        f" ../../../../input_models/{model}/{ligand_name}.pdb "
+                        for ligand_name in ligand_res.values()
+                    ]
+                )
                 command_local += f"grep -h ATOM prot.pdb {lig_files} >| complex.pdb\n"
-                command_local += f"{command_name} editconf -f complex.pdb -o complex.gro\n"
+                command_local += (
+                    f"{command_name} editconf -f complex.pdb -o complex.gro\n"
+                )
                 line = '#include "atomtypes.itp"\\n'
                 included_ligands = []
                 for ligand_name in ligand_res.values():
                     if ligand_name not in included_ligands:
                         included_ligands.append(ligand_name)
-                        line += f'#include "{ligand_name}.acpype/{ligand_name}_GMX.itp"\\n'
+                        line += (
+                            f'#include "{ligand_name}.acpype/{ligand_name}_GMX.itp"\\n'
+                        )
                     line += "#ifdef POSRES\\n"
-                    line += f'#include "{ligand_name}.acpype/posre_{ligand_name}.itp"\\n'
+                    line += (
+                        f'#include "{ligand_name}.acpype/posre_{ligand_name}.itp"\\n'
+                    )
                     line += "#endif\\n"
                 line += "'"
                 local_path = (os.getcwd() + "/" + md_folder + "/FF").replace("/", "\/")
-                command_local += f"sed -i '/#include \"{local_path}\/{ff}.ff\/forcefield.itp\"/a {line} topol.top\n"
+                command_local += f'sed -i \'/#include "{local_path}\/{ff}.ff\/forcefield.itp"/a {line} topol.top\n'
                 for ligand_name in ligand_res.values():
-                    command_local += f"sed -i -e '$a{ligand_name.ljust(20)}1' topol.top\n"
+                    command_local += (
+                        f"sed -i -e '$a{ligand_name.ljust(20)}1' topol.top\n"
+                    )
             else:
                 command_local += f"{command_name} editconf -f prot.pdb -o complex.gro\n"
 
             command_local += f"{command_name} editconf -f complex.gro -o prot_box.gro -c -d 1.0 -bt octahedron\n"
             command_local += f"{command_name} solvate -cp prot_box.gro -cs spc216.gro -o prot_solv.gro -p topol.top\n"
-            command_local += f'echo q | {command_name} make_ndx -f prot_solv.gro -o index.ndx\n'
+            command_local += (
+                f"echo q | {command_name} make_ndx -f prot_solv.gro -o index.ndx\n"
+            )
 
             return command_local
 
@@ -10542,7 +11213,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command_name = command
                     break
             if command_name is None:
-                raise ValueError(f"Gromacs executable is required for the setup and was not found. The following executable names were tested: {','.join(possible_command_names)}")
+                raise ValueError(
+                    f"Gromacs executable is required for the setup and was not found. The following executable names were tested: {','.join(possible_command_names)}"
+                )
         else:
             command_name = local_command_name
 
@@ -10554,13 +11227,23 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         self.saveModels(f"{md_folder}/input_models")
 
-        for file in resource_listdir(Requirement.parse("prepare_proteins"), "prepare_proteins/scripts/md/gromacs/mdp"):
+        for file in resource_listdir(
+            Requirement.parse("prepare_proteins"),
+            "prepare_proteins/scripts/md/gromacs/mdp",
+        ):
             if not file.startswith("__"):
-                _copyScriptFile(f"{md_folder}/scripts", file, subfolder="md/gromacs/mdp")
+                _copyScriptFile(
+                    f"{md_folder}/scripts", file, subfolder="md/gromacs/mdp"
+                )
 
-        for file in resource_listdir(Requirement.parse("prepare_proteins"), f"prepare_proteins/scripts/md/gromacs/ff/{ff}"):
+        for file in resource_listdir(
+            Requirement.parse("prepare_proteins"),
+            f"prepare_proteins/scripts/md/gromacs/ff/{ff}",
+        ):
             if not file.startswith("__"):
-                _copyScriptFile(f"{md_folder}/FF/{ff}.ff", file, subfolder=f"md/gromacs/ff/{ff}")
+                _copyScriptFile(
+                    f"{md_folder}/FF/{ff}.ff", file, subfolder=f"md/gromacs/ff/{ff}"
+                )
 
         for line in fileinput.input(f"{md_folder}/scripts/em.mdp", inplace=True):
             if "SYSTEM_OUTPUT" in line:
@@ -10571,14 +11254,19 @@ make sure of reading the target sequences with the function readTargetSequences(
             if "TIME_INTEGRATOR" in line:
                 line = line.replace("TIME_INTEGRATOR", str(production_dt / 1000))
                 if equilibration_dt > 2:
-                    print("WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation.")
+                    print(
+                        "WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation."
+                    )
                     cst = "all-bonds"
                 else:
                     cst = "h-bonds"
             if "BOND_CONSTRAINTS" in line:
                 line = line.replace("BOND_CONSTRAINTS", cst)
             if "NUMBER_OF_STEPS" in line:
-                line = line.replace("NUMBER_OF_STEPS", str(int((sim_time * (1e6 / production_dt)) / frags)))
+                line = line.replace(
+                    "NUMBER_OF_STEPS",
+                    str(int((sim_time * (1e6 / production_dt)) / frags)),
+                )
             if "TEMPERATURE" in line:
                 line = line.replace("TEMPERATURE", str(temperature))
             if "SYSTEM_OUTPUT" in line:
@@ -10589,14 +11277,18 @@ make sure of reading the target sequences with the function readTargetSequences(
             if "TIME_INTEGRATOR" in line:
                 line = line.replace("TIME_INTEGRATOR", str(equilibration_dt / 1000))
                 if equilibration_dt > 2:
-                    print("WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation.")
+                    print(
+                        "WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation."
+                    )
                     cst = "all-bonds"
                 else:
                     cst = "h-bonds"
             if "BOND_CONSTRAINTS" in line:
                 line = line.replace("BOND_CONSTRAINTS", cst)
             if "NUMBER_OF_STEPS" in line:
-                line = line.replace("NUMBER_OF_STEPS", str(int(nvt_time * (1e6 / equilibration_dt))))
+                line = line.replace(
+                    "NUMBER_OF_STEPS", str(int(nvt_time * (1e6 / equilibration_dt)))
+                )
             if "TEMPERATURE" in line:
                 line = line.replace("TEMPERATURE", str(temperature))
             if "SYSTEM_OUTPUT" in line:
@@ -10607,14 +11299,18 @@ make sure of reading the target sequences with the function readTargetSequences(
             if "TIME_INTEGRATOR" in line:
                 line = line.replace("TIME_INTEGRATOR", str(equilibration_dt / 1000))
                 if equilibration_dt > 2:
-                    print("WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation.")
+                    print(
+                        "WARNING: you have selected a time integrator higher than 2 femtoseconds. Constraints have been automatically changed to all bonds. This may affect the accuracy of your simulation."
+                    )
                     cst = "all-bonds"
                 else:
                     cst = "h-bonds"
             if "BOND_CONSTRAINTS" in line:
                 line = line.replace("BOND_CONSTRAINTS", cst)
             if "NUMBER_OF_STEPS" in line:
-                line = line.replace("NUMBER_OF_STEPS", str(int(npt_time * (1e6 / equilibration_dt))))
+                line = line.replace(
+                    "NUMBER_OF_STEPS", str(int(npt_time * (1e6 / equilibration_dt)))
+                )
             if "TEMPERATURE" in line:
                 line = line.replace("TEMPERATURE", str(temperature))
             if "SYSTEM_OUTPUT" in line:
@@ -10636,49 +11332,104 @@ make sure of reading the target sequences with the function readTargetSequences(
                     os.mkdir(f"{md_folder}/output_models/{model}/{i}")
 
             parser = PDB.PDBParser()
-            structure = parser.get_structure("protein", f"{md_folder}/input_models/{model}.pdb")
+            structure = parser.get_structure(
+                "protein", f"{md_folder}/input_models/{model}.pdb"
+            )
 
-            his_pro, ion_residues = _setupModelStructure(structure, ligand_chains, ion_chains)
-            ligand_res = _getLigandParameters(structure, ligand_chains, f"{md_folder}/input_models/{model}", f"{md_folder}/ligand_params", charge=charge) if ligand_chains else shutil.copyfile(f"{md_folder}/input_models/{model}.pdb",f"{md_folder}/input_models/{model}/protein.pdb")
+            his_pro, ion_residues = _setupModelStructure(
+                structure, ligand_chains, ion_chains
+            )
+            ligand_res = (
+                _getLigandParameters(
+                    structure,
+                    ligand_chains,
+                    f"{md_folder}/input_models/{model}",
+                    f"{md_folder}/ligand_params",
+                    charge=charge,
+                )
+                if ligand_chains
+                else shutil.copyfile(
+                    f"{md_folder}/input_models/{model}.pdb",
+                    f"{md_folder}/input_models/{model}/protein.pdb",
+                )
+            )
 
             for i in range(replicas):
 
-                skip_local = os.path.exists(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx") and not overwrite
+                skip_local = (
+                    os.path.exists(
+                        f"{md_folder}/output_models/{model}/{i}/topol/index.ndx"
+                    )
+                    and not overwrite
+                )
                 if not skip_local:
-                    command_local = _generateLocalCommand(command_name, model, i, ligand_chains, ligand_res, ion_residues, ion_chains, md_folder, ff, his_pro)
+                    command_local = _generateLocalCommand(
+                        command_name,
+                        model,
+                        i,
+                        ligand_chains,
+                        ligand_res,
+                        ion_residues,
+                        ion_chains,
+                        md_folder,
+                        ff,
+                        his_pro,
+                    )
                     print(command_local)
-                    #adfasdf
+                    # adfasdf
                     with open("tmp.sh", "w") as f:
                         f.write(command_local)
                     subprocess.run("bash tmp.sh", shell=True)
                     os.remove("tmp.sh")
 
                 group_dics = {}
-                group_dics["complex"] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx")
+                group_dics["complex"] = _readGromacsIndexFile(
+                    f"{md_folder}/output_models/{model}/{i}/topol/index.ndx"
+                )
 
                 if not skip_local:
-                    os.system(f'echo "q"| {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/complex.gro -o {md_folder}/output_models/{model}/{i}/topol/tmp_index.ndx')
-                    group_dics['tmp_index'] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/tmp_index.ndx")
+                    os.system(
+                        f'echo "q"| {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/complex.gro -o {md_folder}/output_models/{model}/{i}/topol/tmp_index.ndx'
+                    )
+                    group_dics["tmp_index"] = _readGromacsIndexFile(
+                        f"{md_folder}/output_models/{model}/{i}/topol/tmp_index.ndx"
+                    )
 
-                    if 'Water' in group_dics['tmp_index']:
-                        reading, crystal_waters_ndx_lines = False, '[ CrystalWaters ]\n'
-                        for line in open(f"{md_folder}/output_models/{model}/{i}/topol/tmp_index.ndx"):
-                            if '[' in line and reading:
+                    if "Water" in group_dics["tmp_index"]:
+                        reading, crystal_waters_ndx_lines = False, "[ CrystalWaters ]\n"
+                        for line in open(
+                            f"{md_folder}/output_models/{model}/{i}/topol/tmp_index.ndx"
+                        ):
+                            if "[" in line and reading:
                                 reading = False
-                            elif '[ Water ]' in line:
+                            elif "[ Water ]" in line:
                                 reading = True
                             elif reading:
                                 crystal_waters_ndx_lines += line
 
-                        with open(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx", 'a') as f:
+                        with open(
+                            f"{md_folder}/output_models/{model}/{i}/topol/index.ndx",
+                            "a",
+                        ) as f:
                             f.write(crystal_waters_ndx_lines)
-                        os.system(f'echo \"{group_dics["complex"]["Water"]} & !{len(group_dics["complex"])}\nq\" | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx')
-                        os.system(f'echo \"del {group_dics["complex"]["SOL"]}\n name {len(group_dics["complex"])} SOL\nq\" | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx')
+                        os.system(
+                            f'echo "{group_dics["complex"]["Water"]} & !{len(group_dics["complex"])}\nq" | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx'
+                        )
+                        os.system(
+                            f'echo "del {group_dics["complex"]["SOL"]}\n name {len(group_dics["complex"])} SOL\nq" | {command_name} make_ndx -f {md_folder}/output_models/{model}/{i}/topol/prot_solv.gro -o {md_folder}/output_models/{model}/{i}/topol/index.ndx -n {md_folder}/output_models/{model}/{i}/topol/index.ndx'
+                        )
 
-                        group_dics['complex'] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx")
+                        group_dics["complex"] = _readGromacsIndexFile(
+                            f"{md_folder}/output_models/{model}/{i}/topol/index.ndx"
+                        )
 
-                sol_group = 'SOL'
-                skip_ions = os.path.exists(f"{md_folder}/output_models/{model}/{i}/topol/prot_ions.gro") and not overwrite
+                sol_group = "SOL"
+                skip_ions = (
+                    os.path.exists(
+                        f"{md_folder}/output_models/{model}/{i}/topol/prot_ions.gro"
+                    )
+                    and not overwrite
+                )
                 if not skip_ions:
                     command_local = f"cd {md_folder}/output_models/{model}/{i}/topol\n"
                     command_local += f"{command_name} grompp -f ../../../../scripts/ions.mdp -c prot_solv.gro -p topol.top -o prot_ions.tpr -maxwarn 1\n"
@@ -10687,9 +11438,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if constantph:
                         command_local += f"{command_name} grompp -f ../../../../scripts/ions.mdp -c prot_ions.gro -p topol.top -o prot_buf.tpr -maxwarn 1\n"
                         command_local += f"echo {group_dics['complex'][sol_group]} | {command_name} genion -s prot_buf.tpr -p topol.top -o prot_buf.gro -np 1 -rmin 1.0 -pname BUF -n index.ndx\n"
-                        file_name = 'prot_buf'
+                        file_name = "prot_buf"
                     else:
-                        file_name = 'prot_ions'
+                        file_name = "prot_ions"
 
                     command_local += f'echo "q"| {command_name} make_ndx -f {file_name}.gro -o index.ndx\n'
 
@@ -10698,12 +11449,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                     subprocess.run("bash tmp.sh", shell=True)
                     os.remove("tmp.sh")
 
-                    group_dics["complex"] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx")
+                    group_dics["complex"] = _readGromacsIndexFile(
+                        f"{md_folder}/output_models/{model}/{i}/topol/index.ndx"
+                    )
 
                 if ligand_chains or ion_residues:
-                    skip_ndx = os.path.exists(f"{md_folder}/output_models/{model}/{i}/topol/posre.itp") and not overwrite
+                    skip_ndx = (
+                        os.path.exists(
+                            f"{md_folder}/output_models/{model}/{i}/topol/posre.itp"
+                        )
+                        and not overwrite
+                    )
                     if not skip_ndx:
-                        command_local = f"cd {md_folder}/output_models/{model}/{i}/topol\n"
+                        command_local = (
+                            f"cd {md_folder}/output_models/{model}/{i}/topol\n"
+                        )
                         lig_selector = ""
                         if ligand_chains:
                             for ligand_name in ligand_res.values():
@@ -10729,24 +11489,32 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         command_local += f'echo -e "{selector_line}q"| {command_name} make_ndx -f {file_name}.gro -o index.ndx\n'
 
-
                         with open("tmp.sh", "w") as f:
                             f.write(command_local)
                         subprocess.run("bash tmp.sh", shell=True)
                         os.remove("tmp.sh")
 
-                        group_dics["complex"] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/index.ndx")
+                        group_dics["complex"] = _readGromacsIndexFile(
+                            f"{md_folder}/output_models/{model}/{i}/topol/index.ndx"
+                        )
 
                         if ligand_chains:
                             for ligand_name in ligand_res.values():
-                                group_dics[ligand_name] = _readGromacsIndexFile(f"{md_folder}/output_models/{model}/{i}/topol/{ligand_name}_index.ndx")
+                                group_dics[ligand_name] = _readGromacsIndexFile(
+                                    f"{md_folder}/output_models/{model}/{i}/topol/{ligand_name}_index.ndx"
+                                )
 
                 command = f"export GMXLIB=$(pwd)/{md_folder}/FF" + "\n"
                 command += f"cd {md_folder}/output_models/{model}/{i}\n"
                 local_path = os.getcwd() + f"/{md_folder}/FF"
                 command += f'sed -i  "s#{local_path}#$GMXLIB#g" topol/topol.top\n'
 
-                skip_em = os.path.exists(f"{md_folder}/output_models/{model}/{i}/em/prot_em.tpr") and not overwrite
+                skip_em = (
+                    os.path.exists(
+                        f"{md_folder}/output_models/{model}/{i}/em/prot_em.tpr"
+                    )
+                    and not overwrite
+                )
                 if not skip_em:
                     command += "mkdir -p em\n"
                     command += "cd em\n"
@@ -10754,12 +11522,19 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += f"{remote_command_name} mdrun -v -deffnm prot_em\n"
                     command += "cd ..\n"
 
-                skip_nvt = os.path.exists(f"{md_folder}/output_models/{model}/{i}/nvt/prot_nvt.tpr") and not overwrite
+                skip_nvt = (
+                    os.path.exists(
+                        f"{md_folder}/output_models/{model}/{i}/nvt/prot_nvt.tpr"
+                    )
+                    and not overwrite
+                )
                 if not skip_nvt:
                     command += "mkdir -p nvt\n"
                     command += "cd nvt\n"
                     command += "cp -r ../../../../scripts/nvt.mdp .\n"
-                    tc_grps1, tc_grps2 = ["Protein"], "SOL_Ion" if ion_residues else "Water_and_ions"
+                    tc_grps1, tc_grps2 = ["Protein"], (
+                        "SOL_Ion" if ion_residues else "Water_and_ions"
+                    )
                     if ion_residues:
                         for r in ion_residues:
                             tc_grps1.append(f"r_{r}")
@@ -10770,18 +11545,29 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if ligand_chains:
                         for ligand_name in ligand_res.values():
                             command += f"echo {group_dics[ligand_name]['System_&_!H*']} | {remote_command_name} genrestr -f ../topol/{ligand_name}.acpype/{ligand_name}_GMX.gro -n ../topol/{ligand_name}_index.ndx -o ../topol/{ligand_name}.acpype/posre_{ligand_name}.itp -fc 1000 1000 1000\n"
-                    sel = group_dics['complex']["Protein"] if not ion_residues else f"Protein_{'_'.join([f'r_{r}' for r in ion_residues])}"
+                    sel = (
+                        group_dics["complex"]["Protein"]
+                        if not ion_residues
+                        else f"Protein_{'_'.join([f'r_{r}' for r in ion_residues])}"
+                    )
                     command += f"echo {sel} | {remote_command_name} genrestr -f ../topol/{file_name}.gro -o ../topol/posre.itp -fc 1000 1000 1000 -n ../topol/index.ndx\n"
                     command += f"{remote_command_name} grompp -f nvt.mdp -c ../em/prot_em.gro -p ../topol/topol.top -o prot_nvt.tpr -r ../em/prot_em.gro -n ../topol/index.ndx\n"
                     command += f"{remote_command_name} mdrun -v -deffnm prot_nvt\n"
                     command += "cd ..\n"
 
                 FClist = ("550", "300", "170", "90", "50", "30", "15", "10", "5")
-                skip_npt = os.path.exists(f"{md_folder}/output_models/{model}/{i}/npt/prot_npt_{len(FClist)}.tpr") and not overwrite
+                skip_npt = (
+                    os.path.exists(
+                        f"{md_folder}/output_models/{model}/{i}/npt/prot_npt_{len(FClist)}.tpr"
+                    )
+                    and not overwrite
+                )
                 if not skip_npt:
                     command += "mkdir -p npt\n"
                     command += "cd npt\n"
-                    tc_grps1, tc_grps2 = ["Protein"], "SOL_Ion" if ion_residues else "Water_and_ions"
+                    tc_grps1, tc_grps2 = ["Protein"], (
+                        "SOL_Ion" if ion_residues else "Water_and_ions"
+                    )
                     if ion_residues:
                         for r in ion_residues:
                             tc_grps1.append(f"r_{r}")
@@ -10790,9 +11576,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                         tc_grps1.extend(ligand_res.values())
                     command += "cp -r ../../../../scripts/npt.mdp .\n"
                     command += f"sed -i  '/tc-grps/c\\tc-grps = {'_'.join(tc_grps1)} {tc_grps2}' npt.mdp\n"
-                    sel = group_dics['complex']["Protein"] if not ion_residues else f"Protein_{'_'.join([f'r_{r}' for r in ion_residues])}"
+                    sel = (
+                        group_dics["complex"]["Protein"]
+                        if not ion_residues
+                        else f"Protein_{'_'.join([f'r_{r}' for r in ion_residues])}"
+                    )
                     for j in range(len(FClist) + 1):
-                        if not os.path.exists(f"{md_folder}/output_models/{model}/{i}/npt/prot_npt_{j + 1}.tpr") or overwrite:
+                        if (
+                            not os.path.exists(
+                                f"{md_folder}/output_models/{model}/{i}/npt/prot_npt_{j + 1}.tpr"
+                            )
+                            or overwrite
+                        ):
                             if j == 0:
                                 command += f"{remote_command_name} grompp -f npt.mdp -c ../nvt/prot_nvt.gro -t ../nvt/prot_nvt.cpt -p ../topol/topol.top -o prot_npt_1.tpr -r ../nvt/prot_nvt.gro -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_npt_{j + 1}\n"
@@ -10805,11 +11600,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_npt_{j + 1}\n"
                     command += "cd ..\n"
 
-                skip_md = os.path.exists(f"{md_folder}/output_models/{model}/{i}/md/prot_md_{frags}.xtc") and not overwrite
+                skip_md = (
+                    os.path.exists(
+                        f"{md_folder}/output_models/{model}/{i}/md/prot_md_{frags}.xtc"
+                    )
+                    and not overwrite
+                )
                 if not skip_md:
                     command += "mkdir -p md\n"
                     command += "cd md\n"
-                    tc_grps1, tc_grps2 = ["Protein"], "SOL_Ion" if ion_residues else "Water_and_ions"
+                    tc_grps1, tc_grps2 = ["Protein"], (
+                        "SOL_Ion" if ion_residues else "Water_and_ions"
+                    )
                     if ion_residues:
                         for r in ion_residues:
                             tc_grps1.append(f"r_{r}")
@@ -10819,7 +11621,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                     command += "cp -r ../../../../scripts/md.mdp .\n"
                     command += f"sed -i  '/tc-grps/c\\tc-grps = {'_'.join(tc_grps1)} {tc_grps2}' md.mdp\n"
                     for j in range(1, frags + 1):
-                        if not os.path.exists(f"{md_folder}/output_models/{model}/{i}/md/prot_md_{j}.xtc") or overwrite:
+                        if (
+                            not os.path.exists(
+                                f"{md_folder}/output_models/{model}/{i}/md/prot_md_{j}.xtc"
+                            )
+                            or overwrite
+                        ):
                             if j == 1:
                                 command += f"{remote_command_name} grompp -f md.mdp -c ../npt/prot_npt_{len(FClist) + 1}.gro  -t ../npt/prot_npt_{len(FClist) + 1}.cpt -p ../topol/topol.top -o prot_md_{j}.tpr -n ../topol/index.ndx\n"
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_md_{j}\n"
@@ -10828,7 +11635,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 command += f"{remote_command_name} mdrun -v -deffnm prot_md_{j}\n"
                     command += "cd ../../../..\n"
                 else:
-                    command = ''
+                    command = ""
 
                 if command.strip():
                     jobs.append(command)
@@ -10921,166 +11728,37 @@ make sure of reading the target sequences with the function readTargetSequences(
                         + "/npt/prot_npt_10_no_water.gro"
                     )
 
-    def setUpOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
-                               add_bonds=None, skip_ligands=None, ligand_only=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
-                               extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
-                               non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
-                               nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
-                               restraint_constant=5.0, chunk_size=100.0,
-                               equilibration_data_report_time=1.0, equilibration_dcd_report_time=0.0, temperature=300.0,
-                               collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
-                               extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
-                               solvate=True,
-                               verbose=False,
-                               strict_ligand_atom_check=True,
-                               ligand_parameters_source=None,
-                               parameterization_method='ambertools',
-                               parameterization_options=None,
-                               only_models=None, skip_models=None,
-                               ligand_smiles=None,
-                               ligand_sdf_files=None,
-                               ligand_xml_files=None,
-                               skip_ligand_charge_computation=False,
-                               export_per_residue_ffxml=False,
-                               ):
+    def setUpOpenMMPreparation(
+        self,
+        job_folder,
+        replicas,
+        ligand_charges=None,
+        residue_names=None,
+        ff="amber14",
+        add_bonds=None,
+        skip_ligands=None,
+        metal_ligand=None,
+        metal_parameters=None,
+        skip_replicas=None,
+        extra_frcmod=None,
+        extra_mol2=None,
+        non_standard_residues=None,
+        add_hydrogens=True,
+        extra_force_field=None,
+        add_counterionsRand=False,
+        skip_preparation=False,
+        ligand_parameters_source=None,
+        only_models=None,
+        skip_models=None,
+    ):
         """
-        Set up OpenMM simulations for multiple models with customizable ligand charges, residue names, and force field options.
-        Includes support for multiple replicas.
+        Prepare OpenMM systems for multiple models: ligand parametrization, solvation,
+        and AMBER prmtop/inpcrd generation (or reuse existing ones).
 
-        Parameters:
-        ...
-        - nvt_temp_scaling_steps (int, optional): Temperature scaling segments during NVT equilibration.
-          Must be at least 1 and cannot exceed the number of MD steps derived from `nvt_time` and `time_step`.
-        - npt_restraint_scaling_steps (int, optional): Restraint scaling segments during NPT equilibration.
-          Must be at least 1 and cannot exceed the number of MD steps derived from `npt_time` and `time_step`.
-        - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
-          but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
-        - solvate (bool, optional): When False, request the backends to skip solvent/ion addition (defaults to True).
-        - verbose (bool, optional): When True, emit detailed progress information from the parameterization backends.
-        - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
-          same atom-name set as the ligand extracted from the PDB; mismatches raise an error. Disable to downgrade to warnings.
-        - ligand_only (bool or str or list of str, optional): If set, skip protein + ligand simulations and instead
-          prepare solvated ligand-only systems. Use True to process every ligand detected in each model, a single
-          residue name to limit the run to that ligand, or a list of residue names for multiple ligands.
-        - ligand_parameters_source (str, optional): Path to a folder containing per-ligand parameter packs named
-          like `<RESNAME>_parameters` (e.g., `NAD_parameters`). You can pass either the folder that directly
-          contains these packs, or a parent folder with a `parameters/` subfolder. Only ligands present in the
-          system are considered; for those found, the full pack is copied into the job `parameters/` and
-          parameterization for that ligand is skipped via `metal_parameters`.
-        - parameterization_method (str, optional): Name of the parameterization backend to use. Defaults to
-          ``'ambertools'`` which preserves the existing workflow.
-        - parameterization_options (dict, optional): Backend-specific options forwarded to the selected
-          parameterization backend.
-        - ligand_smiles (dict, optional): Mapping from ligand residue name to SMILES strings. Required by the
-          OpenFF backend to build ligand templates; ignored by AmberTools.
-        - ligand_sdf_files (dict, optional): Mapping from residue name to SDF file paths or option dictionaries
-          (with optional ``index`` and ``charge_method`` keys). When provided, the OpenFF backend uses the SDF
-          connectivity/chemistry while retaining ligand coordinates from the model PDB.
-        - ligand_xml_files (dict, optional): Mapping from residue name to FFXML files containing templates to add
-          to the OpenFF forcefield (e.g., {'HEM': 'path/HEM.ffxml'}). Ignored by the AmberTools backend.
-        - only_models (str or list of str, optional): If provided, restrict setup to these model names only.
-        - skip_models (list of str, optional): If provided, skip setup for these models.
-        - skip_ligand_charge_computation (bool, optional): If True, the parameterization backends reuse
-          existing ligand charges (OpenFF expects cached ``<RES>.offmol.json`` templates, AmberTools relies on
-          existing MOL2/PREPI files). Missing caches trigger debugging placeholders for OpenFF (zero charges with
-          a warning) and hard errors for AmberTools to guard realistic runs.
-        - export_per_residue_ffxml (bool or str or list of str, optional): If True, export FFXML templates for all
-          ligands prepared by the OpenFF backend into the parameters folder; if a string or list, export only for the
-          specified residue names. The AmberTools backend will also export when requested, using available mol2/frcmod
-          inputs for the selected residues.
+        This function is split out so it can be reused by different simulation
+        workflows (e.g., classical MD, absolute binding free energy).
         """
-
-        openmm_setup = _require_openmm_support("proteinModels.setUpOpenMMSimulations")
-        openmm_md_cls = getattr(openmm_setup, "openmm_md", None)
-        if openmm_md_cls is None:
-            raise ImportError(
-                "OpenMM support is enabled but the 'openmm_md' class could not be located. "
-                "Reinstall prepare_proteins with its OpenMM extras."
-            )
-
         import os, shutil
-
-        if ligand_smiles is not None:
-            if not isinstance(ligand_smiles, dict):
-                raise TypeError("ligand_smiles must be a dict mapping residue name to SMILES.")
-            normalized_smiles = {}
-            for key, value in ligand_smiles.items():
-                if not isinstance(key, str):
-                    raise TypeError("ligand_smiles keys must be strings.")
-                if not isinstance(value, str):
-                    raise TypeError(f"SMILES for residue {key!r} must be a string.")
-                residue_name = key.strip().upper()
-                smiles_value = value.strip()
-                if not residue_name or not smiles_value:
-                    raise ValueError("ligand_smiles entries must not be empty.")
-                normalized_smiles[residue_name] = smiles_value
-            ligand_smiles = normalized_smiles
-
-        if ligand_sdf_files is not None:
-            if not isinstance(ligand_sdf_files, dict):
-                raise TypeError("ligand_sdf_files must be a dict mapping residue name to SDF definitions.")
-            normalized_sdfs = {}
-            for key, value in ligand_sdf_files.items():
-                if not isinstance(key, str):
-                    raise TypeError("ligand_sdf_files keys must be strings.")
-                residue_name = key.strip().upper()
-                if not residue_name:
-                    raise ValueError("ligand_sdf_files entries must not have empty residue names.")
-                if isinstance(value, str):
-                    normalized_sdfs[residue_name] = {"path": value}
-                elif isinstance(value, dict):
-                    if "path" not in value:
-                        raise ValueError(f"ligand_sdf_files entry for {residue_name!r} is missing a 'path'.")
-                    entry = {"path": value["path"]}
-                    if "index" in value:
-                        entry["index"] = value["index"]
-                    if "charge_method" in value:
-                        entry["charge_method"] = value["charge_method"]
-                    normalized_sdfs[residue_name] = entry
-                else:
-                    raise TypeError(
-                        "ligand_sdf_files values must be path strings or dictionaries with options."
-                    )
-            ligand_sdf_files = normalized_sdfs
-        if ligand_xml_files is not None:
-            if not isinstance(ligand_xml_files, dict):
-                raise TypeError("ligand_xml_files must be a dict mapping residue name to FFXML paths.")
-            normalized_xml = {}
-            for key, value in ligand_xml_files.items():
-                if not isinstance(key, str):
-                    raise TypeError("ligand_xml_files keys must be residue name strings.")
-                resname = key.strip().upper()
-                if not resname:
-                    continue
-                if not isinstance(value, (str, os.PathLike)):
-                    raise TypeError(f"ligand_xml_files[{key!r}] must be a path string.")
-                path_str = os.fspath(value)
-                normalized_xml[resname] = path_str
-            ligand_xml_files = normalized_xml
-
-        # Normalize export flag (OpenFF-only)
-        if isinstance(export_per_residue_ffxml, str):
-            export_per_residue_ffxml = [export_per_residue_ffxml]
-        elif isinstance(export_per_residue_ffxml, (list, tuple, set)):
-            export_per_residue_ffxml = [str(v) for v in export_per_residue_ffxml]
-
-        def _select_backend_parameters_folder(base_folder: str, backend_label: str) -> str:
-            if not backend_label:
-                return base_folder
-            backend_folder = os.path.join(base_folder, backend_label)
-            if backend_label == "ambertools":
-                try:
-                    entries = os.listdir(base_folder)
-                except OSError:
-                    entries = []
-                has_legacy_packs = any(
-                    entry.endswith('_parameters') and os.path.isdir(os.path.join(base_folder, entry))
-                    for entry in entries
-                )
-                if has_legacy_packs:
-                    return base_folder
-            os.makedirs(backend_folder, exist_ok=True)
-            return backend_folder
 
         # Normalize model filters
         if isinstance(only_models, str):
@@ -11089,12 +11767,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             skip_models = []
 
         def _replica_has_inputs(replica_folder: str) -> bool:
-            input_dir = os.path.join(replica_folder, 'input_files')
+            input_dir = os.path.join(replica_folder, "input_files")
             if not os.path.isdir(input_dir):
                 return False
             files = os.listdir(input_dir)
-            has_prmtop = any(f.endswith('.prmtop') for f in files)
-            has_inpcrd = any(f.endswith('.inpcrd') or f.endswith('.rst7') for f in files)
+            has_prmtop = any(f.endswith(".prmtop") for f in files)
+            has_inpcrd = any(
+                f.endswith(".inpcrd") or f.endswith(".rst7") for f in files
+            )
             return has_prmtop and has_inpcrd
 
         def _replicas_needed(model_folder: str, replicas: int, skip_replicas):
@@ -11111,23 +11791,288 @@ make sure of reading the target sequences with the function readTargetSequences(
                     needed.append(replica)
             return needed, prepared
 
-        def setUpJobs(job_folder, openmm_md, script_file, parameterization_result=None, simulation_time=simulation_time,
-                      dcd_report_time=dcd_report_time, data_report_time=data_report_time,
-                      nvt_time=nvt_time, npt_time=npt_time, nvt_temp_scaling_steps=nvt_temp_scaling_steps,
-                      npt_restraint_scaling_steps=npt_restraint_scaling_steps,
-                      restraint_constant=restraint_constant, chunk_size=chunk_size,
-                      equilibration_data_report_time=equilibration_data_report_time,
-                      equilibration_dcd_report_time=equilibration_dcd_report_time, temperature=temperature,
-                      collision_rate=collision_rate, time_step=time_step, cuda=cuda,
-                      fixed_seed=fixed_seed, add_counterionsRand=add_counterionsRand):
+        # Create the base job folder
+        if not os.path.exists(job_folder):
+            os.mkdir(job_folder)
+
+        # Store per-model OpenMM objects
+        self.openmm_md = {}
+
+        ligand_parameters_folder = os.path.join(job_folder, "parameters")
+        if not os.path.exists(ligand_parameters_folder):
+            os.mkdir(ligand_parameters_folder)
+
+        if ligand_parameters_source is not None and not os.path.exists(
+            ligand_parameters_source
+        ):
+            raise ValueError(
+                f"ligand_parameters_source not found: {ligand_parameters_source}"
+            )
+
+        # Resolve the actual source directory that contains `<RES>_parameters` packs.
+        def _resolve_ligand_pack_root(path):
+            if path is None:
+                return None
+            # Prefer a direct folder with *_parameters entries
+            try:
+                entries = os.listdir(path)
+            except Exception:
+                return None
+            has_packs = any(
+                name.endswith("_parameters") and os.path.isdir(os.path.join(path, name))
+                for name in entries
+            )
+            if has_packs:
+                return path
+            # Otherwise, look for a common `parameters/` subfolder
+            sub = os.path.join(path, "parameters")
+            if os.path.isdir(sub):
+                try:
+                    sub_entries = os.listdir(sub)
+                except Exception:
+                    return None
+                has_packs = any(
+                    name.endswith("_parameters")
+                    and os.path.isdir(os.path.join(sub, name))
+                    for name in sub_entries
+                )
+                if has_packs:
+                    return sub
+            return None
+
+        resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source)
+
+        # Per-model preparation: create/open OpenMM systems and ensure prmtop/inpcrd exist
+        for model in self:
+            # Filter models by only_models / skip_models
+            if only_models and model not in only_models:
+                continue
+            if model in skip_models:
+                continue
+
+            model_folder = os.path.join(job_folder, model)
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            needed_replicas, prepared_replicas = _replicas_needed(
+                model_folder, replicas, skip_replicas
+            )
+
+            # Set up OpenMM object. Keep lightweight setup even when skipping preparation
+            self.openmm_md[model] = prepare_proteins.MD.openmm_md(
+                self.models_paths[model]
+            )
+            if not skip_preparation:
+                self.openmm_md[model].setUpFF(ff)
+
+                if add_hydrogens:
+                    variants = self.openmm_md[model].getProtonationStates()
+                    self.openmm_md[model].removeHydrogens()
+                    self.openmm_md[model].addHydrogens(variants=variants)
+
+            # Try to reuse already prepared system inputs if available, avoiding recomputation.
+            base_name = getattr(self.openmm_md[model], "pdb_name", "input")
+            # 1) Prefer system-level parameters in the job parameters folder
+            job_prmtop = os.path.join(ligand_parameters_folder, f"{base_name}.prmtop")
+            job_inpcrd = None
+            for ext in (".inpcrd", ".rst7"):
+                candidate = os.path.join(ligand_parameters_folder, f"{base_name}{ext}")
+                if os.path.exists(candidate):
+                    job_inpcrd = candidate
+                    break
+            if os.path.exists(job_prmtop) and job_inpcrd:
+                self.openmm_md[model].prmtop_file = job_prmtop
+                self.openmm_md[model].inpcrd_file = job_inpcrd
+
+            # 2) Otherwise, if some replicas are already prepared, point to their inputs
+            if not getattr(self.openmm_md[model], "prmtop_file", None) or not getattr(
+                self.openmm_md[model], "inpcrd_file", None
+            ):
+                if prepared_replicas:
+                    zfill_pre = max(len(str(replicas)), 2)
+                    first_prepared = prepared_replicas[0]
+                    rep_name = f"replica_{str(first_prepared).zfill(zfill_pre)}"
+                    rep_input = os.path.join(model_folder, rep_name, "input_files")
+                    if os.path.isdir(rep_input):
+                        prmtops = [
+                            f for f in os.listdir(rep_input) if f.endswith(".prmtop")
+                        ]
+                        inpcrds = [
+                            f
+                            for f in os.listdir(rep_input)
+                            if f.endswith(".inpcrd") or f.endswith(".rst7")
+                        ]
+                        if prmtops and inpcrds:
+                            self.openmm_md[model].prmtop_file = os.path.join(
+                                rep_input, prmtops[0]
+                            )
+                            self.openmm_md[model].inpcrd_file = os.path.join(
+                                rep_input, inpcrds[0]
+                            )
+
+            # Only generate parameters when preparation is not skipped and replicas need inputs
+            # and no reusable inputs were found from parameters/ or an existing replica.
+            has_prmtop = bool(getattr(self.openmm_md[model], "prmtop_file", None))
+            has_inpcrd = bool(getattr(self.openmm_md[model], "inpcrd_file", None))
+            if (
+                (not skip_preparation)
+                and (len(needed_replicas) > 0)
+                and not (has_prmtop and has_inpcrd)
+            ):
+                # Use external ligand parameter packs if provided (either `metal_parameters`
+                # or a resolved `ligand_parameters_source`). `parameterizePDBLigands` will
+                # detect `<RES>_parameters` subfolders from `metal_parameters` and skip any
+                # re-parameterization for those residues, only copying the packs for ligands
+                # actually present in the system.
+                external_params = (
+                    metal_parameters if metal_parameters else resolved_ligand_pack_root
+                )
+                _ = self.openmm_md[model].parameterizePDBLigands(
+                    ligand_parameters_folder,
+                    charges=ligand_charges,
+                    metal_ligand=metal_ligand,
+                    add_bonds=add_bonds.get(model) if add_bonds else None,
+                    skip_ligands=skip_ligands,
+                    overwrite=False,
+                    metal_parameters=external_params,
+                    extra_frcmod=extra_frcmod,
+                    extra_mol2=extra_mol2,
+                    cpus=20,
+                    return_qm_jobs=True,
+                    extra_force_field=extra_force_field,
+                    force_field="ff14SB",
+                    residue_names=residue_names.get(model) if residue_names else None,
+                    add_counterions=True,
+                    add_counterionsRand=add_counterionsRand,
+                    save_amber_pdb=True,
+                    solvate=True,
+                    regenerate_amber_files=True,
+                    non_standard_residues=non_standard_residues,
+                )
+
+        # No explicit return needed: state is stored in self.openmm_md and files on disk.
+        return
+
+    def setUpOpenMMSimulations(
+        self,
+        job_folder,
+        replicas,
+        simulation_time,
+        ligand_charges=None,
+        residue_names=None,
+        ff="amber14",
+        add_bonds=None,
+        skip_ligands=None,
+        metal_ligand=None,
+        metal_parameters=None,
+        skip_replicas=None,
+        extra_frcmod=None,
+        extra_mol2=None,
+        dcd_report_time=100.0,
+        data_report_time=100.0,
+        non_standard_residues=None,
+        add_hydrogens=True,
+        extra_force_field=None,
+        nvt_time=0.1,
+        npt_time=0.2,
+        nvt_temp_scaling_steps=50,
+        npt_restraint_scaling_steps=50,
+        restraint_constant=100.0,
+        chunk_size=100.0,
+        equilibration_report_time=1.0,
+        temperature=300.0,
+        collision_rate=1.0,
+        time_step=0.002,
+        cuda=False,
+        fixed_seed=None,
+        script_file=None,
+        extra_script_options=None,
+        add_counterionsRand=False,
+        skip_preparation=False,
+        ligand_parameters_source=None,
+        only_models=None,
+        skip_models=None,
+    ):
+        """
+        Set up OpenMM simulations for multiple models with customizable ligand charges,
+        residue names, and force field options. Includes support for multiple replicas.
+
+        This version first calls `setUpOpenMMPreparation` to perform system preparation
+        (ligand parametrization, solvation, AMBER prmtop/inpcrd generation) and then
+        configures per-replica simulation jobs.
+        """
+        import os, shutil
+
+        # Normalize model filters
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        if skip_models is None:
+            skip_models = []
+
+        # First: prepare systems (PDB → parameterized, solvated AMBER systems)
+        self.setUpOpenMMPreparation(
+            job_folder=job_folder,
+            replicas=replicas,
+            ligand_charges=ligand_charges,
+            residue_names=residue_names,
+            ff=ff,
+            add_bonds=add_bonds,
+            skip_ligands=skip_ligands,
+            metal_ligand=metal_ligand,
+            metal_parameters=metal_parameters,
+            skip_replicas=skip_replicas,
+            extra_frcmod=extra_frcmod,
+            extra_mol2=extra_mol2,
+            non_standard_residues=non_standard_residues,
+            add_hydrogens=add_hydrogens,
+            extra_force_field=extra_force_field,
+            add_counterionsRand=add_counterionsRand,
+            skip_preparation=skip_preparation,
+            ligand_parameters_source=ligand_parameters_source,
+            only_models=only_models,
+            skip_models=skip_models,
+        )
+
+        # Script folder and simulation script setup
+        script_folder = os.path.join(job_folder, "scripts")
+        if not os.path.exists(script_folder):
+            os.mkdir(script_folder)
+
+        if not script_file:
+            _copyScriptFile(
+                script_folder,
+                "openmm_simulation.py",
+                subfolder="md/openmm",
+                hidden=False,
+            )
+            script_file = script_folder + "/openmm_simulation.py"
+
+        def setUpJobs(
+            job_folder,
+            openmm_md,
+            script_file,
+            simulation_time=simulation_time,
+            dcd_report_time=dcd_report_time,
+            data_report_time=data_report_time,
+            nvt_time=nvt_time,
+            npt_time=npt_time,
+            nvt_temp_scaling_steps=nvt_temp_scaling_steps,
+            npt_restraint_scaling_steps=npt_restraint_scaling_steps,
+            restraint_constant=restraint_constant,
+            chunk_size=chunk_size,
+            equilibration_report_time=equilibration_report_time,
+            temperature=temperature,
+            collision_rate=collision_rate,
+            time_step=time_step,
+            cuda=cuda,
+            fixed_seed=fixed_seed,
+            add_counterionsRand=add_counterionsRand,
+        ):
             """Set up simulation jobs for a single replica.
 
             This prepares the replica folder with an `input_files/` directory containing
-            the required simulation inputs. For the current AMBER workflow, this means
-            copying the `.prmtop` and `.inpcrd`/`.rst7` files and returning a list with
-            the command to run the OpenMM simulation script.
-            If a ``parameterization_result`` is provided, its metadata determines which
-            files are copied into the replica folder.
+            the required AMBER inputs (`.prmtop` and `.inpcrd`/`.rst7`) and returns a list
+            with the command to run the OpenMM simulation script.
 
             Returns
             -------
@@ -11139,29 +12084,16 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Ensure replica folder and inputs folder exist
             os.makedirs(job_folder, exist_ok=True)
-            input_dir = os.path.join(job_folder, 'input_files')
+            input_dir = os.path.join(job_folder, "input_files")
             os.makedirs(input_dir, exist_ok=True)
 
             # Base filename for input files (model basename + extension)
-            base_name = getattr(openmm_md, 'pdb_name', 'input')
-            resolved_parameterization = parameterization_result or getattr(openmm_md, 'parameterization_result', None)
-            input_format = None
-            if resolved_parameterization is not None:
-                input_format = resolved_parameterization.input_format
-                prmtop_src = resolved_parameterization.prmtop_path or getattr(openmm_md, 'prmtop_file', None)
-                inpcrd_src = resolved_parameterization.coordinates_path or getattr(openmm_md, 'inpcrd_file', None)
-                openmm_md.parameterization_result = resolved_parameterization
-            else:
-                prmtop_src = getattr(openmm_md, 'prmtop_file', None)
-                inpcrd_src = getattr(openmm_md, 'inpcrd_file', None)
+            base_name = getattr(openmm_md, "pdb_name", "input")
+            prmtop_src = getattr(openmm_md, "prmtop_file", None)
+            inpcrd_src = getattr(openmm_md, "inpcrd_file", None)
 
-            if input_format and input_format != 'amber':
-                raise NotImplementedError(
-                    f"Parameterization format '{input_format}' is not supported by the default OpenMM runner."
-                )
-
-            prmtop_ext = os.path.splitext(prmtop_src)[1] if prmtop_src else '.prmtop'
-            inpcrd_ext = os.path.splitext(inpcrd_src)[1] if inpcrd_src else '.inpcrd'
+            prmtop_ext = os.path.splitext(prmtop_src)[1] if prmtop_src else ".prmtop"
+            inpcrd_ext = os.path.splitext(inpcrd_src)[1] if inpcrd_src else ".inpcrd"
 
             prmtop_name = f"{base_name}{prmtop_ext}"
             inpcrd_name = f"{base_name}{inpcrd_ext}"
@@ -11170,9 +12102,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             inpcrd_path = os.path.join(input_dir, inpcrd_name)
 
             # Copy source files into input directory using the model's basename
-            if prmtop_src and os.path.exists(prmtop_src) and not os.path.exists(prmtop_path):
+            if (
+                prmtop_src
+                and os.path.exists(prmtop_src)
+                and not os.path.exists(prmtop_path)
+            ):
                 shutil.copyfile(prmtop_src, prmtop_path)
-            if inpcrd_src and os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_path):
+            if (
+                inpcrd_src
+                and os.path.exists(inpcrd_src)
+                and not os.path.exists(inpcrd_path)
+            ):
                 shutil.copyfile(inpcrd_src, inpcrd_path)
 
             # Build the command regardless; execution-time checks will fail fast if inputs are missing
@@ -11201,498 +12141,34 @@ make sure of reading the target sequences with the function readTargetSequences(
                 + f"--nvt_temp_scaling_steps {nvt_temp_scaling_steps} "
                 + f"--npt_restraint_scaling_steps {npt_restraint_scaling_steps} "
                 + f"--restraint_constant {restraint_constant} "
-                + f"--equilibration_data_report_time {equilibration_data_report_time} "
-                + f"--equilibration_dcd_report_time {equilibration_dcd_report_time}"
+                + f"--equilibration_report_time {equilibration_report_time}"
             )
             # Always provide a seed for the simulation. Use the given fixed seed
             # when supplied; otherwise generate a random one so the OpenMM
             # script, which requires the flag, always receives a value.
-            seed = int(fixed_seed) if fixed_seed is not None else int(np.random.randint(0, 2**31 - 1))
+            seed = (
+                int(fixed_seed)
+                if fixed_seed is not None
+                else int(np.random.randint(0, 2**31 - 1))
+            )
             cmd[-1] += f" --seed {seed}"
-            jobs.append("\n".join(cmd) + "\n")
+            jobs.append("\n".join(cmd))
 
             return jobs
 
-        # Create the base job folder
-        if not os.path.exists(job_folder):
-            os.mkdir(job_folder)
-
-        self.openmm_md = _OpenMMSimulationRegistry()
-
-        ligand_parameters_folder = os.path.join(job_folder, 'parameters')
-        os.makedirs(ligand_parameters_folder, exist_ok=True)
-
-        if ligand_parameters_source is not None and not os.path.exists(ligand_parameters_source):
-            raise ValueError(f"ligand_parameters_source not found: {ligand_parameters_source}")
-
-        # Resolve the actual source directory that contains `<RES>_parameters` packs.
-        def _resolve_ligand_pack_root(path, backend_label=None):
-            if path is None:
-                return None
-            candidate_paths = []
-            if backend_label:
-                candidate_paths.append(os.path.join(path, backend_label))
-            candidate_paths.append(path)
-            for candidate in candidate_paths:
-                try:
-                    entries = os.listdir(candidate)
-                except Exception:
-                    entries = []
-                has_packs = any(
-                    name.endswith('_parameters') and os.path.isdir(os.path.join(candidate, name)) for name in entries
-                )
-                if has_packs:
-                    return candidate
-                sub = os.path.join(candidate, 'parameters')
-                if not os.path.isdir(sub):
-                    continue
-                try:
-                    sub_entries = os.listdir(sub)
-                except Exception:
-                    continue
-                has_packs = any(
-                    name.endswith('_parameters') and os.path.isdir(os.path.join(sub, name)) for name in sub_entries
-                )
-                if has_packs:
-                    return sub
-            return None
-        resolved_ligand_pack_root = None
-        backend_options = dict(parameterization_options) if parameterization_options else {}
-        if ligand_smiles:
-            backend_options.setdefault("ligand_smiles", ligand_smiles)
-        if ligand_sdf_files:
-            backend_options.setdefault("ligand_sdf_files", ligand_sdf_files)
-        if skip_ligand_charge_computation:
-            backend_options.setdefault("skip_ligand_charge_computation", True)
-        backend_options.setdefault("solvate", bool(solvate))
-        if "verbose" not in backend_options:
-            backend_options["verbose"] = bool(verbose)
-        backend_name_lower = str(parameterization_method).lower()
-        if backend_name_lower == "openff":
-            if ligand_xml_files:
-                backend_options.setdefault("ligand_xml_files", ligand_xml_files)
-            if export_per_residue_ffxml:
-                backend_options.setdefault("export_per_residue_ffxml", export_per_residue_ffxml)
-        elif backend_name_lower == "ambertools":
-            if ligand_xml_files:
-                backend_options.setdefault("ligand_xml_files", ligand_xml_files)
-        backend = get_backend(parameterization_method, **backend_options)
-        backend_label = getattr(backend, "name", str(parameterization_method)).lower()
-        ligand_parameters_folder = _select_backend_parameters_folder(ligand_parameters_folder, backend_label)
-        resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source, backend_label)
-
-        script_folder = os.path.join(job_folder, 'scripts')
-        if not os.path.exists(script_folder):
-            os.mkdir(script_folder)
-
-        if not script_file:
-            _copyScriptFile(script_folder, "openmm_simulation.py", subfolder='md/openmm', hidden=False)
-            script_file = script_folder + '/openmm_simulation.py'
-
-        aa3_residues = set(openmm_setup.aa3)
-        ALL_LIGANDS = "__ALL__"
-
-        def _normalize_ligand_only_option(option):
-            if option in (None, False):
-                return None
-            if option is True:
-                return ALL_LIGANDS
-            if isinstance(option, str):
-                value = option.strip()
-                if not value:
-                    return None
-                if value.lower() == "all":
-                    return ALL_LIGANDS
-                return {value.upper()}
-            if isinstance(option, (list, tuple, set)):
-                normalized = {str(item).strip().upper() for item in option if str(item).strip()}
-                if not normalized:
-                    return None
-                if "ALL" in normalized:
-                    return ALL_LIGANDS
-                return normalized
-            raise TypeError("ligand_only must be True, False, a string, or an iterable of strings.")
-
-        ligand_only_selector = _normalize_ligand_only_option(ligand_only)
-        ligand_only_active = ligand_only_selector is not None
-
-        skip_ligands_upper = set(DEFAULT_PARAMETERIZATION_SKIP_RESIDUES)
-        if skip_ligands:
-            if isinstance(skip_ligands, str):
-                skip_ligands_upper.add(skip_ligands.strip().upper())
-            else:
-                skip_ligands_upper.update({str(item).strip().upper() for item in skip_ligands})
-        effective_skip_ligands = sorted(skip_ligands_upper) if skip_ligands_upper else None
-
-        def _detect_model_ligands(model_name):
-            structure = self.structures.get(model_name)
-            if structure is None:
-                return []
-            ligands = []
-            for residue in structure.get_residues():
-                resname = getattr(residue, 'resname', '').strip().upper()
-                if not resname or resname in ('HOH', 'WAT'):
-                    continue
-                if resname in aa3_residues or resname in skip_ligands_upper:
-                    continue
-                if resname not in ligands:
-                    ligands.append(resname)
-            return ligands
-
-        def _collect_ligand_packs(parameters_folder):
-            packs = {}
-            if not os.path.isdir(parameters_folder):
-                return packs
-            for entry in os.listdir(parameters_folder):
-                if entry.endswith('_parameters'):
-                    residue = entry[: -len('_parameters')]
-                    packs[residue.upper()] = os.path.join(parameters_folder, entry)
-            return packs
-
-        def _posix_path(path):
-            return Path(path).expanduser().absolute().as_posix()
-
-        def _execute_with_logging(command, model_key=None):
-            entry = None
-            if model_key is not None:
-                md_obj = self.openmm_md.get(model_key)
-                if md_obj is not None:
-                    log = getattr(md_obj, "command_log", None)
-                    if log is not None:
-                        entry = {"command": command.rstrip(), "returncode": None}
-                        log.append(entry)
-            ret = os.system(command)
-            if entry is not None:
-                entry["returncode"] = ret
-            return ret
-
-        def _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate):
-            ligand_key = ligand_name.upper()
-            base_tag = f"{model_name}_{ligand_key}"
-            prmtop_path = os.path.join(ligand_parameters_folder, f"{base_tag}.prmtop")
-            inpcrd_path = os.path.join(ligand_parameters_folder, f"{base_tag}.inpcrd")
-            inpcrd_candidates = [inpcrd_path, os.path.join(ligand_parameters_folder, f"{base_tag}.rst7")]
-            existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
-            model_ligand_pdb = os.path.join(ligand_parameters_folder, f"{base_tag}.pdb")
-            if os.path.exists(prmtop_path) and existing_inpcrd:
-                return prmtop_path, existing_inpcrd
-
-            if not allow_generate:
-                raise FileNotFoundError(
-                    f"Missing ligand-only inputs for {ligand_key} in model {model_name}. "
-                    f"Enable preparation or place the AMBER files in {ligand_parameters_folder}."
-                )
-
-            pack_dir = packs.get(ligand_key)
-            if not pack_dir or not os.path.isdir(pack_dir):
-                packs.update(_collect_ligand_packs(ligand_parameters_folder))
-                pack_dir = packs.get(ligand_key)
-            if not pack_dir or not os.path.isdir(pack_dir):
-                raise ValueError(
-                    f"Parameter pack for ligand {ligand_key} not found in {ligand_parameters_folder}. "
-                    "Run preparation without skip_preparation or provide ligand_parameters_source."
-                )
-
-            ligand_pdb = os.path.join(pack_dir, f"{ligand_key}.pdb")
-            if os.path.exists(model_ligand_pdb):
-                ligand_pdb = model_ligand_pdb
-            else:
-                if not os.path.exists(ligand_pdb):
-                    raise FileNotFoundError(f"Ligand PDB for {ligand_key} not found at {ligand_pdb}.")
-                shutil.copyfile(ligand_pdb, model_ligand_pdb)
-                ligand_pdb = model_ligand_pdb
-
-            mol2_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2")
-            mol2_manifest = os.path.join(ligand_parameters_folder, f"{ligand_key}.mol2.list")
-            alt_mol2 = os.path.join(pack_dir, f"{ligand_key}.mol2")
-            alt_mol2_manifest = os.path.join(pack_dir, f"{ligand_key}.mol2.list")
-            if os.path.exists(alt_mol2_manifest):
-                shutil.copyfile(alt_mol2_manifest, mol2_manifest)
-            if os.path.exists(alt_mol2):
-                shutil.copyfile(alt_mol2, mol2_path)
-            elif not os.path.exists(mol2_path):
-                raise FileNotFoundError(f"Mol2 file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
-            mol2_paths = []
-            if os.path.exists(mol2_manifest):
-                try:
-                    with open(mol2_manifest) as mf:
-                        for raw in mf:
-                            entry = raw.strip()
-                            if not entry:
-                                continue
-                            if os.path.isabs(entry):
-                                candidate = entry
-                            else:
-                                candidate = os.path.normpath(os.path.join(ligand_parameters_folder, entry))
-                            if os.path.exists(candidate):
-                                mol2_paths.append(candidate)
-                except OSError:
-                    mol2_paths = []
-            if not mol2_paths:
-                mol2_paths = [mol2_path]
-
-            frcmod_path = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod")
-            alt_frcmod = os.path.join(pack_dir, f"{ligand_key}.frcmod")
-            if os.path.exists(alt_frcmod):
-                shutil.copyfile(alt_frcmod, frcmod_path)
-            elif not os.path.exists(frcmod_path):
-                raise FileNotFoundError(f"Frcmod file for ligand {ligand_key} not found in {ligand_parameters_folder} or pack {pack_dir}.")
-            frcmod_manifest = os.path.join(ligand_parameters_folder, f"{ligand_key}.frcmod.list")
-            alt_manifest = os.path.join(pack_dir, f"{ligand_key}.frcmod.list")
-            if os.path.exists(alt_manifest):
-                shutil.copyfile(alt_manifest, frcmod_manifest)
-            frcmod_paths = []
-            if os.path.exists(frcmod_manifest):
-                try:
-                    with open(frcmod_manifest) as mf:
-                        for raw in mf:
-                            entry = raw.strip()
-                            if not entry:
-                                continue
-                            if os.path.isabs(entry):
-                                candidate = entry
-                            else:
-                                candidate = os.path.normpath(os.path.join(ligand_parameters_folder, entry))
-                            if os.path.exists(candidate):
-                                frcmod_paths.append(candidate)
-                except OSError:
-                    frcmod_paths = []
-            if not frcmod_paths:
-                frcmod_paths = [frcmod_path]
-
-            tleap_script = os.path.join(ligand_parameters_folder, f"{base_tag}_ligand_only.leap")
-            with open(tleap_script, 'w') as tlf:
-                tlf.write('source leaprc.gaff\n')
-                tlf.write('source leaprc.water.tip3p\n')
-                for frcmod in frcmod_paths:
-                    tlf.write(f'loadamberparams "{_posix_path(frcmod)}"\n')
-                primary_mol2 = mol2_paths[0]
-                tlf.write(f'{ligand_key} = loadmol2 "{_posix_path(primary_mol2)}"\n')
-                tlf.write(f'mol = loadpdb "{_posix_path(ligand_pdb)}"\n')
-                tlf.write('solvatebox mol TIP3PBOX 12\n')
-                if add_counterionsRand:
-                    tlf.write('addIonsRand mol Na+ 0\n')
-                    tlf.write('addIonsRand mol Cl- 0\n')
-                else:
-                    tlf.write('addIons2 mol Na+ 0\n')
-                    tlf.write('addIons2 mol Cl- 0\n')
-                tlf.write(f'saveamberparm mol "{_posix_path(prmtop_path)}" "{_posix_path(inpcrd_path)}"\n')
-                tlf.write('quit\n')
-
-            command = f'tleap -s -f "{tleap_script}"'
-            ret = _execute_with_logging(command, model_name)
-            if ret != 0:
-                raise RuntimeError(f"tleap failed while preparing ligand-only inputs for {ligand_key} in model {model_name}.")
-
-            existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
-            if not (os.path.exists(prmtop_path) and existing_inpcrd):
-                raise RuntimeError(f"Failed to generate prmtop/inpcrd for ligand {ligand_key} in model {model_name}.")
-
-            return prmtop_path, existing_inpcrd
-
-        def _prepare_ligand_only_jobs(model_name, selected_ligands, packs):
-            jobs = []
-            allow_generate = not skip_preparation
-            zfill = max(len(str(replicas)), 2)
-
-            for ligand_name in selected_ligands:
-                prmtop_src, inpcrd_src = _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate)
-
-                ligand_root = os.path.join(job_folder, ligand_name)
-                os.makedirs(ligand_root, exist_ok=True)
-
-                model_root = os.path.join(ligand_root, model_name)
-                os.makedirs(model_root, exist_ok=True)
-
-                ligand_md = SimpleNamespace(
-                    pdb_name=f"{model_name}_{ligand_name.upper()}",
-                    prmtop_file=prmtop_src,
-                    inpcrd_file=inpcrd_src,
-                )
-
-                for replica in range(1, replicas + 1):
-                    if skip_replicas and replica in skip_replicas:
-                        continue
-                    replica_folder = os.path.join(model_root, f"replica_{str(replica).zfill(zfill)}")
-                    jobs.extend(setUpJobs(replica_folder, ligand_md, script_file))
-
-            return jobs
-
+        # Now set up per-replica simulation jobs using the prepared systems
         simulation_jobs = []
-        ligand_simulation_jobs = []
-        ligand_setup_completed = False
 
         for model in self:
+            # Filter models by only_models / skip_models
             if only_models and model not in only_models:
                 continue
             if model in skip_models:
-                continue
-            if ligand_only_active and ligand_setup_completed:
-                break
-
-            model_ligands = _detect_model_ligands(model)
-
-            self.openmm_md[model] = openmm_md_cls(self.models_paths[model])
-            if not skip_preparation:
-                self.openmm_md[model].setUpFF(ff)
-                if add_hydrogens:
-                    variants = self.openmm_md[model].getProtonationStates()
-                    self.openmm_md[model].removeHydrogens()
-                    self.openmm_md[model].addHydrogens(variants=variants)
-
-            if ligand_only_active:
-                if ligand_only_selector == ALL_LIGANDS:
-                    selected_ligands = model_ligands
-                else:
-                    selected_ligands = [lig for lig in model_ligands if lig in ligand_only_selector]
-                    missing = ligand_only_selector - set(selected_ligands)
-                    if missing:
-                        raise ValueError(
-                            f"Requested ligand(s) {sorted(missing)} not found in model {model}. "
-                            f"Available ligands: {model_ligands or 'none'}"
-                        )
-
-                if not selected_ligands:
-                    continue
-
-                selected_ligands = [lig.upper() for lig in selected_ligands]
-                selected_ligands_set = set(selected_ligands)
-
-                packs = _collect_ligand_packs(ligand_parameters_folder)
-                missing_packs = [lig for lig in selected_ligands if lig not in packs]
-                if missing_packs and skip_preparation:
-                    raise FileNotFoundError(
-                        f"Ligand parameter packs missing for {missing_packs} in model {model}. "
-                        "Disable skip_preparation or provide pre-generated packs."
-                    )
-
-                if missing_packs and not skip_preparation:
-                    external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
-                    skip_for_param = set(skip_ligands_upper)
-                    if ligand_only_selector != ALL_LIGANDS:
-                        skip_for_param.update(
-                            lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
-                        )
-                    skip_argument = list(skip_for_param) if skip_for_param else None
-                prepare_kwargs = dict(
-                    charges=ligand_charges,
-                    metal_ligand=metal_ligand,
-                    add_bonds=add_bonds.get(model) if add_bonds else None,
-                    skip_ligands=sorted(skip_argument) if skip_argument else effective_skip_ligands,
-                    overwrite=False,
-                    metal_parameters=external_params,
-                    extra_frcmod=extra_frcmod,
-                    extra_mol2=extra_mol2,
-                    cpus=20,
-                    return_qm_jobs=True,
-                    extra_force_field=extra_force_field,
-                    force_field='ff14SB',
-                    residue_names=residue_names.get(model) if residue_names else None,
-                    add_counterions=True,
-                    add_counterionsRand=add_counterionsRand,
-                    save_amber_pdb=True,
-                    solvate=bool(solvate),
-                    regenerate_amber_files=True,
-                    non_standard_residues=non_standard_residues,
-                    strict_atom_name_check=strict_ligand_atom_check,
-                    only_residues=selected_ligands_set,
-                    build_full_system=False,
-                    ligand_sdf_files=ligand_sdf_files,
-                )
-                if getattr(backend, "name", "").lower() == "openff":
-                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
-                elif getattr(backend, "name", "").lower() == "ambertools":
-                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
-                prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
-                if "verbose" not in prepare_kwargs:
-                    prepare_kwargs["verbose"] = bool(verbose)
-
-                backend.prepare_model(
-                    self.openmm_md[model],
-                    ligand_parameters_folder,
-                    **prepare_kwargs,
-                )
-                self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
-                packs = _collect_ligand_packs(ligand_parameters_folder)
-
-                ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
-                ligand_setup_completed = True
                 continue
 
             model_folder = os.path.join(job_folder, model)
             if not os.path.exists(model_folder):
                 os.mkdir(model_folder)
-
-            needed_replicas, prepared_replicas = _replicas_needed(model_folder, replicas, skip_replicas)
-
-            base_name = getattr(self.openmm_md[model], 'pdb_name', 'input')
-            job_prmtop = os.path.join(ligand_parameters_folder, f"{base_name}.prmtop")
-            job_inpcrd = None
-            for ext in ('.inpcrd', '.rst7'):
-                candidate = os.path.join(ligand_parameters_folder, f"{base_name}{ext}")
-                if os.path.exists(candidate):
-                    job_inpcrd = candidate
-                    break
-            if os.path.exists(job_prmtop) and job_inpcrd:
-                self.openmm_md[model].prmtop_file = job_prmtop
-                self.openmm_md[model].inpcrd_file = job_inpcrd
-
-            if not getattr(self.openmm_md[model], 'prmtop_file', None) or not getattr(self.openmm_md[model], 'inpcrd_file', None):
-                if prepared_replicas:
-                    zfill_pre = max(len(str(replicas)), 2)
-                    first_prepared = prepared_replicas[0]
-                    rep_name = f"replica_{str(first_prepared).zfill(zfill_pre)}"
-                    rep_input = os.path.join(model_folder, rep_name, 'input_files')
-                    if os.path.isdir(rep_input):
-                        prmtops = [f for f in os.listdir(rep_input) if f.endswith('.prmtop')]
-                        inpcrds = [f for f in os.listdir(rep_input) if f.endswith('.inpcrd') or f.endswith('.rst7')]
-                        if prmtops and inpcrds:
-                            self.openmm_md[model].prmtop_file = os.path.join(rep_input, prmtops[0])
-                            self.openmm_md[model].inpcrd_file = os.path.join(rep_input, inpcrds[0])
-
-            has_prmtop = bool(getattr(self.openmm_md[model], 'prmtop_file', None))
-            has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
-            if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
-                external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
-                prepare_kwargs = dict(
-                    charges=ligand_charges,
-                    metal_ligand=metal_ligand,
-                    add_bonds=add_bonds.get(model) if add_bonds else None,
-                    skip_ligands=effective_skip_ligands,
-                    overwrite=False,
-                    metal_parameters=external_params,
-                    extra_frcmod=extra_frcmod,
-                    extra_mol2=extra_mol2,
-                    cpus=20,
-                    return_qm_jobs=True,
-                    extra_force_field=extra_force_field,
-                    force_field='ff14SB',
-                    residue_names=residue_names.get(model) if residue_names else None,
-                    add_counterions=True,
-                    add_counterionsRand=add_counterionsRand,
-                    save_amber_pdb=True,
-                    solvate=bool(solvate),
-                    regenerate_amber_files=True,
-                    non_standard_residues=non_standard_residues,
-                    strict_atom_name_check=strict_ligand_atom_check,
-                    ligand_sdf_files=ligand_sdf_files,
-                )
-                if getattr(backend, "name", "").lower() == "openff":
-                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
-                elif getattr(backend, "name", "").lower() == "ambertools":
-                    prepare_kwargs["ligand_xml_files"] = ligand_xml_files
-                prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
-                if "verbose" not in prepare_kwargs:
-                    prepare_kwargs["verbose"] = bool(verbose)
-
-                backend.prepare_model(
-                    self.openmm_md[model],
-                    ligand_parameters_folder,
-                    **prepare_kwargs,
-                )
-
-            parameterization_result = backend.describe_model(self.openmm_md[model])
-            self.openmm_md[model].parameterization_result = parameterization_result
 
             zfill = max(len(str(replicas)), 2)
             for replica in range(1, replicas + 1):
@@ -11700,30 +12176,30 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
 
                 replica_str = str(replica).zfill(zfill)
-                replica_folder = os.path.join(model_folder, f'replica_{replica_str}')
+                replica_folder = os.path.join(model_folder, f"replica_{replica_str}")
                 if not os.path.exists(replica_folder):
                     os.mkdir(replica_folder)
 
-                jobs = setUpJobs(
-                    replica_folder,
-                    self.openmm_md[model],
-                    script_file,
-                    parameterization_result=parameterization_result,
-                )
+                jobs = setUpJobs(replica_folder, self.openmm_md[model], script_file)
                 simulation_jobs.extend(jobs)
-
-        self.openmm_md.openmm_command_logs.clear()
-        for model_name, md_obj in self.openmm_md.items():
-            self.openmm_md.openmm_command_logs[model_name] = list(getattr(md_obj, "command_log", []))
-
-        if ligand_only_active:
-            return ligand_simulation_jobs
 
         return simulation_jobs
 
-    def setUpPLACERcalculation(self, PLACERfolder, output_folder="output_folder", PLACER_PATH="/gpfs/projects/bsc72/conda_envs/PLACER/", suffix=None, num_samples=50,
-                           ligand=None, apo=False,rerank="prmsd", mutate=None, mutate_chain="A",
-                           mutate_to=None, residue_json=None):
+    def setUpPLACERcalculation(
+        self,
+        PLACERfolder,
+        output_folder="output_folder",
+        PLACER_PATH="/gpfs/projects/bsc72/conda_envs/PLACER/",
+        suffix=None,
+        num_samples=50,
+        ligand=None,
+        apo=False,
+        rerank="prmsd",
+        mutate=None,
+        mutate_chain="A",
+        mutate_to=None,
+        residue_json=None,
+    ):
         """
         Set up PLACER calculations for evaluating catalytic centers, with or without ligand.
         Special amino acids can be added.
@@ -11765,26 +12241,38 @@ make sure of reading the target sequences with the function readTargetSequences(
             List of command-line commands to be executed.
         """
         # validate PLACER_PATH option
-        valid_PLACER_PATH = {"/gpfs/projects/bsc72/conda_envs/PLACER/","/gpfs/home/bsc/bsc072871/repos/PLACER/","/shared/work/NBD_Utilities/PLACER/"}
+        valid_PLACER_PATH = {
+            "/gpfs/projects/bsc72/conda_envs/PLACER/",
+            "/gpfs/home/bsc/bsc072871/repos/PLACER/",
+            "/shared/work/NBD_Utilities/PLACER/",
+        }
         if PLACER_PATH not in valid_PLACER_PATH:
             raise ValueError(f"Invalid path! option. Choose from {valid_PLACER_PATH}")
 
         # Validate rerank option
         rerank_options = {"prmsd", "plddt_pde", "plddt"}
         if rerank not in rerank_options:
-            raise ValueError(f"Invalid rerank option '{rerank}'. Choose from {rerank_options}")
+            raise ValueError(
+                f"Invalid rerank option '{rerank}'. Choose from {rerank_options}"
+            )
 
         # Validate mutation options
         if mutate:
             if not isinstance(mutate, dict):
-                raise TypeError("Expected 'mutate' to be a dictionary mapping model names to residue numbers.")
+                raise TypeError(
+                    "Expected 'mutate' to be a dictionary mapping model names to residue numbers."
+                )
             if not mutate_to or not isinstance(mutate_to, str) or len(mutate_to) != 3:
-                raise ValueError("Expected 'mutate_to' to be a 3-letter residue code string.")
+                raise ValueError(
+                    "Expected 'mutate_to' to be a 3-letter residue code string."
+                )
 
         # Validate ligand options
         if ligand:
             if apo:
-                raise ValueError("Cannot specify both ligand and apo at the same time!.")
+                raise ValueError(
+                    "Cannot specify both ligand and apo at the same time!."
+                )
 
         # Prepare output directories
         os.makedirs(PLACERfolder, exist_ok=True)
@@ -11801,9 +12289,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             pdb_path = os.path.join(input_pdbs_folder, pdb_name)
 
             command = f"python {PLACER_PATH}run_PLACER.py "
-            command +=  f"-f {pdb_path} "
-            command +=  f"-o {PLACERfolder}/{output_folder} "
-            command +=  f"--nsamples {num_samples} "
+            command += f"-f {pdb_path} "
+            command += f"-o {PLACERfolder}/{output_folder} "
+            command += f"--nsamples {num_samples} "
 
             if suffix:
                 command += f"--suffix {suffix} "
@@ -11835,7 +12323,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         separator="-",
         overwrite=False,
         only_models=None,
-        output_folder='.analysis',
+        output_folder=".analysis",
     ):
         """
         Analyse a Glide Docking simulation. The function allows to calculate ligand
@@ -11876,31 +12364,33 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         # Create analysis folder
-        if not os.path.exists(docking_folder + '/'+output_folder):
-            os.mkdir(docking_folder + '/'+output_folder)
+        if not os.path.exists(docking_folder + "/" + output_folder):
+            os.mkdir(docking_folder + "/" + output_folder)
 
         # Create scores data folder
-        if not os.path.exists(docking_folder + '/'+output_folder+"/scores"):
-            os.mkdir(docking_folder + '/'+output_folder+"/scores")
+        if not os.path.exists(docking_folder + "/" + output_folder + "/scores"):
+            os.mkdir(docking_folder + "/" + output_folder + "/scores")
 
         # Create distance data folder
-        if not os.path.exists(docking_folder + '/'+output_folder+"/atom_pairs"):
-            os.mkdir(docking_folder + '/'+output_folder+"/atom_pairs")
+        if not os.path.exists(docking_folder + "/" + output_folder + "/atom_pairs"):
+            os.mkdir(docking_folder + "/" + output_folder + "/atom_pairs")
 
         # Create angle data folder
         if angles:
-            if not os.path.exists(docking_folder + '/'+output_folder+"/angles"):
-                os.mkdir(docking_folder + '/'+output_folder+"/angles")
+            if not os.path.exists(docking_folder + "/" + output_folder + "/angles"):
+                os.mkdir(docking_folder + "/" + output_folder + "/angles")
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         prepare_proteins._copyScriptFile(
-            docking_folder + '/'+output_folder, "analyse_docking.py"
+            docking_folder + "/" + output_folder, "analyse_docking.py"
         )
-        script_path = docking_folder + '/'+output_folder+"/._analyse_docking.py"
+        script_path = docking_folder + "/" + output_folder + "/._analyse_docking.py"
 
         # Write protein_atoms dictionary to json file
         if protein_atoms:
-            with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
+            with open(
+                docking_folder + "/" + output_folder + "/._protein_atoms.json", "w"
+            ) as jf:
                 json.dump(protein_atoms, jf)
 
         if isinstance(only_models, str):
@@ -11908,30 +12398,46 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Write atom_pairs dictionary to json file
         if atom_pairs:
-            with open(docking_folder + '/'+output_folder+"/._atom_pairs.json", "w") as jf:
+            with open(
+                docking_folder + "/" + output_folder + "/._atom_pairs.json", "w"
+            ) as jf:
                 json.dump(atom_pairs, jf)
 
         # Write angles dictionary to json file
         if angles:
-            with open(docking_folder + '/'+output_folder+"/._angles.json", "w") as jf:
+            with open(
+                docking_folder + "/" + output_folder + "/._angles.json", "w"
+            ) as jf:
                 json.dump(angles, jf)
 
         command = (
             "run "
             + docking_folder
-            + '/'+output_folder+"/._analyse_docking.py "
+            + "/"
+            + output_folder
+            + "/._analyse_docking.py "
             + docking_folder
         )
         if atom_pairs:
             command += (
-                " --atom_pairs " + docking_folder + '/'+output_folder+"/._atom_pairs.json"
+                " --atom_pairs "
+                + docking_folder
+                + "/"
+                + output_folder
+                + "/._atom_pairs.json"
             )
         elif protein_atoms:
             command += (
-                " --protein_atoms " + docking_folder + '/'+output_folder+"/._protein_atoms.json"
+                " --protein_atoms "
+                + docking_folder
+                + "/"
+                + output_folder
+                + "/._protein_atoms.json"
             )
         if angles:
-            command += " --angles " + docking_folder + '/'+output_folder+"/._angles.json"
+            command += (
+                " --angles " + docking_folder + "/" + output_folder + "/._angles.json"
+            )
         if skip_chains:
             command += " --skip_chains"
         if return_failed:
@@ -11945,7 +12451,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             command += " --only_models " + ",".join(self.models_names)
         if overwrite:
             command += " --overwrite "
-        command += ' --analysis_folder '+output_folder
+        command += " --analysis_folder " + output_folder
 
         os.system(command)
 
@@ -11956,22 +12462,20 @@ make sure of reading the target sequences with the function readTargetSequences(
         #     )
 
         # Read scores data
-        scores_directory = docking_folder + '/'+output_folder+"/scores"
+        scores_directory = docking_folder + "/" + output_folder + "/scores"
         self.docking_data = []
         for f in os.listdir(scores_directory):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split(".")[0]
 
             # Read the CSV file into pandas
-            self.docking_data.append(pd.read_csv(
-                scores_directory+'/'+f
-            ))
+            self.docking_data.append(pd.read_csv(scores_directory + "/" + f))
 
         # Concatenate the list of DataFrames into a single DataFrame
         self.docking_data = pd.concat(self.docking_data)
         self.docking_data.set_index(["Protein", "Ligand", "Pose"], inplace=True)
 
-        distances_directory = docking_folder + '/'+output_folder+"/atom_pairs"
+        distances_directory = docking_folder + "/" + output_folder + "/atom_pairs"
         for f in os.listdir(distances_directory):
             model = f.split(separator)[0]
             ligand = f.split(separator)[1].split(".")[0]
@@ -11979,7 +12483,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Read the CSV file into pandas
             self.docking_distances.setdefault(model, {})
             self.docking_distances[model][ligand] = pd.read_csv(
-                distances_directory+'/'+f
+                distances_directory + "/" + f
             )
             self.docking_distances[model][ligand].set_index(
                 ["Protein", "Ligand", "Pose"], inplace=True
@@ -11989,7 +12493,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             if ligand not in self.docking_ligands[model]:
                 self.docking_ligands[model].append(ligand)
 
-        angles_directory = docking_folder + '/'+output_folder+"/angles"
+        angles_directory = docking_folder + "/" + output_folder + "/angles"
         if os.path.exists(angles_directory):
             for f in os.listdir(angles_directory):
                 model = f.split(separator)[0]
@@ -11998,18 +12502,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Read the CSV file into pandas
                 self.docking_angles.setdefault(model, {})
                 self.docking_angles[model][ligand] = pd.read_csv(
-                    angles_directory +'/'+ f
+                    angles_directory + "/" + f
                 )
                 self.docking_angles[model][ligand].set_index(
                     ["Protein", "Ligand", "Pose"], inplace=True
                 )
 
         if return_failed:
-            with open(docking_folder + '/'+output_folder+"/._failed_dockings.json") as jifd:
+            with open(
+                docking_folder + "/" + output_folder + "/._failed_dockings.json"
+            ) as jifd:
                 failed_dockings = json.load(jifd)
             return failed_dockings
 
-    def analyseDockingParallel(self,
+    def analyseDockingParallel(
+        self,
         docking_folder,
         protein_atoms=None,
         angles=None,
@@ -12021,38 +12528,43 @@ make sure of reading the target sequences with the function readTargetSequences(
         overwrite=False,
         only_models=None,
         compute_sasa=False,
-        output_folder='.analysis'):
+        output_folder=".analysis",
+    ):
         """
         Set up jobs for analysing individual docking and creating CSV files. The files should be
         read by the analyseDocking function (i.e., the non-parallel version).
         """
 
         # Create analysis folder
-        if not os.path.exists(docking_folder + '/'+output_folder):
-            os.mkdir(docking_folder + '/'+output_folder)
+        if not os.path.exists(docking_folder + "/" + output_folder):
+            os.mkdir(docking_folder + "/" + output_folder)
 
         # Create scores data folder
-        if not os.path.exists(docking_folder + '/'+output_folder+"/scores"):
-            os.mkdir(docking_folder + '/'+output_folder+"/scores")
+        if not os.path.exists(docking_folder + "/" + output_folder + "/scores"):
+            os.mkdir(docking_folder + "/" + output_folder + "/scores")
 
         # Create distance data folder
-        if not os.path.exists(docking_folder + '/'+output_folder+"/atom_pairs"):
-            os.mkdir(docking_folder + '/'+output_folder+"/atom_pairs")
+        if not os.path.exists(docking_folder + "/" + output_folder + "/atom_pairs"):
+            os.mkdir(docking_folder + "/" + output_folder + "/atom_pairs")
 
         # Create angle data folder
         if angles:
-            if not os.path.exists(docking_folder + '/'+output_folder+"/angles"):
-                os.mkdir(docking_folder + '/'+output_folder+"/angles")
+            if not os.path.exists(docking_folder + "/" + output_folder + "/angles"):
+                os.mkdir(docking_folder + "/" + output_folder + "/angles")
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         prepare_proteins._copyScriptFile(
-            docking_folder + '/'+output_folder, "analyse_individual_docking.py"
+            docking_folder + "/" + output_folder, "analyse_individual_docking.py"
         )
-        script_path = docking_folder + '/'+output_folder+"/._analyse_individual_docking.py"
+        script_path = (
+            docking_folder + "/" + output_folder + "/._analyse_individual_docking.py"
+        )
 
         # Write protein_atoms dictionary to json file
         if protein_atoms:
-            with open(docking_folder + '/'+output_folder+"/._protein_atoms.json", "w") as jf:
+            with open(
+                docking_folder + "/" + output_folder + "/._protein_atoms.json", "w"
+            ) as jf:
                 json.dump(protein_atoms, jf)
 
         if isinstance(only_models, str):
@@ -12060,43 +12572,59 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Write atom_pairs dictionary to json file
         if atom_pairs:
-            with open(docking_folder + '/'+output_folder+"/._atom_pairs.json", "w") as jf:
+            with open(
+                docking_folder + "/" + output_folder + "/._atom_pairs.json", "w"
+            ) as jf:
                 json.dump(atom_pairs, jf)
 
         # Write angles dictionary to json file
         if angles:
-            with open(docking_folder + '/'+output_folder+"/._angles.json", "w") as jf:
+            with open(
+                docking_folder + "/" + output_folder + "/._angles.json", "w"
+            ) as jf:
                 json.dump(angles, jf)
 
         jobs = []
-        for model in os.listdir(docking_folder+'/output_models'):
+        for model in os.listdir(docking_folder + "/output_models"):
 
             # Skip models not given in only_models
-            if only_models != None  and model not in only_models:
+            if only_models != None and model not in only_models:
                 continue
 
             # Check separator in model name
             if separator in model:
-                raise ValueError('The separator %s was found in model name %s. Please use a different one!' % (separator, model))
+                raise ValueError(
+                    "The separator %s was found in model name %s. Please use a different one!"
+                    % (separator, model)
+                )
 
-            for f in os.listdir(docking_folder+'/output_models/'+model):
+            for f in os.listdir(docking_folder + "/output_models/" + model):
 
                 subjobs = None
                 mae_output = None
 
-                if f.endswith('.maegz'):
-                    ligand = f.replace(model+'_','').replace('_pv.maegz','')
+                if f.endswith(".maegz"):
+                    ligand = f.replace(model + "_", "").replace("_pv.maegz", "")
 
                     # Check separator in ligand name
                     if separator in ligand:
-                        raise ValueError('The separator %s was found in ligand name %s. Please use a different one!' % (separator, ligand))
+                        raise ValueError(
+                            "The separator %s was found in ligand name %s. Please use a different one!"
+                            % (separator, ligand)
+                        )
 
-                    mae_output = docking_folder+'/output_models/'+model+'/'+f
+                    mae_output = docking_folder + "/output_models/" + model + "/" + f
 
-                    csv_name = model+separator+ligand+'.csv'
-                    scores_csv = docking_folder+'/'+output_folder+'/scores/'+csv_name
-                    distance_csv = docking_folder+'/'+output_folder+'/atom_pairs/'+csv_name
-                    angles_csv = docking_folder+'/'+output_folder+'/angles/'+csv_name
+                    csv_name = model + separator + ligand + ".csv"
+                    scores_csv = (
+                        docking_folder + "/" + output_folder + "/scores/" + csv_name
+                    )
+                    distance_csv = (
+                        docking_folder + "/" + output_folder + "/atom_pairs/" + csv_name
+                    )
+                    angles_csv = (
+                        docking_folder + "/" + output_folder + "/angles/" + csv_name
+                    )
 
                     skip_scores = True
                     skip_distances = True
@@ -12114,18 +12642,41 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if skip_scores and skip_distances and skip_angles:
                         continue
 
-                    command  = 'run '
-                    command += docking_folder+'/'+output_folder+"/._analyse_individual_docking.py "
-                    command += docking_folder+' '
-                    command += mae_output+' '
-                    command += model+' '
-                    command += ligand+' '
+                    command = "run "
+                    command += (
+                        docking_folder
+                        + "/"
+                        + output_folder
+                        + "/._analyse_individual_docking.py "
+                    )
+                    command += docking_folder + " "
+                    command += mae_output + " "
+                    command += model + " "
+                    command += ligand + " "
                     if atom_pairs:
-                        command += "--atom_pairs " + docking_folder + '/'+output_folder+"/._atom_pairs.json "
+                        command += (
+                            "--atom_pairs "
+                            + docking_folder
+                            + "/"
+                            + output_folder
+                            + "/._atom_pairs.json "
+                        )
                     elif protein_atoms:
-                        command += "--protein_atoms " + docking_folder + '/'+output_folder+"/._protein_atoms.json "
+                        command += (
+                            "--protein_atoms "
+                            + docking_folder
+                            + "/"
+                            + output_folder
+                            + "/._protein_atoms.json "
+                        )
                     if angles:
-                        command += " --angles " + docking_folder + '/'+output_folder+"/._angles.json"
+                        command += (
+                            " --angles "
+                            + docking_folder
+                            + "/"
+                            + output_folder
+                            + "/._angles.json"
+                        )
                     if skip_chains:
                         command += " --skip_chains"
                     if return_failed:
@@ -12135,18 +12686,258 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if compute_sasa:
                         command += " --compute_sasa"
                     command += " --separator " + separator
-                    command += '\n'
+                    command += "\n"
                     jobs.append(command)
 
         return jobs
 
-    def analyseRosettaDocking(self, docking_folder, separator='-', only_models=None,
-                              atom_pairs=None, energy_by_residue=False,
-                              interacting_residues=False, query_residues=None,
-                              overwrite=False, protonation_states=False,
-                              binding_energy=False, decompose_bb_hb_into_pair_energies=False,
-                              cpus=None, return_jobs=False, verbose=False,
-                              skip_finished=False, pyrosetta_env=None, param_files=None):
+    def setUpOpenMMABFESimulations(
+        self,
+        job_folder,
+        replicas,
+        ligand_charges=None,
+        residue_names=None,
+        ff="amber14",
+        add_bonds=None,
+        skip_ligands=None,
+        metal_ligand=None,
+        metal_parameters=None,
+        skip_replicas=None,
+        extra_frcmod=None,
+        extra_mol2=None,
+        non_standard_residues=None,
+        add_hydrogens=True,
+        extra_force_field=None,
+        add_counterionsRand=False,
+        skip_preparation=False,
+        ligand_parameters_source=None,
+        only_models=None,
+        skip_models=None,
+    ):
+        """
+        Set up Absolute Binding Free Energy (ABFE) jobs for each model.
+
+        This function:
+        1) Reuses setUpOpenMMPreparation to ensure prmtop/inpcrd exist.
+        2) For each model and each replica, creates a replica directory,
+            copies prmtop/inpcrd there, and writes an ABFE control (.cntl)
+            file and a nodefile.
+
+        It does NOT run anything; it just prepares the filesystem layout.
+        """
+        import os, shutil
+
+        # Normalize model filters to be consistent with other methods
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        if skip_models is None:
+            skip_models = []
+
+        # 1) Ensure systems are prepared (PDB → solvated, parametrized AMBER prmtop/inpcrd)
+        self.setUpOpenMMPreparation(
+            job_folder=job_folder,
+            replicas=replicas,
+            ligand_charges=ligand_charges,
+            residue_names=residue_names,
+            ff=ff,
+            add_bonds=add_bonds,
+            skip_ligands=skip_ligands,
+            metal_ligand=metal_ligand,
+            metal_parameters=metal_parameters,
+            skip_replicas=skip_replicas,
+            extra_frcmod=extra_frcmod,
+            extra_mol2=extra_mol2,
+            non_standard_residues=non_standard_residues,
+            add_hydrogens=add_hydrogens,
+            extra_force_field=extra_force_field,
+            add_counterionsRand=add_counterionsRand,
+            skip_preparation=skip_preparation,
+            ligand_parameters_source=ligand_parameters_source,
+            only_models=only_models,
+            skip_models=skip_models,
+        )
+
+        # 2) ABFE-specific file generation for each model/replica
+        abfe_jobs = []
+
+        # ABFE control file template (BASENAME will be formatted per model)
+        abfe_cntl_template = """#The job transport is the mean in which replicas are executed on GPU devices
+    #LOCAL_OPENMM is the only job transport system currently supported. Each local GPU is
+    #managed by a different process using the python multiprocessing module 
+    JOB_TRANSPORT = 'LOCAL_OPENMM'
+
+    #The basename of the job. Input amber files are expected to be called <jobname>.prmtop and <jobname>.inpcrd
+    #The checkpoint file is expected to be called <jobname>_0.xml
+    BASENAME = '{basename}'
+
+    #Arrays of thermodynamic states in temperature and alchemical space.
+    TEMPERATURES = '300'
+    LAMBDAS =    '0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00'
+    DIRECTION=   '   1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1'
+    INTERMEDIATE='   0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0'
+    LAMBDA1 =    '0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.10, 0.20, 0.30, 0.40, 0.50, 0.50, 0.40, 0.30, 0.20, 0.10, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00'
+    LAMBDA2 =    '0.00, 0.10, 0.20, 0.30, 0.40, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.50, 0.40, 0.30, 0.20, 0.10, 0.00'
+    ALPHA =      '0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10, 0.10'
+    U0 =         '110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110., 110.'
+    W0COEFF =    '0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00'
+
+    #The displacement vector that brings the ligand from the binding site to a position in the bulk
+    DISPLACEMENT = '22.00, 22.00, 22.00'
+
+    #The position of the binding site restraint. In leg1 it is zero to center it on the receptor
+    LIGOFFSET = '0., 0., 0.'
+
+    #Execution time in minutes
+    WALL_TIME = 240
+
+    #Frequency of replica exchange attempts in seconds
+    CYCLE_TIME = 10
+
+    #Frequency of saving checkpoint files in seconds
+    CHECKPOINT_TIME = 600
+
+    #The nodefile. Each line corresponds to a GPU device.
+    NODEFILE = 'nodefile'
+
+    #Number of replicas to keep in a fast execution queue. It is expressed as a fraction of the number of compute devices.
+    #With one device a value of 1 here keeps one replica in the queue. 
+    SUBJOBS_BUFFER_SIZE = '1.0'
+
+    #MD steps per replica run
+    PRODUCTION_STEPS = '20000'
+
+    #frequency of printing information after a replica run. Must be a multiple of PRODUCTION_STEPS
+    PRNT_FREQUENCY = '20000'
+
+    #frequency of saving trajectory frames. Must be a multiple of PRODUCTION_STEPS
+    TRJ_FREQUENCY = '20000'
+
+    #list of ligand atoms.
+    LIGAND_ATOMS = 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216
+
+    #list of atoms of the ligand that define the centroid of the ligand.
+    LIGAND_CM_ATOMS = 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216
+
+    #list of atoms of the receptor that define the center of the binding site
+    RCPT_CM_ATOMS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195
+
+    #force constant (in kcal/(mol A^2)) and tolerance (in A) of the binding site restraint potential
+    CM_KF = 25.00
+    CM_TOL = 5.00
+
+    #list of atoms that are restrained followed by the corresponding force constant and tolerance,
+    #in kcal/(mol A^2) and angstroms, respectively
+    POS_RESTRAINED_ATOMS = 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39
+    POSRE_FORCE_CONSTANT = 25.0
+    POSRE_TOLERANCE = 0.5
+
+    #softcore parameters in kcal/mol, acore is dimensionless
+    UMAX = 200.00
+    ACORE = 0.062500
+    UBCORE = 100.0
+
+    #thermostat friction coefficient in 1/ps
+    FRICTION_COEFF = 0.500000
+
+    #MD time step in ps
+    TIME_STEP = 0.002
+
+    #OpenMM platform name
+    OPENMM_PLATFORM = CPU
+
+    #set to 'yes' to turn on verbose logging
+    VERBOSE = 'no'
+    """
+
+        nodefile_line = "localhost,0:0,1,CUDA,,/tmp\n"
+
+        # replicate naming convention like original MD setup
+        zfill = max(len(str(replicas)), 2)
+
+        for model in self:
+            # Filter models by only_models / skip_models
+            if only_models and model not in only_models:
+                continue
+            if model in skip_models:
+                continue
+
+            # Model folder under the main job folder (same structure as MD setup)
+            model_folder = os.path.join(job_folder, model)
+            if not os.path.exists(model_folder):
+                os.mkdir(model_folder)
+
+            # Determine the basename used for prmtop/inpcrd (pdb_name if available)
+            openmm_md = self.openmm_md[model]
+            base_name = getattr(openmm_md, "pdb_name", model)
+
+            # Source AMBER files (from preparation step)
+            prmtop_src = getattr(openmm_md, "prmtop_file", None)
+            inpcrd_src = getattr(openmm_md, "inpcrd_file", None)
+
+            # Loop over replicas just like the MD function
+            for replica in range(1, replicas + 1):
+                if skip_replicas and replica in skip_replicas:
+                    continue
+
+                replica_str = str(replica).zfill(zfill)
+                replica_folder = os.path.join(model_folder, f"replica_{replica_str}")
+                if not os.path.exists(replica_folder):
+                    os.mkdir(replica_folder)
+
+                # Destination AMBER files in the replica folder for the ABFE engine
+                prmtop_dst = os.path.join(replica_folder, f"{base_name}.prmtop")
+                inpcrd_dst = os.path.join(replica_folder, f"{base_name}.inpcrd")
+
+                if (
+                    prmtop_src
+                    and os.path.exists(prmtop_src)
+                    and not os.path.exists(prmtop_dst)
+                ):
+                    shutil.copyfile(prmtop_src, prmtop_dst)
+                if (
+                    inpcrd_src
+                    and os.path.exists(inpcrd_src)
+                    and not os.path.exists(inpcrd_dst)
+                ):
+                    shutil.copyfile(inpcrd_src, inpcrd_dst)
+
+                # Write ABFE control file in this replica folder
+                cntl_text = abfe_cntl_template.format(basename=base_name)
+                cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
+                with open(cntl_path, "w") as f:
+                    f.write(cntl_text)
+
+                # Write nodefile in this replica folder
+                nodefile_path = os.path.join(replica_folder, "nodefile")
+                with open(nodefile_path, "w") as f:
+                    f.write(nodefile_line)
+
+                # Collect the control file path for this replica
+                abfe_jobs.append(cntl_path)
+
+        # Return list of control files (one per replica)
+        return abfe_jobs
+
+    def analyseRosettaDocking(
+        self,
+        docking_folder,
+        separator="-",
+        only_models=None,
+        atom_pairs=None,
+        energy_by_residue=False,
+        interacting_residues=False,
+        query_residues=None,
+        overwrite=False,
+        protonation_states=False,
+        binding_energy=False,
+        decompose_bb_hb_into_pair_energies=False,
+        cpus=None,
+        return_jobs=False,
+        verbose=False,
+        skip_finished=False,
+        pyrosetta_env=None,
+        param_files=None,
+    ):
         """
         Analyse the Rosetta docking folder. By default this function falls back to parsing
         the Rosetta score files so it works without PyRosetta, but when options such as
@@ -12201,16 +12992,23 @@ make sure of reading the target sequences with the function readTargetSequences(
             Name of the conda environment to activate before running the PyRosetta analysis script.
         """
 
-        output_models_path = os.path.join(docking_folder, 'output_models')
+        output_models_path = os.path.join(docking_folder, "output_models")
         if not os.path.exists(output_models_path):
-            raise ValueError(f"Rosetta docking output folder '{output_models_path}' does not exist.")
+            raise ValueError(
+                f"Rosetta docking output folder '{output_models_path}' does not exist."
+            )
 
-        model_ligands = [d for d in os.listdir(output_models_path)
-                         if os.path.isdir(os.path.join(output_models_path, d))]
+        model_ligands = [
+            d
+            for d in os.listdir(output_models_path)
+            if os.path.isdir(os.path.join(output_models_path, d))
+        ]
         if only_models is not None:
             if isinstance(only_models, str):
                 only_models = [only_models]
-            model_ligands = [ml for ml in model_ligands if ml.split(separator)[0] in only_models]
+            model_ligands = [
+                ml for ml in model_ligands if ml.split(separator)[0] in only_models
+            ]
 
         if not model_ligands:
             raise ValueError("No docking models found after applying filters.")
@@ -12221,15 +13019,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                     f"The separator '{separator}' was not found or was found more than once in '{model_ligand}'."
                 )
 
-        pyrosetta_features = any([
-            atom_pairs,
-            energy_by_residue,
-            interacting_residues,
-            protonation_states,
-            binding_energy,
-            decompose_bb_hb_into_pair_energies,
-            return_jobs,
-        ])
+        pyrosetta_features = any(
+            [
+                atom_pairs,
+                energy_by_residue,
+                interacting_residues,
+                protonation_states,
+                binding_energy,
+                decompose_bb_hb_into_pair_energies,
+                return_jobs,
+            ]
+        )
 
         if not pyrosetta_features:
             # Fall back to parsing the raw SCORE files.
@@ -12241,8 +13041,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             for model_ligand in model_ligands:
                 model, ligand = model_ligand.split(separator)
                 try:
-                    scorefile_out = os.path.join(output_models_path, f"{model_ligand}/{model_ligand}.out")
-                    scorefile_sc = os.path.join(output_models_path, f"{model_ligand}/{model_ligand}.sc")
+                    scorefile_out = os.path.join(
+                        output_models_path, f"{model_ligand}/{model_ligand}.out"
+                    )
+                    scorefile_sc = os.path.join(
+                        output_models_path, f"{model_ligand}/{model_ligand}.sc"
+                    )
 
                     if os.path.exists(scorefile_out):
                         scorefile = scorefile_out
@@ -12254,19 +13058,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                         )
 
                     scores = _readRosettaScoreFile(scorefile)
-                    scores['Ligand'] = ligand
-                    scores = scores.set_index(['Model', 'Ligand', 'Pose'])
+                    scores["Ligand"] = ligand
+                    scores = scores.set_index(["Model", "Ligand", "Pose"])
 
-                    distance_columns = [col for col in scores.columns if col.startswith('distance_')]
+                    distance_columns = [
+                        col for col in scores.columns if col.startswith("distance_")
+                    ]
                     distance_df = scores[distance_columns]
 
-                    self.rosetta_docking_distances.setdefault(model, {})[ligand] = distance_df
+                    self.rosetta_docking_distances.setdefault(model, {})[
+                        ligand
+                    ] = distance_df
                     scores = scores.drop(columns=distance_columns)
 
-                    interface_delta_col = next((col for col in scores.columns if col.startswith('interface_delta_')), None)
-                    if interface_delta_col and 'total_score' in scores.columns:
+                    interface_delta_col = next(
+                        (
+                            col
+                            for col in scores.columns
+                            if col.startswith("interface_delta_")
+                        ),
+                        None,
+                    )
+                    if interface_delta_col and "total_score" in scores.columns:
                         cols = list(scores.columns)
-                        cols.insert(cols.index('total_score') + 1, cols.pop(cols.index(interface_delta_col)))
+                        cols.insert(
+                            cols.index("total_score") + 1,
+                            cols.pop(cols.index(interface_delta_col)),
+                        )
                         scores = scores[cols]
 
                     self.rosetta_docking = pd.concat([self.rosetta_docking, scores])
@@ -12277,7 +13095,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 processed_files += 1
                 progress = f"Processing: {processed_files}/{total_files} files"
-                sys.stdout.write('\r' + progress)
+                sys.stdout.write("\r" + progress)
                 sys.stdout.flush()
 
             print()
@@ -12285,19 +13103,27 @@ make sure of reading the target sequences with the function readTargetSequences(
             return self.rosetta_docking
 
         # --- PyRosetta-driven analysis path ---
-        analysis_folder = os.path.join(docking_folder, '.analysis')
+        analysis_folder = os.path.join(docking_folder, ".analysis")
         os.makedirs(analysis_folder, exist_ok=True)
         _copyScriptFile(docking_folder, "analyse_calculation.py", subfolder="pyrosetta")
-        script_path = os.path.join(docking_folder, '._analyse_calculation.py')
-        distances_folder = os.path.join(analysis_folder, 'distances')
+        script_path = os.path.join(docking_folder, "._analyse_calculation.py")
+        distances_folder = os.path.join(analysis_folder, "distances")
 
         expanded_atom_pairs = None
         missing_ligand_atoms = {}
         models_without_pairs = []
         if atom_pairs is not None:
-            ligand_chain_overrides = _collect_ligand_chain_overrides(docking_folder, model_ligands, separator)
-            expanded_atom_pairs, missing_ligand_atoms, models_without_pairs = _prepare_expanded_atom_pairs(
-                atom_pairs, docking_folder, model_ligands, separator, ligand_chain_overrides=ligand_chain_overrides
+            ligand_chain_overrides = _collect_ligand_chain_overrides(
+                docking_folder, model_ligands, separator
+            )
+            expanded_atom_pairs, missing_ligand_atoms, models_without_pairs = (
+                _prepare_expanded_atom_pairs(
+                    atom_pairs,
+                    docking_folder,
+                    model_ligands,
+                    separator,
+                    ligand_chain_overrides=ligand_chain_overrides,
+                )
             )
             if not expanded_atom_pairs:
                 requested_pairs = _collect_requested_model_ligand_pairs(atom_pairs)
@@ -12323,7 +13149,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         )
                         continue
 
-                    params_atoms, params_path = _list_params_atom_names(docking_folder, ligand)
+                    params_atoms, params_path = _list_params_atom_names(
+                        docking_folder, ligand
+                    )
                     if params_atoms:
                         suffix = "..." if len(params_atoms) > 10 else ""
                         ligand_atom_summaries.append(
@@ -12340,13 +13168,21 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ligand_atom_summaries.append(
                         f"{ligand}: (no atoms found in ligand_params/{ligand}/{ligand}.pdb;{path_note})"
                     )
-                detail = "\n".join(ligand_atom_summaries) if ligand_atom_summaries else "no ligands could be derived from the selected models."
+                detail = (
+                    "\n".join(ligand_atom_summaries)
+                    if ligand_atom_summaries
+                    else "no ligands could be derived from the selected models."
+                )
                 if missing_ligand_atoms:
                     missing_lines = []
                     for (model, ligand), atoms in sorted(missing_ligand_atoms.items()):
                         atom_list = ", ".join(sorted(atoms))
-                        missing_lines.append(f"{model}/{ligand}: missing requested atoms: {atom_list}")
-                    detail += "\nMissing requested ligand atoms:\n" + "\n".join(missing_lines)
+                        missing_lines.append(
+                            f"{model}/{ligand}: missing requested atoms: {atom_list}"
+                        )
+                    detail += "\nMissing requested ligand atoms:\n" + "\n".join(
+                        missing_lines
+                    )
                 if models_without_pairs:
                     detail += (
                         "\nNo atom pair entries were matched for the following docking models: "
@@ -12371,16 +13207,23 @@ make sure of reading the target sequences with the function readTargetSequences(
                     f"{detail}"
                 )
         atom_pairs_file = (
-            os.path.join(docking_folder, '._atom_pairs.json')
+            os.path.join(docking_folder, "._atom_pairs.json")
             if expanded_atom_pairs
             else None
         )
         if atom_pairs_file:
-            with open(atom_pairs_file, 'w') as jf:
+            with open(atom_pairs_file, "w") as jf:
                 json.dump(expanded_atom_pairs, jf)
 
         if overwrite:
-            for subfolder in ['scores', 'distances', 'binding_energy', 'ebr', 'neighbours', 'protonation']:
+            for subfolder in [
+                "scores",
+                "distances",
+                "binding_energy",
+                "ebr",
+                "neighbours",
+                "protonation",
+            ]:
                 folder = os.path.join(analysis_folder, subfolder)
                 if os.path.isdir(folder):
                     for model_ligand in model_ligands:
@@ -12388,17 +13231,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if os.path.exists(path):
                             os.remove(path)
 
-        os.makedirs(os.path.join(analysis_folder, 'scores'), exist_ok=True)
+        os.makedirs(os.path.join(analysis_folder, "scores"), exist_ok=True)
         if expanded_atom_pairs is not None:
-            os.makedirs(os.path.join(analysis_folder, 'distances'), exist_ok=True)
+            os.makedirs(os.path.join(analysis_folder, "distances"), exist_ok=True)
         if binding_energy:
-            os.makedirs(os.path.join(analysis_folder, 'binding_energy'), exist_ok=True)
+            os.makedirs(os.path.join(analysis_folder, "binding_energy"), exist_ok=True)
         if energy_by_residue:
-            os.makedirs(os.path.join(analysis_folder, 'ebr'), exist_ok=True)
+            os.makedirs(os.path.join(analysis_folder, "ebr"), exist_ok=True)
         if interacting_residues:
-            os.makedirs(os.path.join(analysis_folder, 'neighbours'), exist_ok=True)
+            os.makedirs(os.path.join(analysis_folder, "neighbours"), exist_ok=True)
         if protonation_states:
-            os.makedirs(os.path.join(analysis_folder, 'protonation'), exist_ok=True)
+            os.makedirs(os.path.join(analysis_folder, "protonation"), exist_ok=True)
 
         command = f"python {script_path} {docking_folder} "
         if binding_energy:
@@ -12410,7 +13253,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         if interacting_residues:
             command += "--interacting_residues "
             if query_residues is not None:
-                command += "--query_residues " + ",".join([str(r) for r in query_residues]) + " "
+                command += (
+                    "--query_residues "
+                    + ",".join([str(r) for r in query_residues])
+                    + " "
+                )
         if protonation_states:
             command += "--protonation_states "
         if decompose_bb_hb_into_pair_energies:
@@ -12430,21 +13277,25 @@ make sure of reading the target sequences with the function readTargetSequences(
         if return_jobs:
             commands = []
             for model_ligand in model_ligands:
-                score_file = os.path.join(analysis_folder, 'scores', f"{model_ligand}.csv")
+                score_file = os.path.join(
+                    analysis_folder, "scores", f"{model_ligand}.csv"
+                )
                 if skip_finished and os.path.exists(score_file):
                     continue
-                job_command = command.replace('MODEL', model_ligand)
+                job_command = command.replace("MODEL", model_ligand)
                 if pyrosetta_env:
                     job_command = _wrap_pyrosetta_command(job_command, pyrosetta_env)
                 commands.append(job_command)
 
             print("Returning jobs for running the analysis in parallel.")
-            print("After jobs have finished, rerun this function removing return_jobs=True!")
+            print(
+                "After jobs have finished, rerun this function removing return_jobs=True!"
+            )
             return commands
 
         missing = False
         for model_ligand in model_ligands:
-            score_file = os.path.join(analysis_folder, 'scores', f"{model_ligand}.csv")
+            score_file = os.path.join(analysis_folder, "scores", f"{model_ligand}.csv")
             if not os.path.exists(score_file):
                 missing = True
                 break
@@ -12452,10 +13303,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         if missing:
             if not pyrosetta_env:
                 installed = {pkg.key for pkg in pkg_resources.working_set}
-                if 'pyrosetta' not in installed:
+                if "pyrosetta" not in installed:
                     raise ValueError(
-                        'PyRosetta was not found in your Python environment. '
-                        'Consider using return_jobs=True or activating an environment that does have it.'
+                        "PyRosetta was not found in your Python environment. "
+                        "Consider using return_jobs=True or activating an environment that does have it."
                     )
             exec_command = command
             if pyrosetta_env:
@@ -12468,44 +13319,58 @@ make sure of reading the target sequences with the function readTargetSequences(
         processed_files = 0
 
         for model_ligand in model_ligands:
-            score_file = os.path.join(analysis_folder, 'scores', f"{model_ligand}.csv")
+            score_file = os.path.join(analysis_folder, "scores", f"{model_ligand}.csv")
             if not os.path.exists(score_file):
                 print(f"Score file for {model_ligand} not found, skipping.")
                 continue
 
             scores = pd.read_csv(score_file)
             base_model, ligand = model_ligand.split(separator, 1)
-            scores['Model'] = base_model
-            scores['Ligand'] = ligand
-            scores = scores.set_index(['Model', 'Ligand', 'Pose'])
+            scores["Model"] = base_model
+            scores["Ligand"] = ligand
+            scores = scores.set_index(["Model", "Ligand", "Pose"])
 
-            distance_columns = [col for col in scores.columns if col.startswith('distance_')]
+            distance_columns = [
+                col for col in scores.columns if col.startswith("distance_")
+            ]
             distance_df = pd.DataFrame()
             if distance_columns:
                 distance_df = scores[distance_columns]
                 scores = scores.drop(columns=distance_columns)
                 if not distance_df.empty:
-                    distance_df = distance_df.sort_index(level=['Model', 'Ligand', 'Pose'])
+                    distance_df = distance_df.sort_index(
+                        level=["Model", "Ligand", "Pose"]
+                    )
             elif atom_pairs:
                 distance_file = os.path.join(distances_folder, f"{model_ligand}.csv")
                 if os.path.exists(distance_file):
                     raw_distances = pd.read_csv(distance_file)
-                    if {'Model', 'Pose'}.issubset(raw_distances.columns):
+                    if {"Model", "Pose"}.issubset(raw_distances.columns):
                         filtered = raw_distances.copy()
-                        mask = filtered['Model'] == model_ligand
+                        mask = filtered["Model"] == model_ligand
                         if mask.any():
                             filtered = filtered[mask]
-                        filtered['Ligand'] = ligand
-                        filtered['Model'] = base_model
-                        distance_df = filtered.set_index(['Model', 'Ligand', 'Pose']).sort_index(level=['Model', 'Ligand', 'Pose'])
+                        filtered["Ligand"] = ligand
+                        filtered["Model"] = base_model
+                        distance_df = filtered.set_index(
+                            ["Model", "Ligand", "Pose"]
+                        ).sort_index(level=["Model", "Ligand", "Pose"])
 
             if not distance_df.empty:
-                self.rosetta_docking_distances.setdefault(base_model, {})[ligand] = distance_df
+                self.rosetta_docking_distances.setdefault(base_model, {})[
+                    ligand
+                ] = distance_df
 
-            interface_delta_col = next((col for col in scores.columns if col.startswith('interface_delta_')), None)
-            if interface_delta_col and 'total_score' in scores.columns:
+            interface_delta_col = next(
+                (col for col in scores.columns if col.startswith("interface_delta_")),
+                None,
+            )
+            if interface_delta_col and "total_score" in scores.columns:
                 cols = list(scores.columns)
-                cols.insert(cols.index('total_score') + 1, cols.pop(cols.index(interface_delta_col)))
+                cols.insert(
+                    cols.index("total_score") + 1,
+                    cols.pop(cols.index(interface_delta_col)),
+                )
                 scores = scores[cols]
 
             if self.rosetta_docking.empty:
@@ -12515,7 +13380,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             processed_files += 1
             progress = f"Processing: {processed_files}/{total_files} files"
-            sys.stdout.write('\r' + progress)
+            sys.stdout.write("\r" + progress)
             sys.stdout.flush()
 
         print()
@@ -12527,10 +13392,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         Record the type ('distance', 'angle', etc.) for a Rosetta docking metric,
         storing both prefixed (metric_*) and bare names for convenience.
         """
-        if not hasattr(self, 'rosetta_docking_metric_type') or self.rosetta_docking_metric_type is None:
+        if (
+            not hasattr(self, "rosetta_docking_metric_type")
+            or self.rosetta_docking_metric_type is None
+        ):
             self.rosetta_docking_metric_type = {}
-        prefixed = metric_name if metric_name.startswith('metric_') else f"metric_{metric_name}"
-        bare = prefixed[7:] if prefixed.startswith('metric_') else prefixed
+        prefixed = (
+            metric_name
+            if metric_name.startswith("metric_")
+            else f"metric_{metric_name}"
+        )
+        bare = prefixed[7:] if prefixed.startswith("metric_") else prefixed
         self.rosetta_docking_metric_type[prefixed] = metric_type
         self.rosetta_docking_metric_type[bare] = metric_type
 
@@ -12538,15 +13410,24 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Retrieve the recorded metric type, accepting either prefixed or bare names.
         """
-        if not hasattr(self, 'rosetta_docking_metric_type') or self.rosetta_docking_metric_type is None:
+        if (
+            not hasattr(self, "rosetta_docking_metric_type")
+            or self.rosetta_docking_metric_type is None
+        ):
             self.rosetta_docking_metric_type = {}
-        prefixed = metric_name if metric_name.startswith('metric_') else f"metric_{metric_name}"
-        bare = prefixed[7:] if prefixed.startswith('metric_') else prefixed
+        prefixed = (
+            metric_name
+            if metric_name.startswith("metric_")
+            else f"metric_{metric_name}"
+        )
+        bare = prefixed[7:] if prefixed.startswith("metric_") else prefixed
         if prefixed in self.rosetta_docking_metric_type:
             return self.rosetta_docking_metric_type[prefixed]
         return self.rosetta_docking_metric_type.get(bare)
 
-    def combineRosettaDockingDistancesIntoMetrics(self, catalytic_labels, overwrite=False):
+    def combineRosettaDockingDistancesIntoMetrics(
+        self, catalytic_labels, overwrite=False
+    ):
         """
         Combine different equivalent distances into specific named metrics. The function
         takes as input a dictionary (catalytic_labels) composed of inner dictionaries as follows:
@@ -12569,7 +13450,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         # Initialize the metric type dictionary if it doesn't exist
-        if not hasattr(self, 'rosetta_docking_metric_type'):
+        if not hasattr(self, "rosetta_docking_metric_type"):
             self.rosetta_docking_metric_type = {}
 
         for name in catalytic_labels:
@@ -12579,7 +13460,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 )
             else:
                 values = []
-                for model in self.rosetta_docking.index.get_level_values('Model').unique():
+                for model in self.rosetta_docking.index.get_level_values(
+                    "Model"
+                ).unique():
 
                     # Check whether model is found in docking distances
                     if model not in self.rosetta_docking_distances:
@@ -12589,7 +13472,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         self.rosetta_docking.index.get_level_values("Model") == model
                     ]
 
-                    for ligand in self.rosetta_docking.index.get_level_values('Ligand').unique():
+                    for ligand in self.rosetta_docking.index.get_level_values(
+                        "Ligand"
+                    ).unique():
 
                         # Check whether ligand is found in model's docking distances
                         if ligand not in self.rosetta_docking_distances[model]:
@@ -12640,7 +13525,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 self.rosetta_docking["metric_" + name] = values
 
-    def combineRosettaDockingMetricsWithExclusions(self, combinations, exclusions, drop=True):
+    def combineRosettaDockingMetricsWithExclusions(
+        self, combinations, exclusions, drop=True
+    ):
         """
         Combine mutually exclusive Rosetta docking metrics into new metrics while
         respecting exclusion rules.
@@ -12665,16 +13552,18 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         if self.rosetta_docking_data is None or self.rosetta_docking_data.empty:
-            raise ValueError("Rosetta docking data is empty. Run analyseRosettaDocking first.")
+            raise ValueError(
+                "Rosetta docking data is empty. Run analyseRosettaDocking first."
+            )
 
-        if not hasattr(self, 'rosetta_docking_metric_type'):
+        if not hasattr(self, "rosetta_docking_metric_type"):
             self.rosetta_docking_metric_type = {}
 
         def _with_prefix(name: str) -> str:
-            return name if name.startswith('metric_') else f"metric_{name}"
+            return name if name.startswith("metric_") else f"metric_{name}"
 
         def _strip_prefix(name: str) -> str:
-            return name[7:] if name.startswith('metric_') else name
+            return name[7:] if name.startswith("metric_") else name
 
         # Determine exclusion type
         if isinstance(exclusions, list):
@@ -12684,7 +13573,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             simple_exclusions = False
             by_metric_exclusions = True
         else:
-            raise ValueError('exclusions should be a list of tuples or a dictionary by metrics.')
+            raise ValueError(
+                "exclusions should be a list of tuples or a dictionary by metrics."
+            )
 
         # Collect all unique metrics involved
         unique_metrics = set()
@@ -12693,10 +13584,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             for metric in metrics:
                 metric_label = _with_prefix(metric)
                 if metric_label not in self.rosetta_docking_metric_type:
-                    raise ValueError(f"Metric '{metric}' is not present in rosetta_docking_metric_type.")
+                    raise ValueError(
+                        f"Metric '{metric}' is not present in rosetta_docking_metric_type."
+                    )
                 metric_types.append(self.rosetta_docking_metric_type[metric_label])
             if len(set(metric_types)) != 1:
-                raise ValueError('Attempting to combine different metric types (e.g., distances and angles) is not allowed.')
+                raise ValueError(
+                    "Attempting to combine different metric types (e.g., distances and angles) is not allowed."
+                )
             self._set_rosetta_metric_type(new_metric, metric_types[0])
             unique_metrics.update(_strip_prefix(metric) for metric in metrics)
 
@@ -12706,11 +13601,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Add metric prefix if not already present
         add_metric_prefix = True
         for m in metrics_list:
-            if 'metric_' in m:
+            if "metric_" in m:
                 raise ValueError('Provide metric names without the "metric_" prefix.')
-        all_metrics_columns = ['metric_' + m for m in metrics_list]
+        all_metrics_columns = ["metric_" + m for m in metrics_list]
 
-        missing_columns = set(all_metrics_columns) - set(self.rosetta_docking_data.columns)
+        missing_columns = set(all_metrics_columns) - set(
+            self.rosetta_docking_data.columns
+        )
         if missing_columns:
             raise ValueError(f"Missing metric columns in data: {missing_columns}")
 
@@ -12720,7 +13617,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if simple_exclusions:
             for row_idx, metric_col_label in enumerate(min_metric_labels):
-                m = metric_col_label.replace('metric_', '')
+                m = metric_col_label.replace("metric_", "")
 
                 for exclusion_group in exclusions:
                     canonical_group = {_strip_prefix(x) for x in exclusion_group}
@@ -12756,7 +13653,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     min_col_idx = -1
 
                     for col_idx, metric_value in enumerate(data_array[row_idx]):
-                        if col_idx not in considered_metrics and (row_idx, col_idx) not in excluded_positions:
+                        if (
+                            col_idx not in considered_metrics
+                            and (row_idx, col_idx) not in excluded_positions
+                        ):
                             if metric_value < min_value:
                                 min_value = metric_value
                                 min_col_idx = col_idx
@@ -12779,17 +13679,23 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         for new_metric_name, metrics_to_combine in combinations.items():
             canonical_metrics = [_strip_prefix(m) for m in metrics_to_combine]
-            c_indexes = [metrics_indexes[m] for m in canonical_metrics if m in metrics_indexes]
+            c_indexes = [
+                metrics_indexes[m] for m in canonical_metrics if m in metrics_indexes
+            ]
 
             if c_indexes:
                 combined_min = np.min(data_array[:, c_indexes], axis=1)
 
                 if np.all(np.isinf(combined_min)):
-                    print(f"Skipping combination for '{new_metric_name}' due to incompatible exclusions.")
+                    print(
+                        f"Skipping combination for '{new_metric_name}' due to incompatible exclusions."
+                    )
                     continue
-                self.rosetta_docking_data['metric_' + new_metric_name] = combined_min
+                self.rosetta_docking_data["metric_" + new_metric_name] = combined_min
             else:
-                raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
+                raise ValueError(
+                    f"No valid metrics to combine for '{new_metric_name}'."
+                )
 
         if drop:
             self.rosetta_docking_data.drop(columns=all_metrics_columns, inplace=True)
@@ -12807,12 +13713,34 @@ make sure of reading the target sequences with the function readTargetSequences(
                         break
 
             if not non_excluded_found:
-                print(f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'.")
+                print(
+                    f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'."
+                )
 
-    def rosettaDockingBindingEnergyLandscape(self, initial_threshold=3.5, vertical_line=None, xlim=None, ylim=None, clim=None, color=None,
-                                             size=1.0, alpha=0.05, vertical_line_width=0.5, vertical_line_color='k', dataframe=None,
-                                             title=None, no_xticks=False, no_yticks=False, no_xlabel=False, no_ylabel=False,
-                                             no_cbar=False, xlabel=None, ylabel=None, clabel=None, relative_total_energy=False):
+    def rosettaDockingBindingEnergyLandscape(
+        self,
+        initial_threshold=3.5,
+        vertical_line=None,
+        xlim=None,
+        ylim=None,
+        clim=None,
+        color=None,
+        size=1.0,
+        alpha=0.05,
+        vertical_line_width=0.5,
+        vertical_line_color="k",
+        dataframe=None,
+        title=None,
+        no_xticks=False,
+        no_yticks=False,
+        no_xlabel=False,
+        no_ylabel=False,
+        no_cbar=False,
+        xlabel=None,
+        ylabel=None,
+        clabel=None,
+        relative_total_energy=False,
+    ):
         """
         Plot binding energy as an interactive plot.
 
@@ -12863,59 +13791,131 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         if not self.rosetta_docking_distances:
-            raise ValueError('There are no distances in the docking data. Use calculateDistances to show plot.')
+            raise ValueError(
+                "There are no distances in the docking data. Use calculateDistances to show plot."
+            )
 
         def getLigands(model, dataframe=None):
             if dataframe is not None:
-                model_series = dataframe[dataframe.index.get_level_values('Model') == model]
+                model_series = dataframe[
+                    dataframe.index.get_level_values("Model") == model
+                ]
             else:
-                model_series = self.rosetta_docking[self.rosetta_docking.index.get_level_values('Model') == model]
+                model_series = self.rosetta_docking[
+                    self.rosetta_docking.index.get_level_values("Model") == model
+                ]
 
-            ligands = list(set(model_series.index.get_level_values('Ligand').tolist()))
-            ligands_ddm = Dropdown(options=ligands, description='Ligand', style={'description_width': 'initial'})
+            ligands = list(set(model_series.index.get_level_values("Ligand").tolist()))
+            ligands_ddm = Dropdown(
+                options=ligands,
+                description="Ligand",
+                style={"description_width": "initial"},
+            )
 
-            interact(getDistance, model_series=fixed(model_series), model=fixed(model), ligand=ligands_ddm)
+            interact(
+                getDistance,
+                model_series=fixed(model_series),
+                model=fixed(model),
+                ligand=ligands_ddm,
+            )
 
         def getDistance(model_series, model, ligand, by_metric=False):
-            ligand_series = model_series[model_series.index.get_level_values('Ligand') == ligand]
+            ligand_series = model_series[
+                model_series.index.get_level_values("Ligand") == ligand
+            ]
 
             distances = []
-            distance_label = 'Distance'
+            distance_label = "Distance"
             if by_metric:
-                distances = [d for d in ligand_series if d.startswith('metric_') and not ligand_series[d].dropna().empty]
-                distance_label = 'Metric'
+                distances = [
+                    d
+                    for d in ligand_series
+                    if d.startswith("metric_") and not ligand_series[d].dropna().empty
+                ]
+                distance_label = "Metric"
 
             if not distances:
-                if model in self.rosetta_docking_distances and ligand in self.rosetta_docking_distances[model]:
-                    distances = [d for d in self.rosetta_docking_distances[model][ligand] if 'distance' in d or '_coordinate' in d]
-                if model in self.rosetta_docking_angles and ligand in self.rosetta_docking_angles[model]:
-                    distances += [d for d in self.rosetta_docking_angles[model][ligand] if 'angle' in d]
-                if 'Ligand RMSD' in self.rosetta_docking:
-                    distances.append('Ligand RMSD')
+                if (
+                    model in self.rosetta_docking_distances
+                    and ligand in self.rosetta_docking_distances[model]
+                ):
+                    distances = [
+                        d
+                        for d in self.rosetta_docking_distances[model][ligand]
+                        if "distance" in d or "_coordinate" in d
+                    ]
+                if (
+                    model in self.rosetta_docking_angles
+                    and ligand in self.rosetta_docking_angles[model]
+                ):
+                    distances += [
+                        d
+                        for d in self.rosetta_docking_angles[model][ligand]
+                        if "angle" in d
+                    ]
+                if "Ligand RMSD" in self.rosetta_docking:
+                    distances.append("Ligand RMSD")
 
             if not distances:
-                raise ValueError('No distances or metrics found for this ligand. Consider calculating some distances.')
+                raise ValueError(
+                    "No distances or metrics found for this ligand. Consider calculating some distances."
+                )
 
-            distances_ddm = Dropdown(options=distances, description=distance_label, style={'description_width': 'initial'})
+            distances_ddm = Dropdown(
+                options=distances,
+                description=distance_label,
+                style={"description_width": "initial"},
+            )
 
-            interact(getMetrics, distances=fixed(distances_ddm), ligand_series=fixed(ligand_series),
-                     model=fixed(model), ligand=fixed(ligand))
+            interact(
+                getMetrics,
+                distances=fixed(distances_ddm),
+                ligand_series=fixed(ligand_series),
+                model=fixed(model),
+                ligand=fixed(ligand),
+            )
 
-        def getMetrics(ligand_series, distances, model, ligand, filter_by_metric=False, filter_by_label=False,
-                       color_by_metric=False, color_by_labels=False):
+        def getMetrics(
+            ligand_series,
+            distances,
+            model,
+            ligand,
+            filter_by_metric=False,
+            filter_by_label=False,
+            color_by_metric=False,
+            color_by_labels=False,
+        ):
 
             if color_by_metric or filter_by_metric:
-                metrics = [k for k in ligand_series.keys() if 'metric_' in k]
+                metrics = [k for k in ligand_series.keys() if "metric_" in k]
                 metrics_sliders = {}
                 for m in metrics:
-                    if self.rosetta_docking_metric_type[m] == 'distance':
-                        m_slider = FloatSlider(value=initial_threshold, min=0, max=max(30, max(ligand_series[m])), step=0.1,
-                                               description=f"{m}:", disabled=False, continuous_update=False,
-                                               orientation='horizontal', readout=True, readout_format='.2f')
-                    elif self.rosetta_docking_metric_type[m] in ['angle', 'torsion']:
-                        m_slider = FloatRangeSlider(value=[110, 130], min=-180, max=180, step=0.1,
-                                                    description=f"{m}:", disabled=False, continuous_update=False,
-                                                    orientation='horizontal', readout=True, readout_format='.2f')
+                    if self.rosetta_docking_metric_type[m] == "distance":
+                        m_slider = FloatSlider(
+                            value=initial_threshold,
+                            min=0,
+                            max=max(30, max(ligand_series[m])),
+                            step=0.1,
+                            description=f"{m}:",
+                            disabled=False,
+                            continuous_update=False,
+                            orientation="horizontal",
+                            readout=True,
+                            readout_format=".2f",
+                        )
+                    elif self.rosetta_docking_metric_type[m] in ["angle", "torsion"]:
+                        m_slider = FloatRangeSlider(
+                            value=[110, 130],
+                            min=-180,
+                            max=180,
+                            step=0.1,
+                            description=f"{m}:",
+                            disabled=False,
+                            continuous_update=False,
+                            orientation="horizontal",
+                            readout=True,
+                            readout_format=".2f",
+                        )
 
                     metrics_sliders[m] = m_slider
             else:
@@ -12923,37 +13923,70 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if filter_by_label:
                 labels_ddms = {}
-                labels = [l for l in ligand_series.keys() if 'label_' in l]
+                labels = [l for l in ligand_series.keys() if "label_" in l]
                 for l in labels:
                     label_options = [None] + sorted(list(set(ligand_series[l])))
-                    labels_ddms[l] = Dropdown(options=label_options, description=l, style={'description_width': 'initial'})
+                    labels_ddms[l] = Dropdown(
+                        options=label_options,
+                        description=l,
+                        style={"description_width": "initial"},
+                    )
             else:
                 labels_ddms = {}
 
-            interact(getColor, distance=distances, model=fixed(model), ligand=fixed(ligand),
-                     metrics=fixed(metrics_sliders), ligand_series=fixed(ligand_series),
-                     color_by_metric=fixed(color_by_metric), color_by_labels=fixed(color_by_labels), **labels_ddms)
+            interact(
+                getColor,
+                distance=distances,
+                model=fixed(model),
+                ligand=fixed(ligand),
+                metrics=fixed(metrics_sliders),
+                ligand_series=fixed(ligand_series),
+                color_by_metric=fixed(color_by_metric),
+                color_by_labels=fixed(color_by_labels),
+                **labels_ddms,
+            )
 
-        def getColor(distance, ligand_series, metrics, model, ligand, color_by_metric=False,
-                     color_by_labels=False, **labels):
+        def getColor(
+            distance,
+            ligand_series,
+            metrics,
+            model,
+            ligand,
+            color_by_metric=False,
+            color_by_labels=False,
+            **labels,
+        ):
 
             if color is None:
-                color_columns = [k for k in ligand_series.keys() if ':' not in k and 'distance' not in k and not k.startswith('metric_') and not k.startswith('label_')]
-                color_columns = [None, 'Epoch'] + color_columns
+                color_columns = [
+                    k
+                    for k in ligand_series.keys()
+                    if ":" not in k
+                    and "distance" not in k
+                    and not k.startswith("metric_")
+                    and not k.startswith("label_")
+                ]
+                color_columns = [None, "Epoch"] + color_columns
 
-                if 'interface_delta_B' in ligand_series:
-                    be_column = 'interface_delta_B'
+                if "interface_delta_B" in ligand_series:
+                    be_column = "interface_delta_B"
                 else:
-                    raise ValueError('No binding energy column (interface_delta_B) found in the data.')
+                    raise ValueError(
+                        "No binding energy column (interface_delta_B) found in the data."
+                    )
 
                 color_columns.remove(be_column)
 
-                color_ddm = Dropdown(options=color_columns, description='Color', style={'description_width': 'initial'})
+                color_ddm = Dropdown(
+                    options=color_columns,
+                    description="Color",
+                    style={"description_width": "initial"},
+                )
                 if color_by_metric:
-                    color_ddm.options = ['Color by metrics']
+                    color_ddm.options = ["Color by metrics"]
                     alpha_value = 0.10
                 elif color_by_labels:
-                    color_ddm.options = ['Color by labels']
+                    color_ddm.options = ["Color by labels"]
                     alpha_value = 1.00
                 else:
                     alpha_value = fixed(0.10)
@@ -12962,26 +13995,61 @@ make sure of reading the target sequences with the function readTargetSequences(
             else:
                 color_object = fixed(color)
 
-            interact(_bindingEnergyLandscape, color=color_object, ligand_series=fixed(ligand_series),
-                     distance=fixed(distance), color_by_metric=fixed(color_by_metric), color_by_labels=fixed(color_by_labels),
-                     Alpha=alpha_value, labels=fixed(labels), model=fixed(model), ligand=fixed(ligand), title=fixed(title),
-                     no_xticks=fixed(no_xticks), no_yticks=fixed(no_yticks), no_cbar=fixed(no_cbar), clabel=fixed(clabel),
-                     no_xlabel=fixed(no_xlabel), no_ylabel=fixed(no_ylabel), xlabel=fixed(xlabel), ylabel=fixed(ylabel),
-                     relative_total_energy=fixed(relative_total_energy), clim=fixed(clim), **metrics)
+            interact(
+                _bindingEnergyLandscape,
+                color=color_object,
+                ligand_series=fixed(ligand_series),
+                distance=fixed(distance),
+                color_by_metric=fixed(color_by_metric),
+                color_by_labels=fixed(color_by_labels),
+                Alpha=alpha_value,
+                labels=fixed(labels),
+                model=fixed(model),
+                ligand=fixed(ligand),
+                title=fixed(title),
+                no_xticks=fixed(no_xticks),
+                no_yticks=fixed(no_yticks),
+                no_cbar=fixed(no_cbar),
+                clabel=fixed(clabel),
+                no_xlabel=fixed(no_xlabel),
+                no_ylabel=fixed(no_ylabel),
+                xlabel=fixed(xlabel),
+                ylabel=fixed(ylabel),
+                relative_total_energy=fixed(relative_total_energy),
+                clim=fixed(clim),
+                **metrics,
+            )
 
-        def _bindingEnergyLandscape(color, ligand_series, distance, model, ligand,
-                                    color_by_metric=False, color_by_labels=False,
-                                    Alpha=0.10, labels=None, title=None, no_xticks=False,
-                                    no_yticks=False, no_cbar=False, no_xlabel=True, no_ylabel=False,
-                                    xlabel=None, ylabel=None, clabel=None, relative_total_energy=False,
-                                    clim=None, **metrics):
+        def _bindingEnergyLandscape(
+            color,
+            ligand_series,
+            distance,
+            model,
+            ligand,
+            color_by_metric=False,
+            color_by_labels=False,
+            Alpha=0.10,
+            labels=None,
+            title=None,
+            no_xticks=False,
+            no_yticks=False,
+            no_cbar=False,
+            no_xlabel=True,
+            no_ylabel=False,
+            xlabel=None,
+            ylabel=None,
+            clabel=None,
+            relative_total_energy=False,
+            clim=None,
+            **metrics,
+        ):
 
             skip_fp = False
             show_plot = True
 
             return_axis = False
             if color_by_metric:
-                color = 'k'
+                color = "k"
                 color_metrics = metrics
                 metrics = {}
                 return_axis = True
@@ -12992,75 +14060,218 @@ make sure of reading the target sequences with the function readTargetSequences(
                 return_axis = True
                 show_plot = False
 
-            if color == 'Total Energy' and relative_total_energy:
+            if color == "Total Energy" and relative_total_energy:
                 relative_color_values = True
                 if clim is None:
                     clim = (0, 27.631021116)
             else:
                 relative_color_values = None
 
-            if 'interface_delta_B' in ligand_series:
-                be_column = 'interface_delta_B'
+            if "interface_delta_B" in ligand_series:
+                be_column = "interface_delta_B"
             else:
-                raise ValueError('No binding energy column (interface_delta_B) found in the data.')
+                raise ValueError(
+                    "No binding energy column (interface_delta_B) found in the data."
+                )
 
             if not skip_fp:
-                axis = self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim,
-                                                            vertical_line=vertical_line, color_column=color, clim=clim, size=size,
-                                                            vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
-                                                            metrics=metrics, labels=labels, return_axis=return_axis, show=show_plot,
-                                                            title=title, no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar,
-                                                            no_xlabel=no_xlabel, no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel,
-                                                            clabel=clabel, relative_color_values=relative_color_values, dataframe=ligand_series)
+                axis = self.scatterPlotIndividualSimulation(
+                    model,
+                    ligand,
+                    distance,
+                    be_column,
+                    xlim=xlim,
+                    ylim=ylim,
+                    vertical_line=vertical_line,
+                    color_column=color,
+                    clim=clim,
+                    size=size,
+                    vertical_line_color=vertical_line_color,
+                    vertical_line_width=vertical_line_width,
+                    metrics=metrics,
+                    labels=labels,
+                    return_axis=return_axis,
+                    show=show_plot,
+                    title=title,
+                    no_xticks=no_xticks,
+                    no_yticks=no_yticks,
+                    no_cbar=no_cbar,
+                    no_xlabel=no_xlabel,
+                    no_ylabel=no_ylabel,
+                    xlabel=xlabel,
+                    ylabel=ylabel,
+                    clabel=clabel,
+                    relative_color_values=relative_color_values,
+                    dataframe=ligand_series,
+                )
 
                 # Set reasonable ticks
                 if axis is not None:
                     if not no_xticks:
-                        axis.set_xticks(axis.get_xticks()[::max(1, len(axis.get_xticks()) // 10 + 1)])
+                        axis.set_xticks(
+                            axis.get_xticks()[
+                                :: max(1, len(axis.get_xticks()) // 10 + 1)
+                            ]
+                        )
                     if not no_yticks:
-                        axis.set_yticks(axis.get_yticks()[::max(1, len(axis.get_yticks()) // 10 + 1)])
+                        axis.set_yticks(
+                            axis.get_yticks()[
+                                :: max(1, len(axis.get_yticks()) // 10 + 1)
+                            ]
+                        )
 
             if color_by_metric:
-                self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim,
-                                                     vertical_line=vertical_line, color_column='r', clim=clim, size=size,
-                                                     vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
-                                                     metrics=color_metrics, labels=labels, axis=axis, show=True, alpha=Alpha,
-                                                     no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar, no_xlabel=no_xlabel,
-                                                     no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel, clabel=clabel, dataframe=ligand_series)
+                self.scatterPlotIndividualSimulation(
+                    model,
+                    ligand,
+                    distance,
+                    be_column,
+                    xlim=xlim,
+                    ylim=ylim,
+                    vertical_line=vertical_line,
+                    color_column="r",
+                    clim=clim,
+                    size=size,
+                    vertical_line_color=vertical_line_color,
+                    vertical_line_width=vertical_line_width,
+                    metrics=color_metrics,
+                    labels=labels,
+                    axis=axis,
+                    show=True,
+                    alpha=Alpha,
+                    no_xticks=no_xticks,
+                    no_yticks=no_yticks,
+                    no_cbar=no_cbar,
+                    no_xlabel=no_xlabel,
+                    no_ylabel=no_ylabel,
+                    xlabel=xlabel,
+                    ylabel=ylabel,
+                    clabel=clabel,
+                    dataframe=ligand_series,
+                )
             elif color_by_labels:
-                all_labels = {l: sorted(list(set(ligand_series[l].to_list()))) for l in ligand_series.keys() if 'label_' in l}
+                all_labels = {
+                    l: sorted(list(set(ligand_series[l].to_list())))
+                    for l in ligand_series.keys()
+                    if "label_" in l
+                }
 
                 for l in all_labels:
                     colors = iter([plt.cm.Set2(i) for i in range(len(all_labels[l]))])
                     for i, v in enumerate(all_labels[l]):
                         if i == 0:
-                            axis = self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim, plot_label=v,
-                                                                        vertical_line=vertical_line, color_column=[next(colors)], clim=clim, size=size,
-                                                                        vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
-                                                                        metrics=metrics, labels=labels, return_axis=return_axis, alpha=Alpha, show=show_plot,
-                                                                        no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar, no_xlabel=no_xlabel,
-                                                                        no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel, clabel=clabel, dataframe=ligand_series)
+                            axis = self.scatterPlotIndividualSimulation(
+                                model,
+                                ligand,
+                                distance,
+                                be_column,
+                                xlim=xlim,
+                                ylim=ylim,
+                                plot_label=v,
+                                vertical_line=vertical_line,
+                                color_column=[next(colors)],
+                                clim=clim,
+                                size=size,
+                                vertical_line_color=vertical_line_color,
+                                vertical_line_width=vertical_line_width,
+                                metrics=metrics,
+                                labels=labels,
+                                return_axis=return_axis,
+                                alpha=Alpha,
+                                show=show_plot,
+                                no_xticks=no_xticks,
+                                no_yticks=no_yticks,
+                                no_cbar=no_cbar,
+                                no_xlabel=no_xlabel,
+                                no_ylabel=no_ylabel,
+                                xlabel=xlabel,
+                                ylabel=ylabel,
+                                clabel=clabel,
+                                dataframe=ligand_series,
+                            )
                             continue
                         elif i == len(all_labels[l]) - 1:
                             show_plot = True
-                        axis = self.scatterPlotIndividualSimulation(model, ligand, distance, be_column, xlim=xlim, ylim=ylim, plot_label=v,
-                                                                    vertical_line=vertical_line, color_column=[next(colors)], clim=clim, size=size,
-                                                                    vertical_line_color=vertical_line_color, vertical_line_width=vertical_line_width,
-                                                                    metrics=metrics, labels={l: v}, return_axis=return_axis, axis=axis, alpha=Alpha, show=show_plot,
-                                                                    show_legend=True, title=title, no_xticks=no_xticks, no_yticks=no_yticks, no_cbar=no_cbar,
-                                                                    no_xlabel=no_xlabel, no_ylabel=no_ylabel, xlabel=xlabel, ylabel=ylabel, clabel=clabel,
-                                                                    dataframe=ligand_series)
+                        axis = self.scatterPlotIndividualSimulation(
+                            model,
+                            ligand,
+                            distance,
+                            be_column,
+                            xlim=xlim,
+                            ylim=ylim,
+                            plot_label=v,
+                            vertical_line=vertical_line,
+                            color_column=[next(colors)],
+                            clim=clim,
+                            size=size,
+                            vertical_line_color=vertical_line_color,
+                            vertical_line_width=vertical_line_width,
+                            metrics=metrics,
+                            labels={l: v},
+                            return_axis=return_axis,
+                            axis=axis,
+                            alpha=Alpha,
+                            show=show_plot,
+                            show_legend=True,
+                            title=title,
+                            no_xticks=no_xticks,
+                            no_yticks=no_yticks,
+                            no_cbar=no_cbar,
+                            no_xlabel=no_xlabel,
+                            no_ylabel=no_ylabel,
+                            xlabel=xlabel,
+                            ylabel=ylabel,
+                            clabel=clabel,
+                            dataframe=ligand_series,
+                        )
 
-        models = self.rosetta_docking.index.get_level_values('Model').unique()
-        models_ddm = Dropdown(options=models, description='Model', style={'description_width': 'initial'})
+        models = self.rosetta_docking.index.get_level_values("Model").unique()
+        models_ddm = Dropdown(
+            options=models, description="Model", style={"description_width": "initial"}
+        )
 
         interact(getLigands, model=models_ddm, dataframe=fixed(dataframe))
 
-    def scatterPlotIndividualSimulation(self, model, ligand, x, y, vertical_line=None, color_column=None, size=1.0, labels_size=10.0, plot_label=None,
-                                        xlim=None, ylim=None, metrics=None, labels=None, title=None, title_size=14.0, return_axis=False, dpi=300, show_legend=False,
-                                        axis=None, xlabel=None, ylabel=None, vertical_line_color='k', vertical_line_width=0.5, marker_size=0.8, clim=None, show=False,
-                                        clabel=None, legend_font_size=6, no_xticks=False, no_yticks=False, no_cbar=False, no_xlabel=False, no_ylabel=False,
-                                        relative_color_values=False, dataframe=None, separator='_', **kwargs):
+    def scatterPlotIndividualSimulation(
+        self,
+        model,
+        ligand,
+        x,
+        y,
+        vertical_line=None,
+        color_column=None,
+        size=1.0,
+        labels_size=10.0,
+        plot_label=None,
+        xlim=None,
+        ylim=None,
+        metrics=None,
+        labels=None,
+        title=None,
+        title_size=14.0,
+        return_axis=False,
+        dpi=300,
+        show_legend=False,
+        axis=None,
+        xlabel=None,
+        ylabel=None,
+        vertical_line_color="k",
+        vertical_line_width=0.5,
+        marker_size=0.8,
+        clim=None,
+        show=False,
+        clabel=None,
+        legend_font_size=6,
+        no_xticks=False,
+        no_yticks=False,
+        no_cbar=False,
+        no_xlabel=False,
+        no_ylabel=False,
+        relative_color_values=False,
+        dataframe=None,
+        separator="_",
+        **kwargs,
+    ):
         """
         Creates a scatter plot for the selected model and ligand using the x and y
         columns. Data series can be filtered by specific metrics.
@@ -13158,22 +14369,52 @@ make sure of reading the target sequences with the function readTargetSequences(
                     if self.rosetta_docking_distances[model][ligand] is not None:
                         for distance in self.rosetta_docking_distances[model][ligand]:
                             if dataframe is not None:
-                                index_columns = ['Model', 'Ligand', 'Pose']
-                                indexes = dataframe.reset_index().set_index(index_columns).index
-                                ligand_series[distance] = self.rosetta_docking_distances[model][ligand][self.rosetta_docking_distances[model][ligand].index.isin(indexes)][distance].tolist()
+                                index_columns = ["Model", "Ligand", "Pose"]
+                                indexes = (
+                                    dataframe.reset_index()
+                                    .set_index(index_columns)
+                                    .index
+                                )
+                                ligand_series[
+                                    distance
+                                ] = self.rosetta_docking_distances[model][ligand][
+                                    self.rosetta_docking_distances[model][
+                                        ligand
+                                    ].index.isin(indexes)
+                                ][
+                                    distance
+                                ].tolist()
                             else:
-                                ligand_series[distance] = self.rosetta_docking_distances[model][ligand][distance].tolist()
+                                ligand_series[distance] = (
+                                    self.rosetta_docking_distances[model][ligand][
+                                        distance
+                                    ].tolist()
+                                )
 
             if model in self.rosetta_docking_angles:
                 if ligand in self.rosetta_docking_angles[model]:
                     if self.rosetta_docking_angles[model][ligand] is not None:
                         for angle in self.rosetta_docking_angles[model][ligand]:
                             if dataframe is not None:
-                                index_columns = ['Model', 'Ligand', 'Pose']
-                                indexes = dataframe.reset_index().set_index(index_columns).index
-                                ligand_series[angle] = self.rosetta_docking_angles[model][ligand][self.rosetta_docking_angles[model][ligand].index.isin(indexes)][angle].tolist()
+                                index_columns = ["Model", "Ligand", "Pose"]
+                                indexes = (
+                                    dataframe.reset_index()
+                                    .set_index(index_columns)
+                                    .index
+                                )
+                                ligand_series[angle] = self.rosetta_docking_angles[
+                                    model
+                                ][ligand][
+                                    self.rosetta_docking_angles[model][
+                                        ligand
+                                    ].index.isin(indexes)
+                                ][
+                                    angle
+                                ].tolist()
                             else:
-                                ligand_series[angle] = self.rosetta_docking_angles[model][ligand][angle].tolist()
+                                ligand_series[angle] = self.rosetta_docking_angles[
+                                    model
+                                ][ligand][angle].tolist()
 
             return ligand_series
 
@@ -13182,7 +14423,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if isinstance(value, float):
                     mask = ligand_series[metric] <= value
                 elif isinstance(value, tuple):
-                    mask = (ligand_series[metric] >= value[0]) & (ligand_series[metric] <= value[1])
+                    mask = (ligand_series[metric] >= value[0]) & (
+                        ligand_series[metric] <= value[1]
+                    )
                 ligand_series = ligand_series[mask]
             return ligand_series
 
@@ -13194,10 +14437,29 @@ make sure of reading the target sequences with the function readTargetSequences(
             return ligand_series
 
         def _defineColorColumns(ligand_series):
-            color_columns = [col for col in ligand_series.columns if ':' not in col and 'distance' not in col and 'angle' not in col and not col.startswith('metric_')]
+            color_columns = [
+                col
+                for col in ligand_series.columns
+                if ":" not in col
+                and "distance" not in col
+                and "angle" not in col
+                and not col.startswith("metric_")
+            ]
             return color_columns
 
-        def _plotScatter(axis, ligand_series, x, y, color_column, color_columns, plot_label, clim, marker_size, size, **kwargs):
+        def _plotScatter(
+            axis,
+            ligand_series,
+            x,
+            y,
+            color_column,
+            color_columns,
+            plot_label,
+            clim,
+            marker_size,
+            size,
+            **kwargs,
+        ):
             if color_column is not None:
                 if clim is not None:
                     vmin, vmax = clim
@@ -13205,37 +14467,62 @@ make sure of reading the target sequences with the function readTargetSequences(
                     vmin, vmax = None, None
 
                 ascending = False
-                colormap = 'Blues_r'
+                colormap = "Blues_r"
 
-                if color_column == 'Step':
+                if color_column == "Step":
                     ascending = True
-                    colormap = 'Blues'
+                    colormap = "Blues"
 
-                elif color_column in ['Epoch', 'Cluster']:
+                elif color_column in ["Epoch", "Cluster"]:
                     ascending = True
                     color_values = ligand_series.reset_index()[color_column]
                     cmap = plt.cm.jet
                     cmaplist = [cmap(i) for i in range(cmap.N)]
-                    cmaplist[0] = (.5, .5, .5, 1.0)
+                    cmaplist[0] = (0.5, 0.5, 0.5, 1.0)
                     max_value = max(color_values.tolist())
                     bounds = np.linspace(0, max_value + 1, max_value + 2)
                     norm = mpl.colors.BoundaryNorm(bounds, cmap.N)
-                    colormap = mpl.colors.LinearSegmentedColormap.from_list('Custom cmap', cmaplist, cmap.N)
+                    colormap = mpl.colors.LinearSegmentedColormap.from_list(
+                        "Custom cmap", cmaplist, cmap.N
+                    )
                     color_values = color_values + 0.01
-                    sc = axis.scatter(ligand_series[x], ligand_series[y], c=color_values, cmap=colormap, norm=norm, vmin=vmin, vmax=vmax, label=plot_label, s=marker_size*size, **kwargs)
+                    sc = axis.scatter(
+                        ligand_series[x],
+                        ligand_series[y],
+                        c=color_values,
+                        cmap=colormap,
+                        norm=norm,
+                        vmin=vmin,
+                        vmax=vmax,
+                        label=plot_label,
+                        s=marker_size * size,
+                        **kwargs,
+                    )
                     if not no_cbar:
                         cbar = plt.colorbar(sc, ax=axis)
                         cbar.set_label(label=color_column, size=labels_size * size)
                         cbar.ax.tick_params(labelsize=labels_size * size)
 
                 elif color_column in color_columns:
-                    ligand_series = ligand_series.sort_values(color_column, ascending=ascending)
+                    ligand_series = ligand_series.sort_values(
+                        color_column, ascending=ascending
+                    )
                     color_values = ligand_series[color_column]
 
                     if relative_color_values:
                         color_values = color_values - np.min(color_values)
 
-                    sc = axis.scatter(ligand_series[x], ligand_series[y], c=color_values, cmap=colormap, vmin=vmin, vmax=vmax, label=plot_label, s=marker_size * size, **kwargs)
+                    sc = axis.scatter(
+                        ligand_series[x],
+                        ligand_series[y],
+                        c=color_values,
+                        cmap=colormap,
+                        vmin=vmin,
+                        vmax=vmax,
+                        label=plot_label,
+                        s=marker_size * size,
+                        **kwargs,
+                    )
                     if not no_cbar:
                         cbar = plt.colorbar(sc, ax=axis)
                         if clabel is None:
@@ -13243,27 +14530,48 @@ make sure of reading the target sequences with the function readTargetSequences(
                         cbar.set_label(label=clabel, size=labels_size * size)
                         cbar.ax.tick_params(labelsize=labels_size * size)
                 else:
-                    sc = axis.scatter(ligand_series[x], ligand_series[y], c=color_column, vmin=vmin, vmax=vmax, label=plot_label, s=marker_size * size, **kwargs)
+                    sc = axis.scatter(
+                        ligand_series[x],
+                        ligand_series[y],
+                        c=color_column,
+                        vmin=vmin,
+                        vmax=vmax,
+                        label=plot_label,
+                        s=marker_size * size,
+                        **kwargs,
+                    )
             else:
-                sc = axis.scatter(ligand_series[x], ligand_series[y], label=plot_label, s=marker_size * size, **kwargs)
+                sc = axis.scatter(
+                    ligand_series[x],
+                    ligand_series[y],
+                    label=plot_label,
+                    s=marker_size * size,
+                    **kwargs,
+                )
             return sc
 
         # Extract model series from dataframe or self.rosetta_docking
         if dataframe is not None:
-            model_series = dataframe[dataframe.index.get_level_values('Model') == model]
+            model_series = dataframe[dataframe.index.get_level_values("Model") == model]
         else:
-            model_series = self.rosetta_docking[self.rosetta_docking.index.get_level_values('Model') == model]
+            model_series = self.rosetta_docking[
+                self.rosetta_docking.index.get_level_values("Model") == model
+            ]
 
         if model_series.empty:
-            raise ValueError(f'Model name {model} not found in data!')
+            raise ValueError(f"Model name {model} not found in data!")
 
-        ligand_series = model_series[model_series.index.get_level_values('Ligand') == ligand]
+        ligand_series = model_series[
+            model_series.index.get_level_values("Ligand") == ligand
+        ]
         if ligand_series.empty:
             raise ValueError(f"Ligand name {ligand} not found in model's {model} data!")
 
         # Add distance and angle data to ligand_series
         if len(ligand_series) != 0:
-            ligand_series = _addDistanceAndAngleData(ligand_series, model, ligand, dataframe)
+            ligand_series = _addDistanceAndAngleData(
+                ligand_series, model, ligand, dataframe
+            )
 
         # Filter points by metrics
         if metrics is not None:
@@ -13276,7 +14584,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Check if an axis has been given
         new_axis = False
         if axis is None:
-            plt.figure(figsize=(4*size, 3.3*size), dpi=dpi)
+            plt.figure(figsize=(4 * size, 3.3 * size), dpi=dpi)
             axis = plt.gca()
             new_axis = True
 
@@ -13288,11 +14596,25 @@ make sure of reading the target sequences with the function readTargetSequences(
         color_columns = _defineColorColumns(ligand_series)
 
         # Plot scatter
-        sc = _plotScatter(axis, ligand_series, x, y, color_column, color_columns, plot_label, clim, marker_size, size, **kwargs)
+        sc = _plotScatter(
+            axis,
+            ligand_series,
+            x,
+            y,
+            color_column,
+            color_columns,
+            plot_label,
+            clim,
+            marker_size,
+            size,
+            **kwargs,
+        )
 
         # Plot vertical line if specified
         if vertical_line is not None:
-            axis.axvline(vertical_line, c=vertical_line_color, lw=vertical_line_width, ls='--')
+            axis.axvline(
+                vertical_line, c=vertical_line_color, lw=vertical_line_width, ls="--"
+            )
 
         # Set labels and title
         if xlabel is None and not no_xlabel:
@@ -13300,9 +14622,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if ylabel is None and not no_ylabel:
             ylabel = y
 
-        axis.set_xlabel(xlabel, fontsize=labels_size*size)
-        axis.set_ylabel(ylabel, fontsize=labels_size*size)
-        axis.tick_params(axis='both', labelsize=labels_size*size)
+        axis.set_xlabel(xlabel, fontsize=labels_size * size)
+        axis.set_ylabel(ylabel, fontsize=labels_size * size)
+        axis.tick_params(axis="both", labelsize=labels_size * size)
 
         # Set ticks visibility
         if no_xticks:
@@ -13311,14 +14633,14 @@ make sure of reading the target sequences with the function readTargetSequences(
             axis.set_yticks([])
 
         if title is not None:
-            axis.set_title(title, fontsize=title_size*size)
+            axis.set_title(title, fontsize=title_size * size)
         if xlim is not None:
             axis.set_xlim(xlim)
         if ylim is not None:
             axis.set_ylim(ylim)
 
         if show_legend:
-            axis.legend(prop={'size': legend_font_size*size})
+            axis.legend(prop={"size": legend_font_size * size})
 
         if show:
             plt.show()
@@ -13326,53 +14648,88 @@ make sure of reading the target sequences with the function readTargetSequences(
         if return_axis:
             return axis
 
-    def rosettaDockingCatalyticBindingFreeEnergyMatrix(self, initial_threshold=3.5, initial_threshold_filter=3.5, measured_metrics=None,
-                                                       store_values=False, lig_label_rot=90, observable='interface_delta_B',
-                                                       matrix_file='catalytic_matrix.npy', models_file='catalytic_models.json',
-                                                       max_metric_threshold=30, pele_data=None, KT=5.93, to_csv=None,
-                                                       only_proteins=None, only_ligands=None, average_binding_energy=False,
-                                                       nan_to_zero=False):
+    def rosettaDockingCatalyticBindingFreeEnergyMatrix(
+        self,
+        initial_threshold=3.5,
+        initial_threshold_filter=3.5,
+        measured_metrics=None,
+        store_values=False,
+        lig_label_rot=90,
+        observable="interface_delta_B",
+        matrix_file="catalytic_matrix.npy",
+        models_file="catalytic_models.json",
+        max_metric_threshold=30,
+        pele_data=None,
+        KT=5.93,
+        to_csv=None,
+        only_proteins=None,
+        only_ligands=None,
+        average_binding_energy=False,
+        nan_to_zero=False,
+    ):
 
-        def _bindingFreeEnergyMatrix(KT=KT, sort_by_ligand=None, models_file='catalytic_models.json',
-                                     lig_label_rot=90, pele_data=None, only_proteins=None, only_ligands=None,
-                                     abc=False, avg_ebc=False, n_poses=10, **metrics):
+        def _bindingFreeEnergyMatrix(
+            KT=KT,
+            sort_by_ligand=None,
+            models_file="catalytic_models.json",
+            lig_label_rot=90,
+            pele_data=None,
+            only_proteins=None,
+            only_ligands=None,
+            abc=False,
+            avg_ebc=False,
+            n_poses=10,
+            **metrics,
+        ):
 
-            metrics_filter = {m: metrics[m] for m in metrics if m.startswith('metric_')}
-            labels_filter = {l: metrics[l] for l in metrics if l.startswith('label_')}
+            metrics_filter = {m: metrics[m] for m in metrics if m.startswith("metric_")}
+            labels_filter = {l: metrics[l] for l in metrics if l.startswith("label_")}
 
             if pele_data is None:
                 pele_data = self.rosetta_docking
 
             if only_proteins is not None:
-                proteins = [p for p in pele_data.index.get_level_values('Model').unique() if p in only_proteins]
+                proteins = [
+                    p
+                    for p in pele_data.index.get_level_values("Model").unique()
+                    if p in only_proteins
+                ]
             else:
-                proteins = pele_data.index.get_level_values('Model').unique()
+                proteins = pele_data.index.get_level_values("Model").unique()
 
             if only_ligands is not None:
-                ligands = [l for l in pele_data.index.get_level_values('Ligand').unique() if l in only_ligands]
+                ligands = [
+                    l
+                    for l in pele_data.index.get_level_values("Ligand").unique()
+                    if l in only_ligands
+                ]
             else:
-                ligands = pele_data.index.get_level_values('Ligand').unique()
+                ligands = pele_data.index.get_level_values("Ligand").unique()
 
             if len(proteins) == 0:
-                raise ValueError('No proteins were found!')
+                raise ValueError("No proteins were found!")
             if len(ligands) == 0:
-                raise ValueError('No ligands were found!')
+                raise ValueError("No ligands were found!")
 
             # Create a matrix of length proteins times ligands
             M = np.zeros((len(proteins), len(ligands)))
 
             # Calculate the probability of each state
             for i, protein in enumerate(proteins):
-                protein_series = pele_data[pele_data.index.get_level_values('Model') == protein]
+                protein_series = pele_data[
+                    pele_data.index.get_level_values("Model") == protein
+                ]
 
                 for j, ligand in enumerate(ligands):
-                    ligand_series = protein_series[protein_series.index.get_level_values('Ligand') == ligand]
+                    ligand_series = protein_series[
+                        protein_series.index.get_level_values("Ligand") == ligand
+                    ]
 
                     if not ligand_series.empty:
 
                         if abc:
                             # Calculate partition function
-                            total_energy = ligand_series['total_score']
+                            total_energy = ligand_series["total_score"]
                             energy_minimum = total_energy.min()
                             relative_energy = total_energy - energy_minimum
                             Z = np.sum(np.exp(-relative_energy / KT))
@@ -13382,24 +14739,38 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         for metric in metrics_filter:
                             if isinstance(metrics_filter[metric], float):
-                                mask = catalytic_series[metric] <= metrics_filter[metric]
+                                mask = (
+                                    catalytic_series[metric] <= metrics_filter[metric]
+                                )
                             elif isinstance(metrics_filter[metric], tuple):
-                                mask = (catalytic_series[metric] >= metrics_filter[metric][0]).to_numpy()
-                                mask = mask & ((catalytic_series[metric] <= metrics_filter[metric][1]).to_numpy())
+                                mask = (
+                                    catalytic_series[metric]
+                                    >= metrics_filter[metric][0]
+                                ).to_numpy()
+                                mask = mask & (
+                                    (
+                                        catalytic_series[metric]
+                                        <= metrics_filter[metric][1]
+                                    ).to_numpy()
+                                )
                             catalytic_series = catalytic_series[mask]
 
                         for l in labels_filter:
                             # Filter by labels
                             if labels_filter[l] is not None:
-                                catalytic_series = catalytic_series[catalytic_series[l] == labels_filter[l]]
+                                catalytic_series = catalytic_series[
+                                    catalytic_series[l] == labels_filter[l]
+                                ]
 
                         if abc:
-                            total_energy = catalytic_series['total_score']
+                            total_energy = catalytic_series["total_score"]
                             relative_energy = total_energy - energy_minimum
                             probability = np.exp(-relative_energy / KT) / Z
                             M[i][j] = np.sum(probability * catalytic_series[observable])
                         elif avg_ebc:
-                            M[i][j] = catalytic_series.nsmallest(n_poses, observable)[observable].mean()
+                            M[i][j] = catalytic_series.nsmallest(n_poses, observable)[
+                                observable
+                            ].mean()
                     else:
                         M[i][j] = np.nan
 
@@ -13407,37 +14778,35 @@ make sure of reading the target sequences with the function readTargetSequences(
                 M[np.isnan(M)] = 0.0
 
             if abc:
-                binding_metric_label = '$A_{B}^{C}$'
+                binding_metric_label = "$A_{B}^{C}$"
             elif avg_ebc:
-                binding_metric_label = '$\overline{E}_{B}^{C}$'
+                binding_metric_label = "$\overline{E}_{B}^{C}$"
             else:
-                raise ValueError('You should mark at least one option: $A_{B}^{C}$ or $\overline{E}_{B}^{C}$!')
+                raise ValueError(
+                    "You should mark at least one option: $A_{B}^{C}$ or $\overline{E}_{B}^{C}$!"
+                )
 
             if store_values:
                 np.save(matrix_file, M)
-                if not models_file.endswith('.json'):
-                    models_file = models_file + '.json'
-                with open(models_file, 'w') as of:
+                if not models_file.endswith(".json"):
+                    models_file = models_file + ".json"
+                with open(models_file, "w") as of:
                     json.dump(list(proteins), of)
 
             if to_csv is not None:
-                catalytic_values = {
-                    'Model': [],
-                    'Ligand': [],
-                    binding_metric_label: []
-                }
+                catalytic_values = {"Model": [], "Ligand": [], binding_metric_label: []}
 
                 for i, m in zip(M, proteins):
                     for v, l in zip(i, ligands):
-                        catalytic_values['Model'].append(m)
-                        catalytic_values['Ligand'].append(l)
+                        catalytic_values["Model"].append(m)
+                        catalytic_values["Ligand"].append(l)
                         catalytic_values[binding_metric_label].append(v)
                 catalytic_values = pd.DataFrame(catalytic_values)
-                catalytic_values.set_index(['Model', 'Ligand'])
+                catalytic_values.set_index(["Model", "Ligand"])
                 catalytic_values.to_csv(to_csv)
 
             # Sort matrix by ligand or protein
-            if sort_by_ligand == 'by_protein':
+            if sort_by_ligand == "by_protein":
                 protein_labels = proteins
             else:
                 ligand_index = list(ligands).index(sort_by_ligand)
@@ -13446,15 +14815,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                 protein_labels = [proteins[x] for x in sort_indexes]
 
             plt.figure(dpi=100, figsize=(0.28 * len(ligands), 0.2 * len(proteins)))
-            plt.imshow(M, cmap='autumn')
+            plt.imshow(M, cmap="autumn")
             plt.colorbar(label=binding_metric_label)
 
-            plt.xlabel('Ligands', fontsize=12)
+            plt.xlabel("Ligands", fontsize=12)
             ax = plt.gca()
             ax.set_xticks(np.arange(len(ligands)))  # Set tick positions
             ax.set_xticklabels(ligands, rotation=lig_label_rot)
             plt.xticks(np.arange(len(ligands)), ligands, rotation=lig_label_rot)
-            plt.ylabel('Proteins', fontsize=12)
+            plt.ylabel("Proteins", fontsize=12)
             ax.set_yticks(np.arange(len(proteins)))  # Set tick positions
             plt.yticks(np.arange(len(proteins)), protein_labels)
 
@@ -13462,20 +14831,22 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Check to_csv input
         if to_csv is not None and not isinstance(to_csv, str):
-            raise ValueError('to_csv must be a path to the output csv file.')
-        if to_csv is not None and not to_csv.endswith('.csv'):
-            to_csv = to_csv + '.csv'
+            raise ValueError("to_csv must be a path to the output csv file.")
+        if to_csv is not None and not to_csv.endswith(".csv"):
+            to_csv = to_csv + ".csv"
 
         # Define if PELE data is given
         if pele_data is None:
             pele_data = self.rosetta_docking
 
         # Add checks for the given pele data pandas df
-        metrics = [k for k in pele_data.keys() if 'metric_' in k]
+        metrics = [k for k in pele_data.keys() if "metric_" in k]
         labels = {}
         for m in metrics:
             for l in pele_data.keys():
-                if 'label_' in l and l.replace('label_', '') == m.replace('metric_', ''):
+                if "label_" in l and l.replace("label_", "") == m.replace(
+                    "metric_", ""
+                ):
                     labels[m] = sorted(list(set(pele_data[l])))
 
         metrics_sliders = {}
@@ -13487,42 +14858,49 @@ make sure of reading the target sequences with the function readTargetSequences(
                 else:
                     threshold = initial_threshold_filter
             else:
-                threshold = initial_threshold_filter  # Ensure threshold is always defined
+                threshold = (
+                    initial_threshold_filter  # Ensure threshold is always defined
+                )
 
-            if self.rosetta_docking_metric_type[m] == 'distance':
+            if self.rosetta_docking_metric_type[m] == "distance":
                 m_slider = FloatSlider(
                     value=threshold,
                     min=0,
                     max=max_metric_threshold,
                     step=0.1,
-                    description=m + ':',
+                    description=m + ":",
                     disabled=False,
                     continuous_update=False,
-                    orientation='horizontal',
+                    orientation="horizontal",
                     readout=True,
-                    readout_format='.2f',
-                    style={'description_width': 'initial'})
+                    readout_format=".2f",
+                    style={"description_width": "initial"},
+                )
 
-            elif self.rosetta_docking_metric_type[m] == 'angle':
+            elif self.rosetta_docking_metric_type[m] == "angle":
                 m_slider = FloatRangeSlider(
                     value=[110, 130],
                     min=-180,
                     max=180,
                     step=0.1,
-                    description=m + ':',
+                    description=m + ":",
                     disabled=False,
                     continuous_update=False,
-                    orientation='horizontal',
+                    orientation="horizontal",
                     readout=True,
-                    readout_format='.2f',
+                    readout_format=".2f",
                 )
 
             metrics_sliders[m] = m_slider
 
             if m in labels and labels[m] != []:
                 label_options = [None] + labels[m]
-                label_ddm = Dropdown(options=label_options, description=m.replace('metric_', 'label_'), style={'description_width': 'initial'})
-                metrics_sliders[m.replace('metric_', 'label_')] = label_ddm
+                label_ddm = Dropdown(
+                    options=label_options,
+                    description=m.replace("metric_", "label_"),
+                    style={"description_width": "initial"},
+                )
+                metrics_sliders[m.replace("metric_", "label_")] = label_ddm
 
         if only_proteins is not None:
             if isinstance(only_proteins, str):
@@ -13533,20 +14911,27 @@ make sure of reading the target sequences with the function readTargetSequences(
             if isinstance(only_ligands, str):
                 only_ligands = [only_ligands]
 
-            ligands = [l for l in self.rosetta_docking.index.get_level_values('Ligand').unique() if l in only_ligands]
+            ligands = [
+                l
+                for l in self.rosetta_docking.index.get_level_values("Ligand").unique()
+                if l in only_ligands
+            ]
         else:
-            ligands = self.rosetta_docking.index.get_level_values('Ligand').unique()
+            ligands = self.rosetta_docking.index.get_level_values("Ligand").unique()
 
         VB = []
-        ligand_ddm = Dropdown(options=list(ligands) + ['by_protein'], description='Sort by ligand',
-                              style={'description_width': 'initial'})
+        ligand_ddm = Dropdown(
+            options=list(ligands) + ["by_protein"],
+            description="Sort by ligand",
+            style={"description_width": "initial"},
+        )
         VB.append(ligand_ddm)
 
-        abc = Checkbox(value=True, description='$A_{B}^{C}$')
+        abc = Checkbox(value=True, description="$A_{B}^{C}$")
         VB.append(abc)
 
         if average_binding_energy:
-            avg_ebc = Checkbox(value=False, description='$\overline{E}_{B}^{C}$')
+            avg_ebc = Checkbox(value=False, description="$\overline{E}_{B}^{C}$")
             VB.append(avg_ebc)
 
             Ebc_slider = IntSlider(
@@ -13554,11 +14939,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 min=1,
                 max=1000,
                 step=1,
-                description='N poses (only $\overline{E}_{B}^{C}$):',
+                description="N poses (only $\overline{E}_{B}^{C}$):",
                 disabled=False,
                 continuous_update=False,
-                orientation='horizontal',
-                readout=True)
+                orientation="horizontal",
+                readout=True,
+            )
             VB.append(Ebc_slider)
 
         KT_slider = FloatSlider(
@@ -13566,12 +14952,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             min=0.593,
             max=1000.0,
             step=0.1,
-            description='KT:',
+            description="KT:",
             disabled=False,
             continuous_update=False,
-            orientation='horizontal',
+            orientation="horizontal",
             readout=True,
-            readout_format='.1f')
+            readout_format=".1f",
+        )
 
         for m in metrics_sliders:
             VB.append(metrics_sliders[m])
@@ -13580,26 +14967,51 @@ make sure of reading the target sequences with the function readTargetSequences(
         VB.append(KT_slider)
 
         if average_binding_energy:
-            plot = interactive_output(_bindingFreeEnergyMatrix, {'KT': KT_slider, 'sort_by_ligand': ligand_ddm,
-                                      'pele_data': fixed(pele_data), 'models_file': fixed(models_file),
-                                      'lig_label_rot': fixed(lig_label_rot), 'only_proteins': fixed(only_proteins),
-                                      'only_ligands': fixed(only_ligands), 'abc': abc, 'avg_ebc': avg_ebc,
-                                      'n_poses': Ebc_slider, **metrics_sliders})
+            plot = interactive_output(
+                _bindingFreeEnergyMatrix,
+                {
+                    "KT": KT_slider,
+                    "sort_by_ligand": ligand_ddm,
+                    "pele_data": fixed(pele_data),
+                    "models_file": fixed(models_file),
+                    "lig_label_rot": fixed(lig_label_rot),
+                    "only_proteins": fixed(only_proteins),
+                    "only_ligands": fixed(only_ligands),
+                    "abc": abc,
+                    "avg_ebc": avg_ebc,
+                    "n_poses": Ebc_slider,
+                    **metrics_sliders,
+                },
+            )
         else:
-            plot = interactive_output(_bindingFreeEnergyMatrix, {'KT': KT_slider, 'sort_by_ligand': ligand_ddm,
-                                      'pele_data': fixed(pele_data), 'models_file': fixed(models_file),
-                                      'lig_label_rot': fixed(lig_label_rot), 'only_proteins': fixed(only_proteins),
-                                      'only_ligands': fixed(only_ligands), 'abc': abc, **metrics_sliders})
+            plot = interactive_output(
+                _bindingFreeEnergyMatrix,
+                {
+                    "KT": KT_slider,
+                    "sort_by_ligand": ligand_ddm,
+                    "pele_data": fixed(pele_data),
+                    "models_file": fixed(models_file),
+                    "lig_label_rot": fixed(lig_label_rot),
+                    "only_proteins": fixed(only_proteins),
+                    "only_ligands": fixed(only_ligands),
+                    "abc": abc,
+                    **metrics_sliders,
+                },
+            )
 
         VB.append(plot)
         VB = VBox(VB)
 
         display(VB)
 
-    def computeRosettaDockingFreeEnergy(self, df=None, KT: float = 0.593,
-                                        binding_col: Optional[str] = None,
-                                        add_probabilities: bool = False,
-                                        skip_warnings: bool = False) -> pd.DataFrame:
+    def computeRosettaDockingFreeEnergy(
+        self,
+        df=None,
+        KT: float = 0.593,
+        binding_col: Optional[str] = None,
+        add_probabilities: bool = False,
+        skip_warnings: bool = False,
+    ) -> pd.DataFrame:
         """
         Compute Boltzmann-weighted binding free energy per (Model, Ligand) from docking poses.
 
@@ -13624,40 +15036,64 @@ make sure of reading the target sequences with the function readTargetSequences(
         pandas.DataFrame
             DataFrame indexed by (Model, Ligand) with a single column ``free_energy``.
         """
-        target_df = df if df is not None else getattr(self, "rosetta_docking_data", None)
+        target_df = (
+            df if df is not None else getattr(self, "rosetta_docking_data", None)
+        )
         if target_df is None:
-            raise ValueError("No docking dataframe provided and self.rosetta_docking_data is missing.")
+            raise ValueError(
+                "No docking dataframe provided and self.rosetta_docking_data is missing."
+            )
 
-        if not isinstance(target_df.index, pd.MultiIndex) or len(target_df.index.names) != 3:
-            raise ValueError("Input must be a MultiIndex dataframe with levels (Model, Ligand, Pose).")
+        if (
+            not isinstance(target_df.index, pd.MultiIndex)
+            or len(target_df.index.names) != 3
+        ):
+            raise ValueError(
+                "Input must be a MultiIndex dataframe with levels (Model, Ligand, Pose)."
+            )
 
         if KT <= 0:
             raise ValueError("KT must be positive.")
 
             if binding_col is None:
-                binding_col = next((c for c in target_df.columns if c.startswith("interface_delta_")), None)
+                binding_col = next(
+                    (c for c in target_df.columns if c.startswith("interface_delta_")),
+                    None,
+                )
                 if binding_col is None:
-                    raise ValueError("Could not find a binding energy column starting with 'interface_delta_'.")
-                binding_col_display = binding_col if isinstance(binding_col, str) else repr(binding_col)
+                    raise ValueError(
+                        "Could not find a binding energy column starting with 'interface_delta_'."
+                    )
+                binding_col_display = (
+                    binding_col if isinstance(binding_col, str) else repr(binding_col)
+                )
                 if not skip_warnings:
-                    warnings.warn(f"Using binding energy column '{binding_col_display}'.", UserWarning)
+                    warnings.warn(
+                        f"Using binding energy column '{binding_col_display}'.",
+                        UserWarning,
+                    )
 
         if binding_col not in target_df.columns:
-            raise ValueError(f"Binding energy column '{binding_col}' not found in dataframe.")
+            raise ValueError(
+                f"Binding energy column '{binding_col}' not found in dataframe."
+            )
 
         # Mutate the caller only when probabilities are requested; otherwise work on a copy
         df_for_probs = target_df if add_probabilities else target_df.copy()
 
-        energies = pd.to_numeric(df_for_probs[binding_col], errors='coerce')
+        energies = pd.to_numeric(df_for_probs[binding_col], errors="coerce")
         if energies.isna().any() and not skip_warnings:
-            warnings.warn("Binding energies contain NaNs; affected poses will be ignored in free energy calculation.", UserWarning)
+            warnings.warn(
+                "Binding energies contain NaNs; affected poses will be ignored in free energy calculation.",
+                UserWarning,
+            )
 
         free_energy_records = []
         if add_probabilities and "boltzmann_p" not in df_for_probs.columns:
             df_for_probs["boltzmann_p"] = np.nan
 
         for (model, ligand), group in df_for_probs.groupby(level=[0, 1]):
-            e = pd.to_numeric(group[binding_col], errors='coerce')
+            e = pd.to_numeric(group[binding_col], errors="coerce")
             finite_mask = np.isfinite(e)
             if not finite_mask.any():
                 free_energy_records.append(((model, ligand), np.nan))
@@ -13688,15 +15124,15 @@ make sure of reading the target sequences with the function readTargetSequences(
         return free_energy_df
 
     def getBestRosettaDockingPoses(
-            self,
-            filter_values,
-            return_failed=False,
-            exclude_models=None,
-            exclude_ligands=None,
-            exclude_pairs=None,
-            score_column='interface_delta_B',
-            docking_df=None,
-        ):
+        self,
+        filter_values,
+        return_failed=False,
+        exclude_models=None,
+        exclude_ligands=None,
+        exclude_pairs=None,
+        score_column="interface_delta_B",
+        docking_df=None,
+    ):
         """
         Get best docking poses based on the best SCORE and a set of metrics with specified thresholds.
         The filter thresholds must be provided with a dictionary using the metric names as keys
@@ -13740,19 +15176,21 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         source_df = docking_df if docking_df is not None else self.rosetta_docking
         if source_df is None or source_df.empty:
-            raise ValueError("No Rosetta docking data available. Run analyseRosettaDocking first.")
+            raise ValueError(
+                "No Rosetta docking data available. Run analyseRosettaDocking first."
+            )
 
         best_poses = []
         failed = []
 
-        for model in source_df.index.get_level_values('Model').unique():
+        for model in source_df.index.get_level_values("Model").unique():
 
             if model in exclude_models:
                 continue
 
             model_series = source_df[source_df.index.get_level_values("Model") == model]
 
-            for ligand in model_series.index.get_level_values('Ligand').unique():
+            for ligand in model_series.index.get_level_values("Ligand").unique():
 
                 if ligand in exclude_ligands:
                     continue
@@ -13773,11 +15211,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                             metric_label = metric
 
                         if isinstance(threshold, (float, int)):
-                            ligand_data = ligand_data[ligand_data[metric_label] <= threshold]
+                            ligand_data = ligand_data[
+                                ligand_data[metric_label] <= threshold
+                            ]
                         elif isinstance(threshold, (tuple, list)):
                             ligand_data = ligand_data[
-                                (ligand_data[metric_label] >= threshold[0]) &
-                                (ligand_data[metric_label] <= threshold[1])
+                                (ligand_data[metric_label] >= threshold[0])
+                                & (ligand_data[metric_label] <= threshold[1])
                             ]
                     else:
                         metric_label = metric
@@ -13807,7 +15247,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         max_distance=None,
         max_distance_step_shift=None,
         verbose=False,
-        score_column='interface_delta_B',
+        score_column="interface_delta_B",
         docking_df=None,
     ):
         """
@@ -13828,7 +15268,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         source_df = docking_df if docking_df is not None else self.rosetta_docking
 
         if source_df is None or source_df.empty:
-            raise ValueError("No Rosetta docking data available. Run analyseRosettaDocking first.")
+            raise ValueError(
+                "No Rosetta docking data available. Run analyseRosettaDocking first."
+            )
 
         if fixed is None:
             fixed = []
@@ -13845,22 +15287,26 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             data = source_df
 
-        protein_ligand_pairs = set(zip(
-            data.index.get_level_values(0),
-            data.index.get_level_values(1)
-        ))
+        protein_ligand_pairs = set(
+            zip(data.index.get_level_values(0), data.index.get_level_values(1))
+        )
 
         # Ensure metric types are known for every requested metric
         for metric in metrics.keys():
-            metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+            metric_label = (
+                metric if metric.startswith("metric_") else "metric_" + metric
+            )
             metric_type = self._get_rosetta_metric_type(metric_label)
             if metric_type is None:
                 inferred_type = None
                 if metric_label in self.rosetta_docking.columns:
-                    if 'angle' in metric_label.lower() or 'torsion' in metric_label.lower():
-                        inferred_type = 'angle'
+                    if (
+                        "angle" in metric_label.lower()
+                        or "torsion" in metric_label.lower()
+                    ):
+                        inferred_type = "angle"
                     else:
-                        inferred_type = 'distance'
+                        inferred_type = "distance"
                 if inferred_type is not None:
                     self._set_rosetta_metric_type(metric_label, inferred_type)
                 else:
@@ -13879,7 +15325,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             if verbose:
                 ti = time.time()
 
-            best_poses = self.getBestRosettaDockingPoses(metrics, score_column=score_column, docking_df=data)
+            best_poses = self.getBestRosettaDockingPoses(
+                metrics, score_column=score_column, docking_df=data
+            )
 
             new_selected_pairs = set()
             for idx in best_poses.index:
@@ -13904,7 +15352,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             for metric in metrics:
                 if metric in fixed:
                     continue
-                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+                metric_label = (
+                    metric if metric.startswith("metric_") else "metric_" + metric
+                )
                 metric_type = self._get_rosetta_metric_type(metric_label)
                 if metric_type is None:
                     raise ValueError(f"Metric type for {metric_label} not defined.")
@@ -13913,7 +15363,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 threshold = metrics[metric]
                 if isinstance(threshold, (int, float)):
-                    if metric_type in ['distance', 'angle']:
+                    if metric_type in ["distance", "angle"]:
                         acceptance = metric_values <= threshold
                     else:
                         acceptance = metric_values >= threshold
@@ -13927,16 +15377,18 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             ordered_metrics = sorted(
                 [(m, a) for m, a in metric_acceptance.items() if m not in fixed],
-                key=lambda x: x[1]
+                key=lambda x: x[1],
             )
 
             updated = False
             for metric, _ in ordered_metrics:
-                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
+                metric_label = (
+                    metric if metric.startswith("metric_") else "metric_" + metric
+                )
                 metric_type = self._get_rosetta_metric_type(metric_label)
-                if metric_type == 'distance':
+                if metric_type == "distance":
                     step = current_distance_step
-                elif metric_type == 'angle':
+                elif metric_type == "angle":
                     step = angle_step
                 else:
                     raise ValueError(f"Unknown metric type for {metric_label}")
@@ -13945,7 +15397,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if isinstance(threshold, (int, float)):
                     new_value = threshold + step
 
-                    if metric_type == 'distance' and max_distance is not None:
+                    if metric_type == "distance" and max_distance is not None:
                         if not step_shift_applied and new_value >= max_distance:
                             if max_distance_step_shift is not None:
                                 current_distance_step = max_distance_step_shift
@@ -13988,7 +15440,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 print(
                     f"Selected pairs: {len(extracted_pairs)}/{len(protein_ligand_pairs)}, "
                     f"Current thresholds: {metrics}, Time elapsed: {elapsed_time:.2f}s",
-                    end='\r'
+                    end="\r",
                 )
 
         if selected_indexes:
@@ -13998,7 +15450,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return best_poses
 
-    def extractRosettaDockingModels(self, docking_folder, input_df, output_folder, separator='_'):
+    def extractRosettaDockingModels(
+        self, docking_folder, input_df, output_folder, separator="_"
+    ):
         """
         Extract models based on an input DataFrame with index ['Model', 'Ligand', 'Pose'].
 
@@ -14073,14 +15527,18 @@ make sure of reading the target sequences with the function readTargetSequences(
             sep_candidates = []
             if separator:
                 sep_candidates.append(separator)
-            sep_candidates.extend(['-', '_'])
+            sep_candidates.extend(["-", "_"])
             seen = set()
-            sep_candidates = [s for s in sep_candidates if not (s in seen or seen.add(s))]
+            sep_candidates = [
+                s for s in sep_candidates if not (s in seen or seen.add(s))
+            ]
 
             output_model_dir = None
             used_separator = None
             for sep_candidate in sep_candidates:
-                candidate_dir = os.path.join(output_models_root, f"{model}{sep_candidate}{ligand}")
+                candidate_dir = os.path.join(
+                    output_models_root, f"{model}{sep_candidate}{ligand}"
+                )
                 if os.path.exists(candidate_dir):
                     output_model_dir = candidate_dir
                     used_separator = sep_candidate
@@ -14090,13 +15548,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                 missing_models.append(f"{model}{separator}{ligand}")
                 continue
 
-            silent_file = os.path.join(output_model_dir, f"{model}{used_separator}{ligand}.out")
+            silent_file = os.path.join(
+                output_model_dir, f"{model}{used_separator}{ligand}.out"
+            )
             if not os.path.exists(silent_file):
                 missing_models.append(f"{model}{used_separator}{ligand}")
                 continue
 
-            if 'description' in row.index:
-                best_model_tag = row['description']
+            if "description" in row.index:
+                best_model_tag = row["description"]
             else:
                 padding_key = (silent_file, model)
                 pose_padding = pose_padding_cache.get(padding_key)
@@ -14135,7 +15595,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return models
 
-    def extractRosettaModels(self, rosetta_folder, input_df, output_folder, overwrite=False):
+    def extractRosettaModels(
+        self, rosetta_folder, input_df, output_folder, overwrite=False
+    ):
         """
         Extract Rosetta models (e.g., relax runs) using an input DataFrame indexed by
         ['Model', 'Pose'] as returned by :meth:`analyseRosettaCalculation`.
@@ -14262,7 +15724,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not tags_to_extract:
                 continue
 
-            command = f"{executable} -silent {silent_file} -tags " + " ".join(tags_to_extract)
+            command = f"{executable} -silent {silent_file} -tags " + " ".join(
+                tags_to_extract
+            )
             for param_file in extra_res_files:
                 command += f" -extra_res_fa {param_file}"
             command += " 2>/dev/null"
@@ -14289,7 +15753,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return models
 
-    def convertLigandPDBtoMae(self, ligands_folder, change_ligand_name=True, keep_pdbs=False):
+    def convertLigandPDBtoMae(
+        self, ligands_folder, change_ligand_name=True, keep_pdbs=False
+    ):
         """
         Convert ligand PDBs into MAE files.
 
@@ -14308,12 +15774,17 @@ make sure of reading the target sequences with the function readTargetSequences(
         if change_ligand_name:
             command += " --change_ligand_name"
         if keep_pdbs:
-            command += ' --keep_pdbs'
+            command += " --keep_pdbs"
         os.system(command)
         os.chdir(cwd)
 
-    def convertLigandMAEtoPDB(self, ligands_folder, change_ligand_name=True, modify_maes=False,
-                              assign_pdb_names=False):
+    def convertLigandMAEtoPDB(
+        self,
+        ligands_folder,
+        change_ligand_name=True,
+        modify_maes=False,
+        assign_pdb_names=False,
+    ):
         """
         Convert ligand MAEs into PDB files.
 
@@ -14327,11 +15798,11 @@ make sure of reading the target sequences with the function readTargetSequences(
             keep_maes = True
 
         if isinstance(change_ligand_name, dict):
-            with open(ligands_folder+'/ligand_names.json', 'w') as jf:
+            with open(ligands_folder + "/ligand_names.json", "w") as jf:
                 json.dump(change_ligand_name, jf)
         elif isinstance(change_ligand_name, str):
             if len(change_ligand_name) != 3:
-                raise ValueError('The ligand name should be three-letters long')
+                raise ValueError("The ligand name should be three-letters long")
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(ligands_folder, "MAEtoPDB.py")
@@ -14343,18 +15814,18 @@ make sure of reading the target sequences with the function readTargetSequences(
         if isinstance(change_ligand_name, dict):
             command += " --residue_names ligand_names.json"
         elif isinstance(change_ligand_name, str):
-            command += " --residue_names "+change_ligand_name
+            command += " --residue_names " + change_ligand_name
         if change_ligand_name:
             command += " --change_ligand_name"
         if modify_maes:
-            command += ' --modify_maes'
+            command += " --modify_maes"
         if assign_pdb_names:
-            command += ' --assign_pdb_names'
+            command += " --assign_pdb_names"
         os.system(command)
         os.chdir(cwd)
 
         if isinstance(change_ligand_name, dict):
-            os.remove(ligands_folder+'/ligand_names.json')
+            os.remove(ligands_folder + "/ligand_names.json")
 
     def getDockingDistances(self, model, ligand):
         """
@@ -14580,10 +16051,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     atoms = [a.name for a in r]
 
                     # Check for hydrogens
-                    hydrogens = [a for a in atoms if a.startswith('H')]
+                    hydrogens = [a for a in atoms if a.startswith("H")]
 
                     if not hydrogens:
-                        print(f'The model {model} have not been protonated.')
+                        print(f"The model {model} have not been protonated.")
                         continue
 
                     if "HE2" in atoms and "HD1" in atoms:
@@ -14593,15 +16064,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                     elif "HE2" in atoms:
                         self.protonation_states["State"].append("HIE")
                     else:
-                        print(f'HIS {r.id[1]} could not be assigned for model {model}')
+                        print(f"HIS {r.id[1]} could not be assigned for model {model}")
                         continue
                     self.protonation_states["Model"].append(model)
                     self.protonation_states["Chain"].append(r.get_parent().id)
                     self.protonation_states["Residue"].append(r.id[1])
                     self.protonation_states["Name"].append(r.resname)
 
-        if self.protonation_states['Model'] == []:
-            raise ValueError("No protonation states were found. Did you run prepwizard?")
+        if self.protonation_states["Model"] == []:
+            raise ValueError(
+                "No protonation states were found. Did you run prepwizard?"
+            )
 
         # Convert dictionary to Pandas
         self.protonation_states = pd.DataFrame(self.protonation_states)
@@ -14641,14 +16114,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Initialize a Series with NaN values, indexed the same as self.docking_data
                 metric_series = pd.Series(np.nan, index=self.docking_data.index)
 
-                for model in self.docking_data.index.get_level_values("Protein").unique():
+                for model in self.docking_data.index.get_level_values(
+                    "Protein"
+                ).unique():
                     # Check whether model is found in docking distances
                     if model not in self.docking_distances:
                         continue
 
                     model_series = self.docking_data.xs(model, level="Protein")
 
-                    for ligand in model_series.index.get_level_values("Ligand").unique():
+                    for ligand in model_series.index.get_level_values(
+                        "Ligand"
+                    ).unique():
                         # Check whether ligand is found in model's docking distances
                         if ligand not in self.docking_distances[model]:
                             continue
@@ -14671,10 +16148,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                         if distance_metric:
                             distances = catalytic_labels[name][model][ligand]
-                            distance_values = self.docking_distances[model][ligand][distances].min(axis=1)
+                            distance_values = self.docking_distances[model][ligand][
+                                distances
+                            ].min(axis=1)
                             # Align the indices
                             indices = ligand_series.index
-                            metric_series.loc[(model, ligand, indices)] = distance_values.values
+                            metric_series.loc[(model, ligand, indices)] = (
+                                distance_values.values
+                            )
                             self.docking_metric_type[name] = "distance"
                         elif angle_metric:
                             angles = catalytic_labels[name][model][ligand]
@@ -14682,9 +16163,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                                 raise ValueError(
                                     "Combining more than one angle into a metric is not currently supported."
                                 )
-                            angle_values = self.docking_angles[model][ligand][angles].min(axis=1)
+                            angle_values = self.docking_angles[model][ligand][
+                                angles
+                            ].min(axis=1)
                             indices = ligand_series.index
-                            metric_series.loc[(model, ligand, indices)] = angle_values.values
+                            metric_series.loc[(model, ligand, indices)] = (
+                                angle_values.values
+                            )
                             self.docking_metric_type[name] = "angle"
 
                 # Assign the Series to the DataFrame
@@ -14720,14 +16205,18 @@ make sure of reading the target sequences with the function readTargetSequences(
         elif isinstance(exclusions, dict):
             by_metric_exclusions = True
         else:
-            raise ValueError('exclusions should be a list of tuples or a dictionary by metrics.')
+            raise ValueError(
+                "exclusions should be a list of tuples or a dictionary by metrics."
+            )
 
         # Collect all unique metrics from combinations
         unique_metrics = set()
         for new_metric, metrics in combinations.items():
             metric_types = [self.docking_metric_type[m] for m in metrics]
             if len(set(metric_types)) != 1:
-                raise ValueError('Attempting to combine different metric types (e.g., distances and angles) is not allowed.')
+                raise ValueError(
+                    "Attempting to combine different metric types (e.g., distances and angles) is not allowed."
+                )
             self.docking_metric_type[new_metric] = metric_types[0]
             unique_metrics.update(metrics)
 
@@ -14738,9 +16227,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Add metric prefix if not given
         add_metric_prefix = True
         for m in metrics_list:
-            if 'metric_' in m:
-                raise ValueError('"metric_" prefix found in given metrics. Please, leave it out.')
-        all_metrics_columns = ['metric_' + m for m in metrics_list]
+            if "metric_" in m:
+                raise ValueError(
+                    '"metric_" prefix found in given metrics. Please, leave it out.'
+                )
+        all_metrics_columns = ["metric_" + m for m in metrics_list]
 
         # Ensure all required metric columns exist in the data
         missing_columns = set(all_metrics_columns) - set(self.docking_data.columns)
@@ -14758,7 +16249,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         if simple_exclusions:
             for row_idx, metric_col_label in enumerate(min_metric_labels):
-                m = metric_col_label.replace('metric_', '')
+                m = metric_col_label.replace("metric_", "")
 
                 # Exclude metrics specified in exclusions
                 for exclusion_group in exclusions:
@@ -14785,7 +16276,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Iterate over each row to handle exclusions iteratively
             for row_idx in range(data_array.shape[0]):
 
-                considered_metrics = set()  # Track metrics already considered as minimums in this row
+                considered_metrics = (
+                    set()
+                )  # Track metrics already considered as minimums in this row
 
                 while True:
                     # Find the minimum among metrics that haven't been excluded or considered as minimums
@@ -14794,12 +16287,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Identify the next lowest metric that hasn't been excluded or already considered
                     for col_idx, metric_value in enumerate(data_array[row_idx]):
-                        if col_idx not in considered_metrics and (row_idx, col_idx) not in excluded_positions:
+                        if (
+                            col_idx not in considered_metrics
+                            and (row_idx, col_idx) not in excluded_positions
+                        ):
                             if metric_value < min_value:
                                 min_value = metric_value
                                 min_col_idx = col_idx
                     # if row_idx == 3:
-                        # print(min_value, min_col_idx, data.columns[min_col_idx])
+                    # print(min_value, min_col_idx, data.columns[min_col_idx])
 
                     # Break the loop if no valid minimum metric is found
                     if min_col_idx == -1:
@@ -14810,7 +16306,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     # Get the name of the metric and retrieve exclusions based on this metric
                     min_metric_label = data.columns[min_col_idx]
-                    min_metric_name = min_metric_label.replace('metric_', '')
+                    min_metric_name = min_metric_label.replace("metric_", "")
                     excluded_metrics = exclusions.get(min_metric_name, [])
 
                     # Apply exclusions for this metric
@@ -14819,7 +16315,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                             excluded_col_idx = metrics_indexes[excluded_metric]
                             if (row_idx, excluded_col_idx) not in excluded_positions:
                                 excluded_positions.add((row_idx, excluded_col_idx))
-                                data_array[row_idx, excluded_col_idx] = np.inf  # Set excluded metric to infinity
+                                data_array[row_idx, excluded_col_idx] = (
+                                    np.inf
+                                )  # Set excluded metric to infinity
                 # if row_idx == 3:
                 #     print()
                 #     for x, m in zip(data_array[row_idx], metrics_indexes.items()):
@@ -14827,7 +16325,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Combine metrics and add new columns to the DataFrame
         for new_metric_name, metrics_to_combine in combinations.items():
-            c_indexes = [metrics_indexes[m] for m in metrics_to_combine if m in metrics_indexes]
+            c_indexes = [
+                metrics_indexes[m] for m in metrics_to_combine if m in metrics_indexes
+            ]
 
             if c_indexes:
                 # Calculate the minimum value among the combined metrics, excluding inf-only combinations
@@ -14835,11 +16335,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 # Check if combined_min is all inf and handle accordingly
                 if np.all(np.isinf(combined_min)):
-                    print(f"Skipping combination for '{new_metric_name}' due to incompatible exclusions.")
+                    print(
+                        f"Skipping combination for '{new_metric_name}' due to incompatible exclusions."
+                    )
                     continue
-                self.docking_data['metric_' + new_metric_name] = combined_min
+                self.docking_data["metric_" + new_metric_name] = combined_min
             else:
-                raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
+                raise ValueError(
+                    f"No valid metrics to combine for '{new_metric_name}'."
+                )
 
         # Drop original metric columns if specified
         if drop:
@@ -14851,7 +16355,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             for metric in metrics_to_combine:
                 # Use standardized names for consistent indexing
-                metric_column_name = 'metric_' + metric if 'metric_' not in metric else metric
+                metric_column_name = (
+                    "metric_" + metric if "metric_" not in metric else metric
+                )
                 col_idx = metrics_indexes.get(metric_column_name)
 
                 if col_idx is not None:
@@ -14863,7 +16369,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Print warning if all values for a combination are excluded
             if not non_excluded_found:
-                print(f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'.")
+                print(
+                    f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'."
+                )
 
     def plotDockingData(self):
         """
@@ -14896,8 +16404,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             # Plotting the scatter plot for the selected X and Y axes
             plt.figure(figsize=(8, 6))
-            plt.scatter(filtered_df[x_axis], filtered_df[y_axis], color='blue')
-            plt.title(f'Scatter Plot for {protein} - {ligand}')
+            plt.scatter(filtered_df[x_axis], filtered_df[y_axis], color="blue")
+            plt.title(f"Scatter Plot for {protein} - {ligand}")
             plt.xlabel(x_axis)
             plt.ylabel(y_axis)
             plt.grid(True)
@@ -14909,22 +16417,22 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Create dropdown widgets for selecting the Protein, Ligand, X-axis, and Y-axis columns
         protein_dropdown = widgets.Dropdown(
             options=df.index.levels[0],  # Options for Protein selection
-            description='Protein'        # Label for the dropdown
+            description="Protein",  # Label for the dropdown
         )
 
         ligand_dropdown = widgets.Dropdown(
             options=df.index.levels[1],  # Options for Ligand selection
-            description='Ligand'         # Label for the dropdown
+            description="Ligand",  # Label for the dropdown
         )
 
         x_axis_dropdown = widgets.Dropdown(
-            options=df.columns,          # Options for selecting the X-axis (numeric columns)
-            description='X-axis'         # Label for the dropdown
+            options=df.columns,  # Options for selecting the X-axis (numeric columns)
+            description="X-axis",  # Label for the dropdown
         )
 
         y_axis_dropdown = widgets.Dropdown(
-            options=df.columns,          # Options for selecting the Y-axis (numeric columns)
-            description='Y-axis'         # Label for the dropdown
+            options=df.columns,  # Options for selecting the Y-axis (numeric columns)
+            description="Y-axis",  # Label for the dropdown
         )
 
         # Create an interactive widget that dynamically updates the plot based on selections
@@ -14933,7 +16441,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             protein=protein_dropdown,
             ligand=ligand_dropdown,
             x_axis=x_axis_dropdown,
-            y_axis=y_axis_dropdown
+            y_axis=y_axis_dropdown,
         )
 
     def getBestDockingPoses(
@@ -14959,12 +16467,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         docking_data = self.docking_data
         index = docking_data.index
 
-        exclude_models_mask = ~index.get_level_values('Protein').isin(exclude_models)
-        exclude_ligands_mask = ~index.get_level_values('Ligand').isin(exclude_ligands)
+        exclude_models_mask = ~index.get_level_values("Protein").isin(exclude_models)
+        exclude_ligands_mask = ~index.get_level_values("Ligand").isin(exclude_ligands)
 
         pairs_to_exclude = set(exclude_pairs)
         if pairs_to_exclude:
-            exclude_pairs_mask = ~index.map(lambda idx: (idx[0], idx[1]) in pairs_to_exclude)
+            exclude_pairs_mask = ~index.map(
+                lambda idx: (idx[0], idx[1]) in pairs_to_exclude
+            )
         else:
             exclude_pairs_mask = np.ones(len(index), dtype=bool)  # Include all
 
@@ -14976,7 +16486,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         for metric in filter_values:
             filter_value = filter_values[metric]
             if metric not in ["Score", "RMSD"]:
-                if not metric.startswith("metric_") and metric != 'Closest distance':
+                if not metric.startswith("metric_") and metric != "Closest distance":
                     metric_label = "metric_" + metric
                 else:
                     metric_label = metric
@@ -14984,47 +16494,59 @@ make sure of reading the target sequences with the function readTargetSequences(
                 metric_label = metric
 
             if isinstance(filter_value, (float, int)):
-                filtered_data = filtered_data[filtered_data[metric_label] <= filter_value]
+                filtered_data = filtered_data[
+                    filtered_data[metric_label] <= filter_value
+                ]
             elif isinstance(filter_value, (tuple, list)):
                 filtered_data = filtered_data[
-                    (filtered_data[metric_label] >= filter_value[0]) &
-                    (filtered_data[metric_label] <= filter_value[1])
+                    (filtered_data[metric_label] >= filter_value[0])
+                    & (filtered_data[metric_label] <= filter_value[1])
                 ]
             else:
-                filtered_data = filtered_data[filtered_data[metric_label] < filter_value]
+                filtered_data = filtered_data[
+                    filtered_data[metric_label] < filter_value
+                ]
 
         # Ensure index levels are named
         if filtered_data.index.nlevels == 3:
-            filtered_data.index.set_names(['Protein', 'Ligand', 'Pose'], inplace=True)
+            filtered_data.index.set_names(["Protein", "Ligand", "Pose"], inplace=True)
         else:
             # If index levels are not named, we can set default names
-            filtered_data.index.set_names(['Protein', 'Ligand'], inplace=True)
+            filtered_data.index.set_names(["Protein", "Ligand"], inplace=True)
 
         # Get all available pairs after exclusions
-        available_pairs = docking_data[mask].index.to_frame(index=False)[['Protein', 'Ligand']].drop_duplicates()
+        available_pairs = (
+            docking_data[mask]
+            .index.to_frame(index=False)[["Protein", "Ligand"]]
+            .drop_duplicates()
+        )
 
         # Get pairs present in filtered_data
-        filtered_pairs = filtered_data.index.to_frame(index=False)[['Protein', 'Ligand']].drop_duplicates()
+        filtered_pairs = filtered_data.index.to_frame(index=False)[
+            ["Protein", "Ligand"]
+        ].drop_duplicates()
 
         # Find failed pairs
         failed_pairs = pd.merge(
             available_pairs,
             filtered_pairs,
-            on=['Protein', 'Ligand'],
-            how='left',
-            indicator=True
+            on=["Protein", "Ligand"],
+            how="left",
+            indicator=True,
         )
-        failed_pairs = failed_pairs[failed_pairs['_merge'] == 'left_only'][['Protein', 'Ligand']]
+        failed_pairs = failed_pairs[failed_pairs["_merge"] == "left_only"][
+            ["Protein", "Ligand"]
+        ]
         failed = list(failed_pairs.itertuples(index=False, name=None))
 
         # Sort and group
-        filtered_data = filtered_data.sort_values(by=['Protein', 'Ligand', 'Score'])
+        filtered_data = filtered_data.sort_values(by=["Protein", "Ligand", "Score"])
 
         # Use level indices if names are not consistent
         if filtered_data.index.nlevels >= 2:
             grouped = filtered_data.groupby(level=[0, 1], sort=False)
         else:
-            grouped = filtered_data.groupby(['Protein', 'Ligand'], sort=False)
+            grouped = filtered_data.groupby(["Protein", "Ligand"], sort=False)
 
         # Select top n_models per group
         top_n = grouped.head(n_models)
@@ -15099,15 +16621,21 @@ make sure of reading the target sequences with the function readTargetSequences(
         # Filter data by ligands if provided
         if ligands is not None:
             # Assuming that the ligand identifier is at index level 1
-            data = self.docking_data[self.docking_data.index.get_level_values(1).isin(ligands)]
+            data = self.docking_data[
+                self.docking_data.index.get_level_values(1).isin(ligands)
+            ]
         else:
             data = self.docking_data
 
         # Get all unique protein-ligand pairs
-        protein_ligand_pairs = set(zip(
-            data.index.get_level_values(0),  # Assuming protein identifier is at index level 0
-            data.index.get_level_values(1)   # Ligand identifier at index level 1
-        ))
+        protein_ligand_pairs = set(
+            zip(
+                data.index.get_level_values(
+                    0
+                ),  # Assuming protein identifier is at index level 0
+                data.index.get_level_values(1),  # Ligand identifier at index level 1
+            )
+        )
 
         extracted_pairs = set()
         selected_indexes = []
@@ -15119,7 +16647,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 ti = time.time()
 
             # Get best poses with current thresholds
-            best_poses = self.getBestDockingPoses(metrics, n_models=1)  # Assuming self has this method
+            best_poses = self.getBestDockingPoses(
+                metrics, n_models=1
+            )  # Assuming self has this method
 
             # Select new models
             new_selected_pairs = set()
@@ -15148,15 +16678,19 @@ make sure of reading the target sequences with the function readTargetSequences(
             for metric in metrics:
                 if metric in fixed:
                     continue
-                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
-                metric_type = self.docking_metric_type.get(metric_label.replace('metric_', ''), None)
+                metric_label = (
+                    metric if metric.startswith("metric_") else "metric_" + metric
+                )
+                metric_type = self.docking_metric_type.get(
+                    metric_label.replace("metric_", ""), None
+                )
                 if metric_type is None:
                     raise ValueError(f"Metric type for {metric_label} not defined.")
 
                 metric_values = remaining_data[metric_label]
 
                 if isinstance(metrics[metric], (int, float)):
-                    if metric_type in ['distance', 'angle']:
+                    if metric_type in ["distance", "angle"]:
                         acceptance = metric_values <= metrics[metric]
                     else:
                         acceptance = metric_values >= metrics[metric]
@@ -15171,17 +16705,21 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Order metrics by acceptance count (ascending)
             ordered_metrics = sorted(
                 [(m, a) for m, a in metric_acceptance.items() if m not in fixed],
-                key=lambda x: x[1]
+                key=lambda x: x[1],
             )
 
             # Adjust thresholds for the metric with lowest acceptance
             updated = False
             for metric, _ in ordered_metrics:
-                metric_label = metric if metric.startswith('metric_') else 'metric_' + metric
-                metric_type = self.docking_metric_type.get(metric_label.replace('metric_', ''), None)
-                if metric_type == 'distance':
+                metric_label = (
+                    metric if metric.startswith("metric_") else "metric_" + metric
+                )
+                metric_type = self.docking_metric_type.get(
+                    metric_label.replace("metric_", ""), None
+                )
+                if metric_type == "distance":
                     step = current_distance_step
-                elif metric_type == 'angle':
+                elif metric_type == "angle":
                     step = angle_step
                 else:
                     raise ValueError(f"Unknown metric type for {metric_label}")
@@ -15190,19 +16728,23 @@ make sure of reading the target sequences with the function readTargetSequences(
                     # For upper limit thresholds (assuming distance and angle are upper limits)
                     new_value = metrics[metric] + step
 
-                    if metric_type == 'distance' and max_distance is not None:
+                    if metric_type == "distance" and max_distance is not None:
                         if not step_shift_applied and new_value >= max_distance:
                             if max_distance_step_shift is not None:
                                 # Apply step shift
                                 current_distance_step = max_distance_step_shift
                                 step_shift_applied = True
-                                print(f"Max distance {max_distance} reached for metric {metric}. Applying step shift to {current_distance_step}.")
+                                print(
+                                    f"Max distance {max_distance} reached for metric {metric}. Applying step shift to {current_distance_step}."
+                                )
                                 # Do not cap the value; allow it to exceed max_distance
                             else:
                                 # If no step shift, cap at max_distance and terminate
                                 new_value = max_distance
                                 metrics[metric] = new_value
-                                print(f"Max distance {max_distance} reached for metric {metric}. Terminating iteration.")
+                                print(
+                                    f"Max distance {max_distance} reached for metric {metric}. Terminating iteration."
+                                )
                                 updated = True
                                 break  # Exit the for-loop to terminate the while-loop
                     # Update the metric
@@ -15233,7 +16775,10 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Optional: Print progress for debugging
             if verbose:
                 elapsed_time = time.time() - ti
-                print(f"Max distance reached: {step_shift_applied}, Current step: {current_distance_step}, Metrics: {metrics}, Time elapsed: {elapsed_time:.2f}s", end='\r')
+                print(
+                    f"Max distance reached: {step_shift_applied}, Current step: {current_distance_step}, Metrics: {metrics}, Time elapsed: {elapsed_time:.2f}s",
+                    end="\r",
+                )
 
         # Collect selected models
         if selected_indexes:
@@ -15525,7 +17070,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             atom_mapping=atom_mapping,
                             conect_update=conect_update,
                             collect_memory=collect_memory,
-                            only_hetatoms=only_hetatoms_conect
+                            only_hetatoms=only_hetatoms_conect,
                         )
                         load_count += 1
 
@@ -15692,11 +17237,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             commands = []
             for m in self:
 
-                if not os.path.exists(f'{rosetta_folder}/output_models/{m}/{m}_relax.out'):
-                    print(f'Silent file for model {m} was not found!')
+                if not os.path.exists(
+                    f"{rosetta_folder}/output_models/{m}/{m}_relax.out"
+                ):
+                    print(f"Silent file for model {m} was not found!")
                     continue
 
-                if skip_finished and not overwrite and os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
+                if (
+                    skip_finished
+                    and not overwrite
+                    and os.path.exists(f"{rosetta_folder}/.analysis/scores/{m}.csv")
+                ):
                     continue
 
                 job_command = command.replace("MODEL", m)
@@ -15713,18 +17264,22 @@ make sure of reading the target sequences with the function readTargetSequences(
         else:
             count = 0
             for m in self:
-                if not os.path.exists(f'{rosetta_folder}/output_models/{m}/{m}_relax.out'):
-                    print(f'Silent file for model {m} was not found!')
+                if not os.path.exists(
+                    f"{rosetta_folder}/output_models/{m}/{m}_relax.out"
+                ):
+                    print(f"Silent file for model {m} was not found!")
                     continue
-                if not os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
+                if not os.path.exists(f"{rosetta_folder}/.analysis/scores/{m}.csv"):
                     count += 1
 
             if count or overwrite:
                 if not pyrosetta_env:
                     installed = {pkg.key for pkg in pkg_resources.working_set}
-                    if 'pyrosetta' not in installed:
-                        raise ValueError('PyRosetta was not found in your Python environment.\
-                        Consider using return_jobs=True or activating an environment the does have it.')
+                    if "pyrosetta" not in installed:
+                        raise ValueError(
+                            "PyRosetta was not found in your Python environment.\
+                        Consider using return_jobs=True or activating an environment the does have it."
+                        )
                 exec_command = command
                 if pyrosetta_env:
                     exec_command = _wrap_pyrosetta_command(exec_command, pyrosetta_env)
@@ -15738,8 +17293,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         self.rosetta_protonation = []
         binding_energy_df = []
 
-        output_folder = '.analysis'
-        analysis_folder = rosetta_folder + '/'+output_folder
+        output_folder = ".analysis"
+        analysis_folder = rosetta_folder + "/" + output_folder
         for model in self:
 
             # Read scores
@@ -15922,7 +17477,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 "Rosetta data is empty. Run analyseRosettaCalculation before combining metrics."
             )
 
-        if not hasattr(self, "rosetta_docking_metric_type") or self.rosetta_docking_metric_type is None:
+        if (
+            not hasattr(self, "rosetta_docking_metric_type")
+            or self.rosetta_docking_metric_type is None
+        ):
             self.rosetta_docking_metric_type = {}
 
         def _with_prefix(name: str) -> str:
@@ -15938,7 +17496,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             simple_exclusions = False
             by_metric_exclusions = True
         else:
-            raise ValueError("exclusions should be a list of tuples or a dictionary by metrics.")
+            raise ValueError(
+                "exclusions should be a list of tuples or a dictionary by metrics."
+            )
 
         unique_metrics = set()
         for new_metric, metrics in combinations.items():
@@ -15949,7 +17509,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if metric_type is None:
                     inferred_type = None
                     if metric_label in self.rosetta_data.columns:
-                        if "angle" in metric_label.lower() or "torsion" in metric_label.lower():
+                        if (
+                            "angle" in metric_label.lower()
+                            or "torsion" in metric_label.lower()
+                        ):
                             inferred_type = "angle"
                         else:
                             inferred_type = "distance"
@@ -16022,7 +17585,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     min_col_idx = -1
 
                     for col_idx, metric_value in enumerate(data_array[row_idx]):
-                        if col_idx not in considered_metrics and (row_idx, col_idx) not in excluded_positions:
+                        if (
+                            col_idx not in considered_metrics
+                            and (row_idx, col_idx) not in excluded_positions
+                        ):
                             if metric_value < min_value:
                                 min_value = metric_value
                                 min_col_idx = col_idx
@@ -16045,17 +17611,23 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         for new_metric_name, metrics_to_combine in combinations.items():
             canonical_metrics = [_strip_prefix(m) for m in metrics_to_combine]
-            c_indexes = [metrics_indexes[m] for m in canonical_metrics if m in metrics_indexes]
+            c_indexes = [
+                metrics_indexes[m] for m in canonical_metrics if m in metrics_indexes
+            ]
 
             if c_indexes:
                 combined_min = np.min(data_array[:, c_indexes], axis=1)
 
                 if np.all(np.isinf(combined_min)):
-                    print(f"Skipping combination for '{new_metric_name}' due to incompatible exclusions.")
+                    print(
+                        f"Skipping combination for '{new_metric_name}' due to incompatible exclusions."
+                    )
                     continue
                 self.rosetta_data["metric_" + new_metric_name] = combined_min
             else:
-                raise ValueError(f"No valid metrics to combine for '{new_metric_name}'.")
+                raise ValueError(
+                    f"No valid metrics to combine for '{new_metric_name}'."
+                )
 
         if drop:
             self.rosetta_data.drop(columns=all_metrics_columns, inplace=True)
@@ -16073,7 +17645,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                         break
 
             if not non_excluded_found:
-                print(f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'.")
+                print(
+                    f"Warning: No non-excluded metrics available to combine for '{new_metric_name}'."
+                )
 
     def getBestRosettaModels(
         self, filter_values, n_models=1, return_failed=False, exclude_models=None
@@ -16180,7 +17754,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         data = rosetta_df if rosetta_df is not None else self.rosetta_data
         if data is None or data.empty:
-            raise ValueError("No Rosetta model data available. Run analyseRosettaCalculation first.")
+            raise ValueError(
+                "No Rosetta model data available. Run analyseRosettaCalculation first."
+            )
 
         if fixed is None:
             fixed = []
@@ -16194,12 +17770,17 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Ensure metric types are known
         for metric in metrics.keys():
-            metric_label = metric if metric.startswith("metric_") else "metric_" + metric
+            metric_label = (
+                metric if metric.startswith("metric_") else "metric_" + metric
+            )
             metric_type = self._get_rosetta_metric_type(metric_label)
             if metric_type is None:
                 inferred_type = None
                 if metric_label in data.columns:
-                    if "angle" in metric_label.lower() or "torsion" in metric_label.lower():
+                    if (
+                        "angle" in metric_label.lower()
+                        or "torsion" in metric_label.lower()
+                    ):
                         inferred_type = "angle"
                     else:
                         inferred_type = "distance"
@@ -16244,14 +17825,18 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if remaining_data.empty:
                 if verbose:
-                    print("No remaining data to relax thresholds on. Terminating iteration.")
+                    print(
+                        "No remaining data to relax thresholds on. Terminating iteration."
+                    )
                 break
 
             metric_acceptance = {}
             for metric in metrics:
                 if metric in fixed:
                     continue
-                metric_label = metric if metric.startswith("metric_") else "metric_" + metric
+                metric_label = (
+                    metric if metric.startswith("metric_") else "metric_" + metric
+                )
                 metric_type = self._get_rosetta_metric_type(metric_label)
                 if metric_type is None:
                     raise ValueError(f"Metric type for {metric_label} not defined.")
@@ -16278,7 +17863,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             updated = False
             for metric, _ in ordered_metrics:
-                metric_label = metric if metric.startswith("metric_") else "metric_" + metric
+                metric_label = (
+                    metric if metric.startswith("metric_") else "metric_" + metric
+                )
                 metric_type = self._get_rosetta_metric_type(metric_label)
                 if metric_type == "distance":
                     step = current_distance_step
@@ -16581,7 +18168,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         def getConectLines(pdb_file, format_for_prepwizard=True):
 
-            ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+            ace_names = ["CO", "OP1", "CP2", "1HP2", "2HP2", "3HP2"]
 
             # Read PDB file
             atom_tuples = {}
@@ -16591,11 +18178,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for l in f:
                     if l.startswith("ATOM") or l.startswith("HETATM"):
                         index, name, resname, chain, resid = (
-                            int(l[6:11]),        # Atom index
-                            l[12:16].strip(),    # Atom name
-                            l[17:20].strip(),    # Residue name
-                            l[21],               # Chain identifier
-                            int(l[22:26]),       # Residue index
+                            int(l[6:11]),  # Atom index
+                            l[12:16].strip(),  # Atom name
+                            l[17:20].strip(),  # Residue name
+                            l[21],  # Chain identifier
+                            int(l[22:26]),  # Residue index
                         )
 
                         if not previous_chain:
@@ -16605,33 +18192,33 @@ make sure of reading the target sequences with the function readTargetSequences(
                             resid -= 1
 
                             if format_for_prepwizard:
-                                if name == 'CP2':
-                                    name = 'CH3'
-                                elif name == 'CO':
-                                    name = 'C'
-                                elif name == 'OP1':
-                                    name = 'O'
-                                elif name == '1HP2':
-                                    name = '1H'
-                                elif name == '2HP2':
-                                    name = '2H'
-                                elif name == '3HP2':
-                                    name = '3H'
+                                if name == "CP2":
+                                    name = "CH3"
+                                elif name == "CO":
+                                    name = "C"
+                                elif name == "OP1":
+                                    name = "O"
+                                elif name == "1HP2":
+                                    name = "1H"
+                                elif name == "2HP2":
+                                    name = "2H"
+                                elif name == "3HP2":
+                                    name = "3H"
 
-                        if resname == 'NMA':
+                        if resname == "NMA":
                             add_one = True
 
                             if format_for_prepwizard:
-                                if name == 'HN2':
-                                    name = 'H'
-                                elif name == 'C':
-                                    name = 'CA'
-                                elif name == 'H1':
-                                    name = '1HA'
-                                elif name == 'H2':
-                                    name = '2HA'
-                                elif name == 'H3':
-                                    name = '3HA'
+                                if name == "HN2":
+                                    name = "H"
+                                elif name == "C":
+                                    name = "CA"
+                                elif name == "H1":
+                                    name = "1HA"
+                                elif name == "H2":
+                                    name = "2HA"
+                                elif name == "H3":
+                                    name = "3HA"
 
                         if previous_chain != chain:
                             add_one = False
@@ -16661,11 +18248,11 @@ make sure of reading the target sequences with the function readTargetSequences(
                 for l in f:
                     if l.startswith("ATOM") or l.startswith("HETATM"):
                         index, name, resname, chain, resid = (
-                            int(l[6:11]),        # Atom index
-                            l[12:16].strip(),    # Atom name
-                            l[17:20].strip(),    # Residue name
-                            l[21],               # Chain identifier
-                            int(l[22:26]),       # Residue index
+                            int(l[6:11]),  # Atom index
+                            l[12:16].strip(),  # Atom name
+                            l[17:20].strip(),  # Residue name
+                            l[21],  # Chain identifier
+                            int(l[22:26]),  # Residue index
                         )
                         atom_indexes[(chain, resid, name)] = index
 
@@ -16689,13 +18276,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         def checkCappingGroups(pdb_file, format_for_prepwizard=True, keep_conects=True):
 
-            ace_names = ['CO', 'OP1', 'CP2', '1HP2', '2HP2', '3HP2']
+            ace_names = ["CO", "OP1", "CP2", "1HP2", "2HP2", "3HP2"]
 
             if keep_conects:
                 conect_lines = getConectLines(pdb_file)
 
             # Detect capping groups
-            structure = _readPDB(pdb_file, best_model_tag+".pdb")
+            structure = _readPDB(pdb_file, best_model_tag + ".pdb")
             model = structure[0]
 
             for chain in model:
@@ -16712,7 +18299,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Check for NMA residue
                 nma_residue = None
                 for r in residues:
-                    if r.resname == 'NMA':
+                    if r.resname == "NMA":
                         nma_residue = r
 
                 # Build a separate residue for ACE
@@ -16723,36 +18310,38 @@ make sure of reading the target sequences with the function readTargetSequences(
                     for a in ace_atoms:
                         residues[0].detach_child(a.name)
 
-                    ace_residue = PDB.Residue.Residue((' ', residues[0].id[1]-1, ' '), 'ACE', '')
+                    ace_residue = PDB.Residue.Residue(
+                        (" ", residues[0].id[1] - 1, " "), "ACE", ""
+                    )
 
                     for i, a in enumerate(ace_atoms):
                         new_name = a.get_name()
 
                         # Define the new name based on the old one
                         if format_for_prepwizard:
-                            if new_name == 'CP2':
-                                new_name = 'CH3'
-                            elif new_name == 'CO':
-                                new_name = 'C'
-                            elif new_name == 'OP1':
-                                new_name = 'O'
-                            elif new_name == '1HP2':
-                                new_name = '1H'
-                            elif new_name == '2HP2':
-                                new_name = '2H'
-                            elif new_name == '3HP2':
-                                new_name = '3H'
+                            if new_name == "CP2":
+                                new_name = "CH3"
+                            elif new_name == "CO":
+                                new_name = "C"
+                            elif new_name == "OP1":
+                                new_name = "O"
+                            elif new_name == "1HP2":
+                                new_name = "1H"
+                            elif new_name == "2HP2":
+                                new_name = "2H"
+                            elif new_name == "3HP2":
+                                new_name = "3H"
 
                         # Create a new atom
                         new_atom = PDB.Atom.Atom(
-                            new_name,                  # Atom name
-                            a.get_coord(),             # Coordinates
-                            a.get_bfactor(),           # B-factor
-                            a.get_occupancy(),         # Occupancy
-                            a.get_altloc(),            # AltLoc
-                            "%-4s" % new_name,         # Full atom name (formatted)
-                            a.get_serial_number(),     # Serial number
-                            a.element                  # Element symbol
+                            new_name,  # Atom name
+                            a.get_coord(),  # Coordinates
+                            a.get_bfactor(),  # B-factor
+                            a.get_occupancy(),  # Occupancy
+                            a.get_altloc(),  # AltLoc
+                            "%-4s" % new_name,  # Full atom name (formatted)
+                            a.get_serial_number(),  # Serial number
+                            a.element,  # Element symbol
                         )
 
                         ace_residue.add(new_atom)
@@ -16770,27 +18359,27 @@ make sure of reading the target sequences with the function readTargetSequences(
                             new_name = a.get_name()  # Original atom name
 
                             # Rename the atom based on the rules
-                            if new_name == 'HN2':
-                                new_name = 'H'
-                            elif new_name == 'C':
-                                new_name = 'CA'
-                            elif new_name == 'H1':
-                                new_name = '1HA'
-                            elif new_name == 'H2':
-                                new_name = '2HA'
-                            elif new_name == 'H3':
-                                new_name = '3HA'
+                            if new_name == "HN2":
+                                new_name = "H"
+                            elif new_name == "C":
+                                new_name = "CA"
+                            elif new_name == "H1":
+                                new_name = "1HA"
+                            elif new_name == "H2":
+                                new_name = "2HA"
+                            elif new_name == "H3":
+                                new_name = "3HA"
 
                             # Create a new atom with the updated name
                             new_atom = PDB.Atom.Atom(
-                                new_name,                  # New name
-                                a.get_coord(),             # Same coordinates
-                                a.get_bfactor(),           # Same B-factor
-                                a.get_occupancy(),         # Same occupancy
-                                a.get_altloc(),            # Same altloc
-                                "%-4s" % new_name,         # Full atom name (formatted)
-                                a.get_serial_number(),     # Same serial number
-                                a.element                  # Same element
+                                new_name,  # New name
+                                a.get_coord(),  # Same coordinates
+                                a.get_bfactor(),  # Same B-factor
+                                a.get_occupancy(),  # Same occupancy
+                                a.get_altloc(),  # Same altloc
+                                "%-4s" % new_name,  # Full atom name (formatted)
+                                a.get_serial_number(),  # Same serial number
+                                a.element,  # Same element
                             )
                             renamed_atoms.append(new_atom)
 
@@ -16804,7 +18393,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                     if add_one:
                         chain.detach_child(r.id)  # Deatach residue from old chain
-                        new_id = (r.id[0], r.id[1]+1, r.id[2])  # New ID with updated residue number
+                        new_id = (
+                            r.id[0],
+                            r.id[1] + 1,
+                            r.id[2],
+                        )  # New ID with updated residue number
                         r.id = new_id  # Update residue ID with renumbered value
 
                     # Add residue to the new chain
@@ -16850,9 +18443,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     "rosetta_df index must include 'Model' and 'Pose' levels."
                 )
             rosetta_subset = rosetta_df
-            rosetta_subset_models = set(
-                rosetta_subset.index.get_level_values("Model")
-            )
+            rosetta_subset_models = set(rosetta_subset.index.get_level_values("Model"))
 
         executable = "extract_pdbs.linuxgccrelease"
         models = []
@@ -16881,12 +18472,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if model not in self.models_names:
                             continue
 
-                        if rosetta_subset_models is not None and model not in rosetta_subset_models:
+                        if (
+                            rosetta_subset_models is not None
+                            and model not in rosetta_subset_models
+                        ):
                             continue
 
                         scores = readSilentScores(os.path.join(subfolder, f))
                         if tags is not None and model in tags:
-                            print("Reading model %s from the given tag %s" % (model, tags[model]))
+                            print(
+                                "Reading model %s from the given tag %s"
+                                % (model, tags[model])
+                            )
                             best_model_tag = tags[model]
                         elif rosetta_subset is not None:
                             try:
@@ -16942,10 +18539,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                         checkCappingGroups(best_model_tag + ".pdb", keep_conects=False)
 
                         # Remove the pose index from the name.
-                        base_name = '_'.join(best_model_tag.split("_")[:-1])
+                        base_name = "_".join(best_model_tag.split("_")[:-1])
                         new_filename = base_name + ".pdb"
                         if output_folder:
-                            os.rename(best_model_tag + ".pdb", os.path.join(output_folder, new_filename))
+                            os.rename(
+                                best_model_tag + ".pdb",
+                                os.path.join(output_folder, new_filename),
+                            )
                         else:
                             self.readModelFromPDB(
                                 model,
@@ -17076,12 +18676,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         num_designs=100,
         num_batches=1,
         diffuser_T=None,
-        contig=None,              # e.g., 'A1-218/30-30'
-        partial_T=None,           # e.g., 10
-        provide_seq=None,         # e.g., [218, 247]
+        contig=None,  # e.g., 'A1-218/30-30'
+        partial_T=None,  # e.g., 10
+        provide_seq=None,  # e.g., [218, 247]
         script_path=None,
-        additional_args=None,      # dict of other overrides
-        gpu_local=False
+        additional_args=None,  # dict of other overrides
+        gpu_local=False,
     ):
         """
         Create shell commands for RFdiffusion jobs, splitting each model into N batches.
@@ -17106,13 +18706,13 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # ensure folders exist
         os.makedirs(job_folder, exist_ok=True)
-        input_folder = os.path.join(job_folder, 'input_models')
+        input_folder = os.path.join(job_folder, "input_models")
         os.makedirs(input_folder, exist_ok=True)
-        output_folder = os.path.join(job_folder, 'output_models')
+        output_folder = os.path.join(job_folder, "output_models")
         os.makedirs(output_folder, exist_ok=True)
 
         if not script_path:
-            script_path = 'SCRIPT_PATH/run_inference.py'
+            script_path = "SCRIPT_PATH/run_inference.py"
 
         # Convert contig into a per model dictionary
         if isinstance(contig, str):
@@ -17140,9 +18740,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 output_prefix = f"designs/{model}"
 
                 cmd = []
-                cmd.append('cd '+batch_folder+';')
+                cmd.append("cd " + batch_folder + ";")
                 if gpu_local:
-                    cmd.append('CUDA_VISIBLE_DEVICES=GPUID')
+                    cmd.append("CUDA_VISIBLE_DEVICES=GPUID")
                 cmd.append(script_path)
                 cmd.append(f"inference.input_pdb=../../input_models/{model}.pdb")
                 cmd.append(f"inference.output_prefix={output_prefix}")
@@ -17155,7 +18755,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     cmd.append(f"diffuser.partial_T={partial_T}")
                 if provide_seq is not None:
                     if isinstance(provide_seq, (list, tuple)) and len(provide_seq) == 2:
-                        cmd.append(f"contigmap.provide_seq=[{provide_seq[0]}-{provide_seq[1]}]")
+                        cmd.append(
+                            f"contigmap.provide_seq=[{provide_seq[0]}-{provide_seq[1]}]"
+                        )
                     else:
                         cmd.append(f"contigmap.provide_seq={provide_seq}")
 
@@ -17164,7 +18766,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         if isinstance(value, bool):
                             value = str(value).lower()
                         cmd.append(f"{key}={value}")
-                cmd.append('; cd ../../../')
+                cmd.append("; cd ../../../")
 
                 # join with backslashes for readability
                 jobs.append(" \\\n  ".join(cmd))
@@ -17183,7 +18785,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         use_potentials=False,
         ligands=None,
         binder=None,
-        chains=None
+        chains=None,
     ):
         """
         Run Boltz2 structure prediction and afinity.
@@ -17220,12 +18822,10 @@ make sure of reading the target sequences with the function readTargetSequences(
         os.makedirs(job_folder, exist_ok=True)
 
         for model in self.models_names:
-            if not os.path.exists(job_folder + "/" +model):
-                os.mkdir(job_folder+"/"+model)
+            if not os.path.exists(job_folder + "/" + model):
+                os.mkdir(job_folder + "/" + model)
 
-        chain_selection = self._resolve_chain_selection(
-            chains, require_single=True
-        )
+        chain_selection = self._resolve_chain_selection(chains, require_single=True)
 
         for model in self.models_names:
             chain_id = chain_selection.get(model)
@@ -17241,43 +18841,46 @@ make sure of reading the target sequences with the function readTargetSequences(
                     f"No protein sequence found for model {model} (chain {chain_id})."
                 )
 
-        # Write the YAML file
-            with open(job_folder+"/"+model +"/" + "boltz.yaml", "w") as iyf:
-                iyf.write('version: 1\n')
-                iyf.write('sequences:\n')
-                iyf.write('  - protein:\n')
-                iyf.write(f'      id: [{chain_id}]\n')
-                iyf.write(f'      sequence: {sequence}\n')
+            # Write the YAML file
+            with open(job_folder + "/" + model + "/" + "boltz.yaml", "w") as iyf:
+                iyf.write("version: 1\n")
+                iyf.write("sequences:\n")
+                iyf.write("  - protein:\n")
+                iyf.write(f"      id: [{chain_id}]\n")
+                iyf.write(f"      sequence: {sequence}\n")
 
                 if use_msa_server == False:
-                    iyf.write(f'      msa: {msa_path}+{model}.a3m\n')
+                    iyf.write(f"      msa: {msa_path}+{model}.a3m\n")
 
                 if ligands != None:
                     for i, ligand in enumerate(ligands):
-                        ligand_chain = chr(ord('B') + i)  # Assign chains starting from 'B'
-                        iyf.write('  - ligand:\n')
-                        iyf.write(f'      id: [{ligand_chain}]\n')
+                        ligand_chain = chr(
+                            ord("B") + i
+                        )  # Assign chains starting from 'B'
+                        iyf.write("  - ligand:\n")
+                        iyf.write(f"      id: [{ligand_chain}]\n")
                         iyf.write(f"      smiles: '{ligand}'\n")
 
                 if binder != None:
-                    iyf.write('properties:\n')
-                    iyf.write('    - affinity:\n')
-                    iyf.write(f'        binder: {binder}\n')
-
+                    iyf.write("properties:\n")
+                    iyf.write("    - affinity:\n")
+                    iyf.write(f"        binder: {binder}\n")
 
         jobs = []
         for model in self.models_names:
             pdb_name = f"{model}.pdb"
-            pdb_path = job_folder+"/"+model
+            pdb_path = job_folder + "/" + model
 
             command = f"cd {pdb_path} \n"
-            command +=  "boltz predict boltz.yaml "
+            command += "boltz predict boltz.yaml "
 
             if use_msa_server == True:
                 command += "--use_msa_server "
             else:
                 if msa_path is None:
-                    raise ValueError("msa_path must be provided if use_msa_server is False")
+                    raise ValueError(
+                        "msa_path must be provided if use_msa_server is False"
+                    )
             if use_potentials:
                 command += "--use_potentials "
             if diffusion_samples:
@@ -17292,7 +18895,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             jobs.append(command)
 
         return jobs
-
 
     def saveModels(
         self,
@@ -17962,9 +19564,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             ) from exc
 
         pdb_files = [
-            entry
-            for entry in os.listdir(output_dir)
-            if entry.lower().endswith(".pdb")
+            entry for entry in os.listdir(output_dir) if entry.lower().endswith(".pdb")
         ]
         if not pdb_files:
             raise RuntimeError(
@@ -17982,7 +19582,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         self._maestro_temp_dir = output_dir
         self._maestro_manifest = manifest_data
-        self._maestro_manifest_path = manifest_path if os.path.exists(manifest_path) else None
+        self._maestro_manifest_path = (
+            manifest_path if os.path.exists(manifest_path) else None
+        )
         self._maestro_source_file = str(path)
 
         return output_dir
@@ -18056,7 +19658,7 @@ def readSilentScores(silent_file):
                 else:
                     for i, t in enumerate(terms):
                         try:
-                            if '_' in l.strip().split()[i]:
+                            if "_" in l.strip().split()[i]:
                                 scores[t].append(l.strip().split()[i])
                             else:
                                 scores[t].append(float(l.strip().split()[i]))
@@ -18083,6 +19685,7 @@ def _readPDB(name, pdb_file):
 # Note: parallel loading was explored but removed as it did not
 # provide speedups in practice for typical workloads and added
 # complexity. Serial loading plus reduced I/O proved more robust.
+
 
 def _saveStructureToPDB(
     structure,
@@ -18124,7 +19727,11 @@ def _saveStructureToPDB(
     else:
         io.save(output_file)
 
-_DEFAULT_CRYST1_RECORD = "CRYST1   1.000   1.000   1.000  90.00  90.00  90.00 P 1           1"
+
+_DEFAULT_CRYST1_RECORD = (
+    "CRYST1   1.000   1.000   1.000  90.00  90.00  90.00 P 1           1"
+)
+
 
 def _ensure_cryst1_record(pdb_path, cryst1_record=_DEFAULT_CRYST1_RECORD):
     """
@@ -18141,8 +19748,14 @@ def _ensure_cryst1_record(pdb_path, cryst1_record=_DEFAULT_CRYST1_RECORD):
         updated.write(record)
         updated.writelines(lines)
 
+
 def _copyScriptFile(
-    output_folder, script_name, no_py=False, subfolder=None, hidden=True, path="prepare_proteins/scripts",
+    output_folder,
+    script_name,
+    no_py=False,
+    subfolder=None,
+    hidden=True,
+    path="prepare_proteins/scripts",
 ):
     """
     Copy a script file from the prepare_proteins package.
@@ -18215,7 +19828,9 @@ def make_model_path_batches(
     # Collect paths {name: path}
     if isinstance(models, str):
         if not os.path.isdir(models):
-            raise ValueError("models path must be a directory when a string is provided")
+            raise ValueError(
+                "models path must be a directory when a string is provided"
+            )
         paths = {}
         for d in os.listdir(models):
             if d.endswith(".pdb"):
@@ -18288,6 +19903,7 @@ def make_model_path_batches(
         batches[i] = {n: paths[n] for n in batch_names}
 
     return batches
+
 
 def _computeCartesianFromInternal(coord2, coord3, coord4, distance, angle, torsion):
     """
@@ -18403,6 +20019,7 @@ def _getStructureCoordinates(
         coordinates = np.array(coordinates)
 
     return coordinates
+
 
 def _readRosettaScoreFile(score_file, indexing=False, skip_empty=False):
     """
