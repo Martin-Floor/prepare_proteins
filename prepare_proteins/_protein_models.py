@@ -12720,10 +12720,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         This function:
         1) Reuses setUpOpenMMPreparation to ensure prmtop/inpcrd exist.
         2) For each model and each replica, creates a replica directory,
-            copies prmtop/inpcrd there, and writes an ABFE control (.cntl)
-            file and a nodefile.
+        copies prmtop/inpcrd there, writes an ABFE control (.cntl)
+        file and a nodefile, and returns a list of shell command
+        strings to run AToM ABFE.
 
-        It does NOT run anything; it just prepares the filesystem layout.
+        It does NOT run anything; it just prepares the filesystem layout
+        and returns command strings.
         """
         import os, shutil
 
@@ -12912,10 +12914,25 @@ make sure of reading the target sequences with the function readTargetSequences(
                 with open(nodefile_path, "w") as f:
                     f.write(nodefile_line)
 
-                # Collect the control file path for this replica
-                abfe_jobs.append(cntl_path)
+                # Build multi-line job string for this replica
+                # abfe_structprep {base_name}.cntl will create {base_name}_asyncre.cntl,
+                # which we then pass to abfe_production.
+                job_lines = [
+                    f"cd {replica_folder}",
+                    f"make_atm_system_from_amber --AmberPrmtopinFile {base_name}.prmtop "
+                    f"--AmberInpcrdinFile {base_name}.inpcrd "
+                    f"--systemXMLoutFile {base_name}_sys.xml "
+                    f"--systemPDBoutFile {base_name}.pdb",
+                    f"abfe_structprep {base_name}.cntl",
+                    f"abfe_production {base_name}_asyncre.cntl",
+                    "cd -",
+                ]
+                job_str = "\n".join(job_lines)
 
-        # Return list of control files (one per replica)
+                # Collect the job string for this replica
+                abfe_jobs.append(job_str)
+
+        # Return list of multi-line shell command strings (one per replica)
         return abfe_jobs
 
     def analyseRosettaDocking(
