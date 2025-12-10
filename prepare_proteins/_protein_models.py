@@ -12795,6 +12795,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         # ABFE time step is fixed at 0.002 ps = 2 fs
         time_step_ps = 0.002
         production_steps = int((simulation_time * 1000000) / time_step_ps)
+        saving_steps = production_steps/100
         # equivalently: production_steps = int(simulation_time * 500000)
 
         if isinstance(only_models, str):
@@ -12875,10 +12876,10 @@ make sure of reading the target sequences with the function readTargetSequences(
     PRODUCTION_STEPS = '{production_steps}'
 
     #frequency of printing information after a replica run. Must be a multiple of PRODUCTION_STEPS
-    PRNT_FREQUENCY = '{production_steps}'
+    PRNT_FREQUENCY = '{saving_steps}'
 
     #frequency of saving trajectory frames. Must be a multiple of PRODUCTION_STEPS
-    TRJ_FREQUENCY = '{production_steps}'
+    TRJ_FREQUENCY = '{saving_steps}'
 
     #list of ligand atoms.
     LIGAND_ATOMS = 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216
