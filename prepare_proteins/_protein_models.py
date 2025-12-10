@@ -12967,8 +12967,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     temperature=int(temperature),
                     wall_time=int(wall_time),
                     production_steps=int(production_steps),
-                    openmm_platform=openmm_platform,   
-                    verbose=verbose,                   
+                    openmm_platform=openmm_platform,
+                    verbose=verbose,
                 )
                 cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
                 with open(cntl_path, "w") as f:
@@ -12979,10 +12979,20 @@ make sure of reading the target sequences with the function readTargetSequences(
                 with open(nodefile_path, "w") as f:
                     f.write(nodefile_line)
 
-                # Collect the control file path for this replica
-                abfe_jobs.append(cntl_path)
+                # Build the multiline job command for this replica
+                job_lines = [
+                    f"cd {replica_folder}",
+                    f"make_atm_system_from_amber --AmberPrmtopinFile {base_name}.prmtop "
+                    f"--AmberInpcrdinFile {base_name}.inpcrd "
+                    f"--systemXMLoutFile {base_name}_sys.xml "
+                    f"--systemPDBoutFile {base_name}.pdb",
+                    f"abfe_structprep {base_name}.cntl",
+                    f"abfe_production {base_name}_asyncre.cntl",
+                    "cd -",
+                ]
+                abfe_jobs.append("\n".join(job_lines))
 
-        # Return list of control files (one per replica)
+        # Return list of job strings (one per replica)
         return abfe_jobs
 
     def analyseRosettaDocking(
