@@ -12695,6 +12695,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         self,
         job_folder,
         replicas,
+        simulation_time,          # in ns
         ligand_charges=None,
         residue_names=None,
         ff="amber14",
@@ -12713,6 +12714,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         ligand_parameters_source=None,
         only_models=None,
         skip_models=None,
+        temperature=300.0,
+        wall_time=2880,            # minutes = 2 days
     ):
         """
         Set up Absolute Binding Free Energy (ABFE) jobs for each model.
@@ -12720,22 +12723,72 @@ make sure of reading the target sequences with the function readTargetSequences(
         This function:
         1) Reuses setUpOpenMMPreparation to ensure prmtop/inpcrd exist.
         2) For each model and each replica, creates a replica directory,
-        copies prmtop/inpcrd there, writes an ABFE control (.cntl)
-        file and a nodefile, and returns a list of shell command
-        strings to run AToM ABFE.
+        copies prmtop/inpcrd there, and writes an ABFE control (.cntl)
+        file and a nodefile.
 
-        It does NOT run anything; it just prepares the filesystem layout
-        and returns command strings.
+        Parameters
+        ----------
+        job_folder : str
+            Directory where model and replica subfolders will be created.
+        replicas : int
+            Number of ABFE replicas to prepare per model.
+        simulation_time : float
+            Production simulation time in nanoseconds.
+        ligand_charges : dict, optional
+            Mapping from ligand residue names to formal charges.
+        residue_names : dict, optional
+            Mapping of models to residue-name overrides before parametrization.
+        ff : str
+            AMBER force field name used for parametrization.
+        add_bonds : dict, optional
+            Extra covalent bonds to define (e.g., metal coordination).
+        skip_ligands : list, optional
+            Ligand residue names to exclude from parametrization.
+        metal_ligand : str or list, optional
+            Residues treated as metal-binding ligands.
+        metal_parameters : str, optional
+            Folder containing predefined metal–ligand parameter files.
+        skip_replicas : list of int, optional
+            Replica indices to skip during preparation.
+        extra_frcmod : list, optional
+            Additional frcmod files to include in parametrization.
+        extra_mol2 : list, optional
+            Additional MOL2 files for ligand parameters.
+        non_standard_residues : list, optional
+            Residue names treated as ligands rather than standard amino acids.
+        add_hydrogens : bool
+            Whether to add missing hydrogens prior to parametrization.
+        extra_force_field : str or list, optional
+            Additional AMBER or OpenMM force field files to include.
+        add_counterionsRand : bool
+            Add counterions using random placement.
+        skip_preparation : bool
+            Skip system preparation and reuse existing prmtop/inpcrd.
+        ligand_parameters_source : str, optional
+            Source directory for ligand parameter libraries.
+        only_models : list, optional
+            Restrict preparation to these model names.
+        skip_models : list, optional
+            Model names to exclude from preparation.
+        temperature : float
+            Simulation temperature written to the control file.
+        wall_time : int
+            Maximum wall-clock time (minutes) written to the control file.
         """
         import os, shutil
 
-        # Normalize model filters to be consistent with other methods
+        # convert simulation time (ns) to production_steps
+        # ABFE time step is fixed at 0.002 ps = 2 fs
+        time_step_ps = 0.002
+        production_steps = int((simulation_time * 1000000) / time_step_ps)
+        # equivalently: production_steps = int(simulation_time * 500000)
+
         if isinstance(only_models, str):
             only_models = [only_models]
         if skip_models is None:
             skip_models = []
 
-        # 1) Ensure systems are prepared (PDB → solvated, parametrized AMBER prmtop/inpcrd)
+        # Run preparation
         self.setUpOpenMMPreparation(
             job_folder=job_folder,
             replicas=replicas,
@@ -12759,10 +12812,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             skip_models=skip_models,
         )
 
-        # 2) ABFE-specific file generation for each model/replica
         abfe_jobs = []
 
-        # ABFE control file template (BASENAME will be formatted per model)
+        # ABFE control file template (BASENAME, temperature, wall_time, production_steps will be formatted)
         abfe_cntl_template = """#The job transport is the mean in which replicas are executed on GPU devices
     #LOCAL_OPENMM is the only job transport system currently supported. Each local GPU is
     #managed by a different process using the python multiprocessing module 
@@ -12773,7 +12825,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     BASENAME = '{basename}'
 
     #Arrays of thermodynamic states in temperature and alchemical space.
-    TEMPERATURES = '300'
+    TEMPERATURES = '{temperature}'
     LAMBDAS =    '0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00'
     DIRECTION=   '   1,    1,    1,    1,    1,    1,    1,    1,    1,    1,    1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1'
     INTERMEDIATE='   0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    1,    1,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0'
@@ -12790,7 +12842,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     LIGOFFSET = '0., 0., 0.'
 
     #Execution time in minutes
-    WALL_TIME = 240
+    WALL_TIME = {wall_time}
 
     #Frequency of replica exchange attempts in seconds
     CYCLE_TIME = 10
@@ -12806,13 +12858,13 @@ make sure of reading the target sequences with the function readTargetSequences(
     SUBJOBS_BUFFER_SIZE = '1.0'
 
     #MD steps per replica run
-    PRODUCTION_STEPS = '20000'
+    PRODUCTION_STEPS = '{production_steps}'
 
     #frequency of printing information after a replica run. Must be a multiple of PRODUCTION_STEPS
-    PRNT_FREQUENCY = '20000'
+    PRNT_FREQUENCY = '{production_steps}'
 
     #frequency of saving trajectory frames. Must be a multiple of PRODUCTION_STEPS
-    TRJ_FREQUENCY = '20000'
+    TRJ_FREQUENCY = '{production_steps}'
 
     #list of ligand atoms.
     LIGAND_ATOMS = 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, 213, 214, 215, 216
@@ -12890,21 +12942,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                 prmtop_dst = os.path.join(replica_folder, f"{base_name}.prmtop")
                 inpcrd_dst = os.path.join(replica_folder, f"{base_name}.inpcrd")
 
-                if (
-                    prmtop_src
-                    and os.path.exists(prmtop_src)
-                    and not os.path.exists(prmtop_dst)
-                ):
+                if prmtop_src and os.path.exists(prmtop_src) and not os.path.exists(prmtop_dst):
                     shutil.copyfile(prmtop_src, prmtop_dst)
-                if (
-                    inpcrd_src
-                    and os.path.exists(inpcrd_src)
-                    and not os.path.exists(inpcrd_dst)
-                ):
+                if inpcrd_src and os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_dst):
                     shutil.copyfile(inpcrd_src, inpcrd_dst)
 
                 # Write ABFE control file in this replica folder
-                cntl_text = abfe_cntl_template.format(basename=base_name)
+                cntl_text = abfe_cntl_template.format(
+                    basename=base_name,
+                    temperature=int(temperature),
+                    wall_time=int(wall_time),
+                    production_steps=int(production_steps),
+                )
                 cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
                 with open(cntl_path, "w") as f:
                     f.write(cntl_text)
@@ -12914,25 +12963,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 with open(nodefile_path, "w") as f:
                     f.write(nodefile_line)
 
-                # Build multi-line job string for this replica
-                # abfe_structprep {base_name}.cntl will create {base_name}_asyncre.cntl,
-                # which we then pass to abfe_production.
-                job_lines = [
-                    f"cd {replica_folder}",
-                    f"make_atm_system_from_amber --AmberPrmtopinFile {base_name}.prmtop "
-                    f"--AmberInpcrdinFile {base_name}.inpcrd "
-                    f"--systemXMLoutFile {base_name}_sys.xml "
-                    f"--systemPDBoutFile {base_name}.pdb",
-                    f"abfe_structprep {base_name}.cntl",
-                    f"abfe_production {base_name}_asyncre.cntl",
-                    "cd -",
-                ]
-                job_str = "\n".join(job_lines)
+                # Collect the control file path for this replica
+                abfe_jobs.append(cntl_path)
 
-                # Collect the job string for this replica
-                abfe_jobs.append(job_str)
-
-        # Return list of multi-line shell command strings (one per replica)
+        # Return list of control files (one per replica)
         return abfe_jobs
 
     def analyseRosettaDocking(
