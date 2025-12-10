@@ -12715,7 +12715,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         only_models=None,
         skip_models=None,
         temperature=300.0,
-        wall_time=2880,            # minutes = 2 days
+        wall_time=2880,           # minutes
+        openmm_platform="CPU",    
+        verbose="no",             
     ):
         """
         Set up Absolute Binding Free Energy (ABFE) jobs for each model.
@@ -12776,6 +12778,18 @@ make sure of reading the target sequences with the function readTargetSequences(
             Maximum wall-clock time (minutes) written to the control file.
         """
         import os, shutil
+
+        # Validate OpenMM platform
+        valid_platforms = ["CPU", "CUDA", "OpenCL", "Reference"]
+        if openmm_platform not in valid_platforms:
+            raise ValueError(
+                f"Invalid OpenMM platform '{openmm_platform}'. "
+                f"Allowed values: {valid_platforms}"
+            )
+
+        # Validate verbose flag
+        if verbose not in ["yes", "no"]:
+            raise ValueError("verbose must be either 'yes' or 'no'")
 
         # convert simulation time (ns) to production_steps
         # ABFE time step is fixed at 0.002 ps = 2 fs
@@ -12897,10 +12911,10 @@ make sure of reading the target sequences with the function readTargetSequences(
     TIME_STEP = 0.002
 
     #OpenMM platform name
-    OPENMM_PLATFORM = CPU
+    OPENMM_PLATFORM = {openmm_platform}
 
     #set to 'yes' to turn on verbose logging
-    VERBOSE = 'no'
+    VERBOSE = '{verbose}'
     """
 
         nodefile_line = "localhost,0:0,1,CUDA,,/tmp\n"
@@ -12953,6 +12967,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     temperature=int(temperature),
                     wall_time=int(wall_time),
                     production_steps=int(production_steps),
+                    openmm_platform=openmm_platform,   
+                    verbose=verbose,                   
                 )
                 cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
                 with open(cntl_path, "w") as f:
