@@ -750,6 +750,8 @@ class MutationVariabilityAnalyzer:
         protein_models: "proteinModels",
         wild_type: str,
         *,
+        only_models: Optional[Union[str, Iterable[str]]] = None,
+        exclude_models: Optional[Union[str, Iterable[str]]] = None,
         chains: Optional[Union[str, Iterable[str], Dict[str, Iterable[str]]]] = None,
         alignment_params: Optional[Dict[str, float]] = None,
         residue_annotations: Optional[Union[Dict[Any, str], pd.DataFrame]] = None,
@@ -760,9 +762,42 @@ class MutationVariabilityAnalyzer:
         pocket_neighbor_kinds: Optional[Iterable[str]] = None,
     ):
         self.models = protein_models
-        if wild_type not in getattr(self.models, "models_names", []):
+        available_models = list(getattr(self.models, "models_names", []))
+        if wild_type not in available_models:
             raise ValueError(f"Wild-type model '{wild_type}' is not available in the current session.")
         self.wt_model = wild_type
+
+        # Determine the subset of models included in the analysis
+        def _normalize_model_list(value, label):
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple, set)):
+                return [str(v) for v in value]
+            raise TypeError(f"{label} must be a string or an iterable of strings.")
+
+        only_list = _normalize_model_list(only_models, "only_models")
+        exclude_list = _normalize_model_list(exclude_models, "exclude_models")
+
+        selected = list(available_models)
+        if only_list:
+            only_set = set(only_list)
+            selected = [m for m in selected if m in only_set]
+        if exclude_list:
+            exclude_set = set(exclude_list)
+            selected = [m for m in selected if m not in exclude_set]
+
+        if self.wt_model not in selected:
+            raise ValueError(
+                "Wild-type model must be part of the analysis set; "
+                "adjust only_models/exclude_models so that it is included."
+            )
+
+        if not selected:
+            raise ValueError("No models left after applying only_models/exclude_models filters.")
+
+        self.analysis_models: List[str] = selected
 
         self._align_params = dict(self._DEFAULT_ALIGNMENT)
         if alignment_params:
@@ -771,7 +806,7 @@ class MutationVariabilityAnalyzer:
         if self.models.chain_sequences == {} and getattr(self.models, "structures", None):
             self.models.getModelsSequences()
 
-        raw_selection = self.models._resolve_chain_selection(chains=chains, models=self.models.models_names)
+        raw_selection = self.models._resolve_chain_selection(chains=chains, models=self.analysis_models)
         wt_chains = raw_selection.get(self.wt_model, [])
         if not wt_chains:
             raise ValueError(f"No analyzable chains were found for the wild-type model '{self.wt_model}'.")
@@ -827,8 +862,16 @@ class MutationVariabilityAnalyzer:
             raise ValueError("Wild-type chains could not be parsed; ensure the reference contains protein residues.")
         self._wt_chain_sequences = self._chain_sequences[self.wt_model]
 
-        contact_results = contact_results or getattr(self.models, "models_contacts", None) or {}
-        self._contact_summary = self._build_contact_summary(contact_results)
+        contact_results_all = contact_results or getattr(self.models, "models_contacts", None) or {}
+        if contact_results_all:
+            filtered_contacts = {
+                model: result
+                for model, result in contact_results_all.items()
+                if model in self.chain_selection
+            }
+        else:
+            filtered_contacts = {}
+        self._contact_summary = self._build_contact_summary(filtered_contacts)
 
         self._location_map = self._normalize_location_annotations(residue_annotations)
         if auto_classify_locations and self._contact_summary:
@@ -1014,6 +1057,8 @@ class MutationVariabilityAnalyzer:
         cmap: str = "Blues",
         model_order: Optional[Iterable[str]] = None,
         color_by_category: bool = False,
+        dpi: Optional[float] = None,
+        title: Optional[str] = None,
     ) -> plt.Axes:
         """Visualise the mutation presence matrix as a heatmap."""
 
@@ -1024,7 +1069,7 @@ class MutationVariabilityAnalyzer:
         )
         if matrix.empty:
             if ax is None:
-                _, ax = plt.subplots(figsize=(4, 2))
+                _, ax = plt.subplots(figsize=(4, 2), dpi=dpi)
             ax.set_axis_off()
             ax.set_title("No mutations to display")
             return ax
@@ -1036,7 +1081,7 @@ class MutationVariabilityAnalyzer:
             heatmap_data = heatmap_data[order + remaining]
         if heatmap_data.empty:
             if ax is None:
-                _, ax = plt.subplots(figsize=(4, 2))
+                _, ax = plt.subplots(figsize=(4, 2), dpi=dpi)
             ax.set_axis_off()
             ax.set_title("No mutations to display")
             return ax
@@ -1044,7 +1089,7 @@ class MutationVariabilityAnalyzer:
         if ax is None:
             height = max(3, heatmap_data.shape[0] * 0.25)
             width = max(3, heatmap_data.shape[1] * 0.4)
-            _, ax = plt.subplots(figsize=(width, height))
+            _, ax = plt.subplots(figsize=(width, height), dpi=dpi)
 
         if color_by_category:
             table = self.build_mutation_table(models=models)
@@ -1133,7 +1178,7 @@ class MutationVariabilityAnalyzer:
                 boundaries=[-0.5, 0.5, 1.5],
                 ticks=[0, 1],
             )
-            cbar.set_label("Presence")
+            cbar.set_ticklabels(["absence", "presence"])
 
         ax.set_xticks(np.arange(heatmap_data.shape[1]))
         ax.set_xticklabels(heatmap_data.columns, rotation=90, ha="center")
@@ -1141,7 +1186,8 @@ class MutationVariabilityAnalyzer:
         ax.set_yticklabels(heatmap_data.index)
         ax.set_xlabel("Model")
         ax.set_ylabel("Mutation")
-        ax.set_title("Mutation presence across designs")
+        if title is not None:
+            ax.set_title(title)
         plt.tight_layout()
         return ax
 
@@ -6475,17 +6521,61 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Compute neighbour contacts for the selected models and cache them.
 
-        The signature mirrors :func:`prepare_proteins.analysis.find_neighbours_in_pdb`
-        with additional ``models`` and ``chains`` arguments to control the subset
-        and chain selection analysed. By default all polymer chains in each model
-        are used.
+        This is a thin convenience wrapper around
+        :func:`prepare_proteins.analysis.find_neighbours_in_pdb` that applies the
+        same contact-detection logic to every selected model and stores the results
+        on ``self.models_contacts``.
+
+        By default all available models and all polymer chains in each model are
+        analysed. You can restrict the calculation to specific models via
+        ``models`` and to specific chains via ``chains``.
 
         Args:
-            chains: Optional chain selector (string, iterable, or per-model mapping)
-                restricting which chains are analysed. Defaults to all polymer chains.
+            chains: Optional chain selector restricting which chains are analysed.
+                Can be a single chain ID (``\"A\"``), an iterable of chain IDs
+                (e.g. ``[\"A\", \"B\"]``), or a mapping of model name to iterables
+                of chain IDs (for per-model selection). If ``None``, all polymer
+                chains in each model are used.
+            models: Optional model selector. Either a single model name or an
+                iterable of model names. If ``None``, all models in
+                ``self.models_names`` are analysed.
+            mode: Contact mode passed through to
+                :func:`prepare_proteins.analysis.find_neighbours_in_pdb`, controlling
+                whether chain–chain, ligand, or both types of contacts are included.
+            cutoff: Distance cutoff (in Å) for defining direct contacts.
+            second_shell: Optional second-shell cutoff (in Å); if provided, a
+                second, looser distance shell is also computed.
+            atom_scope: Atom selection used when computing distances (all atoms,
+                heavy atoms only, backbone, or side chains).
+            group_by: Granularity of the returned contacts (per residue, per atom,
+                or per chain).
+            exclude_query_intra: If ``True``, intra-chain contacts within the query
+                selection are excluded from the results.
+            query_residues: Optional residue selection used as explicit query set;
+                passed through to :func:`find_neighbours_in_pdb`.
+            include: Optional additional atom / residue selection rules; forwarded
+                to :func:`find_neighbours_in_pdb`.
+            ligand_filters: Optional filters restricting which ligands are included
+                in the contact analysis.
+            chain_filters: Optional filters restricting which protein chains are
+                considered as potential neighbours.
+            altloc_mode: Strategy for handling alternate locations in the PDB file
+                (e.g. first altloc vs. highest occupancy).
+            print_chain_summary: If ``True``, print a short per-chain summary for
+                each processed model.
+            only_residue_dict: If ``True``, return only residue-level contact
+                dictionaries instead of the full result object.
+            exclude_bb_contacts: If ``True``, backbone-only contacts are excluded.
+            classify_bb_sc: If ``True``, contacts are classified as backbone or
+                side-chain contacts.
+            filter_contact_classes: Optional set of contact class labels to retain
+                in the output.
+            split_counts_by_class: If ``True``, contact counts are split by contact
+                class instead of aggregated.
 
         Returns:
-            dict[str, dict]: Mapping of model name to the contact analysis result.
+            dict[str, Any]: Mapping of model name to the contact-analysis result
+            returned by :func:`find_neighbours_in_pdb` for that model.
         """
         available_models = list(self.models_names)
         if models is None:
@@ -6546,6 +6636,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         wild_type: str,
         *,
         chains: Optional[Union[str, Iterable[str], Dict[str, Iterable[str]]]] = None,
+        only_models: Optional[Union[str, Iterable[str]]] = None,
+        exclude_models: Optional[Union[str, Iterable[str]]] = None,
         alignment_params: Optional[Dict[str, float]] = None,
         residue_annotations: Optional[Union[Dict[Any, str], pd.DataFrame]] = None,
         contact_results: Optional[Dict[str, Any]] = None,
@@ -6556,8 +6648,10 @@ make sure of reading the target sequences with the function readTargetSequences(
     ) -> MutationVariabilityAnalyzer:
         """Convenience wrapper to instantiate :class:`MutationVariabilityAnalyzer`.
 
-        Parameters mirror the analyzer constructor; pass ``contact_results`` to override
-        cached neighbour data (defaults to ``self.models_contacts``).
+        Parameters mirror the analyzer constructor. Use ``only_models`` and
+        ``exclude_models`` to restrict the set of designs included in the
+        mutational analysis. Pass ``contact_results`` to override cached
+        neighbour data (defaults to ``self.models_contacts``).
         """
 
         if contact_results is not None:
@@ -6570,6 +6664,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         return MutationVariabilityAnalyzer(
             self,
             wild_type,
+            only_models=only_models,
+            exclude_models=exclude_models,
             chains=chains,
             alignment_params=alignment_params,
             residue_annotations=residue_annotations,

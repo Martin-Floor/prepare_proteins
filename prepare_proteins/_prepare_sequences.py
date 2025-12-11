@@ -3159,6 +3159,8 @@ class sequenceModels:
 
             ref_bb_atoms = []
             for residue in ref.topology.residues:
+                if not residue.is_protein:
+                    continue
                 if residues and residue.resSeq not in residues:
                     continue
                 for atom in residue.atoms:
@@ -3185,6 +3187,8 @@ class sequenceModels:
 
             traj_bb_atoms = []
             for residue in traj.topology.residues:
+                if not residue.is_protein:
+                    continue
                 if residues and residue.resSeq not in residues:
                     continue
                 for atom in residue.atoms:
@@ -3569,8 +3573,8 @@ class sequenceModels:
         Parameters:
         - job_folder (str): Path where temporary SMOG files will be stored.
         - bioemu_folder (str): Path to BioEmu output folders, one per model (should include topology and trajectory).
-        - native_models_folder (str, dict): Path to PDB folder containg the files of native models, one per model. Alternatively,
-                                            a dictionary containing the paths to each native PDB file.
+        - native_models_folder (str, dict): Path to PDB folder containing one file per model, a single PDB file to reuse for
+                                            all models, or a dictionary mapping model → native PDB path.
         - show_smog_output (bool, optional): Whether to display SMOG2 stdout/stderr. Defaults to False.
         - show_progress (bool, optional): Whether to display a progress bar. Defaults to True.
 
@@ -3580,13 +3584,18 @@ class sequenceModels:
         """
 
         def remove_hydrogens_and_oxt(pdb_path, output_path):
-            """Removes all hydrogen atoms and OXT atoms from a PDB file."""
-            with open(pdb_path) as f_in, open(output_path, "w") as f_out:
+            """
+            Removes hydrogens/OXT and renumbers residues/atoms sequentially.
+
+            SMOG2 is strict about residue ordering; multi-chain PDBs that restart
+            numbering at 1 can trigger "Non-sequential residue numbers" unless we
+            renumber the filtered structure.
+            """
+            filtered = []
+            with open(pdb_path) as f_in:
                 for line in f_in:
-                    if line.startswith("TER") or line.startswith("END"):
-                        continue
                     if not line.startswith("ATOM"):
-                        f_out.write(line)
+                        # Drop HETATM/remarks/TER entirely for native contact generation
                         continue
 
                     atom_name = line[12:16].strip()
@@ -3598,8 +3607,42 @@ class sequenceModels:
                     ):
                         continue
 
-                    f_out.write(line)
-                f_out.write("END\n")
+                    filtered.append(line)
+
+            new_lines = []
+            current_res_id = None
+            new_resseq = 0
+            atom_serial = 1
+
+            for line in filtered:
+                if line.startswith("ATOM"):
+                    chain_id = line[21]
+                    resseq = line[22:26]
+                    icode = line[26]
+                    res_id = (chain_id, resseq, icode)
+                    if res_id != current_res_id:
+                        new_resseq += 1
+                        current_res_id = res_id
+
+                    chars = list(line.rstrip("\n"))
+                    # Ensure length for slice assignments
+                    if len(chars) < 80:
+                        chars.extend([" "] * (80 - len(chars)))
+                    serial_str = f"{atom_serial:5d}"
+                    resseq_str = f"{new_resseq:4d}"
+                    chars[6:11] = list(serial_str)
+                    chars[22:26] = list(resseq_str)
+                    new_line = "".join(chars[:80]) + "\n"
+                    new_lines.append(new_line)
+                    atom_serial += 1
+                else:
+                    new_lines.append(line)
+
+            if not new_lines or not new_lines[-1].startswith("END"):
+                new_lines.append("END\n")
+
+            with open(output_path, "w") as f_out:
+                f_out.writelines(new_lines)
 
         def readNC(nc_file):
             """Reads a .contacts.CG file and returns a list of (res1, res2) tuples."""
@@ -3611,17 +3654,25 @@ class sequenceModels:
         if isinstance(only_models, str):
             only_models = [only_models]
 
+        models = list(self)  # Ensures tqdm knows the total number of items
+
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
 
-        if isinstance(native_models_folder, str) and os.path.isdir(
-            native_models_folder
-        ):
-            native_models = {
-                m.replace(".pdb", ""): os.path.join(native_models_folder, m)
-                for m in os.listdir(native_models_folder)
-                if m.endswith(".pdb")
-            }
+        if isinstance(native_models_folder, str):
+            if os.path.isdir(native_models_folder):
+                native_models = {
+                    m.replace(".pdb", ""): os.path.join(native_models_folder, m)
+                    for m in os.listdir(native_models_folder)
+                    if m.endswith(".pdb")
+                }
+            elif os.path.isfile(native_models_folder):
+                target_models = only_models if only_models else models
+                native_models = {m: native_models_folder for m in target_models}
+            else:
+                raise ValueError(
+                    "native_models_folder should be an existing folder, file path, or a dictionary!"
+                )
         elif isinstance(native_models_folder, dict):
             native_models = native_models_folder
         else:
@@ -3631,7 +3682,6 @@ class sequenceModels:
 
         df_distances = {}
 
-        models = list(self)  # Ensures tqdm knows the total number of items
         progress_iter = tqdm(
             models,
             desc="Computing native contacts",
@@ -3918,6 +3968,12 @@ class sequenceModels:
                         "P_unfolded": P_unfolded,
                     }
                 )
+
+        if not data:
+            # No models produced valid folded/unfolded counts; return empty frame with expected columns.
+            return pd.DataFrame(
+                columns=["ΔG_f (kcal/mol)", "P_folded", "P_unfolded"]
+            )
 
         df_dG = pd.DataFrame(data).set_index("Model")
         return df_dG
