@@ -12695,7 +12695,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         self,
         job_folder,
         replicas,
-        simulation_time,          # in ns
+        simulation_time,  # in ns
         ligand_charges=None,
         residue_names=None,
         ff="amber14",
@@ -12715,9 +12715,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         only_models=None,
         skip_models=None,
         temperature=300.0,
-        wall_time=2880,           # minutes
-        openmm_platform="CPU",    
-        verbose="no",             
+        wall_time=2880,  # minutes
+        openmm_platform="CPU",
+        verbose="no",
     ):
         """
         Set up Absolute Binding Free Energy (ABFE) jobs for each model.
@@ -12795,7 +12795,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         # ABFE time step is fixed at 0.002 ps = 2 fs
         time_step_ps = 0.002
         production_steps = int((simulation_time * 1000000) / time_step_ps)
-        saving_steps = production_steps/100
+        saving_steps = max(1, production_steps // 100)
         # equivalently: production_steps = int(simulation_time * 500000)
 
         if isinstance(only_models, str):
@@ -12957,9 +12957,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                 prmtop_dst = os.path.join(replica_folder, f"{base_name}.prmtop")
                 inpcrd_dst = os.path.join(replica_folder, f"{base_name}.inpcrd")
 
-                if prmtop_src and os.path.exists(prmtop_src) and not os.path.exists(prmtop_dst):
+                if (
+                    prmtop_src
+                    and os.path.exists(prmtop_src)
+                    and not os.path.exists(prmtop_dst)
+                ):
                     shutil.copyfile(prmtop_src, prmtop_dst)
-                if inpcrd_src and os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_dst):
+                if (
+                    inpcrd_src
+                    and os.path.exists(inpcrd_src)
+                    and not os.path.exists(inpcrd_dst)
+                ):
                     shutil.copyfile(inpcrd_src, inpcrd_dst)
 
                 # Write ABFE control file in this replica folder
@@ -12968,6 +12976,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     temperature=int(temperature),
                     wall_time=int(wall_time),
                     production_steps=int(production_steps),
+                    saving_steps=int(saving_steps),
                     openmm_platform=openmm_platform,
                     verbose=verbose,
                 )
@@ -12988,7 +12997,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     f"--systemXMLoutFile {base_name}_sys.xml "
                     f"--systemPDBoutFile {base_name}.pdb",
                     f"abfe_structprep {base_name}.cntl",
-                    f"abfe_production {base_name}_asyncre.cntl",
+                    f"abfe_production {base_name}.cntl",
                     "cd -",
                 ]
                 abfe_jobs.append("\n".join(job_lines))
