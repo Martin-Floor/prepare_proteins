@@ -12721,32 +12721,34 @@ make sure of reading the target sequences with the function readTargetSequences(
         # ---- automatic index generation (NO external binaries) ----
         ligand_chain="L",
         bs_cutoff_ang=8.0,
-        rcpt_cm_mode="AUTO",  # "AUTO" (recommended), "CA", "P", "SUGAR", "HEAVY"
-        ligand_cm_mode="heavy",  # "heavy" or "all"
+        rcpt_cm_mode="AUTO",        # AUTO, CA, P, SUGAR, HEAVY
+        ligand_cm_mode="heavy",     # heavy or all
         min_rcpt_atoms=10,
         include_protein=True,
         include_nucleic=True,
+        write_model_pdb=True,
     ):
         """
         Set up Absolute Binding Free Energy (ABFE) jobs for each model.
 
         This version DOES NOT call external tools like `make_atm_system_from_amber`.
-        Instead, it computes the required ABFE atom index lists directly from the
-        Amber prmtop/inpcrd using OpenMM.
+        It computes ABFE atom index lists directly from Amber prmtop/inpcrd using OpenMM.
 
-        Steps:
-        1) Reuse setUpOpenMMPreparation to ensure prmtop/inpcrd exist.
-        2) For each model and replica:
-            - create replica folder and copy prmtop/inpcrd there
-            - compute LIGAND_ATOMS / LIGAND_CM_ATOMS / RCPT_CM_ATOMS / POS_RESTRAINED_ATOMS
-            from prmtop+inpcrd, while filtering out waters/ions and keeping only
-            protein and/or nucleic acids as receptor targets
-            - write .cntl and nodefile
-            - create a job command block (you can adapt to your cluster runner)
+        Folder layout:
+        job_folder/
+            <model>/
+            <base_name>.pdb                 (optional, one per model for visualization)
+            replica_01/
+                <base_name>.prmtop
+                <base_name>.inpcrd
+                <base_name>.cntl
+                nodefile
+            replica_02/
+                ...
 
         Atom indices:
         - 0-based
-        - correspond to Amber topology atom ordering (OpenMM reads Amber in the same order)
+        - correspond to the Amber topology atom ordering (OpenMM reads Amber in the same order)
         """
         import os
         import shutil
@@ -12755,41 +12757,57 @@ make sure of reading the target sequences with the function readTargetSequences(
         # -----------------------------
         # Helpers
         # -----------------------------
-        def _format_index_list(idxs):
-            """Format a list of ints as '0, 1, 2, ...' sorted and unique."""
+        def _write_pdb_from_amber(prmtop_path: str, inpcrd_path: str, pdb_out: str) -> None:
+            """
+            Write a PDB from Amber topology/coordinates using OpenMM.
+
+            Notes:
+            - Atom order matches the Amber topology order (0-based indices).
+            - Chain IDs may be generic if not stored in the Amber topology.
+            """
+            from openmm.app import AmberPrmtopFile, AmberInpcrdFile, PDBFile
+
+            prmtop = AmberPrmtopFile(prmtop_path)
+            inpcrd = AmberInpcrdFile(inpcrd_path)
+
+            with open(pdb_out, "w") as f:
+                PDBFile.writeFile(prmtop.topology, inpcrd.positions, f)
+
+        def _format_index_list(idxs) -> str:
+            """Format indices as '0, 1, 2, ...' sorted and unique."""
             idxs = sorted(set(int(i) for i in idxs))
             return ", ".join(str(i) for i in idxs)
 
         def _compute_indices_from_amber(
-            prmtop_path,
-            inpcrd_path,
-            ligand_chain="L",
+            prmtop_path: str,
+            inpcrd_path: str,
+            ligand_chain: str = "L",
             ligand_resnames=("LIG",),
-            cutoff_ang=8.0,
-            include_protein=True,
-            include_nucleic=True,
-            rcpt_cm_mode="AUTO",  # AUTO, CA, P, SUGAR, HEAVY
-            ligand_cm_mode="heavy",  # heavy or all
-            min_rcpt_atoms=10,
+            cutoff_ang: float = 8.0,
+            include_protein: bool = True,
+            include_nucleic: bool = True,
+            rcpt_cm_mode: str = "AUTO",       # AUTO, CA, P, SUGAR, HEAVY
+            ligand_cm_mode: str = "heavy",    # heavy or all
+            min_rcpt_atoms: int = 10,
         ):
             """
-            Compute ABFE index lists directly from Amber prmtop/inpcrd using OpenMM.
+            Compute ABFE index lists from Amber prmtop/inpcrd using OpenMM.
 
             Ligand selection:
-            - try chain ID == ligand_chain (if chain IDs exist)
-            - otherwise fallback to residue name in ligand_resnames (recommended for Amber)
+            - first try chain ID == ligand_chain (if chain IDs exist)
+            - fallback to residue name in ligand_resnames (recommended for Amber)
 
             Receptor selection:
             - exclude waters/ions
-            - include only protein residues and/or nucleic acids (configurable)
-            - take atoms within cutoff of ligand heavy atoms
+            - include only protein and/or nucleic acids (configurable)
+            - choose receptor atoms within cutoff of ligand (heavy atoms)
 
             RCPT_CM_ATOMS mode:
-            - AUTO: use CA if present, else P if present, else HEAVY
-            - CA: protein-like centroid
-            - P: nucleic-acid centroid (phosphates)
-            - SUGAR: nucleic-acid centroid (C1')
-            - HEAVY: all nearby heavy atoms
+            - AUTO: CA if available in site, else P if available, else HEAVY
+            - CA: protein-like centroid atoms (Cα)
+            - P: nucleic-acid centroid atoms (phosphates)
+            - SUGAR: nucleic-acid centroid atoms (C1')
+            - HEAVY: all nearby receptor heavy atoms
             """
             from openmm.app import AmberPrmtopFile, AmberInpcrdFile
             from openmm.unit import angstrom
@@ -12798,31 +12816,31 @@ make sure of reading the target sequences with the function readTargetSequences(
             inpcrd = AmberInpcrdFile(inpcrd_path)
 
             top = prmtop.topology
-            positions = inpcrd.positions
             atoms = list(top.atoms())
+            positions = inpcrd.positions
 
-            # Convert positions to Nx3 float in Å
-            xyz = np.array([[p.x, p.y, p.z] for p in positions]) / angstrom
+            # Positions -> Nx3 float in Å
+            xyz = np.array([[p.x, p.y, p.z] for p in positions], dtype=float) / angstrom
 
             atom_names = np.array([a.name for a in atoms], dtype=object)
             res_names = np.array([a.residue.name for a in atoms], dtype=object)
             chain_ids = np.array([a.residue.chain.id for a in atoms], dtype=object)
 
-            # Hydrogen heuristic (works well for Amber naming)
+            # Hydrogen heuristic (Amber naming: many H atoms start with 'H')
             is_h = np.char.startswith(atom_names.astype(str), "H")
 
             # -----------------
             # Ligand selection
             # -----------------
-            lig_mask = chain_ids == ligand_chain
+            lig_mask = (chain_ids == ligand_chain)
             if not np.any(lig_mask):
                 lig_mask = np.isin(res_names, list(ligand_resnames))
 
             if not np.any(lig_mask):
                 raise ValueError(
                     f"Could not identify ligand atoms by chain '{ligand_chain}' "
-                    f"or ligand_resnames={ligand_resnames}.\n"
-                    f"Tip: for Amber systems, ligand_resnames is usually the reliable option."
+                    f"or ligand_resnames={ligand_resnames}. "
+                    "For Amber systems, ligand_resnames is usually the reliable option."
                 )
 
             lig_all = np.where(lig_mask)[0]
@@ -12830,130 +12848,55 @@ make sure of reading the target sequences with the function readTargetSequences(
             lig_query = lig_heavy if len(lig_heavy) else lig_all
 
             ligand_atoms = lig_all.tolist()
-            ligand_cm_atoms = (
-                lig_query.tolist() if ligand_cm_mode == "heavy" else lig_all.tolist()
-            )
+            ligand_cm_atoms = lig_query.tolist() if ligand_cm_mode.lower() == "heavy" else lig_all.tolist()
 
             # -----------------
             # Receptor filtering
             # -----------------
             PROT = {
-                "ALA",
-                "ARG",
-                "ASN",
-                "ASP",
-                "CYS",
-                "GLN",
-                "GLU",
-                "GLY",
-                "HIS",
-                "ILE",
-                "LEU",
-                "LYS",
-                "MET",
-                "PHE",
-                "PRO",
-                "SER",
-                "THR",
-                "TRP",
-                "TYR",
-                "VAL",
-                # protonation/variants commonly seen
-                "HID",
-                "HIE",
-                "HIP",
-                "CYM",
-                "CYX",
-                "LYN",
-                "ASH",
-                "GLH",
+                "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE","LEU","LYS",
+                "MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
+                "HID","HIE","HIP","CYM","CYX","LYN","ASH","GLH",
             }
             NA = {
-                # common 1/2/3-letter NA residue names
-                "A",
-                "C",
-                "G",
-                "U",
-                "T",
-                "DA",
-                "DC",
-                "DG",
-                "DT",
-                "DU",
-                "RA",
-                "RC",
-                "RG",
-                "RU",  # some Amber/LEaP conventions
-                "ADE",
-                "CYT",
-                "GUA",
-                "URA",
-                "THY",
+                "A","C","G","U","T",
+                "DA","DC","DG","DT","DU",
+                "RA","RC","RG","RU",
+                "ADE","CYT","GUA","URA","THY",
             }
-            WATER = {"WAT", "HOH", "TIP3", "SOL", "H2O"}
-            IONS = {
-                "NA",
-                "K",
-                "CL",
-                "MG",
-                "ZN",
-                "CA",
-                "MN",
-                "FE",
-                "CU",
-                "CO",
-                "NI",
-                "RB",
-                "CS",
-                "LI",
-                "SR",
-                "CD",
-                "HG",
-                "PB",
-                "AL",
-                "BA",
-                "BR",
-                "I",
-            }
+            WATER = {"WAT","HOH","TIP3","SOL","H2O"}
+            IONS = {"NA","K","CL","MG","ZN","CA","MN","FE","CU","CO","NI","RB","CS","LI","SR","CD","HG","PB","AL","BA","BR","I"}
 
             is_water = np.isin(res_names, list(WATER))
             is_ion = np.isin(res_names, list(IONS))
-            is_protein = (
-                np.isin(res_names, list(PROT))
-                if include_protein
-                else np.zeros(len(atoms), dtype=bool)
-            )
-            is_nucleic = (
-                np.isin(res_names, list(NA))
-                if include_nucleic
-                else np.zeros(len(atoms), dtype=bool)
-            )
+            is_protein = np.isin(res_names, list(PROT)) if include_protein else np.zeros(len(atoms), dtype=bool)
+            is_nucleic = np.isin(res_names, list(NA)) if include_nucleic else np.zeros(len(atoms), dtype=bool)
 
             is_target = (is_protein | is_nucleic) & (~is_water) & (~is_ion)
 
+            # receptor heavy atoms only
             rcpt_mask = (~lig_mask) & is_target & (~is_h)
             rcpt_heavy = np.where(rcpt_mask)[0]
             if len(rcpt_heavy) == 0:
                 raise ValueError(
                     "No receptor heavy atoms remain after filtering (protein/NA only; no water/ions). "
-                    "Check residue names in topology or relax include_protein/include_nucleic."
+                    "Check residue names or relax include_protein/include_nucleic."
                 )
 
             # -----------------
-            # Binding-site by proximity
+            # Binding site by proximity
             # -----------------
             lig_xyz = xyz[lig_query]
             rcpt_xyz = xyz[rcpt_heavy]
 
-            # Compute minimum distance from each receptor heavy atom to any ligand atom
             d2 = np.sum((rcpt_xyz[:, None, :] - lig_xyz[None, :, :]) ** 2, axis=2)
             mind = np.sqrt(np.min(d2, axis=1))
-            nearby_rcpt_heavy = rcpt_heavy[mind <= cutoff_ang]
 
-            if len(nearby_rcpt_heavy) < min_rcpt_atoms:
+            nearby_rcpt_heavy = rcpt_heavy[mind <= float(cutoff_ang)]
+            if len(nearby_rcpt_heavy) < int(min_rcpt_atoms):
                 raise ValueError(
-                    f"Only {len(nearby_rcpt_heavy)} receptor atoms found within {cutoff_ang} Å "
-                    f"after filtering. Increase bs_cutoff_ang or lower min_rcpt_atoms."
+                    f"Only {len(nearby_rcpt_heavy)} receptor atoms found within {cutoff_ang} Å after filtering. "
+                    "Increase bs_cutoff_ang or lower min_rcpt_atoms."
                 )
 
             # -----------------
@@ -12962,31 +12905,25 @@ make sure of reading the target sequences with the function readTargetSequences(
             mode = rcpt_cm_mode.upper()
 
             if mode == "AUTO":
-                # Prefer CA if present
                 ca = [i for i in nearby_rcpt_heavy.tolist() if atom_names[i] == "CA"]
-                if len(ca) >= min_rcpt_atoms:
+                if len(ca) >= int(min_rcpt_atoms):
                     rcpt_cm_atoms = ca
                 else:
-                    # Try phosphate P for NA
                     p = [i for i in nearby_rcpt_heavy.tolist() if atom_names[i] == "P"]
                     rcpt_cm_atoms = p if len(p) >= 1 else nearby_rcpt_heavy.tolist()
-
             elif mode == "CA":
                 ca = [i for i in nearby_rcpt_heavy.tolist() if atom_names[i] == "CA"]
                 rcpt_cm_atoms = ca if len(ca) >= 1 else nearby_rcpt_heavy.tolist()
-
             elif mode == "P":
                 p = [i for i in nearby_rcpt_heavy.tolist() if atom_names[i] == "P"]
                 rcpt_cm_atoms = p if len(p) >= 1 else nearby_rcpt_heavy.tolist()
-
             elif mode == "SUGAR":
                 c1 = [i for i in nearby_rcpt_heavy.tolist() if atom_names[i] == "C1'"]
                 rcpt_cm_atoms = c1 if len(c1) >= 1 else nearby_rcpt_heavy.tolist()
-
             else:  # HEAVY
                 rcpt_cm_atoms = nearby_rcpt_heavy.tolist()
 
-            # POS_RESTRAINED_ATOMS: simplest choice is to restrain the same set
+            # POS_RESTRAINED_ATOMS: simplest consistent choice
             pos_restrained_atoms = rcpt_cm_atoms
 
             return {
@@ -13001,18 +12938,12 @@ make sure of reading the target sequences with the function readTargetSequences(
         # -----------------------------
         valid_platforms = ["CPU", "CUDA", "OpenCL", "Reference"]
         if openmm_platform not in valid_platforms:
-            raise ValueError(
-                f"Invalid OpenMM platform '{openmm_platform}'. Allowed values: {valid_platforms}"
-            )
-        if verbose not in ["yes", "no"]:
+            raise ValueError(f"Invalid OpenMM platform '{openmm_platform}'. Allowed: {valid_platforms}")
+        if verbose not in ("yes", "no"):
             raise ValueError("verbose must be either 'yes' or 'no'")
-
-        if rcpt_cm_mode.upper() not in ["AUTO", "CA", "P", "SUGAR", "HEAVY"]:
-            raise ValueError(
-                "rcpt_cm_mode must be one of: 'AUTO', 'CA', 'P', 'SUGAR', 'HEAVY'"
-            )
-
-        if ligand_cm_mode.lower() not in ["heavy", "all"]:
+        if rcpt_cm_mode.upper() not in ("AUTO", "CA", "P", "SUGAR", "HEAVY"):
+            raise ValueError("rcpt_cm_mode must be one of: AUTO, CA, P, SUGAR, HEAVY")
+        if ligand_cm_mode.lower() not in ("heavy", "all"):
             raise ValueError("ligand_cm_mode must be 'heavy' or 'all'")
 
         # Convert simulation_time (ns) to steps (dt=0.002 ps)
@@ -13026,7 +12957,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             skip_models = []
 
         # -----------------------------
-        # Run preparation (ensures prmtop/inpcrd exist)
+        # Run preparation
         # -----------------------------
         self.setUpOpenMMPreparation(
             job_folder=job_folder,
@@ -13051,14 +12982,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             skip_models=skip_models,
         )
 
-        abfe_jobs = []
-
         # -----------------------------
-        # ABFE control file template
+        # ABFE control template
         # -----------------------------
         abfe_cntl_template = """#The job transport is the mean in which replicas are executed on GPU devices
     #LOCAL_OPENMM is the only job transport system currently supported. Each local GPU is
-    #managed by a different process using the python multiprocessing module 
+    #managed by a different process using the python multiprocessing module
     JOB_TRANSPORT = 'LOCAL_OPENMM'
 
     BASENAME = '{basename}'
@@ -13086,7 +13015,6 @@ make sure of reading the target sequences with the function readTargetSequences(
     PRNT_FREQUENCY = '{saving_steps}'
     TRJ_FREQUENCY = '{saving_steps}'
 
-    # --- auto-filled atom index lists (0-based indices in Amber/OpenMM atom order) ---
     LIGAND_ATOMS = {ligand_atoms}
     LIGAND_CM_ATOMS = {ligand_cm_atoms}
     RCPT_CM_ATOMS = {rcpt_cm_atoms}
@@ -13110,10 +13038,12 @@ make sure of reading the target sequences with the function readTargetSequences(
     """
 
         nodefile_line = "localhost,0:0,1,CUDA,,/tmp\n"
-        zfill = max(len(str(replicas)), 2)
+        abfe_jobs = []
 
-        # Ligand residue names: best guess from ligand_charges (most robust for Amber)
+        # Robust ligand residue-name selection: infer from ligand_charges keys
         ligand_resnames = tuple(ligand_charges.keys()) if ligand_charges else ("LIG",)
+
+        zfill = max(len(str(replicas)), 2)
 
         for model in self:
             if only_models and model not in only_models:
@@ -13129,6 +13059,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             prmtop_src = getattr(openmm_md, "prmtop_file", None)
             inpcrd_src = getattr(openmm_md, "inpcrd_file", None)
+            if not prmtop_src or not inpcrd_src:
+                raise FileNotFoundError(f"Missing prmtop/inpcrd for model '{model}'")
+
+            # Optional: one PDB per model for visualization
+            if write_model_pdb:
+                pdb_path = os.path.join(model_folder, f"{base_name}.pdb")
+                if (not os.path.exists(pdb_path)) or (not skip_preparation):
+                    _write_pdb_from_amber(prmtop_src, inpcrd_src, pdb_path)
 
             for replica in range(1, replicas + 1):
                 if skip_replicas and replica in skip_replicas:
@@ -13141,20 +13079,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 prmtop_dst = os.path.join(replica_folder, f"{base_name}.prmtop")
                 inpcrd_dst = os.path.join(replica_folder, f"{base_name}.inpcrd")
 
-                if (
-                    prmtop_src
-                    and os.path.exists(prmtop_src)
-                    and not os.path.exists(prmtop_dst)
-                ):
+                if os.path.exists(prmtop_src) and not os.path.exists(prmtop_dst):
                     shutil.copyfile(prmtop_src, prmtop_dst)
-                if (
-                    inpcrd_src
-                    and os.path.exists(inpcrd_src)
-                    and not os.path.exists(inpcrd_dst)
-                ):
+                if os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_dst):
                     shutil.copyfile(inpcrd_src, inpcrd_dst)
 
-                # 1) Compute indices from Amber files (no external executables)
+                # Compute indices from the replica's Amber files (keeps it self-contained)
                 indices = _compute_indices_from_amber(
                     prmtop_path=prmtop_dst,
                     inpcrd_path=inpcrd_dst,
@@ -13168,7 +13098,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     min_rcpt_atoms=min_rcpt_atoms,
                 )
 
-                # 2) Write control file
                 cntl_text = abfe_cntl_template.format(
                     basename=base_name,
                     temperature=int(temperature),
@@ -13180,21 +13109,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ligand_atoms=_format_index_list(indices["ligand_atoms"]),
                     ligand_cm_atoms=_format_index_list(indices["ligand_cm_atoms"]),
                     rcpt_cm_atoms=_format_index_list(indices["rcpt_cm_atoms"]),
-                    pos_restrained_atoms=_format_index_list(
-                        indices["pos_restrained_atoms"]
-                    ),
+                    pos_restrained_atoms=_format_index_list(indices["pos_restrained_atoms"]),
                 )
 
                 cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
                 with open(cntl_path, "w") as f:
                     f.write(cntl_text)
 
-                # nodefile
                 nodefile_path = os.path.join(replica_folder, "nodefile")
                 with open(nodefile_path, "w") as f:
                     f.write(nodefile_line)
 
-                # Job lines (keep your ABFE commands here; these binaries must exist in the run environment)
                 job_lines = [
                     f"cd {replica_folder}",
                     f"abfe_structprep {base_name}.cntl",
@@ -13204,6 +13129,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 abfe_jobs.append("\n".join(job_lines))
 
         return abfe_jobs
+
 
     def analyseRosettaDocking(
         self,
