@@ -12693,76 +12693,195 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def setUpOpenMMABFESimulations(
         self,
-        job_folder,
-        replicas,
-        simulation_time,  # ns
-        # --- preparation/parameterization options (passed through to setUpOpenMMPreparation) ---
-        ligand_charges=None,
-        residue_names=None,
-        ff="amber14",
-        add_bonds=None,
-        skip_ligands=None,
-        metal_ligand=None,
-        metal_parameters=None,
-        skip_replicas=None,
-        extra_frcmod=None,
-        extra_mol2=None,
-        non_standard_residues=None,
-        add_hydrogens=True,
-        extra_force_field=None,
-        add_counterionsRand=False,
-        skip_preparation=False,
-        ligand_parameters_source=None,
-        only_models=None,
-        skip_models=None,
-        # --- ABFE control/runtime options ---
-        temperature=300.0,
-        wall_time=2880,          # minutes
-        openmm_platform="CPU",
-        verbose="no",            # written into the .cntl file ("yes" / "no")
+        job_folder: str,
+        replicas: int,
+        simulation_time: float,  # ns
+        # --- preparation / parameterization options (passed through to setUpOpenMMPreparation) ---
+        ligand_charges: Optional[Dict[str, int]] = None,
+        residue_names: Optional[Dict[str, Dict[str, str]]] = None,
+        ff: str = "amber14",
+        add_bonds: Optional[Dict] = None,
+        skip_ligands: Optional[List[str]] = None,
+        metal_ligand: Optional[Union[str, List[str]]] = None,
+        metal_parameters: Optional[str] = None,
+        skip_replicas: Optional[List[int]] = None,
+        extra_frcmod: Optional[List[str]] = None,
+        extra_mol2: Optional[List[str]] = None,
+        non_standard_residues: Optional[List[str]] = None,
+        add_hydrogens: bool = True,
+        extra_force_field: Optional[Union[str, List[str]]] = None,
+        add_counterionsRand: bool = False,
+        skip_preparation: bool = False,
+        ligand_parameters_source: Optional[str] = None,
+        only_models: Optional[List[str]] = None,
+        skip_models: Optional[List[str]] = None,
+        # --- ABFE control / runtime options ---
+        temperature: float = 300.0,
+        wall_time: int = 2880,  # minutes
+        openmm_platform: str = "CPU",
+        verbose: str = "no",  # written into the .cntl file ("yes" / "no")
         # --- automatic index generation (no external binaries) ---
-        ligand_chain="L",
-        bs_cutoff_ang=8.0,
-        rcpt_cm_mode="AUTO",     # AUTO, CA, P, SUGAR, HEAVY
-        ligand_cm_mode="heavy",  # heavy or all
-        min_rcpt_atoms=10,
-        include_protein=True,
-        include_nucleic=True,
-        write_model_pdb=True,
+        ligand_chain: str = "L",
+        bs_cutoff_ang: float = 8.0,
+        rcpt_cm_mode: str = "AUTO",  # AUTO, CA, P, SUGAR, HEAVY
+        ligand_cm_mode: str = "heavy",  # heavy or all
+        min_rcpt_atoms: int = 10,
+        include_protein: bool = True,
+        include_nucleic: bool = True,
+        write_model_pdb: bool = True,
         # --- displacement + python-side verbosity ---
-        displacement_padding_ang=0.0,  # pull the chosen corner slightly inward (Å); 0.0 disables
-        python_verbose=False,          # prints debug info during setup
-    ):
+        displacement_padding_ang: float = 0.0,
+        python_verbose: bool = True,
+    ) -> List[str]:
         """
-        Set up Absolute Binding Free Energy (ABFE) jobs for each model.
+        Set up Absolute Binding Free Energy (ABFE) simulations using OpenMM and an
+        Amber-based system definition.
 
-        Key features:
-        - NO external executables needed for indices: uses OpenMM to read Amber prmtop/inpcrd.
-        - Auto-detects ligand indices (chain ID if present; otherwise by residue name).
-        - Auto-detects receptor binding-site atoms by proximity to ligand, while filtering:
-            * removes waters and ions
-            * keeps only protein and/or nucleic acids as valid receptor targets
-        - Computes DISPLACEMENT automatically:
-            * Uses periodic box vectors from inpcrd if available
-            * Picks the furthest corner from the ligand centroid (heavy atoms)
-            * Optional inward padding with displacement_padding_ang
-        - Writes ONE PDB per model (optional) for visualization and sanity checks.
+        This method:
+        1) Ensures Amber prmtop/inpcrd files exist (via setUpOpenMMPreparation)
+        2) Automatically identifies ligand atoms and receptor binding-site atoms
+            directly from the Amber topology and coordinates (no external binaries)
+        3) Computes a physically meaningful alchemical displacement vector
+            (ligand → solvent bulk)
+        4) Writes ABFE control (.cntl) files and nodefiles for each replica
 
-        Folder layout:
-        job_folder/
-            <model>/
-            <base_name>.pdb                 (optional, one per model)
-            replica_01/
-                <base_name>.prmtop
-                <base_name>.inpcrd
-                <base_name>.cntl
-                nodefile
-            replica_02/
-                ...
-
-        Atom indices:
+        All atom indices written to the control files are:
         - 0-based
-        - correspond to Amber topology atom ordering (OpenMM reads Amber in the same order)
+        - consistent with the Amber/OpenMM atom ordering
+
+        Parameters
+        ----------
+        job_folder : str
+            Path to the directory where model and replica folders will be created.
+
+        replicas : int
+            Number of independent ABFE replicas to prepare per model.
+
+        simulation_time : float
+            Production simulation time in nanoseconds (ns).
+
+        --- Preparation / parameterization options ---
+        ligand_charges : dict[str, int], optional
+            Mapping from ligand residue name to its formal charge.
+            Used during Amber parameterization and ligand identification.
+
+        residue_names : dict, optional
+            Per-model residue renaming rules applied before parameterization.
+
+        ff : str
+            Name of the Amber force field to use (e.g. "amber14").
+
+        add_bonds : dict, optional
+            Explicit covalent bonds to define (e.g. metal coordination).
+
+        skip_ligands : list[str], optional
+            Ligand residue names to exclude from parameterization.
+
+        metal_ligand : str or list[str], optional
+            Residues treated as metal-coordinating ligands.
+
+        metal_parameters : str, optional
+            Path to predefined metal–ligand parameter files.
+
+        skip_replicas : list[int], optional
+            Replica indices to skip during setup.
+
+        extra_frcmod : list[str], optional
+            Additional Amber frcmod files to include.
+
+        extra_mol2 : list[str], optional
+            Additional MOL2 files used for ligand parameterization.
+
+        non_standard_residues : list[str], optional
+            Residue names treated as ligands rather than standard amino acids.
+
+        add_hydrogens : bool
+            Whether to add missing hydrogens prior to parameterization.
+
+        extra_force_field : str or list[str], optional
+            Extra Amber/OpenMM force-field XML or parameter files.
+
+        add_counterionsRand : bool
+            If True, add counterions using random placement.
+
+        skip_preparation : bool
+            If True, reuse existing prmtop/inpcrd files and skip re-parameterization.
+
+        ligand_parameters_source : str, optional
+            Directory containing ligand parameter libraries.
+
+        only_models : list[str], optional
+            Restrict setup to these model names.
+
+        skip_models : list[str], optional
+            Model names to exclude from setup.
+
+        --- ABFE control / runtime options ---
+        temperature : float
+            Simulation temperature in Kelvin.
+
+        wall_time : int
+            Maximum wall-clock time in minutes, written to the ABFE control file.
+
+        openmm_platform : str
+            OpenMM platform to use ("CPU", "CUDA", "OpenCL", or "Reference").
+
+        verbose : str
+            Verbosity flag written into the ABFE control file ("yes" or "no").
+
+        --- Automatic index generation ---
+        ligand_chain : str
+            Chain ID used to identify ligand atoms (fallbacks to residue name if absent).
+
+        bs_cutoff_ang : float
+            Distance cutoff in Å used to define the receptor binding site
+            (atoms within this distance from the ligand).
+
+        rcpt_cm_mode : str
+            Strategy for selecting receptor centroid atoms:
+            - "AUTO": CA (protein) → P (nucleic acids) → heavy atoms fallback
+            - "CA": protein Cα atoms
+            - "P": nucleic-acid phosphate atoms
+            - "SUGAR": nucleic-acid sugar reference atoms (C1')
+            - "HEAVY": all nearby heavy atoms
+
+        ligand_cm_mode : str
+            Ligand centroid definition:
+            - "heavy": heavy atoms only (recommended)
+            - "all": all ligand atoms
+
+        min_rcpt_atoms : int
+            Minimum number of receptor atoms required for centroid definition.
+
+        include_protein : bool
+            Whether protein residues are considered part of the receptor.
+
+        include_nucleic : bool
+            Whether DNA/RNA residues are considered part of the receptor.
+
+        write_model_pdb : bool
+            If True, write a PDB file per model for visualization and debugging.
+
+        --- Displacement and Python-side verbosity ---
+        displacement_padding_ang : float
+            Optional inward shift (Å) applied to the chosen box corner to avoid
+            placing the ligand exactly on the periodic boundary.
+
+        python_verbose : bool
+            If True, print detailed setup information, assumptions, and
+            intermediate calculations to stdout for debugging.
+
+        Returns
+        -------
+        list[str]
+            A list of shell command blocks (one per replica) that can be submitted
+            to run ABFE simulations.
+
+        Notes
+        -----
+        - This function does not rely on external executables for index generation.
+        - All geometric calculations are performed using OpenMM and NumPy.
+        - The resulting setup is suitable for protein, DNA, RNA, or mixed receptors.
         """
         import os
         import shutil
@@ -12788,7 +12907,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             )
 
         if verbose not in ("yes", "no"):
-            raise ValueError("verbose must be either 'yes' or 'no' (written into .cntl)")
+            raise ValueError(
+                "verbose must be either 'yes' or 'no' (written into .cntl)"
+            )
 
         if rcpt_cm_mode.upper() not in ("AUTO", "CA", "P", "SUGAR", "HEAVY"):
             raise ValueError("rcpt_cm_mode must be one of: AUTO, CA, P, SUGAR, HEAVY")
@@ -12818,10 +12939,24 @@ make sure of reading the target sequences with the function readTargetSequences(
             return ", ".join(str(i) for i in idxs)
 
         def _positions_to_xyz_ang(positions) -> np.ndarray:
-            """OpenMM Vec3 positions -> (N,3) float array in Å."""
-            return np.array([[p.x, p.y, p.z] for p in positions], dtype=float) / angstrom
+            """
+            Convert OpenMM positions (Quantity of Vec3) to a unitless (N,3) float array in Å.
+            This is the safest conversion and avoids unit bugs like 1/angstrom.
+            """
+            import numpy as np
+            from openmm.unit import angstrom
 
-        def _write_pdb_from_amber(prmtop_path: str, inpcrd_path: str, pdb_out: str) -> None:
+            # positions is typically a Quantity of Vec3
+            if hasattr(positions, "value_in_unit"):
+                arr = positions.value_in_unit(angstrom)  # unitless in Å
+                return np.array([[v[0], v[1], v[2]] for v in arr], dtype=float)
+
+            # Fallback (rare): assume it's already unitless
+            return np.array(positions, dtype=float)
+
+        def _write_pdb_from_amber(
+            prmtop_path: str, inpcrd_path: str, pdb_out: str
+        ) -> None:
             """Write a PDB from Amber topology/coordinates using OpenMM."""
             from openmm.app import PDBFile
 
@@ -12831,22 +12966,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(pdb_out, "w") as f:
                 PDBFile.writeFile(prmtop.topology, inpcrd.positions, f)
 
-        def _get_box_vectors_ang(inpcrd_obj):
-            """
-            Return (a,b,c) box vectors in Å as numpy arrays (3,).
-            If missing, return None.
-            """
-            bv = getattr(inpcrd_obj, "boxVectors", None)
-            if bv is None:
-                return None
-            a, b, c = bv
-            a = np.array([a.x, a.y, a.z], dtype=float) / angstrom
-            b = np.array([b.x, b.y, b.z], dtype=float) / angstrom
-            c = np.array([c.x, c.y, c.z], dtype=float) / angstrom
-            return a, b, c
-
         def _compute_furthest_corner_displacement(
-            xyz_ang: np.ndarray,
+            xyz_ang,
             lig_cm_atom_indices,
             inpcrd_obj,
             padding_ang: float = 0.0,
@@ -12854,21 +12975,40 @@ make sure of reading the target sequences with the function readTargetSequences(
             """
             Compute DISPLACEMENT (Å) as vector from ligand centroid to furthest box corner.
 
-            Priority:
-            1) Use periodic box vectors from inpcrd (preferred).
-            2) Fallback: coordinate bounding box corners.
-
-            padding_ang:
-            - If > 0, nudges the selected corner toward the cell center by padding_ang Å
-                (useful to avoid being exactly at a boundary).
+            Robust against OpenMM Quantity objects: converts everything to unitless floats in Å.
             """
-            lig_xyz = xyz_ang[np.array(lig_cm_atom_indices, dtype=int)]
-            lig_centroid = lig_xyz.mean(axis=0)
+            import numpy as np
+            from openmm.unit import angstrom
 
-            box_vecs = _get_box_vectors_ang(inpcrd_obj)
-            if box_vecs is not None:
-                a, b, c = box_vecs
-                # 8 corners of the cell spanned by a,b,c (from origin)
+            # --- Force xyz_ang to be a unitless float array in Å ---
+            # If xyz_ang is already a numpy array -> stays.
+            # If xyz_ang is an OpenMM Quantity -> convert to Å and strip units.
+            if hasattr(xyz_ang, "value_in_unit"):
+                xyz = np.array(xyz_ang.value_in_unit(angstrom), dtype=float)
+            else:
+                xyz = np.array(xyz_ang, dtype=float)
+
+            lig_idx = np.array(lig_cm_atom_indices, dtype=int)
+            lig_xyz = xyz[lig_idx]
+            lig_centroid = lig_xyz.mean(axis=0)  # unitless float Å
+
+            # --- Read periodic box vectors and strip units safely ---
+            bv = getattr(inpcrd_obj, "boxVectors", None)
+
+            if bv is not None:
+                a, b, c = bv
+
+                # Convert to unitless floats in Å
+                def _vec_to_ang(v):
+                    # v may be Vec3 or Quantity(Vec3)
+                    if hasattr(v, "value_in_unit"):
+                        v = v.value_in_unit(angstrom)
+                    return np.array([v.x, v.y, v.z], dtype=float)
+
+                a = _vec_to_ang(a)
+                b = _vec_to_ang(b)
+                c = _vec_to_ang(c)
+
                 corners = np.array(
                     [
                         0 * a + 0 * b + 0 * c,
@@ -12883,13 +13023,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                     dtype=float,
                 )
 
+                # Optional inward padding from corners toward cell center
                 if padding_ang and padding_ang > 0:
                     center = 0.5 * (a + b + c)
                     vecs = corners - center
                     norms = np.linalg.norm(vecs, axis=1)
-                    corners = corners - (vecs / np.maximum(norms[:, None], 1e-8)) * float(
-                        padding_ang
-                    )
+                    corners = corners - (
+                        vecs / np.maximum(norms[:, None], 1e-8)
+                    ) * float(padding_ang)
 
                 dists = np.linalg.norm(corners - lig_centroid[None, :], axis=1)
                 corner = corners[int(np.argmax(dists))]
@@ -12900,10 +13041,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                 _log(
                     f"Chosen furthest corner (Å): {corner[0]:.2f}, {corner[1]:.2f}, {corner[2]:.2f}"
                 )
+
             else:
-                # Fallback: coordinate bounding box corners
-                mins = xyz_ang.min(axis=0)
-                maxs = xyz_ang.max(axis=0)
+                # Fallback: bounding box corners from coordinates
+                mins = xyz.min(axis=0)
+                maxs = xyz.max(axis=0)
+
                 corners = np.array(
                     [
                         [mins[0], mins[1], mins[2]],
@@ -12917,11 +13060,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ],
                     dtype=float,
                 )
+
                 dists = np.linalg.norm(corners - lig_centroid[None, :], axis=1)
                 corner = corners[int(np.argmax(dists))]
 
                 if padding_ang and padding_ang > 0:
-                    corner = corner + np.sign(corner - lig_centroid) * float(padding_ang)
+                    corner = corner + np.sign(corner - lig_centroid) * float(
+                        padding_ang
+                    )
 
                 _log(
                     "No periodic box vectors found in inpcrd; using coordinate bounding-box fallback."
@@ -12935,6 +13081,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 f"Ligand centroid (Å): {lig_centroid[0]:.2f}, {lig_centroid[1]:.2f}, {lig_centroid[2]:.2f}"
             )
             _log(f"DISPLACEMENT (Å): {disp[0]:.2f}, {disp[1]:.2f}, {disp[2]:.2f}")
+
             return float(disp[0]), float(disp[1]), float(disp[2])
 
         def _compute_indices_from_amber(prmtop_path: str, inpcrd_path: str):
@@ -12960,7 +13107,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             # -----------------
             # Ligand selection: chain -> fallback by resname
             # -----------------
-            lig_mask = (chain_ids == ligand_chain)
+            lig_mask = chain_ids == ligand_chain
             lig_sel = "chain"
             if not np.any(lig_mask):
                 lig_mask = np.isin(res_names, list(ligand_resnames))
@@ -12974,7 +13121,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             lig_all = np.where(lig_mask)[0]
             lig_heavy = np.where(lig_mask & ~is_h)[0]
-            lig_query = lig_heavy if len(lig_heavy) else lig_all  # for distances/centroid
+            lig_query = (
+                lig_heavy if len(lig_heavy) else lig_all
+            )  # for distances/centroid
 
             ligand_atoms = lig_all.tolist()
             ligand_cm_atoms = (
@@ -12991,18 +13140,81 @@ make sure of reading the target sequences with the function readTargetSequences(
             # Receptor filtering
             # -----------------
             PROT = {
-                "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE","LEU","LYS",
-                "MET","PHE","PRO","SER","THR","TRP","TYR","VAL",
-                "HID","HIE","HIP","CYM","CYX","LYN","ASH","GLH",
+                "ALA",
+                "ARG",
+                "ASN",
+                "ASP",
+                "CYS",
+                "GLN",
+                "GLU",
+                "GLY",
+                "HIS",
+                "ILE",
+                "LEU",
+                "LYS",
+                "MET",
+                "PHE",
+                "PRO",
+                "SER",
+                "THR",
+                "TRP",
+                "TYR",
+                "VAL",
+                "HID",
+                "HIE",
+                "HIP",
+                "CYM",
+                "CYX",
+                "LYN",
+                "ASH",
+                "GLH",
             }
             NA = {
-                "A","C","G","U","T",
-                "DA","DC","DG","DT","DU",
-                "RA","RC","RG","RU",
-                "ADE","CYT","GUA","URA","THY",
+                "A",
+                "C",
+                "G",
+                "U",
+                "T",
+                "DA",
+                "DC",
+                "DG",
+                "DT",
+                "DU",
+                "RA",
+                "RC",
+                "RG",
+                "RU",
+                "ADE",
+                "CYT",
+                "GUA",
+                "URA",
+                "THY",
             }
             WATER = {"WAT", "HOH", "TIP3", "SOL", "H2O"}
-            IONS = {"NA","K","CL","MG","ZN","CA","MN","FE","CU","CO","NI","RB","CS","LI","SR","CD","HG","PB","AL","BA","BR","I"}
+            IONS = {
+                "NA",
+                "K",
+                "CL",
+                "MG",
+                "ZN",
+                "CA",
+                "MN",
+                "FE",
+                "CU",
+                "CO",
+                "NI",
+                "RB",
+                "CS",
+                "LI",
+                "SR",
+                "CD",
+                "HG",
+                "PB",
+                "AL",
+                "BA",
+                "BR",
+                "I",
+            }
 
             is_water = np.isin(res_names, list(WATER))
             is_ion = np.isin(res_names, list(IONS))
@@ -13082,7 +13294,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 rcpt_cm_atoms = nearby.tolist()
                 chosen = "HEAVY"
 
-            _log(f"RCPT_CM_MODE={mode}; chosen={chosen}; rcpt_cm_atoms={len(rcpt_cm_atoms)}")
+            _log(
+                f"RCPT_CM_MODE={mode}; chosen={chosen}; rcpt_cm_atoms={len(rcpt_cm_atoms)}"
+            )
 
             # POS_RESTRAINED_ATOMS: simplest consistent choice is restraining RCPT_CM_ATOMS
             pos_restrained_atoms = rcpt_cm_atoms
@@ -13264,7 +13478,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ligand_atoms=_format_index_list(model_info["ligand_atoms"]),
                     ligand_cm_atoms=_format_index_list(model_info["ligand_cm_atoms"]),
                     rcpt_cm_atoms=_format_index_list(model_info["rcpt_cm_atoms"]),
-                    pos_restrained_atoms=_format_index_list(model_info["pos_restrained_atoms"]),
+                    pos_restrained_atoms=_format_index_list(
+                        model_info["pos_restrained_atoms"]
+                    ),
                 )
 
                 cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
@@ -13288,7 +13504,6 @@ make sure of reading the target sequences with the function readTargetSequences(
             _log(f"Prepared replicas under: {model_folder}")
 
         return abfe_jobs
-
 
     def analyseRosettaDocking(
         self,
