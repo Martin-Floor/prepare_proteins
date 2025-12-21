@@ -1,0 +1,775 @@
+from __future__ import annotations
+
+import glob
+import json
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Tuple
+
+import numpy as np
+from Bio.Data.IUPACData import protein_letters_1to3
+from Bio.PDB import NeighborSearch, PDBParser
+
+_STANDARD_RESNAMES = {v.upper() for v in protein_letters_1to3.values()}
+_RESNAME_MAP = {
+    "HIE": "HIS",
+    "HID": "HIS",
+    "HIP": "HIS",
+    "ASH": "ASP",
+    "GLH": "GLU",
+    "CYX": "CYS",
+    "MSE": "MET",
+}
+
+Q_NATIVE_CUTOFF_A = 4.5
+Q_MIN_SEQ_SEPARATION = 3
+Q_LAMBDA = 1.5
+Q_BETA_PER_A = 1.0  # 10 nm^-1 -> 1.0 A^-1
+
+
+@dataclass
+class MLCGRun:
+    model_name: str
+    protocol: str
+    sims_dir: str
+    prefix: str
+    cg_pdb: Optional[str]
+    coord_chunks: List[str]
+    config_path: Optional[str] = None
+    dcd_paths: List[str] = field(default_factory=list)
+    n_traj: Optional[int] = None
+    n_beads: Optional[int] = None
+    expected_frames: Optional[int] = None
+
+
+@dataclass
+class NativeContactMap:
+    ca_coords: np.ndarray
+    ca_bead_indices: np.ndarray
+    contact_pairs: np.ndarray
+    contact_r0: np.ndarray
+    residue_ids: List[Tuple[str, int]]
+
+
+@dataclass
+class NativeCAMap:
+    ca_coords: np.ndarray
+    ca_bead_indices: np.ndarray
+    residue_ids: List[Tuple[str, int]]
+
+
+def _normalize_chain_id(chain_id: str) -> str:
+    return chain_id.strip() or "A"
+
+
+def _is_heavy_atom(atom) -> bool:
+    element = getattr(atom, "element", "").strip()
+    if element:
+        return element.upper() != "H"
+    name = atom.get_name().strip().upper()
+    return not name.startswith("H")
+
+
+def _collect_native_residues(
+    pdb_path: str,
+    chain_ids: Optional[Iterable[str]] = None,
+) -> List[Dict]:
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("native", pdb_path)
+    model = next(structure.get_models())
+    chain_filter = {c.strip() for c in chain_ids} if chain_ids else None
+
+    chain_residues: List[Dict] = []
+    for chain in model:
+        chain_id = _normalize_chain_id(chain.id)
+        if chain_filter and chain_id not in chain_filter:
+            continue
+        residues: List[Dict] = []
+        for residue in chain:
+            if residue.id[0] != " ":
+                continue
+            resname = residue.get_resname().strip().upper()
+            resname = _RESNAME_MAP.get(resname, resname)
+            if resname not in _STANDARD_RESNAMES:
+                raise ValueError(
+                    f"Unsupported residue {resname} in {pdb_path}. "
+                    "Only standard amino acids are supported."
+                )
+            icode = residue.id[2]
+            if str(icode).strip():
+                raise ValueError(
+                    f"Insertion codes are not supported (found {residue.id} in {pdb_path})."
+                )
+            ca_atom = residue["CA"] if "CA" in residue else None
+            if ca_atom is None:
+                raise ValueError(
+                    f"Missing CA atom in residue {resname} {residue.id[1]} "
+                    f"chain {chain_id} ({pdb_path})."
+                )
+            heavy_atoms = [atom for atom in residue if _is_heavy_atom(atom)]
+            if not heavy_atoms:
+                raise ValueError(
+                    f"No heavy atoms found in residue {resname} {residue.id[1]} "
+                    f"chain {chain_id} ({pdb_path})."
+                )
+            residues.append(
+                {
+                    "chain_id": chain_id,
+                    "resid": int(residue.id[1]),
+                    "resname": resname,
+                    "ca_coord": np.array(ca_atom.coord, dtype=float),
+                    "heavy_atoms": heavy_atoms,
+                }
+            )
+        if residues:
+            chain_residues.append({"chain_id": chain_id, "residues": residues})
+
+    if not chain_residues:
+        raise ValueError(f"No protein residues found in {pdb_path}.")
+    return chain_residues
+
+
+def _parse_cg_atom_indices(cg_pdb: str) -> Dict[Tuple[str, int, str], int]:
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("cg", cg_pdb)
+    atom_indices: Dict[Tuple[str, int, str], int] = {}
+    idx = 0
+    for atom in structure.get_atoms():
+        residue = atom.get_parent()
+        chain = residue.get_parent()
+        chain_id = _normalize_chain_id(chain.id)
+        icode = residue.id[2]
+        if str(icode).strip():
+            raise ValueError(
+                f"Insertion codes are not supported in CG PDB (found {residue.id} in {cg_pdb})."
+            )
+        resid = int(residue.id[1])
+        atom_name = atom.get_name().strip().upper()
+        key = (chain_id, resid, atom_name)
+        if key in atom_indices:
+            raise ValueError(
+                f"Duplicate atom entry for {key} in CG PDB {cg_pdb}."
+            )
+        atom_indices[key] = idx
+        idx += 1
+    return atom_indices
+
+
+def _native_contact_pairs(
+    chain_residues: List[Dict],
+    cutoff_a: float,
+    min_seq_separation: int,
+    include_interchain: bool = False,
+) -> List[Tuple[str, int, int, float]]:
+    if include_interchain:
+        raise NotImplementedError(
+            "Inter-chain native contacts are not implemented yet."
+        )
+
+    contacts: List[Tuple[str, int, int, float]] = []
+    for chain in chain_residues:
+        residues = chain["residues"]
+        chain_id = chain["chain_id"]
+        atom_list = []
+        atom_to_res_idx: Dict[object, int] = {}
+        for idx, residue in enumerate(residues):
+            for atom in residue["heavy_atoms"]:
+                atom_list.append(atom)
+                atom_to_res_idx[atom] = idx
+
+        if not atom_list:
+            continue
+        ns = NeighborSearch(atom_list)
+        contact_pairs = set()
+        for atom in atom_list:
+            neighbors = ns.search(atom.coord, cutoff_a, level="A")
+            for other in neighbors:
+                if other is atom:
+                    continue
+                i = atom_to_res_idx[atom]
+                j = atom_to_res_idx[other]
+                if i == j:
+                    continue
+                if abs(i - j) < min_seq_separation:
+                    continue
+                pair = (i, j) if i < j else (j, i)
+                contact_pairs.add(pair)
+
+        for i, j in sorted(contact_pairs):
+            res_i = residues[i]
+            res_j = residues[j]
+            r0 = float(
+                np.linalg.norm(res_i["ca_coord"] - res_j["ca_coord"])
+            )
+            contacts.append((chain_id, res_i["resid"], res_j["resid"], r0))
+    return contacts
+
+
+def build_native_contact_map(
+    native_pdb: str,
+    cg_pdb: str,
+    cutoff_a: float = Q_NATIVE_CUTOFF_A,
+    min_seq_separation: int = Q_MIN_SEQ_SEPARATION,
+    include_interchain: bool = False,
+) -> NativeContactMap:
+    chain_residues = _collect_native_residues(native_pdb)
+    contacts = _native_contact_pairs(
+        chain_residues,
+        cutoff_a=cutoff_a,
+        min_seq_separation=min_seq_separation,
+        include_interchain=include_interchain,
+    )
+    atom_indices = _parse_cg_atom_indices(cg_pdb)
+
+    residue_ids: List[Tuple[str, int]] = []
+    ca_coords: List[np.ndarray] = []
+    ca_bead_indices: List[int] = []
+    for chain in chain_residues:
+        for residue in chain["residues"]:
+            chain_id = residue["chain_id"]
+            resid = residue["resid"]
+            key = (chain_id, resid, "CA")
+            if key not in atom_indices:
+                raise ValueError(
+                    f"Missing CA bead for {chain_id} residue {resid} in {cg_pdb}."
+                )
+            residue_ids.append((chain_id, resid))
+            ca_coords.append(residue["ca_coord"])
+            ca_bead_indices.append(atom_indices[key])
+
+    contact_pairs = []
+    contact_r0 = []
+    for chain_id, resid_i, resid_j, r0 in contacts:
+        key_i = (chain_id, resid_i, "CA")
+        key_j = (chain_id, resid_j, "CA")
+        if key_i not in atom_indices or key_j not in atom_indices:
+            raise ValueError(
+                f"Missing CA beads for contact {chain_id}:{resid_i}-{resid_j} in {cg_pdb}."
+            )
+        contact_pairs.append([atom_indices[key_i], atom_indices[key_j]])
+        contact_r0.append(r0)
+
+    if not contact_pairs:
+        raise ValueError(
+            f"No native contacts found in {native_pdb} using cutoff {cutoff_a} A."
+        )
+
+    return NativeContactMap(
+        ca_coords=np.stack(ca_coords, axis=0),
+        ca_bead_indices=np.array(ca_bead_indices, dtype=int),
+        contact_pairs=np.array(contact_pairs, dtype=int),
+        contact_r0=np.array(contact_r0, dtype=float),
+        residue_ids=residue_ids,
+    )
+
+
+def build_native_ca_map(
+    native_pdb: str,
+    cg_pdb: str,
+) -> NativeCAMap:
+    chain_residues = _collect_native_residues(native_pdb)
+    atom_indices = _parse_cg_atom_indices(cg_pdb)
+
+    residue_ids: List[Tuple[str, int]] = []
+    ca_coords: List[np.ndarray] = []
+    ca_bead_indices: List[int] = []
+    for chain in chain_residues:
+        for residue in chain["residues"]:
+            chain_id = residue["chain_id"]
+            resid = residue["resid"]
+            key = (chain_id, resid, "CA")
+            if key not in atom_indices:
+                raise ValueError(
+                    f"Missing CA bead for {chain_id} residue {resid} in {cg_pdb}."
+                )
+            residue_ids.append((chain_id, resid))
+            ca_coords.append(residue["ca_coord"])
+            ca_bead_indices.append(atom_indices[key])
+
+    return NativeCAMap(
+        ca_coords=np.stack(ca_coords, axis=0),
+        ca_bead_indices=np.array(ca_bead_indices, dtype=int),
+        residue_ids=residue_ids,
+    )
+
+
+def _kabsch_rmsd(
+    coords: np.ndarray,
+    ref_coords: np.ndarray,
+) -> np.ndarray:
+    ref = ref_coords - ref_coords.mean(axis=0)
+    n_atoms = ref.shape[0]
+    rmsd = np.zeros(coords.shape[0], dtype=float)
+    for i, frame in enumerate(coords):
+        mobile = frame - frame.mean(axis=0)
+        cov = mobile.T @ ref
+        v, s, w = np.linalg.svd(cov)
+        det = np.linalg.det(v @ w)
+        if det < 0:
+            v[:, -1] *= -1
+        rot = v @ w
+        aligned = mobile @ rot
+        diff = aligned - ref
+        rmsd[i] = np.sqrt(np.sum(diff * diff) / n_atoms)
+    return rmsd
+
+
+def _iter_coords_chunks(
+    coord_paths: List[str],
+    stride: int,
+) -> Iterable[np.ndarray]:
+    for coords_path in coord_paths:
+        coords = np.load(coords_path)
+        if coords.ndim != 4 or coords.shape[-1] != 3:
+            raise ValueError(
+                f"Unexpected coords shape for {coords_path}: {coords.shape}"
+            )
+        if stride > 1:
+            coords = coords[:, ::stride, :, :]
+        yield coords
+class MLCGAnalysis:
+    """
+    Discover and analyze MLCG simulation outputs across a job folder.
+    """
+
+    def __init__(
+        self,
+        job_root: str,
+        auto_convert: bool = False,
+        stride: int = 1,
+        dcd_output_root: Optional[str] = None,
+        overwrite_mismatch: bool = True,
+        validate_topology: bool = True,
+    ) -> None:
+        self.job_root = os.path.abspath(job_root)
+        self.stride = int(stride)
+        if self.stride < 1:
+            raise ValueError("stride must be >= 1.")
+        self.dcd_output_root = (
+            os.path.abspath(dcd_output_root)
+            if dcd_output_root is not None
+            else None
+        )
+        self.overwrite_mismatch = bool(overwrite_mismatch)
+        self.validate_topology = bool(validate_topology)
+
+        self.runs: List[MLCGRun] = []
+        self.model_dirs: List[str] = []
+        self._native_cache: Dict[Tuple[str, str, bool], NativeContactMap] = {}
+        self._native_ca_cache: Dict[Tuple[str, str], NativeCAMap] = {}
+
+        self._discover_runs()
+        if auto_convert:
+            self.ensure_dcds()
+
+    def _discover_runs(self) -> None:
+        self.model_dirs = self._find_model_dirs(self.job_root)
+        for model_dir in self.model_dirs:
+            model_name = os.path.basename(model_dir.rstrip(os.sep))
+            input_dir = os.path.join(model_dir, "input_files")
+            cg_pdb = self._find_cg_pdb(input_dir, model_name)
+            for protocol_dir in self._find_protocol_dirs(model_dir):
+                self.runs.extend(
+                    self._collect_runs_from_protocol(
+                        model_name, protocol_dir, cg_pdb
+                    )
+                )
+
+    @staticmethod
+    def _find_model_dirs(job_root: str) -> List[str]:
+        if os.path.isdir(os.path.join(job_root, "input_files")):
+            return [job_root]
+
+        model_dirs: List[str] = []
+        if not os.path.isdir(job_root):
+            raise FileNotFoundError(f"Job folder not found: {job_root}")
+        for entry in sorted(os.listdir(job_root)):
+            path = os.path.join(job_root, entry)
+            if not os.path.isdir(path):
+                continue
+            if os.path.isdir(os.path.join(path, "input_files")):
+                model_dirs.append(path)
+        if not model_dirs:
+            raise FileNotFoundError(
+                f"No model folders with input_files found under {job_root}."
+            )
+        return model_dirs
+
+    @staticmethod
+    def _find_protocol_dirs(model_dir: str) -> List[str]:
+        protocol_dirs: List[str] = []
+        for entry in sorted(os.listdir(model_dir)):
+            if entry.startswith(".") or entry == "input_files":
+                continue
+            path = os.path.join(model_dir, entry)
+            if not os.path.isdir(path):
+                continue
+            sims_dir = os.path.join(path, "sims")
+            if os.path.isdir(sims_dir):
+                protocol_dirs.append(path)
+                continue
+            if glob.glob(os.path.join(path, "*_coords_*.npy")):
+                protocol_dirs.append(path)
+                continue
+            if glob.glob(os.path.join(path, "*.json")):
+                protocol_dirs.append(path)
+        return protocol_dirs
+
+    @staticmethod
+    def _find_cg_pdb(input_dir: str, model_name: str) -> Optional[str]:
+        if not os.path.isdir(input_dir):
+            return None
+        cg_candidates = sorted(glob.glob(os.path.join(input_dir, "*_cg.pdb")))
+        if not cg_candidates:
+            return None
+        preferred = os.path.join(input_dir, f"{model_name}_cg.pdb")
+        if preferred in cg_candidates:
+            return preferred
+        return cg_candidates[0]
+
+    @staticmethod
+    def _coords_sort_key(path: str):
+        match = re.search(r"_coords_(\d+)\.npy$", os.path.basename(path))
+        if match:
+            return int(match.group(1))
+        return path
+
+    @staticmethod
+    def _coords_prefix(path: str) -> Optional[str]:
+        match = re.search(r"(.+)_coords_\d+\.npy$", os.path.basename(path))
+        return match.group(1) if match else None
+
+    @staticmethod
+    def _load_config_prefixes(protocol_dir: str) -> Dict[str, str]:
+        config_map: Dict[str, str] = {}
+        for config_path in sorted(glob.glob(os.path.join(protocol_dir, "*.json"))):
+            try:
+                with open(config_path, "r") as handle:
+                    config = json.load(handle)
+            except Exception:
+                continue
+            sim_cfg = config.get("simulation", {})
+            filename = sim_cfg.get("filename")
+            if not filename:
+                continue
+            prefix = os.path.basename(filename)
+            config_map[prefix] = config_path
+        return config_map
+
+    def _collect_runs_from_protocol(
+        self,
+        model_name: str,
+        protocol_dir: str,
+        cg_pdb: Optional[str],
+    ) -> List[MLCGRun]:
+        config_map = self._load_config_prefixes(protocol_dir)
+        sims_dir = os.path.join(protocol_dir, "sims")
+        search_dir = sims_dir if os.path.isdir(sims_dir) else protocol_dir
+        coords_files = sorted(
+            glob.glob(os.path.join(search_dir, "*_coords_*.npy")),
+            key=self._coords_sort_key,
+        )
+        if not coords_files:
+            return []
+
+        grouped: Dict[str, List[str]] = {}
+        for path in coords_files:
+            prefix = self._coords_prefix(path)
+            if not prefix:
+                continue
+            grouped.setdefault(prefix, []).append(path)
+
+        runs: List[MLCGRun] = []
+        protocol = os.path.basename(protocol_dir)
+        for prefix, chunk_paths in sorted(grouped.items()):
+            runs.append(
+                MLCGRun(
+                    model_name=model_name,
+                    protocol=protocol,
+                    sims_dir=os.path.dirname(chunk_paths[0]),
+                    prefix=prefix,
+                    cg_pdb=cg_pdb,
+                    coord_chunks=sorted(chunk_paths, key=self._coords_sort_key),
+                    config_path=config_map.get(prefix),
+                )
+            )
+        return runs
+
+    def _inspect_coords(self, run: MLCGRun, stride: int) -> Tuple[int, int, int]:
+        n_traj = None
+        n_beads = None
+        total_frames = 0
+        for coords_path in run.coord_chunks:
+            coords = np.load(coords_path, mmap_mode="r")
+            if coords.ndim != 4 or coords.shape[-1] != 3:
+                raise ValueError(
+                    f"Unexpected coords shape for {coords_path}: {coords.shape}"
+                )
+            if n_traj is None:
+                n_traj = coords.shape[0]
+                n_beads = coords.shape[2]
+            else:
+                if coords.shape[0] != n_traj or coords.shape[2] != n_beads:
+                    raise ValueError(
+                        f"Inconsistent coords shape for {coords_path}: {coords.shape}"
+                    )
+            frames = coords.shape[1]
+            total_frames += (frames + stride - 1) // stride
+        if n_traj is None or n_beads is None:
+            raise ValueError(f"No coordinate data found for {run.prefix}.")
+        return n_traj, n_beads, total_frames
+
+    @staticmethod
+    def _count_dcd_frames(dcd_path: str, topology: str) -> int:
+        try:
+            import mdtraj as md
+        except Exception as exc:
+            raise ImportError(
+                "mdtraj is required to validate DCD frame counts."
+            ) from exc
+        try:
+            dcd = md.formats.DCDTrajectoryFile(dcd_path, mode="r")
+            try:
+                return int(dcd.n_frames)
+            except Exception:
+                return int(len(dcd))
+            finally:
+                dcd.close()
+        except Exception:
+            try:
+                traj = md.load(dcd_path, top=topology)
+                return traj.n_frames
+            except Exception as exc:
+                raise RuntimeError(f"Failed to read DCD {dcd_path}.") from exc
+
+    def _output_dir_for_run(self, run: MLCGRun) -> str:
+        if self.dcd_output_root is None:
+            return run.sims_dir
+        return os.path.join(self.dcd_output_root, run.model_name, run.protocol)
+
+    def ensure_dcds(
+        self,
+        stride: Optional[int] = None,
+        overwrite_mismatch: Optional[bool] = None,
+        force: bool = False,
+    ) -> List[MLCGRun]:
+        """
+        Ensure DCD outputs exist and match expected frame counts.
+        """
+        stride = self.stride if stride is None else int(stride)
+        if stride < 1:
+            raise ValueError("stride must be >= 1.")
+        overwrite_mismatch = (
+            self.overwrite_mismatch
+            if overwrite_mismatch is None
+            else bool(overwrite_mismatch)
+        )
+
+        updated_runs: List[MLCGRun] = []
+        for run in self.runs:
+            if not run.coord_chunks:
+                continue
+            if not run.cg_pdb:
+                raise FileNotFoundError(
+                    f"CG PDB not found for {run.model_name} ({run.protocol})."
+                )
+            n_traj, n_beads, expected_frames = self._inspect_coords(run, stride)
+            run.n_traj = n_traj
+            run.n_beads = n_beads
+            run.expected_frames = expected_frames
+
+            output_dir = self._output_dir_for_run(run)
+            dcd_paths = [
+                os.path.join(output_dir, f"{run.prefix}_traj{idx + 1:02d}.dcd")
+                for idx in range(n_traj)
+            ]
+            run.dcd_paths = dcd_paths
+
+            needs_conversion = force
+            if not needs_conversion:
+                for dcd_path in dcd_paths:
+                    if not os.path.exists(dcd_path):
+                        needs_conversion = True
+                        break
+                    frames = self._count_dcd_frames(dcd_path, run.cg_pdb)
+                    if frames != expected_frames:
+                        needs_conversion = True
+                        break
+
+            if needs_conversion:
+                from .mlcg_setup import write_mlcg_dcds
+
+                os.makedirs(output_dir, exist_ok=True)
+                run.dcd_paths = write_mlcg_dcds(
+                    run.sims_dir,
+                    run.cg_pdb,
+                    output_dir=output_dir,
+                    prefix=run.prefix,
+                    stride=stride,
+                    overwrite=overwrite_mismatch or force,
+                    validate_topology=self.validate_topology,
+                )
+                updated_runs.append(run)
+
+        return updated_runs
+
+    def compute_rmsd(
+        self,
+        run: MLCGRun,
+        native_pdb: Optional[str] = None,
+        stride: Optional[int] = None,
+    ) -> np.ndarray:
+        """
+        Compute C-alpha RMSD to a native structure for each trajectory.
+        """
+        if not run.coord_chunks:
+            raise ValueError("No coordinate chunks available for this run.")
+        if native_pdb is None:
+            if not run.cg_pdb:
+                raise ValueError("native_pdb is required when CG PDB is unavailable.")
+            native_pdb = run.cg_pdb
+        if not run.cg_pdb:
+            raise ValueError("CG PDB is required to map C-alpha beads.")
+
+        stride = self.stride if stride is None else int(stride)
+        if stride < 1:
+            raise ValueError("stride must be >= 1.")
+
+        native_ca = self._get_native_ca_map(native_pdb, run.cg_pdb)
+        ca_indices = native_ca.ca_bead_indices
+        ref_coords = native_ca.ca_coords
+
+        n_traj = None
+        rmsd_chunks: List[List[np.ndarray]] = []
+        for coords in _iter_coords_chunks(run.coord_chunks, stride):
+            if n_traj is None:
+                n_traj = coords.shape[0]
+                rmsd_chunks = [[] for _ in range(n_traj)]
+            for t_idx in range(coords.shape[0]):
+                ca_coords = coords[t_idx, :, ca_indices, :]
+                rmsd_chunks[t_idx].append(
+                    _kabsch_rmsd(ca_coords, ref_coords)
+                )
+
+        rmsd_trajs = [
+            np.concatenate(chunks, axis=0) if chunks else np.array([], dtype=float)
+            for chunks in rmsd_chunks
+        ]
+        return np.stack(rmsd_trajs, axis=0)
+
+    def compute_q(
+        self,
+        run: MLCGRun,
+        native_pdb: str,
+        stride: Optional[int] = None,
+        beta: float = Q_BETA_PER_A,
+        lambda_val: float = Q_LAMBDA,
+        include_interchain: bool = False,
+        frame_chunk: int = 0,
+    ) -> np.ndarray:
+        """
+        Compute the fraction of native contacts Q for each trajectory.
+        """
+        if not run.coord_chunks:
+            raise ValueError("No coordinate chunks available for this run.")
+        if not run.cg_pdb:
+            raise ValueError("CG PDB is required to compute Q.")
+
+        stride = self.stride if stride is None else int(stride)
+        if stride < 1:
+            raise ValueError("stride must be >= 1.")
+
+        native_map = self._get_native_map(
+            native_pdb, run.cg_pdb, include_interchain=include_interchain
+        )
+        contact_pairs = native_map.contact_pairs
+        r0 = native_map.contact_r0
+
+        n_traj = None
+        q_chunks: List[List[np.ndarray]] = []
+        for coords in _iter_coords_chunks(run.coord_chunks, stride):
+            if n_traj is None:
+                n_traj = coords.shape[0]
+                q_chunks = [[] for _ in range(n_traj)]
+            for t_idx in range(coords.shape[0]):
+                traj = coords[t_idx]
+                q_vals = self._compute_q_for_traj(
+                    traj,
+                    contact_pairs,
+                    r0,
+                    beta=float(beta),
+                    lambda_val=float(lambda_val),
+                    frame_chunk=frame_chunk,
+                )
+                q_chunks[t_idx].append(q_vals)
+
+        q_trajs = [
+            np.concatenate(chunks, axis=0) if chunks else np.array([], dtype=float)
+            for chunks in q_chunks
+        ]
+        return np.stack(q_trajs, axis=0)
+
+    @staticmethod
+    def _compute_q_for_traj(
+        traj: np.ndarray,
+        contact_pairs: np.ndarray,
+        r0: np.ndarray,
+        beta: float,
+        lambda_val: float,
+        frame_chunk: int = 0,
+    ) -> np.ndarray:
+        if traj.ndim != 3:
+            raise ValueError("Expected trajectory chunk with shape (n_frames, n_beads, 3).")
+        n_frames = traj.shape[0]
+        if frame_chunk and frame_chunk > 0:
+            chunks = []
+            for start in range(0, n_frames, frame_chunk):
+                end = min(start + frame_chunk, n_frames)
+                chunks.append(
+                    MLCGAnalysis._compute_q_for_traj(
+                        traj[start:end],
+                        contact_pairs,
+                        r0,
+                        beta=beta,
+                        lambda_val=lambda_val,
+                        frame_chunk=0,
+                    )
+                )
+            return np.concatenate(chunks, axis=0)
+
+        i_idx = contact_pairs[:, 0]
+        j_idx = contact_pairs[:, 1]
+        delta = traj[:, i_idx, :] - traj[:, j_idx, :]
+        dist = np.linalg.norm(delta, axis=-1)
+        q = 1.0 / (1.0 + np.exp(beta * (dist - lambda_val * r0)))
+        return np.mean(q, axis=1)
+
+    def _get_native_map(
+        self,
+        native_pdb: str,
+        cg_pdb: str,
+        include_interchain: bool,
+    ) -> NativeContactMap:
+        key = (os.path.abspath(native_pdb), os.path.abspath(cg_pdb), include_interchain)
+        native_map = self._native_cache.get(key)
+        if native_map is None:
+            native_map = build_native_contact_map(
+                native_pdb,
+                cg_pdb,
+                include_interchain=include_interchain,
+            )
+            self._native_cache[key] = native_map
+        return native_map
+
+    def _get_native_ca_map(
+        self,
+        native_pdb: str,
+        cg_pdb: str,
+    ) -> NativeCAMap:
+        key = (os.path.abspath(native_pdb), os.path.abspath(cg_pdb))
+        native_ca = self._native_ca_cache.get(key)
+        if native_ca is None:
+            native_ca = build_native_ca_map(native_pdb, cg_pdb)
+            self._native_ca_cache[key] = native_ca
+        return native_ca

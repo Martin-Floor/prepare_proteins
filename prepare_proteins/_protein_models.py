@@ -603,6 +603,14 @@ class _OpenMMSimulationRegistry(dict):
         self.openmm_command_logs = {}
 
 
+class _MLCGSimulationRegistry(dict):
+    """Dictionary storing per-model mlcg_md objects plus a command log registry."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.mlcg_command_logs = {}
+
+
 def _require_openmm_support(feature="OpenMM-dependent functionality"):
     """
     Import the OpenMM integration module on demand, raising a clear error when unavailable.
@@ -622,6 +630,25 @@ def _require_openmm_support(feature="OpenMM-dependent functionality"):
         ) from import_error
     return module
 
+
+def _require_mlcg_support(feature="MLCG-dependent functionality"):
+    """
+    Import the MLCG integration module on demand, raising a clear error when unavailable.
+    """
+    try:
+        module = importlib.import_module("prepare_proteins.MD.mlcg_setup")
+    except Exception as exc:
+        raise ImportError(
+            f"MLCG support is required to use {feature}. "
+            "Install the 'mlcg' package (and its dependencies) to enable this functionality."
+        ) from exc
+    if not getattr(module, "MLCG_AVAILABLE", False):
+        import_error = getattr(module, "_MLCG_IMPORT_ERROR", None)
+        raise ImportError(
+            f"MLCG support is required to use {feature}. "
+            "Install the 'mlcg' package (and its dependencies) to enable this functionality."
+        ) from import_error
+    return module
 
 import ipywidgets as widgets
 import matplotlib as mpl
@@ -1215,6 +1242,167 @@ class MutationVariabilityAnalyzer:
             totals = grouped.groupby("Model")["Count"].transform(lambda x: x.sum() if x.sum() else 1)
             grouped["Fraction"] = grouped["Count"] / totals
         return grouped
+
+    def mutation_frequencies_by_position(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_wt: bool = False,
+        print_summary: bool = True,
+        summary_limit: int = 10,
+        write_bfactor: bool = False,
+        bfactor_output_path: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """
+        Compute per-position substitution frequencies relative to the wild-type.
+
+        Only substitutions are counted; insertions/deletions are ignored. The
+        denominator is the number of analyzed models that contain the WT residue
+        at that position (i.e. non-gaps after alignment).
+
+        Args:
+            models: Optional subset of models to include (defaults to all analyzed).
+            include_wt: Whether to include the WT model in the denominator.
+            print_summary: Print a compact summary table.
+            summary_limit: Max rows to print per chain in the summary (<=0 prints all).
+            write_bfactor: If True, write the frequencies into the B-factor column
+                of the WT structure (in-memory) and optionally save to a PDB file.
+            bfactor_output_path: Optional path to write the WT structure with updated
+                B-factors. Ignored unless ``write_bfactor`` is True.
+
+        Returns:
+            pd.DataFrame with columns:
+            Chain, WT_resseq, WT_icode, WT_position, WT_residue,
+            Mutated_models, Models_considered, Frequency.
+        """
+
+        selected_models = self._select_models(models=models, include_wt=include_wt)
+        if not selected_models:
+            return pd.DataFrame(
+                columns=[
+                    "Chain",
+                    "WT_resseq",
+                    "WT_icode",
+                    "WT_position",
+                    "WT_residue",
+                    "Mutated_models",
+                    "Models_considered",
+                    "Frequency",
+                ]
+            )
+
+        freq_records: List[Dict[str, Any]] = []
+        freq_lookup: Dict[Tuple[str, int, str], float] = {}
+
+        wt_chains = self.chain_selection.get(self.wt_model, [])
+        for chain_id in wt_chains:
+            wt_seq = self._wt_chain_sequences.get(chain_id)
+            wt_meta = self._chain_metadata.get(self.wt_model, {}).get(chain_id)
+            if not wt_seq or not wt_meta:
+                continue
+
+            mutated_counts = [0] * len(wt_meta)
+            coverage_counts = [0] * len(wt_meta)
+
+            for model in selected_models:
+                variant_seq = self._chain_sequences.get(model, {}).get(chain_id)
+                if not variant_seq:
+                    continue
+                wt_aln, var_aln = self._align_sequences(wt_seq, variant_seq)
+                wt_idx = -1
+                var_idx = -1
+                for wt_res, var_res in zip(wt_aln, var_aln):
+                    if wt_res != "-":
+                        wt_idx += 1
+                    if var_res != "-":
+                        var_idx += 1
+                    if wt_res == "-":
+                        continue  # skip insertions relative to WT
+                    if var_res == "-":
+                        continue  # deletion: residue absent in variant, no coverage
+                    coverage_counts[wt_idx] += 1
+                    if wt_res != var_res:
+                        mutated_counts[wt_idx] += 1
+
+            for idx, meta in enumerate(wt_meta):
+                total = coverage_counts[idx]
+                mutated = mutated_counts[idx]
+                freq = mutated / total if total else 0.0
+                key = (chain_id, meta["resseq"], meta["icode"])
+                freq_lookup[key] = freq
+                freq_records.append(
+                    {
+                        "Chain": chain_id,
+                        "WT_resseq": meta["resseq"],
+                        "WT_icode": meta["icode"],
+                        "WT_position": meta["seq_index"],
+                        "WT_residue": meta["resname"],
+                        "Mutated_models": mutated,
+                        "Models_considered": total,
+                        "Frequency": freq,
+                    }
+                )
+
+        freq_df = pd.DataFrame.from_records(freq_records)
+        if freq_df.empty:
+            return freq_df
+
+        if print_summary:
+            print("Per-position substitution frequencies (mutated / models with residue):")
+            for chain_id in sorted(freq_df["Chain"].unique()):
+                chain_df = freq_df[freq_df["Chain"] == chain_id]
+                mutated_sites = chain_df[chain_df["Mutated_models"] > 0]
+                if summary_limit > 0:
+                    mutated_sites = mutated_sites.sort_values(
+                        ["Frequency", "Mutated_models"], ascending=False
+                    ).head(summary_limit)
+                else:
+                    mutated_sites = mutated_sites.sort_values(
+                        ["Frequency", "Mutated_models"], ascending=False
+                    )
+                print(f"  Chain {chain_id}: {len(mutated_sites)} mutated site(s) shown")
+                if mutated_sites.empty:
+                    continue
+                for row in mutated_sites.itertuples():
+                    icode = row.WT_icode.strip()
+                    icode_display = icode if icode else ""
+                    print(
+                        f"    {row.WT_residue}{row.WT_resseq}{icode_display}: "
+                        f"{row.Mutated_models}/{row.Models_considered} "
+                        f"({row.Frequency:.3f})"
+                    )
+
+        if write_bfactor:
+            self._apply_frequencies_to_bfactor(freq_lookup, bfactor_output_path=bfactor_output_path)
+
+        return freq_df
+
+    def _apply_frequencies_to_bfactor(
+        self,
+        freq_lookup: Dict[Tuple[str, int, str], float],
+        *,
+        bfactor_output_path: Optional[str] = None,
+    ) -> None:
+        """Write per-residue frequency values into the B-factor field of the WT structure."""
+
+        structure = self.models.structures.get(self.wt_model)
+        if structure is None:
+            raise ValueError("Wild-type structure not available; cannot write B-factors.")
+
+        for residue in structure.get_residues():
+            if residue.id[0] != " ":
+                continue
+            chain_id = residue.get_parent().id
+            resseq = int(residue.id[1])
+            icode = (residue.id[2] or " ").strip() or " "
+            freq = float(freq_lookup.get((chain_id, resseq, icode), 0.0))
+            for atom in residue.get_atoms():
+                atom.bfactor = freq
+
+        if bfactor_output_path:
+            io = PDB.PDBIO()
+            io.set_structure(structure)
+            io.save(bfactor_output_path)
 
     def plot_mutation_counts(
         self,
@@ -6633,7 +6821,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
     def buildMutationAnalyzer(
         self,
-        wild_type: str,
+        wild_type: Union[str, Dict[str, str]],
         *,
         chains: Optional[Union[str, Iterable[str], Dict[str, Iterable[str]]]] = None,
         only_models: Optional[Union[str, Iterable[str]]] = None,
@@ -6645,13 +6833,19 @@ make sure of reading the target sequences with the function readTargetSequences(
         core_contact_threshold: int = 12,
         surface_contact_threshold: int = 4,
         pocket_neighbor_kinds: Optional[Iterable[str]] = None,
-    ) -> MutationVariabilityAnalyzer:
+    ) -> Union[MutationVariabilityAnalyzer, Dict[str, MutationVariabilityAnalyzer]]:
         """Convenience wrapper to instantiate :class:`MutationVariabilityAnalyzer`.
 
         Parameters mirror the analyzer constructor. Use ``only_models`` and
         ``exclude_models`` to restrict the set of designs included in the
         mutational analysis. Pass ``contact_results`` to override cached
         neighbour data (defaults to ``self.models_contacts``).
+
+        ``wild_type`` can be either a single model name or a dictionary mapping
+        each target model to the WT model it should be compared against. When a
+        dictionary is supplied, the return value is a mapping from each target
+        model to its corresponding analyzer (models that share a WT reuse the
+        same analyzer instance).
         """
 
         if contact_results is not None:
@@ -6661,6 +6855,76 @@ make sure of reading the target sequences with the function readTargetSequences(
             if not analysis_contacts:
                 self.computeModelContacts(chains=chains)
                 analysis_contacts = self.models_contacts
+
+        if isinstance(wild_type, dict):
+            if not wild_type:
+                raise ValueError("wild_type mapping cannot be empty.")
+
+            def _normalize_model_list(value, label):
+                if value is None:
+                    return []
+                if isinstance(value, str):
+                    return [value]
+                if isinstance(value, (list, tuple, set)):
+                    return [str(v) for v in value]
+                raise TypeError(f"{label} must be a string or an iterable of strings.")
+
+            only_list = _normalize_model_list(only_models, "only_models")
+            exclude_list = _normalize_model_list(exclude_models, "exclude_models")
+
+            target_models = list(wild_type.keys())
+            if only_list:
+                only_set = set(only_list)
+                target_models = [m for m in target_models if m in only_set]
+            if exclude_list:
+                exclude_set = set(exclude_list)
+                target_models = [m for m in target_models if m not in exclude_set]
+
+            if not target_models:
+                raise ValueError(
+                    "No models left after applying only_models/exclude_models filters to wild_type mapping."
+                )
+
+            available_models = list(getattr(self, "models_names", []))
+            available_set = set(available_models)
+            missing_models = [m for m in target_models if m not in available_set]
+            if missing_models:
+                raise ValueError(
+                    "Models not available in the current session: " + ", ".join(sorted(missing_models))
+                )
+
+            wt_models = {wild_type[model] for model in target_models}
+            missing_wt = [wt for wt in wt_models if wt not in available_set]
+            if missing_wt:
+                raise ValueError(
+                    "Wild-type models not available in the current session: " + ", ".join(sorted(missing_wt))
+                )
+
+            grouped_by_wt: Dict[str, List[str]] = defaultdict(list)
+            for model in target_models:
+                grouped_by_wt[wild_type[model]].append(model)
+
+            analyzers: Dict[str, MutationVariabilityAnalyzer] = {}
+            for wt_model, model_list in grouped_by_wt.items():
+                only_for_analyzer = list(dict.fromkeys(model_list + [wt_model]))
+                analyzer = MutationVariabilityAnalyzer(
+                    self,
+                    wt_model,
+                    only_models=only_for_analyzer,
+                    exclude_models=None,
+                    chains=chains,
+                    alignment_params=alignment_params,
+                    residue_annotations=residue_annotations,
+                    contact_results=analysis_contacts,
+                    auto_classify_locations=auto_classify_locations,
+                    core_contact_threshold=core_contact_threshold,
+                    surface_contact_threshold=surface_contact_threshold,
+                    pocket_neighbor_kinds=pocket_neighbor_kinds,
+                )
+                for model in model_list:
+                    analyzers[model] = analyzer
+            return analyzers
+
         return MutationVariabilityAnalyzer(
             self,
             wild_type,
@@ -11816,6 +12080,842 @@ make sure of reading the target sequences with the function readTargetSequences(
             return ligand_simulation_jobs
 
         return simulation_jobs
+
+    def setUpMLCGSimulations(
+        self,
+        job_folder,
+        replicas=1,
+        model_file=None,
+        protocols=("langevin", "pt"),
+        mlcg_env=None,
+        conda_sh="~/miniconda3/etc/profile.d/conda.sh",
+        only_models=None,
+        skip_models=None,
+        strip_hetero=True,
+        coordinate_jitter=None,
+        write_cg_pdb=True,
+        skip_preparation=False,
+        pt_betas=None,
+        pt_betas_by_model=None,
+        pt_exchange_interval=2000,
+        temperature=300.0,
+        dt=0.004,
+        friction=1.0,
+        n_timesteps=50000,
+        save_interval=250,
+        export_interval=10000,
+        log_interval=10000,
+        create_checkpoints=False,
+        read_checkpoint_file=False,
+        device="cuda",
+        dtype="single",
+        specialize_priors=True,
+        extra_langevin_options=None,
+        extra_pt_options=None,
+        model_url=None,
+        model_cache_dir=None,
+        model_shared_dir=None,
+        copy_model_file=False,
+    ):
+        """
+        Set up MLCG simulations (Langevin and parallel tempering) for the current models.
+
+        Parameters
+        ----------
+        job_folder : str
+            Base folder where the simulation setups will be created.
+        replicas : int, optional
+            Number of independent starting configurations per model (replicated from the PDB).
+        model_file : str, optional
+            Path to the model_with_prior.pt (or model_and_prior.pt) checkpoint. If missing,
+            the cache, model_url, or the Zenodo paper model is used.
+        protocols : str or sequence, optional
+            Which protocols to set up ("langevin", "pt", or both).
+        mlcg_env : str, optional
+            Name of the Conda environment that provides MLCG. If set, commands
+            are wrapped with conda activation/deactivation.
+        conda_sh : str, optional
+            Path to conda.sh for environment activation (default: ~/miniconda3/etc/profile.d/conda.sh).
+        strip_hetero : bool, optional
+            If True, ignore HETATM/ligands/ions when building CG inputs.
+        coordinate_jitter : float, optional
+            Standard deviation (in Angstrom) of random noise added to replicate coordinates.
+        write_cg_pdb : bool, optional
+            If True, write a CG PDB alongside the structure file for analysis.
+        skip_preparation : bool, optional
+            If True, skip generating CG structures and reuse existing input_files.
+        pt_betas : list[float], optional
+            Override PT beta ladder for all models.
+        pt_betas_by_model : dict, optional
+            Override PT beta ladder per model name.
+        pt_exchange_interval : int, optional
+            Exchange interval (in steps) for PT runs.
+        model_url : str, optional
+            URL to download the pretrained model if it is not found locally. A zip archive
+            is supported and will be searched for the model file.
+        model_cache_dir : str, optional
+            Cache directory for pretrained models (default: ~/.cache/prepare_proteins/mlcg).
+        model_shared_dir : str, optional
+            If provided, copy the pretrained model into this directory (relative to the parent
+            directory of job_folder unless absolute) and reference it by relative path from
+            protocol folders. This keeps a single shared copy for multiple job folders.
+        copy_model_file : bool, optional
+            If True, copy the pretrained model into each model's input_files folder.
+            Defaults to False so the model can be shared across job folders.
+        """
+
+        mlcg_setup = importlib.import_module("prepare_proteins.MD.mlcg_setup")
+        mlcg_md_cls = getattr(mlcg_setup, "mlcg_md", None)
+        mlcg_available = bool(getattr(mlcg_setup, "MLCG_AVAILABLE", False))
+        if not mlcg_available and not skip_preparation and not mlcg_env:
+            raise ImportError(
+                "MLCG support is required to prepare inputs. Install the 'mlcg' package "
+                "or provide 'mlcg_env' to prepare inputs in a conda environment."
+            )
+
+        def _prepare_inputs_in_env(
+            pdb_path: str,
+            output_dir: str,
+            structure_name: str,
+            cg_pdb_name: str,
+        ) -> None:
+            jitter_repr = "None" if coordinate_jitter is None else repr(float(coordinate_jitter))
+            script = f"""
+import os
+import numpy as np
+import copy
+import torch
+try:
+    from mlcg.cg import OPEPS_MAP
+except Exception:
+    from mlcg.cg._mappings import OPEPS_MAP
+from mlcg.geometry._symmetrize import _symmetrise_distance_interaction
+from mlcg.geometry.topology import Topology, get_connectivity_matrix, get_n_paths
+from mlcg.data.atomic_data import AtomicData
+from mlcg.neighbor_list.neighbor_list import make_neighbor_list
+import networkx as nx
+from networkx.algorithms.shortest_paths.unweighted import bidirectional_shortest_path
+
+STANDARD_RES = {{
+    "ALA","CYS","ASP","GLU","PHE","GLY","HIS","ILE","LYS","LEU",
+    "MET","ASN","PRO","GLN","ARG","SER","THR","VAL","TRP","TYR"
+}}
+ALL_RESIDUES = [
+    "ALA","CYS","ASP","GLU","PHE","GLY","HIS","ILE","LYS","LEU",
+    "MET","ASN","PRO","GLN","ARG","SER","THR","VAL","TRP","TYR"
+]
+RESNAME_MAP = {{
+    "HIE": "HIS",
+    "HID": "HIS",
+    "HIP": "HIS",
+    "ASH": "ASP",
+    "GLH": "GLU",
+    "CYX": "CYS",
+    "MSE": "MET",
+}}
+
+def _parse_pdb(path, strip_hetero=True):
+    residues = {{}}
+    order = []
+    with open(path, "r") as handle:
+        for line in handle:
+            record = line[0:6].strip()
+            if record not in ("ATOM", "HETATM"):
+                continue
+            if strip_hetero and record != "ATOM":
+                continue
+            atom_name = line[12:16].strip()
+            altloc = line[16].strip()
+            resname = line[17:20].strip().upper()
+            chain_id = line[21].strip() or "A"
+            resseq = line[22:26].strip()
+            icode = line[26].strip()
+            if not resseq:
+                continue
+            try:
+                resseq_int = int(resseq)
+            except ValueError:
+                continue
+            element = line[76:78].strip().upper()
+            if not element:
+                element = atom_name[:1].upper()
+            if element == "H" or atom_name.upper().startswith("H"):
+                continue
+            try:
+                x = float(line[30:38])
+                y = float(line[38:46])
+                z = float(line[46:54])
+            except ValueError:
+                continue
+            occ_str = line[54:60].strip()
+            try:
+                occ = float(occ_str) if occ_str else 0.0
+            except ValueError:
+                occ = 0.0
+            key = (chain_id, resseq_int, icode)
+            if key not in residues:
+                residues[key] = {{
+                    "resname": resname,
+                    "atoms": {{}},
+                }}
+                order.append(key)
+            res = residues[key]
+            rank = (2 if altloc in ("", " ") else 1 if altloc == "A" else 0, occ)
+            existing = res["atoms"].get(atom_name)
+            if existing is None or rank > existing["rank"]:
+                res["atoms"][atom_name] = {{
+                    "coord": (x, y, z),
+                    "rank": rank,
+                }}
+    return residues, order
+
+def _build_opeps_bonds(chain_residues):
+    bonds = []
+    for chain in chain_residues:
+        residues = chain["residues"]
+        for idx, residue in enumerate(residues):
+            resname = residue["resname"]
+            beads = residue["beads"]
+            if resname == "GLY":
+                n_idx, ca_idx, c_idx, o_idx = beads
+                bonds.extend([(n_idx, ca_idx), (ca_idx, c_idx), (c_idx, o_idx)])
+            else:
+                n_idx, ca_idx, cb_idx, c_idx, o_idx = beads
+                bonds.extend([(n_idx, ca_idx), (ca_idx, cb_idx), (ca_idx, c_idx), (c_idx, o_idx)])
+            if idx < len(residues) - 1:
+                next_n = residues[idx + 1]["beads"][0]
+                bonds.append((beads[-2], next_n))
+    return bonds
+
+def _angles_from_bonds(bonds):
+    adjacency = {{}}
+    for i, j in bonds:
+        adjacency.setdefault(i, set()).add(j)
+        adjacency.setdefault(j, set()).add(i)
+    angles = set()
+    for center, neighbors in adjacency.items():
+        neigh = sorted(neighbors)
+        for i_idx in range(len(neigh)):
+            for k_idx in range(i_idx + 1, len(neigh)):
+                i = neigh[i_idx]
+                k = neigh[k_idx]
+                angles.add((i, center, k))
+    return sorted(angles)
+
+def _dihedrals_from_bonds(bonds):
+    adjacency = {{}}
+    for i, j in bonds:
+        adjacency.setdefault(i, set()).add(j)
+        adjacency.setdefault(j, set()).add(i)
+    dihedrals = set()
+    for j, neighbors_j in adjacency.items():
+        for k in neighbors_j:
+            neighbors_k = adjacency.get(k, set())
+            for i in neighbors_j:
+                if i == k:
+                    continue
+                for l in neighbors_k:
+                    if l == j:
+                        continue
+                    dih = (i, j, k, l)
+                    if (l, k, j, i) in dihedrals:
+                        continue
+                    dihedrals.add(dih)
+    return sorted(dihedrals)
+
+def _write_cg_pdb(path, entries):
+    with open(path, "w") as handle:
+        serial = 1
+        for entry in entries:
+            atom_name = entry["atom_name"].rjust(4)
+            resname = entry["resname"][:3].rjust(3)
+            chain_id = (entry["chain_id"] or "A")[:1]
+            resid = entry["resid"] % 10000
+            x, y, z = entry["coord"]
+            element = entry["atom_name"][0].upper()
+            line = (
+                f"ATOM  {{serial:5d}} {{atom_name}} {{resname}} {{chain_id}}{{resid:4d}}    "
+                f"{{x:8.3f}}{{y:8.3f}}{{z:8.3f}}  1.00  0.00           {{element:>2}}"
+            )
+            handle.write(line[:80].ljust(80) + "\\n")
+            serial += 1
+        handle.write("END\\n")
+
+def _bead_map(residue):
+    beads = residue["beads"]
+    if residue["resname"] == "GLY":
+        return {{"N": beads[0], "CA": beads[1], "C": beads[2], "O": beads[3]}}
+    return {{"N": beads[0], "CA": beads[1], "CB": beads[2], "C": beads[3], "O": beads[4]}}
+
+def _terminal_atoms(chain_residues):
+    n_term_atoms = set()
+    c_term_atoms = set()
+    for chain in chain_residues:
+        residues = chain["residues"]
+        if len(residues) <= 1:
+            continue
+        n_term_atoms.update(_bead_map(residues[0]).values())
+        c_term_atoms.update(_bead_map(residues[-1]).values())
+    return n_term_atoms, c_term_atoms
+
+def _atom_res_indices(chain_residues, n_atoms):
+    res_indices = np.zeros(n_atoms, dtype=int)
+    res_counter = 0
+    for chain in chain_residues:
+        for residue in chain["residues"]:
+            for atom_idx in _bead_map(residue).values():
+                res_indices[atom_idx] = res_counter
+            res_counter += 1
+    return res_indices
+
+def _split_bulk_termini(n_term_atoms, c_term_atoms, all_edges):
+    if all_edges.size == 0:
+        order = all_edges.shape[0] if all_edges.ndim == 2 else 2
+        empty = np.zeros((order, 0), dtype=int)
+        return empty, empty, empty
+    edges_t = all_edges.T
+    n_mask = np.isin(edges_t, list(n_term_atoms)).any(axis=1)
+    c_mask = np.isin(edges_t, list(c_term_atoms)).any(axis=1)
+    term_mask = n_mask | c_mask
+    n_edges = edges_t[n_mask].T
+    c_edges = edges_t[c_mask].T
+    bulk_edges = edges_t[~term_mask].T
+    return n_edges, c_edges, bulk_edges
+
+def _check_graph_distance(graph, conn_comp, node_1, node_2, min_pair):
+    con_1 = [i for i, comp in enumerate(conn_comp) if node_1 in comp][0]
+    con_2 = [i for i, comp in enumerate(conn_comp) if node_2 in comp][0]
+    if con_1 == con_2:
+        shortest_path = bidirectional_shortest_path(graph, node_1, node_2)
+        dist = len(shortest_path)
+        return dist >= min_pair
+    return True
+
+def _list_to_edges(items, order):
+    if not items:
+        return np.zeros((order, 0), dtype=int)
+    return np.array(items, dtype=int).T
+
+def _build_neighbor_list(topo, chain_residues, entries, min_pair=6, res_exclusion=1):
+    n_term_atoms, c_term_atoms = _terminal_atoms(chain_residues)
+    atom_res_indices = _atom_res_indices(chain_residues, len(entries))
+
+    conn_mat = get_connectivity_matrix(topo).numpy()
+    bond_edges = get_n_paths(conn_mat, n=2).numpy()
+    if bond_edges.size == 0:
+        bond_edges = np.zeros((2, 0), dtype=int)
+    angle_edges = get_n_paths(conn_mat, n=3).numpy()
+    if angle_edges.size == 0:
+        angle_edges = np.zeros((3, 0), dtype=int)
+
+    n_term_bonds, c_term_bonds, bulk_bonds = _split_bulk_termini(
+        n_term_atoms, c_term_atoms, bond_edges
+    )
+    n_term_angles, c_term_angles, bulk_angles = _split_bulk_termini(
+        n_term_atoms, c_term_atoms, angle_edges
+    )
+
+    phi_edges = {{res: [] for res in ALL_RESIDUES}}
+    psi_edges = {{res: [] for res in ALL_RESIDUES}}
+    pro_omega, non_pro_omega = [], []
+    gamma_1, gamma_2 = [], []
+
+    for chain in chain_residues:
+        residues = chain["residues"]
+        for idx, residue in enumerate(residues):
+            resname = residue["resname"]
+            bead_map = _bead_map(residue)
+            if idx > 0:
+                prev_map = _bead_map(residues[idx - 1])
+                phi_edges[resname].append(
+                    [prev_map["C"], bead_map["N"], bead_map["CA"], bead_map["C"]]
+                )
+                omega = [prev_map["CA"], prev_map["C"], bead_map["N"], bead_map["CA"]]
+                if resname == "PRO":
+                    pro_omega.append(omega)
+                else:
+                    non_pro_omega.append(omega)
+            if idx < len(residues) - 1:
+                next_map = _bead_map(residues[idx + 1])
+                psi_edges[resname].append(
+                    [bead_map["N"], bead_map["CA"], bead_map["C"], next_map["N"]]
+                )
+                gamma_2.append(
+                    [bead_map["CA"], bead_map["O"], next_map["N"], bead_map["C"]]
+                )
+            if residue["resname"] != "GLY":
+                gamma_1.append(
+                    [bead_map["N"], bead_map["CB"], bead_map["C"], bead_map["CA"]]
+                )
+
+    fully_connected = _symmetrise_distance_interaction(
+        topo.fully_connected2torch()
+    ).numpy()
+    graph = nx.Graph(conn_mat)
+    conn_comps = list(nx.connected_components(graph))
+    pairs = []
+    for p in fully_connected.T:
+        i, j = int(p[0]), int(p[1])
+        if abs(atom_res_indices[i] - atom_res_indices[j]) < res_exclusion:
+            continue
+        if graph.has_edge(i, j):
+            continue
+        if not _check_graph_distance(graph, conn_comps, i, j, min_pair):
+            continue
+        if bond_edges.size and np.all(bond_edges == p[:, None], axis=0).any():
+            continue
+        if angle_edges.size and np.all(angle_edges[[0, 2], :] == p[:, None], axis=0).any():
+            continue
+        pairs.append(p)
+    if pairs:
+        non_bonded_edges = torch.tensor(np.array(pairs).T, dtype=torch.long)
+        non_bonded_edges = torch.unique(
+            _symmetrise_distance_interaction(non_bonded_edges), dim=1
+        ).numpy()
+    else:
+        non_bonded_edges = np.zeros((2, 0), dtype=int)
+
+    edges_and_orders = [
+        ("n_term_bonds", 2, n_term_bonds),
+        ("bulk_bonds", 2, bulk_bonds),
+        ("c_term_bonds", 2, c_term_bonds),
+        ("n_term_angles", 3, n_term_angles),
+        ("bulk_angles", 3, bulk_angles),
+        ("c_term_angles", 3, c_term_angles),
+        ("non_bonded", 2, non_bonded_edges),
+        ("pro_omega", 4, _list_to_edges(pro_omega, 4)),
+        ("non_pro_omega", 4, _list_to_edges(non_pro_omega, 4)),
+        ("gamma_1", 4, _list_to_edges(gamma_1, 4)),
+        ("gamma_2", 4, _list_to_edges(gamma_2, 4)),
+    ]
+    for res in ALL_RESIDUES:
+        edges_and_orders.append((f"{{res}}_phi", 4, _list_to_edges(phi_edges[res], 4)))
+        edges_and_orders.append((f"{{res}}_psi", 4, _list_to_edges(psi_edges[res], 4)))
+
+    nls = {{}}
+    for tag, order, edge in edges_and_orders:
+        edge_t = torch.tensor(edge, dtype=torch.long) if not torch.is_tensor(edge) else edge
+        nls[tag] = make_neighbor_list(tag, order, edge_t)
+    return nls
+
+def build_inputs(pdb_path, output_dir, structure_name, cg_pdb_name, replicas, jitter, strip_hetero, write_cg_pdb):
+    residues, order = _parse_pdb(pdb_path, strip_hetero=strip_hetero)
+    if not order:
+        raise ValueError(f"No protein residues found in {{pdb_path}}.")
+    entries = []
+    chain_residues = []
+    current_chain = None
+    chain_bucket = []
+    for key in order:
+        chain_id, resseq, icode = key
+        resname = residues[key]["resname"].upper()
+        resname = RESNAME_MAP.get(resname, resname)
+        if resname not in STANDARD_RES:
+            raise ValueError(f"Unsupported residue {{resname}} in {{pdb_path}}.")
+        atoms = residues[key]["atoms"]
+        required = ["N", "CA", "C", "O"]
+        if resname != "GLY":
+            required.append("CB")
+        for atom_name in required:
+            if atom_name not in atoms:
+                raise ValueError(
+                    f"Missing heavy atom {{atom_name}} in residue {{resname}} "
+                    f"{{resseq}} chain {{chain_id}} ({{pdb_path}})."
+                )
+        bead_atoms = ["N", "CA", "C", "O"] if resname == "GLY" else ["N", "CA", "CB", "C", "O"]
+        bead_indices = []
+        for atom_name in bead_atoms:
+            if (resname, atom_name) not in OPEPS_MAP:
+                raise ValueError(f"No OPEPS mapping for {{resname}} {{atom_name}} in {{pdb_path}}.")
+            _, atom_type, mass = OPEPS_MAP[(resname, atom_name)]
+            coord = atoms[atom_name]["coord"]
+            entries.append({{
+                "atom_name": atom_name,
+                "atom_type": int(atom_type),
+                "mass": float(mass),
+                "resname": resname,
+                "resid": resseq,
+                "chain_id": chain_id,
+                "coord": coord,
+            }})
+            bead_indices.append(len(entries) - 1)
+        if current_chain is None:
+            current_chain = chain_id
+        if chain_id != current_chain:
+            if chain_bucket:
+                chain_residues.append({{"chain_id": current_chain, "residues": chain_bucket}})
+            chain_bucket = []
+            current_chain = chain_id
+        chain_bucket.append({{"resname": resname, "resid": resseq, "beads": bead_indices}})
+    if chain_bucket:
+        chain_residues.append({{"chain_id": current_chain, "residues": chain_bucket}})
+
+    topo = Topology()
+    for entry in entries:
+        topo.add_atom(entry["atom_type"], entry["atom_name"], entry["resname"], entry["resid"])
+
+    bonds = _build_opeps_bonds(chain_residues)
+    for i, j in bonds:
+        topo.add_bond(i, j)
+    angles = _angles_from_bonds(bonds)
+    for i, j, k in angles:
+        topo.add_angle(i, j, k)
+    dihedrals = _dihedrals_from_bonds(bonds)
+    for i, j, k, l in dihedrals:
+        topo.add_dihedral(i, j, k, l)
+
+    nls = _build_neighbor_list(topo, chain_residues, entries)
+
+    coords = np.array([e["coord"] for e in entries], dtype=float)
+    atom_types = np.array([e["atom_type"] for e in entries], dtype=int)
+    masses = np.array([e["mass"] for e in entries], dtype=float)
+
+    os.makedirs(output_dir, exist_ok=True)
+    base_pos = torch.tensor(coords, dtype=torch.float32)
+    atom_types_t = torch.tensor(atom_types, dtype=torch.long)
+    masses_t = torch.tensor(masses, dtype=torch.float32)
+
+    data_list = []
+    for idx in range(max(int(replicas), 1)):
+        pos = base_pos.clone()
+        if jitter is not None:
+            pos = pos + torch.randn_like(pos) * float(jitter)
+        data = AtomicData.from_points(
+            pos=pos,
+            atom_types=atom_types_t,
+            masses=masses_t,
+            neighborlist=copy.deepcopy(nls),
+            tag=f"{{os.path.basename(pdb_path)}}_{{idx + 1}}",
+        )
+        data_list.append(data)
+
+    torch.save(data_list, os.path.join(output_dir, structure_name))
+    if write_cg_pdb:
+        _write_cg_pdb(os.path.join(output_dir, cg_pdb_name), entries)
+
+build_inputs(
+    r\"{pdb_path}\",
+    r\"{output_dir}\",
+    r\"{structure_name}\",
+    r\"{cg_pdb_name}\",
+    replicas={int(replicas)},
+    jitter={jitter_repr},
+    strip_hetero={bool(strip_hetero)},
+    write_cg_pdb={bool(write_cg_pdb)},
+)
+"""
+            command = f"""
+set -e
+source {conda_sh}
+conda activate {mlcg_env}
+python - <<'PY'
+{script}
+PY
+conda deactivate
+"""
+            result = subprocess.run(
+                ["bash", "-i", "-c", command], capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    "MLCG input preparation failed.\\n"
+                    f"stdout:\\n{result.stdout}\\n"
+                    f"stderr:\\n{result.stderr}"
+                )
+            if not os.path.exists(os.path.join(output_dir, structure_name)):
+                raise RuntimeError(
+                    "MLCG input preparation did not produce the expected structure file: "
+                    f"{os.path.join(output_dir, structure_name)}"
+                )
+
+        if isinstance(protocols, str):
+            protocols = [protocols]
+        protocols = [str(p).lower() for p in protocols]
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        if skip_models is None:
+            skip_models = []
+
+        job_folder = os.path.abspath(job_folder)
+        os.makedirs(job_folder, exist_ok=True)
+        job_root = os.path.dirname(job_folder)
+        self.mlcg_md = _MLCGSimulationRegistry()
+        if model_shared_dir and copy_model_file:
+            raise ValueError(
+                "model_shared_dir cannot be used with copy_model_file=True; choose one."
+            )
+
+        shared_model_dir = None
+        if model_shared_dir:
+            shared_model_dir = os.path.expanduser(model_shared_dir)
+            if not os.path.isabs(shared_model_dir):
+                shared_model_dir = os.path.join(job_root, shared_model_dir)
+            os.makedirs(shared_model_dir, exist_ok=True)
+
+        model_file = model_file or "model_with_prior.pt"
+        model_source_path = mlcg_setup.resolve_pretrained_model_path(
+            model_file,
+            model_url=model_url,
+            cache_dir=model_cache_dir,
+        )
+        if shared_model_dir:
+            shared_model_path = os.path.join(
+                shared_model_dir, os.path.basename(model_source_path)
+            )
+            copy_needed = not os.path.exists(shared_model_path)
+            if not copy_needed:
+                try:
+                    copy_needed = (
+                        os.path.getsize(shared_model_path)
+                        != os.path.getsize(model_source_path)
+                    )
+                except OSError:
+                    copy_needed = True
+            if copy_needed:
+                shutil.copy2(model_source_path, shared_model_path)
+            model_source_path = shared_model_path
+        model_source_size = None
+        if copy_model_file:
+            try:
+                model_source_size = os.path.getsize(model_source_path)
+            except OSError:
+                model_source_size = None
+
+        base_simulation = dict(
+            device=device,
+            dtype=dtype,
+            dt=float(dt),
+            friction=float(friction),
+            n_timesteps=int(n_timesteps),
+            save_interval=int(save_interval),
+            export_interval=int(export_interval),
+            log_interval=int(log_interval),
+            log_type="write",
+            create_checkpoints=bool(create_checkpoints),
+            read_checkpoint_file=bool(read_checkpoint_file),
+            save_energies=False,
+            save_forces=False,
+            specialize_priors=bool(specialize_priors),
+        )
+
+        command_root = os.getcwd()
+
+        def _timed_command(protocol_folder: str, run_cmd: str, config_name: str) -> str:
+            protocol_rel = os.path.relpath(protocol_folder, command_root)
+            return "\n".join(
+                [
+                    f'cd "{protocol_rel}"',
+                    "export MACE_USE_CUEQ_CG=1",
+                    "start_ts=$(date +%s)",
+                    run_cmd,
+                    "status=$?",
+                    "end_ts=$(date +%s)",
+                    "elapsed=$((end_ts - start_ts))",
+                    "MLCG_ELAPSED=$elapsed python - <<'PY'",
+                    "import json",
+                    "import os",
+                    f"config_path = {config_name!r}",
+                    "with open(config_path, 'r') as handle:",
+                    "    config = json.load(handle)",
+                    "sim = config.get('simulation', {})",
+                    "dt = float(sim.get('dt', 0.0))",
+                    "nsteps = int(sim.get('n_timesteps', 0))",
+                    "sim_ns = (dt * nsteps) / 1000.0",
+                    "elapsed = float(os.environ.get('MLCG_ELAPSED', '0') or 0)",
+                    "days = elapsed / 86400.0 if elapsed else 0.0",
+                    "ns_day = sim_ns / days if days > 0 else 0.0",
+                    "print(f\"Simulation wall time: {elapsed:.1f}s\")",
+                    "print(f\"Simulated time per replica: {sim_ns:.3f} ns\")",
+                    "if days > 0:",
+                    "    print(f\"Estimated performance: {ns_day:.3f} ns/day\")",
+                    "else:",
+                    "    print(\"Estimated performance: n/a\")",
+                    "PY",
+                    "exit $status",
+                ]
+            ) + "\n"
+
+        jobs = []
+        for model in self:
+            if only_models and model not in only_models:
+                continue
+            if model in skip_models:
+                continue
+
+            model_folder = os.path.join(job_folder, model)
+            os.makedirs(model_folder, exist_ok=True)
+            input_dir = os.path.join(model_folder, "input_files")
+            os.makedirs(input_dir, exist_ok=True)
+
+            model_dest_path = model_source_path
+            if copy_model_file:
+                model_dest_path = os.path.join(
+                    input_dir, os.path.basename(model_source_path)
+                )
+                copy_needed = True
+                if os.path.exists(model_dest_path):
+                    if model_source_size is not None:
+                        copy_needed = os.path.getsize(model_dest_path) != model_source_size
+                    else:
+                        copy_needed = False
+                if copy_needed:
+                    shutil.copy2(model_source_path, model_dest_path)
+
+            if mlcg_available and mlcg_md_cls is not None:
+                mlcg_obj = mlcg_md_cls(self.models_paths[model])
+            else:
+                mlcg_obj = SimpleNamespace(
+                    input_pdb=self.models_paths[model],
+                    pdb_name=os.path.basename(self.models_paths[model]).replace(".pdb", ""),
+                    command_log=[],
+                    structure_file=None,
+                    cg_pdb_file=None,
+                )
+            self.mlcg_md[model] = mlcg_obj
+
+            structure_name = f"{model}_mlcg_structures.pt"
+            cg_pdb_name = f"{model}_cg.pdb"
+            structure_path = os.path.join(input_dir, structure_name)
+            mlcg_obj.structure_file = structure_path
+            mlcg_obj.cg_pdb_file = os.path.join(input_dir, cg_pdb_name)
+
+            if not skip_preparation:
+                if mlcg_available:
+                    mlcg_obj.prepare_inputs(
+                        input_dir,
+                        replicas=replicas,
+                        coordinate_jitter=coordinate_jitter,
+                        strip_hetero=strip_hetero,
+                        write_cg_pdb=write_cg_pdb,
+                        structure_name=structure_name,
+                        cg_pdb_name=cg_pdb_name,
+                    )
+                elif mlcg_env:
+                    _prepare_inputs_in_env(
+                        self.models_paths[model],
+                        input_dir,
+                        structure_name,
+                        cg_pdb_name,
+                    )
+
+            structure_file = mlcg_obj.structure_file
+            if structure_file is None:
+                structure_file = os.path.join(
+                    input_dir, structure_name
+                )
+            if skip_preparation and not os.path.exists(structure_file):
+                raise FileNotFoundError(
+                    f"Expected structure file not found for {model}: {structure_file}"
+                )
+
+            for protocol in protocols:
+                if protocol not in ("langevin", "pt"):
+                    raise ValueError(
+                        f"Unknown protocol '{protocol}'. Use 'langevin', 'pt', or both."
+                    )
+
+                protocol_folder = os.path.join(model_folder, protocol)
+                os.makedirs(protocol_folder, exist_ok=True)
+                sims_dir = os.path.join(protocol_folder, "sims")
+                os.makedirs(sims_dir, exist_ok=True)
+
+                if protocol == "langevin":
+                    beta = 1.0 / (mlcg_setup.KBOLTZMANN * float(temperature))
+                    structure_ref = os.path.relpath(
+                        structure_file, protocol_folder
+                    )
+                    model_ref = model_dest_path
+                    if copy_model_file or shared_model_dir:
+                        model_ref = os.path.relpath(model_dest_path, protocol_folder)
+                    config = {
+                        "betas": [float(beta)],
+                        "model_file": model_ref,
+                        "structure_file": structure_ref,
+                        "simulation": dict(base_simulation),
+                    }
+                    config["simulation"]["filename"] = os.path.join(
+                        "sims", f"{model}_langevin"
+                    )
+                    if extra_langevin_options:
+                        config["simulation"].update(extra_langevin_options)
+
+                    config_path = os.path.join(
+                        protocol_folder, f"{model}_langevin.json"
+                    )
+                    with open(config_path, "w") as handle:
+                        json.dump(config, handle, indent=2)
+
+                    run_cmd = (
+                        "python -m mlcg.scripts.mlcg_nvt_langevin "
+                        f"--config {os.path.basename(config_path)} "
+                        f"--simulation.filename \"sims/${{SLURM_JOB_ID:-local}}_{model}_langevin\""
+                    )
+                    cmd = _timed_command(
+                        protocol_folder, run_cmd, os.path.basename(config_path)
+                    )
+                    jobs.append(cmd)
+                    mlcg_obj.command_log.append(
+                        {"protocol": "langevin", "command": cmd.strip()}
+                    )
+
+                if protocol == "pt":
+                    if pt_betas_by_model and model in pt_betas_by_model:
+                        betas = pt_betas_by_model[model]
+                    elif pt_betas is not None:
+                        betas = pt_betas
+                    else:
+                        betas = mlcg_setup.paper_pt_betas(
+                            model, self.models_paths[model]
+                        )
+
+                    structure_ref = os.path.relpath(
+                        structure_file, protocol_folder
+                    )
+                    model_ref = model_dest_path
+                    if copy_model_file or shared_model_dir:
+                        model_ref = os.path.relpath(model_dest_path, protocol_folder)
+                    config = {
+                        "betas": [float(b) for b in betas],
+                        "model_file": model_ref,
+                        "structure_file": structure_ref,
+                        "simulation": dict(base_simulation),
+                    }
+                    config["simulation"]["exchange_interval"] = int(
+                        pt_exchange_interval
+                    )
+                    config["simulation"]["filename"] = os.path.join(
+                        "sims", f"{model}_pt"
+                    )
+                    if extra_pt_options:
+                        config["simulation"].update(extra_pt_options)
+
+                    config_path = os.path.join(
+                        protocol_folder, f"{model}_pt.json"
+                    )
+                    with open(config_path, "w") as handle:
+                        json.dump(config, handle, indent=2)
+
+                    run_cmd = (
+                        "python -m mlcg.scripts.mlcg_nvt_pt_langevin "
+                        f"--config {os.path.basename(config_path)} "
+                        f"--simulation.filename \"sims/${{SLURM_JOB_ID:-local}}_{model}_pt\""
+                    )
+                    cmd = _timed_command(
+                        protocol_folder, run_cmd, os.path.basename(config_path)
+                    )
+                    jobs.append(cmd)
+                    mlcg_obj.command_log.append(
+                        {"protocol": "pt", "command": cmd.strip()}
+                    )
+
+        self.mlcg_md.mlcg_command_logs.clear()
+        for model_name, md_obj in self.mlcg_md.items():
+            self.mlcg_md.mlcg_command_logs[model_name] = list(
+                getattr(md_obj, "command_log", [])
+            )
+
+        return jobs
 
     def setUpPLACERcalculation(self, PLACERfolder, output_folder="output_folder", PLACER_PATH="/gpfs/projects/bsc72/conda_envs/PLACER/", suffix=None, num_samples=50,
                            ligand=None, apo=False,rerank="prmsd", mutate=None, mutate_chain="A",
