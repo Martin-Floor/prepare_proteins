@@ -13507,7 +13507,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     "cd -",
                 ]
                 abfe_jobs.append("\n".join(job_lines))
-                abfe_jobs.append("\n".join(job_lines))
 
             _log(f"Prepared replicas under: {model_folder}")
 
