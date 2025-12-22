@@ -13495,10 +13495,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                 # Build job command block (binaries must exist in execution environment)
                 job_lines = [
                     f"cd {replica_folder}",
+                    (
+                        f"make_atm_system_from_amber "
+                        f"--AmberPrmtopinFile {base_name}.prmtop "
+                        f"--AmberInpcrdinFile {base_name}.inpcrd "
+                        f"--systemXMLoutFile {base_name}_sys.xml "
+                        f"--systemPDBoutFile {base_name}.pdb"
+                    ),
                     f"abfe_structprep {base_name}.cntl",
                     f"abfe_production {base_name}.cntl",
                     "cd -",
                 ]
+                abfe_jobs.append("\n".join(job_lines))
                 abfe_jobs.append("\n".join(job_lines))
 
             _log(f"Prepared replicas under: {model_folder}")
