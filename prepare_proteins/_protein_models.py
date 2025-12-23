@@ -12695,26 +12695,27 @@ make sure of reading the target sequences with the function readTargetSequences(
         self,
         job_folder: str,
         replicas: int,
-        simulation_time: float,  # ns
+        # --- NEW: the ONLY time-control knob ---
+        protocol: str = "standard",  # "debug", "fast", "standard", "thorough"
         # --- preparation / parameterization options (passed through to setUpOpenMMPreparation) ---
-        ligand_charges: Optional[Dict[str, int]] = None,
-        residue_names: Optional[Dict[str, Dict[str, str]]] = None,
+        ligand_charges: "Optional[Dict[str, int]]" = None,
+        residue_names: "Optional[Dict[str, Dict[str, str]]]" = None,
         ff: str = "amber14",
-        add_bonds: Optional[Dict] = None,
-        skip_ligands: Optional[List[str]] = None,
-        metal_ligand: Optional[Union[str, List[str]]] = None,
-        metal_parameters: Optional[str] = None,
-        skip_replicas: Optional[List[int]] = None,
-        extra_frcmod: Optional[List[str]] = None,
-        extra_mol2: Optional[List[str]] = None,
-        non_standard_residues: Optional[List[str]] = None,
+        add_bonds: "Optional[Dict]" = None,
+        skip_ligands: "Optional[List[str]]" = None,
+        metal_ligand: "Optional[Union[str, List[str]]]" = None,
+        metal_parameters: "Optional[str]" = None,
+        skip_replicas: "Optional[List[int]]" = None,
+        extra_frcmod: "Optional[List[str]]" = None,
+        extra_mol2: "Optional[List[str]]" = None,
+        non_standard_residues: "Optional[List[str]]" = None,
         add_hydrogens: bool = True,
-        extra_force_field: Optional[Union[str, List[str]]] = None,
+        extra_force_field: "Optional[Union[str, List[str]]]" = None,
         add_counterionsRand: bool = False,
         skip_preparation: bool = False,
-        ligand_parameters_source: Optional[str] = None,
-        only_models: Optional[List[str]] = None,
-        skip_models: Optional[List[str]] = None,
+        ligand_parameters_source: "Optional[str]" = None,
+        only_models: "Optional[List[str]]" = None,
+        skip_models: "Optional[List[str]]" = None,
         # --- ABFE control / runtime options ---
         temperature: float = 300.0,
         wall_time: int = 2880,  # minutes
@@ -12732,163 +12733,53 @@ make sure of reading the target sequences with the function readTargetSequences(
         # --- displacement + python-side verbosity ---
         displacement_padding_ang: float = 0.0,
         python_verbose: bool = True,
-    ) -> List[str]:
+    ) -> "List[str]":
         """
-        Set up Absolute Binding Free Energy (ABFE) simulations using OpenMM and an
-        Amber-based system definition.
+        Set up Absolute Binding Free Energy (ABFE) simulations using OpenMM + Amber prmtop/inpcrd.
 
-        This method:
-        1) Ensures Amber prmtop/inpcrd files exist (via setUpOpenMMPreparation)
-        2) Automatically identifies ligand atoms and receptor binding-site atoms
-            directly from the Amber topology and coordinates (no external binaries)
-        3) Computes a physically meaningful alchemical displacement vector
-            (ligand → solvent bulk)
-        4) Writes ABFE control (.cntl) files and nodefiles for each replica
+        Key behavior
+        ------------
+        The user does NOT provide simulation_time anymore.
+        Instead, the chosen `protocol` hardcodes:
+        - total intended sampling per replica (total_ns)
+        - chunk size (chunk_ns)  -> PRODUCTION_STEPS per replica run ("one chunk")
+        - checkpoint/cycle defaults
 
-        All atom indices written to the control files are:
-        - 0-based
-        - consistent with the Amber/OpenMM atom ordering
+        Protocol definitions (defaults you can edit)
+        --------------------------------------------
+        - debug:
+            * Purpose: sanity-check setup quickly (indices, displacement, run command)
+            * total_ns: 0.2 ns per replica
+            * chunk_ns: 0.02 ns (20 ps)  -> many short chunks; fast feedback
+        - fast:
+            * Purpose: quick screening / rough estimate
+            * total_ns: 5 ns per replica
+            * chunk_ns: 0.25 ns
+        - standard:
+            * Purpose: good default for first “real” attempt
+            * total_ns: 20 ns per replica
+            * chunk_ns: 0.5 ns
+        - thorough:
+            * Purpose: more robust sampling
+            * total_ns: 50 ns per replica
+            * chunk_ns: 1.0 ns
 
-        Parameters
-        ----------
-        job_folder : str
-            Path to the directory where model and replica folders will be created.
-
-        replicas : int
-            Number of independent ABFE replicas to prepare per model.
-
-        simulation_time : float
-            Production simulation time in nanoseconds (ns).
-
-        --- Preparation / parameterization options ---
-        ligand_charges : dict[str, int], optional
-            Mapping from ligand residue name to its formal charge.
-            Used during Amber parameterization and ligand identification.
-
-        residue_names : dict, optional
-            Per-model residue renaming rules applied before parameterization.
-
-        ff : str
-            Name of the Amber force field to use (e.g. "amber14").
-
-        add_bonds : dict, optional
-            Explicit covalent bonds to define (e.g. metal coordination).
-
-        skip_ligands : list[str], optional
-            Ligand residue names to exclude from parameterization.
-
-        metal_ligand : str or list[str], optional
-            Residues treated as metal-coordinating ligands.
-
-        metal_parameters : str, optional
-            Path to predefined metal–ligand parameter files.
-
-        skip_replicas : list[int], optional
-            Replica indices to skip during setup.
-
-        extra_frcmod : list[str], optional
-            Additional Amber frcmod files to include.
-
-        extra_mol2 : list[str], optional
-            Additional MOL2 files used for ligand parameterization.
-
-        non_standard_residues : list[str], optional
-            Residue names treated as ligands rather than standard amino acids.
-
-        add_hydrogens : bool
-            Whether to add missing hydrogens prior to parameterization.
-
-        extra_force_field : str or list[str], optional
-            Extra Amber/OpenMM force-field XML or parameter files.
-
-        add_counterionsRand : bool
-            If True, add counterions using random placement.
-
-        skip_preparation : bool
-            If True, reuse existing prmtop/inpcrd files and skip re-parameterization.
-
-        ligand_parameters_source : str, optional
-            Directory containing ligand parameter libraries.
-
-        only_models : list[str], optional
-            Restrict setup to these model names.
-
-        skip_models : list[str], optional
-            Model names to exclude from setup.
-
-        --- ABFE control / runtime options ---
-        temperature : float
-            Simulation temperature in Kelvin.
-
-        wall_time : int
-            Maximum wall-clock time in minutes, written to the ABFE control file.
-
-        openmm_platform : str
-            OpenMM platform to use ("CPU", "CUDA", "OpenCL", or "Reference").
-
-        verbose : str
-            Verbosity flag written into the ABFE control file ("yes" or "no").
-
-        --- Automatic index generation ---
-        ligand_chain : str
-            Chain ID used to identify ligand atoms (fallbacks to residue name if absent).
-
-        bs_cutoff_ang : float
-            Distance cutoff in Å used to define the receptor binding site
-            (atoms within this distance from the ligand).
-
-        rcpt_cm_mode : str
-            Strategy for selecting receptor centroid atoms:
-            - "AUTO": CA (protein) → P (nucleic acids) → heavy atoms fallback
-            - "CA": protein Cα atoms
-            - "P": nucleic-acid phosphate atoms
-            - "SUGAR": nucleic-acid sugar reference atoms (C1')
-            - "HEAVY": all nearby heavy atoms
-
-        ligand_cm_mode : str
-            Ligand centroid definition:
-            - "heavy": heavy atoms only (recommended)
-            - "all": all ligand atoms
-
-        min_rcpt_atoms : int
-            Minimum number of receptor atoms required for centroid definition.
-
-        include_protein : bool
-            Whether protein residues are considered part of the receptor.
-
-        include_nucleic : bool
-            Whether DNA/RNA residues are considered part of the receptor.
-
-        write_model_pdb : bool
-            If True, write a PDB file per model for visualization and debugging.
-
-        --- Displacement and Python-side verbosity ---
-        displacement_padding_ang : float
-            Optional inward shift (Å) applied to the chosen box corner to avoid
-            placing the ligand exactly on the periodic boundary.
-
-        python_verbose : bool
-            If True, print detailed setup information, assumptions, and
-            intermediate calculations to stdout for debugging.
+        Notes on “total_ns”
+        -------------------
+        Many AToM/ABFE runners run replicas in repeated chunks until WALL_TIME (or another stop condition).
+        Here we compute and PRINT an estimated number of chunks: estimated_chunks = ceil(total_ns/chunk_ns).
+        If you want the job to *enforce* stopping after exactly estimated_chunks, tell me your preferred
+        mechanism (wrapper loop, job array, scheduler constraints), and I’ll add it.
 
         Returns
         -------
         list[str]
-            A list of shell command blocks (one per replica) that can be submitted
-            to run ABFE simulations.
-
-        Notes
-        -----
-        - This function does not rely on external executables for index generation.
-        - All geometric calculations are performed using OpenMM and NumPy.
-        - The resulting setup is suitable for protein, DNA, RNA, or mixed receptors.
+            One shell command block per replica.
         """
         import os
         import shutil
         import numpy as np
-
         from openmm.app import AmberPrmtopFile, AmberInpcrdFile
-        from openmm.unit import angstrom
 
         # ---------------------------------------------------------------------
         # Logging helper (python-side verbose)
@@ -12907,20 +12798,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             )
 
         if verbose not in ("yes", "no"):
-            raise ValueError(
-                "verbose must be either 'yes' or 'no' (written into .cntl)"
-            )
+            raise ValueError("verbose must be either 'yes' or 'no' (written into .cntl)")
 
         if rcpt_cm_mode.upper() not in ("AUTO", "CA", "P", "SUGAR", "HEAVY"):
             raise ValueError("rcpt_cm_mode must be one of: AUTO, CA, P, SUGAR, HEAVY")
 
         if ligand_cm_mode.lower() not in ("heavy", "all"):
             raise ValueError("ligand_cm_mode must be 'heavy' or 'all'")
-
-        # Convert simulation time (ns) to steps (dt fixed in cntl as 0.002 ps)
-        time_step_ps = 0.002
-        production_steps = int((simulation_time * 1_000_000) / time_step_ps)
-        saving_steps = max(1, production_steps // 100)
 
         if isinstance(only_models, str):
             only_models = [only_models]
@@ -12929,6 +12813,71 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Ligand residue names: infer from ligand_charges keys (most robust for Amber)
         ligand_resnames = tuple(ligand_charges.keys()) if ligand_charges else ("LIG",)
+
+        # ---------------------------------------------------------------------
+        # Protocol → total_ns + chunking + cadence
+        # ---------------------------------------------------------------------
+        time_step_ps = 0.002  # must match TIME_STEP in .cntl
+
+        PROTOCOLS = {
+            # total_ns = intended total sampling per replica (for planning)
+            # chunk_ns = per-run length (one "replica run") used to set PRODUCTION_STEPS
+            "debug": {
+                "total_ns": 0.2,
+                "chunk_ns": 0.02,
+                "cycle_time_s": 5,
+                "checkpoint_s": 300,
+                "subjobs_buffer": "1.0",
+            },
+            "fast": {
+                "total_ns": 5.0,
+                "chunk_ns": 0.25,
+                "cycle_time_s": 10,
+                "checkpoint_s": 600,
+                "subjobs_buffer": "1.0",
+            },
+            "standard": {
+                "total_ns": 20.0,
+                "chunk_ns": 0.5,
+                "cycle_time_s": 10,
+                "checkpoint_s": 900,
+                "subjobs_buffer": "1.0",
+            },
+            "thorough": {
+                "total_ns": 50.0,
+                "chunk_ns": 1.0,
+                "cycle_time_s": 10,
+                "checkpoint_s": 1200,
+                "subjobs_buffer": "1.0",
+            },
+        }
+
+        prot = protocol.lower().strip()
+        if prot not in PROTOCOLS:
+            raise ValueError(f"protocol must be one of {list(PROTOCOLS.keys())}, got '{protocol}'")
+
+        total_ns = float(PROTOCOLS[prot]["total_ns"])
+        chunk_ns = float(PROTOCOLS[prot]["chunk_ns"])
+        cycle_time_s = int(PROTOCOLS[prot]["cycle_time_s"])
+        checkpoint_s = int(PROTOCOLS[prot]["checkpoint_s"])
+        subjobs_buffer = str(PROTOCOLS[prot]["subjobs_buffer"])
+
+        # Convert chunk length → steps per run/chunk
+        production_steps = int(round((chunk_ns * 1000.0) / time_step_ps))
+        production_steps = max(1, production_steps)
+
+        # Keep these equal to PRODUCTION_STEPS (safe default; avoids known scheduler edge cases)
+        prnt_frequency = production_steps
+        trj_frequency = production_steps
+
+        estimated_chunks = int(np.ceil(total_ns / chunk_ns)) if total_ns > 0 else 0
+
+        _log(
+            f"Protocol={prot} | total_ns={total_ns:.3f} ns/replica | chunk_ns={chunk_ns:.3f} ns "
+            f"-> PRODUCTION_STEPS={production_steps} | PRNT/TRJ={prnt_frequency} "
+            f"| CYCLE_TIME={cycle_time_s}s | CHECKPOINT_TIME={checkpoint_s}s "
+            f"| estimated_chunks≈{estimated_chunks}"
+        )
 
         # ---------------------------------------------------------------------
         # Helper functions
@@ -12941,66 +12890,47 @@ make sure of reading the target sequences with the function readTargetSequences(
         def _positions_to_xyz_ang(positions) -> np.ndarray:
             """
             Convert OpenMM positions (Quantity of Vec3) to a unitless (N,3) float array in Å.
-            This is the safest conversion and avoids unit bugs like 1/angstrom.
             """
-            import numpy as np
             from openmm.unit import angstrom
 
-            # positions is typically a Quantity of Vec3
             if hasattr(positions, "value_in_unit"):
                 arr = positions.value_in_unit(angstrom)  # unitless in Å
                 return np.array([[v[0], v[1], v[2]] for v in arr], dtype=float)
 
-            # Fallback (rare): assume it's already unitless
             return np.array(positions, dtype=float)
 
-        def _write_pdb_from_amber(
-            prmtop_path: str, inpcrd_path: str, pdb_out: str
-        ) -> None:
+        def _write_pdb_from_amber(prmtop_path: str, inpcrd_path: str, pdb_out: str) -> None:
             """Write a PDB from Amber topology/coordinates using OpenMM."""
             from openmm.app import PDBFile
 
             prmtop = AmberPrmtopFile(prmtop_path)
             inpcrd = AmberInpcrdFile(inpcrd_path)
-
             with open(pdb_out, "w") as f:
                 PDBFile.writeFile(prmtop.topology, inpcrd.positions, f)
 
         def _compute_furthest_corner_displacement(
-            xyz_ang,
-            lig_cm_atom_indices,
+            xyz_ang: np.ndarray,
+            lig_cm_atom_indices: "List[int]",
             inpcrd_obj,
             padding_ang: float = 0.0,
-        ):
+        ) -> "Tuple[float, float, float]":
             """
-            Compute DISPLACEMENT (Å) as vector from ligand centroid to furthest box corner.
-
-            Robust against OpenMM Quantity objects: converts everything to unitless floats in Å.
+            Compute DISPLACEMENT (Å) as vector from ligand centroid to furthest periodic box corner.
+            If inpcrd has no boxVectors, fall back to coordinate bounding box.
             """
-            import numpy as np
-            from openmm.unit import angstrom
-
-            # --- Force xyz_ang to be a unitless float array in Å ---
-            # If xyz_ang is already a numpy array -> stays.
-            # If xyz_ang is an OpenMM Quantity -> convert to Å and strip units.
-            if hasattr(xyz_ang, "value_in_unit"):
-                xyz = np.array(xyz_ang.value_in_unit(angstrom), dtype=float)
-            else:
-                xyz = np.array(xyz_ang, dtype=float)
+            xyz = np.array(xyz_ang, dtype=float)
 
             lig_idx = np.array(lig_cm_atom_indices, dtype=int)
-            lig_xyz = xyz[lig_idx]
-            lig_centroid = lig_xyz.mean(axis=0)  # unitless float Å
+            lig_centroid = xyz[lig_idx].mean(axis=0)  # Å
 
-            # --- Read periodic box vectors and strip units safely ---
             bv = getattr(inpcrd_obj, "boxVectors", None)
 
             if bv is not None:
+                from openmm.unit import angstrom
+
                 a, b, c = bv
 
-                # Convert to unitless floats in Å
                 def _vec_to_ang(v):
-                    # v may be Vec3 or Quantity(Vec3)
                     if hasattr(v, "value_in_unit"):
                         v = v.value_in_unit(angstrom)
                     return np.array([v.x, v.y, v.z], dtype=float)
@@ -13023,14 +12953,13 @@ make sure of reading the target sequences with the function readTargetSequences(
                     dtype=float,
                 )
 
-                # Optional inward padding from corners toward cell center
                 if padding_ang and padding_ang > 0:
                     center = 0.5 * (a + b + c)
                     vecs = corners - center
                     norms = np.linalg.norm(vecs, axis=1)
-                    corners = corners - (
-                        vecs / np.maximum(norms[:, None], 1e-8)
-                    ) * float(padding_ang)
+                    corners = corners - (vecs / np.maximum(norms[:, None], 1e-8)) * float(
+                        padding_ang
+                    )
 
                 dists = np.linalg.norm(corners - lig_centroid[None, :], axis=1)
                 corner = corners[int(np.argmax(dists))]
@@ -13041,12 +12970,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 _log(
                     f"Chosen furthest corner (Å): {corner[0]:.2f}, {corner[1]:.2f}, {corner[2]:.2f}"
                 )
-
             else:
-                # Fallback: bounding box corners from coordinates
                 mins = xyz.min(axis=0)
                 maxs = xyz.max(axis=0)
-
                 corners = np.array(
                     [
                         [mins[0], mins[1], mins[2]],
@@ -13060,18 +12986,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ],
                     dtype=float,
                 )
-
                 dists = np.linalg.norm(corners - lig_centroid[None, :], axis=1)
                 corner = corners[int(np.argmax(dists))]
-
-                if padding_ang and padding_ang > 0:
-                    corner = corner + np.sign(corner - lig_centroid) * float(
-                        padding_ang
-                    )
-
-                _log(
-                    "No periodic box vectors found in inpcrd; using coordinate bounding-box fallback."
-                )
+                _log("No boxVectors in inpcrd; using coordinate bounding-box fallback.")
                 _log(
                     f"Chosen furthest bbox corner (Å): {corner[0]:.2f}, {corner[1]:.2f}, {corner[2]:.2f}"
                 )
@@ -13081,16 +12998,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                 f"Ligand centroid (Å): {lig_centroid[0]:.2f}, {lig_centroid[1]:.2f}, {lig_centroid[2]:.2f}"
             )
             _log(f"DISPLACEMENT (Å): {disp[0]:.2f}, {disp[1]:.2f}, {disp[2]:.2f}")
-
             return float(disp[0]), float(disp[1]), float(disp[2])
 
-        def _compute_indices_from_amber(prmtop_path: str, inpcrd_path: str):
-            """
-            Compute ABFE atom index lists directly from Amber prmtop/inpcrd.
-
-            Returns:
-            dict with index lists and additional data needed to compute DISPLACEMENT.
-            """
+        def _compute_indices_from_amber(prmtop_path: str, inpcrd_path: str) -> dict:
+            """Compute ABFE atom index lists directly from Amber prmtop/inpcrd."""
             prmtop = AmberPrmtopFile(prmtop_path)
             inpcrd = AmberInpcrdFile(inpcrd_path)
 
@@ -13101,12 +13012,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             res_names = np.array([a.residue.name for a in atoms], dtype=object)
             chain_ids = np.array([a.residue.chain.id for a in atoms], dtype=object)
 
-            # Hydrogen heuristic (Amber naming is usually H*)
             is_h = np.char.startswith(atom_names.astype(str), "H")
 
-            # -----------------
             # Ligand selection: chain -> fallback by resname
-            # -----------------
             lig_mask = chain_ids == ligand_chain
             lig_sel = "chain"
             if not np.any(lig_mask):
@@ -13115,190 +13023,78 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             if not np.any(lig_mask):
                 raise ValueError(
-                    f"Could not identify ligand atoms by chain '{ligand_chain}' "
-                    f"or ligand_resnames={ligand_resnames}."
+                    f"Could not identify ligand atoms by chain '{ligand_chain}' or ligand_resnames={ligand_resnames}."
                 )
 
             lig_all = np.where(lig_mask)[0]
             lig_heavy = np.where(lig_mask & ~is_h)[0]
-            lig_query = (
-                lig_heavy if len(lig_heavy) else lig_all
-            )  # for distances/centroid
+            lig_query = lig_heavy if len(lig_heavy) else lig_all
 
             ligand_atoms = lig_all.tolist()
-            ligand_cm_atoms = (
-                lig_query.tolist()
-                if ligand_cm_mode.lower() == "heavy"
-                else lig_all.tolist()
-            )
+            ligand_cm_atoms = lig_query.tolist() if ligand_cm_mode.lower() == "heavy" else lig_all.tolist()
+            _log(f"Ligand selection={lig_sel}; ligand atoms(all/heavy)={len(lig_all)}/{len(lig_heavy)}")
 
-            _log(
-                f"Ligand selection={lig_sel}; ligand atoms(all/heavy)={len(lig_all)}/{len(lig_heavy)}"
-            )
-
-            # -----------------
             # Receptor filtering
-            # -----------------
             PROT = {
-                "ALA",
-                "ARG",
-                "ASN",
-                "ASP",
-                "CYS",
-                "GLN",
-                "GLU",
-                "GLY",
-                "HIS",
-                "ILE",
-                "LEU",
-                "LYS",
-                "MET",
-                "PHE",
-                "PRO",
-                "SER",
-                "THR",
-                "TRP",
-                "TYR",
-                "VAL",
-                "HID",
-                "HIE",
-                "HIP",
-                "CYM",
-                "CYX",
-                "LYN",
-                "ASH",
-                "GLH",
+                "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE","LEU","LYS","MET",
+                "PHE","PRO","SER","THR","TRP","TYR","VAL",
+                "HID","HIE","HIP","CYM","CYX","LYN","ASH","GLH",
             }
-            NA = {
-                "A",
-                "C",
-                "G",
-                "U",
-                "T",
-                "DA",
-                "DC",
-                "DG",
-                "DT",
-                "DU",
-                "RA",
-                "RC",
-                "RG",
-                "RU",
-                "ADE",
-                "CYT",
-                "GUA",
-                "URA",
-                "THY",
-            }
-            WATER = {"WAT", "HOH", "TIP3", "SOL", "H2O"}
-            IONS = {
-                "NA",
-                "K",
-                "CL",
-                "MG",
-                "ZN",
-                "CA",
-                "MN",
-                "FE",
-                "CU",
-                "CO",
-                "NI",
-                "RB",
-                "CS",
-                "LI",
-                "SR",
-                "CD",
-                "HG",
-                "PB",
-                "AL",
-                "BA",
-                "BR",
-                "I",
-            }
+            NA = {"A","C","G","U","T","DA","DC","DG","DT","DU","RA","RC","RG","RU","ADE","CYT","GUA","URA","THY"}
+            WATER = {"WAT","HOH","TIP3","SOL","H2O"}
+            IONS = {"NA","K","CL","MG","ZN","CA","MN","FE","CU","CO","NI","RB","CS","LI","SR","CD","HG","PB","AL","BA","BR","I"}
 
             is_water = np.isin(res_names, list(WATER))
             is_ion = np.isin(res_names, list(IONS))
-
-            is_prot = (
-                np.isin(res_names, list(PROT))
-                if include_protein
-                else np.zeros(len(atoms), dtype=bool)
-            )
-            is_na = (
-                np.isin(res_names, list(NA))
-                if include_nucleic
-                else np.zeros(len(atoms), dtype=bool)
-            )
-
+            is_prot = np.isin(res_names, list(PROT)) if include_protein else np.zeros(len(atoms), dtype=bool)
+            is_na = np.isin(res_names, list(NA)) if include_nucleic else np.zeros(len(atoms), dtype=bool)
             is_target = (is_prot | is_na) & (~is_water) & (~is_ion)
 
-            # Receptor heavy atoms only
             rcpt_mask = (~lig_mask) & is_target & (~is_h)
             rcpt_heavy = np.where(rcpt_mask)[0]
             if len(rcpt_heavy) == 0:
-                raise ValueError(
-                    "No receptor heavy atoms remain after filtering (protein/NA only; no waters/ions)."
-                )
+                raise ValueError("No receptor heavy atoms remain after filtering (protein/NA only; no waters/ions).")
 
-            # -----------------
-            # Binding site by proximity (within cutoff)
-            # -----------------
+            # Binding site by proximity
             lig_xyz = xyz[np.array(lig_query, dtype=int)]
             rcpt_xyz = xyz[rcpt_heavy]
-
             d2 = np.sum((rcpt_xyz[:, None, :] - lig_xyz[None, :, :]) ** 2, axis=2)
             mind = np.sqrt(np.min(d2, axis=1))
             nearby = rcpt_heavy[mind <= float(bs_cutoff_ang)]
-
-            _log(
-                f"Binding-site cutoff={bs_cutoff_ang:.2f} Å; nearby receptor heavy atoms={len(nearby)}"
-            )
+            _log(f"Binding-site cutoff={bs_cutoff_ang:.2f} Å; nearby receptor heavy atoms={len(nearby)}")
 
             if len(nearby) < int(min_rcpt_atoms):
                 raise ValueError(
-                    f"Only {len(nearby)} receptor atoms found within {bs_cutoff_ang} Å after filtering. "
-                    "Increase bs_cutoff_ang or lower min_rcpt_atoms."
+                    f"Only {len(nearby)} receptor atoms within {bs_cutoff_ang} Å. "
+                    f"Increase bs_cutoff_ang or lower min_rcpt_atoms."
                 )
 
-            # -----------------
             # RCPT_CM_ATOMS choice
-            # -----------------
             mode = rcpt_cm_mode.upper()
-
             if mode == "AUTO":
                 ca = [i for i in nearby.tolist() if atom_names[i] == "CA"]
                 if len(ca) >= int(min_rcpt_atoms):
-                    rcpt_cm_atoms = ca
-                    chosen = "CA"
+                    rcpt_cm_atoms, chosen = ca, "CA"
                 else:
                     p = [i for i in nearby.tolist() if atom_names[i] == "P"]
                     if len(p) >= 1:
-                        rcpt_cm_atoms = p
-                        chosen = "P"
+                        rcpt_cm_atoms, chosen = p, "P"
                     else:
-                        rcpt_cm_atoms = nearby.tolist()
-                        chosen = "HEAVY"
+                        rcpt_cm_atoms, chosen = nearby.tolist(), "HEAVY"
             elif mode == "CA":
                 ca = [i for i in nearby.tolist() if atom_names[i] == "CA"]
-                rcpt_cm_atoms = ca if len(ca) >= 1 else nearby.tolist()
-                chosen = "CA"
+                rcpt_cm_atoms, chosen = (ca if len(ca) >= 1 else nearby.tolist()), "CA"
             elif mode == "P":
                 p = [i for i in nearby.tolist() if atom_names[i] == "P"]
-                rcpt_cm_atoms = p if len(p) >= 1 else nearby.tolist()
-                chosen = "P"
+                rcpt_cm_atoms, chosen = (p if len(p) >= 1 else nearby.tolist()), "P"
             elif mode == "SUGAR":
                 c1 = [i for i in nearby.tolist() if atom_names[i] == "C1'"]
-                rcpt_cm_atoms = c1 if len(c1) >= 1 else nearby.tolist()
-                chosen = "SUGAR"
+                rcpt_cm_atoms, chosen = (c1 if len(c1) >= 1 else nearby.tolist()), "SUGAR"
             else:
-                rcpt_cm_atoms = nearby.tolist()
-                chosen = "HEAVY"
+                rcpt_cm_atoms, chosen = nearby.tolist(), "HEAVY"
 
-            _log(
-                f"RCPT_CM_MODE={mode}; chosen={chosen}; rcpt_cm_atoms={len(rcpt_cm_atoms)}"
-            )
+            _log(f"RCPT_CM_MODE={mode}; chosen={chosen}; rcpt_cm_atoms={len(rcpt_cm_atoms)}")
 
-            # POS_RESTRAINED_ATOMS: simplest consistent choice is restraining RCPT_CM_ATOMS
             pos_restrained_atoms = rcpt_cm_atoms
 
             return {
@@ -13306,7 +13102,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 "ligand_cm_atoms": sorted(set(ligand_cm_atoms)),
                 "rcpt_cm_atoms": sorted(set(rcpt_cm_atoms)),
                 "pos_restrained_atoms": sorted(set(pos_restrained_atoms)),
-                # Extra info for displacement computation
                 "inpcrd_obj": inpcrd,
                 "xyz_ang": xyz,
             }
@@ -13365,14 +13160,17 @@ make sure of reading the target sequences with the function readTargetSequences(
     LIGOFFSET = '0., 0., 0.'
 
     WALL_TIME = {wall_time}
-    CYCLE_TIME = 10
-    CHECKPOINT_TIME = 600
+    CYCLE_TIME = {cycle_time_s}
+    CHECKPOINT_TIME = {checkpoint_s}
     NODEFILE = 'nodefile'
-    SUBJOBS_BUFFER_SIZE = '1.0'
+    SUBJOBS_BUFFER_SIZE = '{subjobs_buffer}'
 
+    # MD steps per replica run (one chunk)
     PRODUCTION_STEPS = '{production_steps}'
-    PRNT_FREQUENCY = '{saving_steps}'
-    TRJ_FREQUENCY = '{saving_steps}'
+
+    # Must be a multiple of PRODUCTION_STEPS (we set equal)
+    PRNT_FREQUENCY = '{prnt_frequency}'
+    TRJ_FREQUENCY = '{trj_frequency}'
 
     # --- auto-filled atom index lists (0-based indices in Amber/OpenMM atom order) ---
     LIGAND_ATOMS = {ligand_atoms}
@@ -13399,15 +13197,12 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         nodefile_line = "localhost,0:0,1,CUDA,,/tmp\n"
         abfe_jobs = []
-
-        # Replica naming convention
         zfill = max(len(str(replicas)), 2)
 
         # ---------------------------------------------------------------------
         # Main loop over models
         # ---------------------------------------------------------------------
         for model in self:
-            # Filter by only_models/skip_models
             if only_models and model not in only_models:
                 continue
             if model in skip_models:
@@ -13426,16 +13221,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             _log(f"--- Model: {model} (base_name={base_name}) ---")
 
-            # Optional: one PDB per model for visualization
             if write_model_pdb:
                 pdb_path = os.path.join(model_folder, f"{base_name}.pdb")
                 if (not os.path.exists(pdb_path)) or (not skip_preparation):
                     _write_pdb_from_amber(prmtop_src, inpcrd_src, pdb_path)
                     _log(f"Wrote model PDB: {pdb_path}")
 
-            # Compute indices and displacement ONCE per model
+            # Compute indices + displacement once per model
             model_info = _compute_indices_from_amber(prmtop_src, inpcrd_src)
-
             disp_x, disp_y, disp_z = _compute_furthest_corner_displacement(
                 xyz_ang=model_info["xyz_ang"],
                 lig_cm_atom_indices=model_info["ligand_cm_atoms"],
@@ -13443,9 +13236,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 padding_ang=float(displacement_padding_ang),
             )
 
-            # -----------------------------------------------------------------
             # Replicas
-            # -----------------------------------------------------------------
             for replica in range(1, replicas + 1):
                 if skip_replicas and replica in skip_replicas:
                     continue
@@ -13454,7 +13245,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 replica_folder = os.path.join(model_folder, f"replica_{replica_str}")
                 os.makedirs(replica_folder, exist_ok=True)
 
-                # Copy Amber files into replica folder (self-contained)
                 prmtop_dst = os.path.join(replica_folder, f"{base_name}.prmtop")
                 inpcrd_dst = os.path.join(replica_folder, f"{base_name}.inpcrd")
 
@@ -13463,13 +13253,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_dst):
                     shutil.copyfile(inpcrd_src, inpcrd_dst)
 
-                # Write control file using model-level index lists and displacement
                 cntl_text = abfe_cntl_template.format(
                     basename=base_name,
                     temperature=int(temperature),
                     wall_time=int(wall_time),
+                    cycle_time_s=int(cycle_time_s),
+                    checkpoint_s=int(checkpoint_s),
+                    subjobs_buffer=subjobs_buffer,
                     production_steps=int(production_steps),
-                    saving_steps=int(saving_steps),
+                    prnt_frequency=int(prnt_frequency),
+                    trj_frequency=int(trj_frequency),
                     openmm_platform=openmm_platform,
                     verbose=verbose,
                     disp_x=disp_x,
@@ -13478,21 +13271,18 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ligand_atoms=_format_index_list(model_info["ligand_atoms"]),
                     ligand_cm_atoms=_format_index_list(model_info["ligand_cm_atoms"]),
                     rcpt_cm_atoms=_format_index_list(model_info["rcpt_cm_atoms"]),
-                    pos_restrained_atoms=_format_index_list(
-                        model_info["pos_restrained_atoms"]
-                    ),
+                    pos_restrained_atoms=_format_index_list(model_info["pos_restrained_atoms"]),
                 )
 
                 cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
                 with open(cntl_path, "w") as f:
                     f.write(cntl_text)
 
-                # Write nodefile
                 nodefile_path = os.path.join(replica_folder, "nodefile")
                 with open(nodefile_path, "w") as f:
                     f.write(nodefile_line)
 
-                # Build job command block (binaries must exist in execution environment)
+                # One job block per replica
                 job_lines = [
                     f"cd {replica_folder}",
                     (
@@ -13508,9 +13298,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 ]
                 abfe_jobs.append("\n".join(job_lines))
 
-            _log(f"Prepared replicas under: {model_folder}")
+            _log(
+                f"Prepared replicas under: {model_folder} | protocol={prot} "
+                f"(total_ns={total_ns:.2f}, chunk_ns={chunk_ns:.2f}, chunks≈{estimated_chunks})"
+            )
 
         return abfe_jobs
+
+
 
     def analyseRosettaDocking(
         self,
