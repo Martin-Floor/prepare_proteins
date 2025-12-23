@@ -159,12 +159,21 @@ def _geometric_temperatures(
     return sorted(temps)
 
 
+def pt_betas_from_temperature_range(
+    tmin: float,
+    tmax: float,
+    n_replicas: int,
+    target: float = 300.0,
+) -> List[float]:
+    """Return beta ladder for PT using a geometric temperature progression."""
+    temps = _geometric_temperatures(tmin, tmax, n_replicas, target=target)
+    return [1.0 / (KBOLTZMANN * t) for t in temps]
+
+
 def paper_pt_betas(model_name: str, pdb_path: Optional[str] = None) -> List[float]:
     pdb_id = _guess_pdb_id(model_name, pdb_path)
     tmin, tmax, n_replicas = PAPER_PT_SETTINGS.get(pdb_id, DEFAULT_PT_SETTING)
-    temps = _geometric_temperatures(tmin, tmax, n_replicas, target=300.0)
-    betas = [1.0 / (KBOLTZMANN * t) for t in temps]
-    return betas
+    return pt_betas_from_temperature_range(tmin, tmax, n_replicas, target=300.0)
 
 
 DEFAULT_MODEL_CACHE_DIR = os.path.join(

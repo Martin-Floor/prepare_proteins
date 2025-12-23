@@ -12097,11 +12097,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         skip_preparation=False,
         pt_betas=None,
         pt_betas_by_model=None,
+        pt_temperature_range=None,
+        pt_replicas=None,
         pt_exchange_interval=2000,
         temperature=300.0,
         dt=0.004,
         friction=1.0,
         n_timesteps=50000,
+        chunk_ns=5.0,
         save_interval=250,
         export_interval=10000,
         log_interval=10000,
@@ -12116,6 +12119,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         model_cache_dir=None,
         model_shared_dir=None,
         copy_model_file=False,
+        per_replica_simulation_time=None,
     ):
         """
         Set up MLCG simulations (Langevin and parallel tempering) for the current models.
@@ -12148,8 +12152,19 @@ make sure of reading the target sequences with the function readTargetSequences(
             Override PT beta ladder for all models.
         pt_betas_by_model : dict, optional
             Override PT beta ladder per model name.
+        pt_temperature_range : tuple[float, float], optional
+            Temperature range (min, max) in K for a geometric PT ladder.
+            Requires pt_replicas and uses ``temperature`` as the target value.
+        pt_replicas : int, optional
+            Number of PT replicas for a geometric temperature ladder.
         pt_exchange_interval : int, optional
             Exchange interval (in steps) for PT runs.
+        chunk_ns : float, optional
+            Length of each chunk in ns for chunked runs (default: 5.0).
+        per_replica_simulation_time : float, optional
+            Total per-replica simulation length in ns (reduced units). When set, jobs
+            are split into chunked runs and a restartable chunk runner is created per
+            protocol. In chunked mode, ``n_timesteps`` is ignored and checkpoints are enabled.
         model_url : str, optional
             URL to download the pretrained model if it is not found locally. A zip archive
             is supported and will be searched for the model file.
@@ -12682,10 +12697,14 @@ conda deactivate
             except OSError:
                 model_source_size = None
 
+        dt_value = float(dt)
+        if dt_value <= 0:
+            raise ValueError("dt must be positive.")
+
         base_simulation = dict(
             device=device,
             dtype=dtype,
-            dt=float(dt),
+            dt=dt_value,
             friction=float(friction),
             n_timesteps=int(n_timesteps),
             save_interval=int(save_interval),
@@ -12698,6 +12717,44 @@ conda deactivate
             save_forces=False,
             specialize_priors=bool(specialize_priors),
         )
+
+        def _ns_to_steps(ns_value: float, dt_ps: float) -> int:
+            steps = int(round((float(ns_value) * 1000.0) / float(dt_ps)))
+            if steps < 1:
+                raise ValueError(
+                    f"Requested time {ns_value} ns is too short for dt={dt_ps} ps."
+                )
+            return steps
+
+        chunked = per_replica_simulation_time is not None
+        chunk_ns_value = None
+        per_replica_ns_value = None
+        chunk_steps = None
+        per_replica_steps = None
+        total_chunks = None
+        if chunked:
+            per_replica_ns_value = float(per_replica_simulation_time)
+            if per_replica_ns_value <= 0:
+                raise ValueError(
+                    "per_replica_simulation_time must be positive when chunking."
+                )
+            if chunk_ns is None:
+                chunk_ns_value = 5.0
+            else:
+                chunk_ns_value = float(chunk_ns)
+            if chunk_ns_value <= 0:
+                raise ValueError("chunk_ns must be positive when chunking.")
+            chunk_steps = _ns_to_steps(chunk_ns_value, dt_value)
+            per_replica_steps = _ns_to_steps(per_replica_ns_value, dt_value)
+            total_chunks = (per_replica_steps + chunk_steps - 1) // chunk_steps
+            base_simulation["n_timesteps"] = int(chunk_steps)
+            base_simulation["create_checkpoints"] = True
+            base_simulation["read_checkpoint_file"] = False
+
+        if (pt_temperature_range is None) ^ (pt_replicas is None):
+            raise ValueError(
+                "pt_temperature_range and pt_replicas must be provided together."
+            )
 
         command_root = os.getcwd()
 
@@ -12735,6 +12792,141 @@ conda deactivate
                     "exit $status",
                 ]
             ) + "\n"
+
+        def _write_chunk_runner(
+            protocol_folder: str,
+            sims_dir: str,
+            base_config_path: str,
+            run_module: str,
+            prefix: str,
+        ) -> Tuple[str, str]:
+            if chunk_steps is None or per_replica_steps is None or total_chunks is None:
+                raise RuntimeError("Chunking parameters are not initialized.")
+            if chunk_ns_value is None or per_replica_ns_value is None:
+                raise RuntimeError("Chunking parameters are not initialized.")
+            chunk_config_name = "chunk_config.json"
+            state_name = "chunk_state.json"
+            zpad = max(4, len(str(total_chunks)))
+            script = f"""import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+BASE_CONFIG = {os.path.basename(base_config_path)!r}
+CHUNK_CONFIG = {chunk_config_name!r}
+STATE_PATH = {state_name!r}
+SIMS_DIR = {os.path.basename(sims_dir)!r}
+PREFIX = {prefix!r}
+CHUNK_STEPS = {int(chunk_steps)}
+PER_REPLICA_STEPS = {int(per_replica_steps)}
+CHUNK_NS = {float(chunk_ns_value)}
+PER_REPLICA_NS = {float(per_replica_ns_value)}
+TOTAL_CHUNKS = {int(total_chunks)}
+ZPAD = {int(zpad)}
+RUN_MODULE = {run_module!r}
+
+def _find_indices(suffix):
+    pattern = re.compile(r"^" + re.escape(PREFIX) + r"_chunk(\\\\d+)" + re.escape(suffix) + r"$")
+    indices = []
+    if os.path.isdir(SIMS_DIR):
+        for name in os.listdir(SIMS_DIR):
+            match = pattern.match(name)
+            if match:
+                indices.append(int(match.group(1)))
+    return sorted(indices)
+
+def _write_state(state):
+    tmp_path = STATE_PATH + ".tmp"
+    with open(tmp_path, "w") as handle:
+        json.dump(state, handle, indent=2, sort_keys=True)
+    os.replace(tmp_path, STATE_PATH)
+
+def main():
+    done = _find_indices(".done")
+    started = _find_indices(".started")
+    pending = sorted(set(started) - set(done))
+    if pending:
+        chunk_idx = pending[0]
+    elif done:
+        chunk_idx = max(done) + 1
+    else:
+        chunk_idx = 1
+
+    if TOTAL_CHUNKS and chunk_idx > TOTAL_CHUNKS:
+        print("All chunks completed.")
+        return 0
+
+    remaining = PER_REPLICA_STEPS - (chunk_idx - 1) * CHUNK_STEPS
+    if remaining <= 0:
+        print("All chunks completed.")
+        return 0
+    n_steps = min(CHUNK_STEPS, remaining)
+    chunk_tag = str(chunk_idx).zfill(ZPAD)
+    chunk_prefix = PREFIX + "_chunk" + chunk_tag
+    os.makedirs(SIMS_DIR, exist_ok=True)
+    started_marker = os.path.join(SIMS_DIR, chunk_prefix + ".started")
+    done_marker = os.path.join(SIMS_DIR, chunk_prefix + ".done")
+    resume = os.path.exists(started_marker) and not os.path.exists(done_marker)
+    if os.environ.get("MLCG_FORCE_RESTART", "").lower() in ("1", "true", "yes"):
+        resume = False
+
+    with open(BASE_CONFIG, "r") as handle:
+        config = json.load(handle)
+    sim = config.get("simulation", {{}})
+    sim["n_timesteps"] = int(n_steps)
+    sim["filename"] = os.path.join(SIMS_DIR, chunk_prefix)
+    sim["create_checkpoints"] = True
+    sim["read_checkpoint_file"] = bool(resume)
+    config["simulation"] = sim
+
+    with open(CHUNK_CONFIG, "w") as handle:
+        json.dump(config, handle, indent=2)
+    with open(chunk_prefix + ".json", "w") as handle:
+        json.dump(config, handle, indent=2)
+
+    state = dict(
+        chunk_ns=CHUNK_NS,
+        per_replica_ns=PER_REPLICA_NS,
+        chunk_steps=CHUNK_STEPS,
+        per_replica_steps=PER_REPLICA_STEPS,
+        total_chunks=TOTAL_CHUNKS,
+        current_chunk=chunk_idx,
+        current_prefix=chunk_prefix,
+        current_steps=int(n_steps),
+        resume=bool(resume),
+        status="running",
+        updated_at=time.strftime("%Y-%m-%d %H:%M:%S"),
+    )
+    _write_state(state)
+
+    if not os.path.exists(started_marker):
+        with open(started_marker, "w") as handle:
+            handle.write("")
+    run_cmd = [sys.executable, "-m", RUN_MODULE, "--config", CHUNK_CONFIG]
+    result = subprocess.run(run_cmd)
+    state["status"] = "completed" if result.returncode == 0 else "failed"
+    state["last_return_code"] = int(result.returncode)
+    state["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    if result.returncode == 0:
+        with open(done_marker, "w") as handle:
+            handle.write("")
+        try:
+            os.remove(started_marker)
+        except OSError:
+            pass
+        state["last_completed_chunk"] = chunk_idx
+    _write_state(state)
+    return result.returncode
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+            script_path = os.path.join(protocol_folder, "run_chunked.py")
+            with open(script_path, "w") as handle:
+                handle.write(script)
+            return script_path, chunk_config_name
 
         jobs = []
         for model in self:
@@ -12819,6 +13011,7 @@ conda deactivate
                 os.makedirs(protocol_folder, exist_ok=True)
                 sims_dir = os.path.join(protocol_folder, "sims")
                 os.makedirs(sims_dir, exist_ok=True)
+                prefix = f"{model}_{protocol}"
 
                 if protocol == "langevin":
                     beta = 1.0 / (mlcg_setup.KBOLTZMANN * float(temperature))
@@ -12834,26 +13027,45 @@ conda deactivate
                         "structure_file": structure_ref,
                         "simulation": dict(base_simulation),
                     }
-                    config["simulation"]["filename"] = os.path.join(
-                        "sims", f"{model}_langevin"
-                    )
                     if extra_langevin_options:
                         config["simulation"].update(extra_langevin_options)
 
-                    config_path = os.path.join(
-                        protocol_folder, f"{model}_langevin.json"
-                    )
-                    with open(config_path, "w") as handle:
-                        json.dump(config, handle, indent=2)
+                    if chunked:
+                        config["simulation"]["filename"] = os.path.join("sims", prefix)
+                        config_path = os.path.join(
+                            protocol_folder, f"{prefix}_base.json"
+                        )
+                        with open(config_path, "w") as handle:
+                            json.dump(config, handle, indent=2)
+                        runner_path, chunk_config_name = _write_chunk_runner(
+                            protocol_folder,
+                            sims_dir,
+                            config_path,
+                            "mlcg.scripts.mlcg_nvt_langevin",
+                            prefix,
+                        )
+                        run_cmd = f"python {os.path.basename(runner_path)}"
+                        cmd = _timed_command(
+                            protocol_folder, run_cmd, chunk_config_name
+                        )
+                    else:
+                        config["simulation"]["filename"] = os.path.join(
+                            "sims", f"{model}_langevin"
+                        )
+                        config_path = os.path.join(
+                            protocol_folder, f"{model}_langevin.json"
+                        )
+                        with open(config_path, "w") as handle:
+                            json.dump(config, handle, indent=2)
 
-                    run_cmd = (
-                        "python -m mlcg.scripts.mlcg_nvt_langevin "
-                        f"--config {os.path.basename(config_path)} "
-                        f"--simulation.filename \"sims/${{SLURM_JOB_ID:-local}}_{model}_langevin\""
-                    )
-                    cmd = _timed_command(
-                        protocol_folder, run_cmd, os.path.basename(config_path)
-                    )
+                        run_cmd = (
+                            "python -m mlcg.scripts.mlcg_nvt_langevin "
+                            f"--config {os.path.basename(config_path)} "
+                            f"--simulation.filename \"sims/${{SLURM_JOB_ID:-local}}_{model}_langevin\""
+                        )
+                        cmd = _timed_command(
+                            protocol_folder, run_cmd, os.path.basename(config_path)
+                        )
                     jobs.append(cmd)
                     mlcg_obj.command_log.append(
                         {"protocol": "langevin", "command": cmd.strip()}
@@ -12864,6 +13076,14 @@ conda deactivate
                         betas = pt_betas_by_model[model]
                     elif pt_betas is not None:
                         betas = pt_betas
+                    elif pt_temperature_range is not None and pt_replicas is not None:
+                        tmin, tmax = pt_temperature_range
+                        betas = mlcg_setup.pt_betas_from_temperature_range(
+                            float(tmin),
+                            float(tmax),
+                            int(pt_replicas),
+                            target=float(temperature),
+                        )
                     else:
                         betas = mlcg_setup.paper_pt_betas(
                             model, self.models_paths[model]
@@ -12884,26 +13104,45 @@ conda deactivate
                     config["simulation"]["exchange_interval"] = int(
                         pt_exchange_interval
                     )
-                    config["simulation"]["filename"] = os.path.join(
-                        "sims", f"{model}_pt"
-                    )
                     if extra_pt_options:
                         config["simulation"].update(extra_pt_options)
 
-                    config_path = os.path.join(
-                        protocol_folder, f"{model}_pt.json"
-                    )
-                    with open(config_path, "w") as handle:
-                        json.dump(config, handle, indent=2)
+                    if chunked:
+                        config["simulation"]["filename"] = os.path.join("sims", prefix)
+                        config_path = os.path.join(
+                            protocol_folder, f"{prefix}_base.json"
+                        )
+                        with open(config_path, "w") as handle:
+                            json.dump(config, handle, indent=2)
+                        runner_path, chunk_config_name = _write_chunk_runner(
+                            protocol_folder,
+                            sims_dir,
+                            config_path,
+                            "mlcg.scripts.mlcg_nvt_pt_langevin",
+                            prefix,
+                        )
+                        run_cmd = f"python {os.path.basename(runner_path)}"
+                        cmd = _timed_command(
+                            protocol_folder, run_cmd, chunk_config_name
+                        )
+                    else:
+                        config["simulation"]["filename"] = os.path.join(
+                            "sims", f"{model}_pt"
+                        )
+                        config_path = os.path.join(
+                            protocol_folder, f"{model}_pt.json"
+                        )
+                        with open(config_path, "w") as handle:
+                            json.dump(config, handle, indent=2)
 
-                    run_cmd = (
-                        "python -m mlcg.scripts.mlcg_nvt_pt_langevin "
-                        f"--config {os.path.basename(config_path)} "
-                        f"--simulation.filename \"sims/${{SLURM_JOB_ID:-local}}_{model}_pt\""
-                    )
-                    cmd = _timed_command(
-                        protocol_folder, run_cmd, os.path.basename(config_path)
-                    )
+                        run_cmd = (
+                            "python -m mlcg.scripts.mlcg_nvt_pt_langevin "
+                            f"--config {os.path.basename(config_path)} "
+                            f"--simulation.filename \"sims/${{SLURM_JOB_ID:-local}}_{model}_pt\""
+                        )
+                        cmd = _timed_command(
+                            protocol_folder, run_cmd, os.path.basename(config_path)
+                        )
                     jobs.append(cmd)
                     mlcg_obj.command_log.append(
                         {"protocol": "pt", "command": cmd.strip()}
