@@ -12718,7 +12718,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         # --- ABFE control / runtime options ---
         temperature: float = 300.0,
         wall_time: int = 2880,  # minutes
-        openmm_platform: str = "CPU",
+        openmm_platform: str = "CUDA",
         verbose: str = "no",  # written into the .cntl file ("yes" / "no")
         # --- automatic index generation (no external binaries) ---
         ligand_chain: str = "L",
