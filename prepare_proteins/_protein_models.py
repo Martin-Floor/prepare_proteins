@@ -12871,6 +12871,10 @@ def main():
     resume = os.path.exists(started_marker) and not os.path.exists(done_marker)
     if os.environ.get("MLCG_FORCE_RESTART", "").lower() in ("1", "true", "yes"):
         resume = False
+    checkpoint_path = os.path.join(SIMS_DIR, chunk_prefix + "_checkpoint.pt")
+    if resume and not os.path.exists(checkpoint_path):
+        print("Checkpoint " + checkpoint_path + " missing; restarting chunk from scratch.")
+        resume = False
 
     with open(BASE_CONFIG, "r") as handle:
         config = json.load(handle)
