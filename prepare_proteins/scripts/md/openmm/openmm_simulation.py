@@ -63,6 +63,15 @@ def _split_steps(total_steps, segments, label):
     base, remainder = divmod(total_steps, segments)
     return [base + (1 if i < remainder else 0) for i in range(segments)]
 
+def _to_production_steps(step, equilibration_steps):
+    if step is None:
+        return None
+    if step <= 0:
+        return 0
+    if step >= equilibration_steps:
+        return step - equilibration_steps
+    return step
+
 # Validate and parse input parameters
 try:
     input_prmtop = args.input_prmtop
@@ -98,6 +107,7 @@ try:
     chunk_steps = _ns_to_steps(chunk_size, time_step, "Chunk size")
     nvt_steps = _ns_to_steps(nvt_time, time_step, "NVT time")
     npt_steps = _ns_to_steps(npt_time, time_step, "NPT time")
+    equilibration_steps = nvt_steps + npt_steps
     equilibration_data_report_steps = _interval_to_steps(equilibration_data_report_time, time_step, "Equilibration data report time")
     equilibration_dcd_report_steps = _interval_to_steps(equilibration_dcd_report_time, time_step, "Equilibration DCD report time", allow_zero=True)
     if equilibration_dcd_report_steps is None and equilibration_data_report_steps is not None:
@@ -239,6 +249,12 @@ class CustomDataReporter(StateDataReporter):
             values.append(energy)
         return values
 
+def _chunk_number_from_filename(filename):
+    match = re.match(r'^production_(\d+)\.data$', filename)
+    if not match:
+        return None
+    return int(match.group(1))
+
 def get_last_step_from_report():
     """
     Get the last step from the production data report file.
@@ -248,10 +264,16 @@ def get_last_step_from_report():
     """
     last_step = 0
     last_chunk_file = None
-    for filename in sorted(os.listdir('.'), reverse=True):
-        if filename.startswith('production_') and filename.endswith('.data'):
+    last_chunk_number = None
+    for filename in os.listdir('.'):
+        if not (filename.startswith('production_') and filename.endswith('.data')):
+            continue
+        chunk_number = _chunk_number_from_filename(filename)
+        if chunk_number is None:
+            continue
+        if last_chunk_number is None or chunk_number > last_chunk_number:
+            last_chunk_number = chunk_number
             last_chunk_file = filename
-            break
 
     if last_chunk_file:
         with open(last_chunk_file, 'r') as f:
@@ -285,7 +307,7 @@ def check_rename_needed(zfill_length):
     bool: True if renaming is needed, False otherwise.
     """
     for filename in os.listdir('.'):
-        if filename.startswith('production_') and (filename.endswith('.data') or filename.endswith('.dcd')):
+        if filename.startswith('production_') and (filename.endswith('.data') or filename.endswith('.dcd') or filename.endswith('.chk')):
             parts = filename.split('_')
             chunk_num = parts[1].split('.')[0]
             if len(chunk_num) != zfill_length:
@@ -300,12 +322,30 @@ def rename_chunk_files(zfill_length):
     zfill_length (int): The zero-fill length.
     """
     for filename in os.listdir('.'):
-        if filename.startswith('production_') and (filename.endswith('.data') or filename.endswith('.dcd')):
+        if filename.startswith('production_') and (filename.endswith('.data') or filename.endswith('.dcd') or filename.endswith('.chk')):
             parts = filename.split('_')
             chunk_num = parts[1].split('.')[0]
             new_chunk_num = chunk_num.zfill(zfill_length)
             new_filename = filename.replace(chunk_num, new_chunk_num)
             os.rename(filename, new_filename)
+
+def _chunk_index_from_report_file(report_file):
+    if not report_file:
+        return None
+    chunk_number = _chunk_number_from_filename(report_file)
+    if chunk_number is None:
+        return None
+    return chunk_number - 1
+
+def _get_checkpoint_step(simulation):
+    try:
+        state = simulation.context.getState(getStep=True)
+    except Exception:
+        return None
+    try:
+        return int(state.getStepCount())
+    except Exception:
+        return None
 
 # Define function to get the current time
 def current_time():
@@ -383,13 +423,84 @@ try:
     if check_rename_needed(zfill_length):
         rename_chunk_files(zfill_length)
 
-    # Check if the checkpoint file exists
-    if os.path.exists(checkpoint_file):
-        print("Checkpoint file found. Loading checkpoint.")
-        simulation.loadCheckpoint(checkpoint_file)
+    last_report_step, last_report_file = get_last_step_from_report()
+    last_report_step = _to_production_steps(last_report_step, equilibration_steps)
+    last_report_chunk = _chunk_index_from_report_file(last_report_file)
+    if last_report_chunk is None and last_report_step > 0:
+        last_report_chunk = last_report_step // chunk_steps
+    if last_report_chunk is not None and last_report_step > 0:
+        report_chunk_start = last_report_chunk * chunk_steps
+        if last_report_step < report_chunk_start:
+            last_report_step = report_chunk_start + last_report_step
 
-        # Find the last step completed from the latest production data report file
-        last_step, last_chunk_file = get_last_step_from_report()
+    checkpoint_loaded = False
+    checkpoint_path = None
+    checkpoint_label = None
+    loaded_chunk_index = None
+
+    if last_report_chunk is not None:
+        chunk_suffix = str(last_report_chunk + 1).zfill(zfill_length)
+        chunk_checkpoint_file = f'production_{chunk_suffix}.chk'
+        if os.path.exists(chunk_checkpoint_file):
+            checkpoint_path = chunk_checkpoint_file
+            checkpoint_label = "Chunk"
+            loaded_chunk_index = last_report_chunk
+        elif os.path.exists(checkpoint_file):
+            checkpoint_path = checkpoint_file
+            checkpoint_label = "General"
+    elif os.path.exists(checkpoint_file):
+        checkpoint_path = checkpoint_file
+        checkpoint_label = "General"
+
+    if checkpoint_path:
+        print(f"{checkpoint_label} checkpoint file {checkpoint_path} found. Loading checkpoint.")
+        simulation.loadCheckpoint(checkpoint_path)
+        checkpoint_loaded = True
+
+    if not checkpoint_loaded:
+        # Check for the latest chunk checkpoint file if no prior checkpoint was chosen
+        for chunk in range(num_chunks - 1, -1, -1):
+            chunk_suffix = str(chunk + 1).zfill(zfill_length)
+            chunk_checkpoint_file = f'production_{chunk_suffix}.chk'
+            if os.path.exists(chunk_checkpoint_file):
+                print(f'Chunk checkpoint file {chunk_checkpoint_file} found. Loading checkpoint.')
+                simulation.loadCheckpoint(chunk_checkpoint_file)
+                checkpoint_loaded = True
+                checkpoint_path = chunk_checkpoint_file
+                last_report_chunk = chunk
+                loaded_chunk_index = chunk
+                break
+
+    if checkpoint_loaded:
+        checkpoint_step = _get_checkpoint_step(simulation)
+        checkpoint_step = _to_production_steps(checkpoint_step, equilibration_steps)
+        last_step = 0
+        if checkpoint_path == checkpoint_file:
+            if last_report_chunk is not None:
+                checkpoint_chunk_start = last_report_chunk * chunk_steps
+                checkpoint_chunk_end = min(checkpoint_chunk_start + chunk_steps, total_steps)
+                if last_report_step >= checkpoint_chunk_end:
+                    last_step = checkpoint_chunk_end
+                elif last_report_step > 0:
+                    last_step = checkpoint_chunk_start
+                else:
+                    last_step = checkpoint_chunk_start
+            elif checkpoint_step is not None and checkpoint_step > 0:
+                last_step = checkpoint_step
+        else:
+            if last_report_step > 0:
+                last_step = last_report_step
+            elif checkpoint_step is not None and checkpoint_step > 0:
+                if loaded_chunk_index is not None:
+                    checkpoint_chunk_start = loaded_chunk_index * chunk_steps
+                    if checkpoint_step < checkpoint_chunk_start:
+                        checkpoint_step = checkpoint_chunk_start + checkpoint_step
+                last_step = checkpoint_step
+            elif loaded_chunk_index is not None:
+                last_step = loaded_chunk_index * chunk_steps
+            elif last_report_chunk is not None:
+                last_step = last_report_chunk * chunk_steps
+
         # Check if the simulation has finished
         if last_step >= total_steps:
             print(f'Simulation has already run for {simulation_time}ns, increase the simulation time to continue...')
@@ -398,152 +509,121 @@ try:
         # Determine the correct chunk to start from
         chunk = last_step // chunk_steps
     else:
-        # Check for the latest chunk checkpoint file if the general checkpoint file is not found
-        chunk_checkpoint_found = False
-        start_chunk = 0
-        for chunk in range(num_chunks - 1, -1, -1):
-            chunk_suffix = str(chunk + 1).zfill(zfill_length)
-            chunk_checkpoint_file = f'production_{chunk_suffix}.chk'
-            if os.path.exists(chunk_checkpoint_file):
-                print(f'Chunk checkpoint file {chunk_checkpoint_file} found. Loading checkpoint.')
-                simulation.loadCheckpoint(chunk_checkpoint_file)
-                last_step_data, _ = get_last_step_from_report()
-                if last_step_data > 0:
-                    last_step = last_step_data
-                else:
-                    last_step = chunk * chunk_steps
-                start_chunk = chunk
-                chunk_checkpoint_found = True
-                break
+        print('\tAdding positional restraint force')
+        # Add a restraint force to the system
+        posres_force = addHeavyAtomsPositionalRestraintForce(system, inpcrd.positions, prmtop.topology, restraint_constant, has_box)
 
-        if not chunk_checkpoint_found:
-            print('\tAdding positional restraint force')
-            # Add a restraint force to the system
-            posres_force = addHeavyAtomsPositionalRestraintForce(system, inpcrd.positions, prmtop.topology, restraint_constant, has_box)
+        # Set up equilibration reporters
+        equilibration_reporter = CustomDataReporter(system, 'equilibration.data', equilibration_data_report_steps, step=True,
+                                                    potentialEnergy=True, temperature=True)
+        if equilibration_dcd_report_steps:
+            equilibration_dcd_reporter = DCDReporter('equilibration.dcd', equilibration_dcd_report_steps)
+            simulation.reporters.append(equilibration_dcd_reporter)
+        simulation.reporters.append(equilibration_reporter)
+        simulation.context.reinitialize(preserveState=True)
 
-            # Set up equilibration reporters
-            equilibration_reporter = CustomDataReporter(system, 'equilibration.data', equilibration_data_report_steps, step=True,
-                                                        potentialEnergy=True, temperature=True)
-            if equilibration_dcd_report_steps:
-                equilibration_dcd_reporter = DCDReporter('equilibration.dcd', equilibration_dcd_report_steps)
-                simulation.reporters.append(equilibration_dcd_reporter)
-            simulation.reporters.append(equilibration_reporter)
-            simulation.context.reinitialize(preserveState=True)
+        # Setup and run energy minimization
+        print('Applying energy minimization.')
+        minimization_start = current_time()
+        simulation.minimizeEnergy()
+        print('\tDone')
+        minimization_end = current_time()
+        print_elapsed_time(minimization_start, minimization_end, "Energy minimization")
+        # Store minimized structure
+        print('\tStoring minimized structure')
+        with open('minimized.pdb', 'w') as of:
+            state = simulation.context.getState(getPositions=True)
+            positions = state.getPositions()
+            PDBFile.writeFile(prmtop.topology, positions, of)
 
-            # Setup and run energy minimization
-            print('Applying energy minimization.')
-            minimization_start = current_time()
-            simulation.minimizeEnergy()
-            print('\tDone')
-            minimization_end = current_time()
-            print_elapsed_time(minimization_start, minimization_end, "Energy minimization")
+        # Store energy of the minimized state (step 0)
+        state = simulation.context.getState(getEnergy=True)
+        equilibration_reporter.report(simulation, state)
 
-            # Store minimized structure
-            print('\tStoring minimized structure')
-            with open('minimized.pdb', 'w') as of:
-                state = simulation.context.getState(getPositions=True)
-                positions = state.getPositions()
-                PDBFile.writeFile(prmtop.topology, positions, of)
+        # Run NVT equilibration
+        initial_temperature = 5 * u.kelvin
+        simulation.context.setVelocitiesToTemperature(initial_temperature)
+        nvt_simulation_steps = nvt_steps
+        nvt_simulation_time = nvt_simulation_steps * time_step
 
-            # Store energy of the minimized state (step 0)
-            state = simulation.context.getState(getEnergy=True)
-            equilibration_reporter.report(simulation, state)
+        print('NVT equilibration:')
+        print(f'\tThe simulation will run for {nvt_simulation_steps} steps with a time step of {time_step} ps ({nvt_simulation_time} ps).')
 
-            # Run NVT equilibration
-            initial_temperature = 5 * u.kelvin
-            simulation.context.setVelocitiesToTemperature(initial_temperature)
-            nvt_simulation_steps = nvt_steps
-            nvt_simulation_time = nvt_simulation_steps * time_step
-
-            print('NVT equilibration:')
-            print(f'\tThe simulation will run for {nvt_simulation_steps} steps with a time step of {time_step} ps ({nvt_simulation_time} ps).')
-
-            nvt_start = current_time()
-            T_initial = 5.0
-            T_final = temperature
-            if nvt_temp_scaling_steps == 1:
-                temperature_schedule = [T_final * u.kelvin]
-            else:
-                dT = (T_final - T_initial) / (nvt_temp_scaling_steps - 1)
-                temperature_schedule = [(T_initial + i * dT) * u.kelvin for i in range(nvt_temp_scaling_steps)]
-            for i, (segment_steps, current_temperature) in enumerate(zip(nvt_step_schedule, temperature_schedule)):
-                integrator.setTemperature(current_temperature)
-                print(f'\r{" " * 80}', end='\r')
-                print(f'\tRunning NVT temperature scaling step {i+1} of {nvt_temp_scaling_steps} at T={current_temperature}', end='\r')
-                simulation.step(segment_steps)
-
-            print(f'\r{" " * 80}', end='\r')
-            print('\tFinished running NVT equilibration.')
-            nvt_end = current_time()
-            nvt_elapsed = nvt_end - nvt_start
-            ns_per_day = compute_ns_per_day(nvt_time, nvt_elapsed)
-            print_elapsed_time(nvt_start, nvt_end, "NVT equilibration")
-            print(f"NVT equilibration performance: {ns_per_day:.2f} ns/day")
-
-            # Run NPT equilibration
-            npt_simulation_steps = npt_steps
-            npt_simulation_time = npt_simulation_steps * time_step
-
-            print('NPT equilibration')
-            print('\tInitializing Monte Carlo Barostat:')
-            print(f'\tTemperature: {temperature} K')
-            print(f'\tPressure: 1 bar')
-            barostat = omm.MonteCarloBarostat(1 * u.bar, temperature * u.kelvin)
-            system.addForce(barostat)
-            simulation.context.reinitialize(preserveState=True)
-            simulation.context.setVelocitiesToTemperature(temperature * u.kelvin)
-
-            print(f'\tThe simulation will run for {npt_simulation_steps} steps with a time step of {time_step} ps ({npt_simulation_time / 1000} ns).')
-            initial_restraint_constant = restraint_constant
-            denom = max(npt_restraint_scaling_steps - 1, 1)
-            npt_start = current_time()
-            for i, segment_steps in enumerate(npt_step_schedule):
-                t = i / denom
-                K = (
-                    initial_restraint_constant * (1 - t)**4 * u.kilocalories_per_mole / u.angstroms**2
-                ).value_in_unit(u.kilojoules_per_mole / u.nanometer**2)
-                posres_force.setGlobalParameterDefaultValue(0, K)
-                simulation.context.setParameter('k', K)
-                print(f'\r{" " * 100}', end='\r')
-                print(f'\tRunning NPT restraint scaling step {i+1} of {npt_restraint_scaling_steps} at a restraint constant of {K}', end='\r')
-                simulation.step(segment_steps)
-            print(f'\r{" " * 100}', end='\r')
-            print('\tFinished running NPT equilibration.')
-            npt_end = current_time()
-            npt_elapsed = npt_end - npt_start
-            ns_per_day = compute_ns_per_day(npt_time, npt_elapsed)
-            print_elapsed_time(npt_start, npt_end, "NPT equilibration")
-            print(f"NPT equilibration performance: {ns_per_day:.2f} ns/day")
-
-            # Remove positional restraint force
-            print('Production Run')
-            print('\tRemoving positional restraint force')
-            removeHeavyAtomPositionalRestraintForce(system)
-            simulation.context.reinitialize(preserveState=True)
-
-            last_step = 0  # No steps completed in production run
-            chunk = 0
+        nvt_start = current_time()
+        T_initial = 5.0
+        T_final = temperature
+        if nvt_temp_scaling_steps == 1:
+            temperature_schedule = [T_final * u.kelvin]
         else:
-            chunk = start_chunk
+            dT = (T_final - T_initial) / (nvt_temp_scaling_steps - 1)
+            temperature_schedule = [(T_initial + i * dT) * u.kelvin for i in range(nvt_temp_scaling_steps)]
+        for i, (segment_steps, current_temperature) in enumerate(zip(nvt_step_schedule, temperature_schedule)):
+            integrator.setTemperature(current_temperature)
+            print(f'\r{" " * 80}', end='\r')
+            print(f'\tRunning NVT temperature scaling step {i+1} of {nvt_temp_scaling_steps} at T={current_temperature}', end='\r')
+            simulation.step(segment_steps)
+
+        print(f'\r{" " * 80}', end='\r')
+        print('\tFinished running NVT equilibration.')
+        nvt_end = current_time()
+        nvt_elapsed = nvt_end - nvt_start
+        ns_per_day = compute_ns_per_day(nvt_time, nvt_elapsed)
+        print_elapsed_time(nvt_start, nvt_end, "NVT equilibration")
+        print(f"NVT equilibration performance: {ns_per_day:.2f} ns/day")
+
+        # Run NPT equilibration
+        npt_simulation_steps = npt_steps
+        npt_simulation_time = npt_simulation_steps * time_step
+
+        print('NPT equilibration')
+        print('\tInitializing Monte Carlo Barostat:')
+        print(f'\tTemperature: {temperature} K')
+        print(f'\tPressure: 1 bar')
+        barostat = omm.MonteCarloBarostat(1 * u.bar, temperature * u.kelvin)
+        system.addForce(barostat)
+        simulation.context.reinitialize(preserveState=True)
+        simulation.context.setVelocitiesToTemperature(temperature * u.kelvin)
+
+        print(f'\tThe simulation will run for {npt_simulation_steps} steps with a time step of {time_step} ps ({npt_simulation_time / 1000} ns).')
+        initial_restraint_constant = restraint_constant
+        denom = max(npt_restraint_scaling_steps - 1, 1)
+        npt_start = current_time()
+        for i, segment_steps in enumerate(npt_step_schedule):
+            t = i / denom
+            K = (
+                initial_restraint_constant * (1 - t)**4 * u.kilocalories_per_mole / u.angstroms**2
+            ).value_in_unit(u.kilojoules_per_mole / u.nanometer**2)
+            posres_force.setGlobalParameterDefaultValue(0, K)
+            simulation.context.setParameter('k', K)
+            print(f'\r{" " * 100}', end='\r')
+            print(f'\tRunning NPT restraint scaling step {i+1} of {npt_restraint_scaling_steps} at a restraint constant of {K}', end='\r')
+            simulation.step(segment_steps)
+        print(f'\r{" " * 100}', end='\r')
+        print('\tFinished running NPT equilibration.')
+        npt_end = current_time()
+        npt_elapsed = npt_end - npt_start
+        ns_per_day = compute_ns_per_day(npt_time, npt_elapsed)
+        print_elapsed_time(npt_start, npt_end, "NPT equilibration")
+        print(f"NPT equilibration performance: {ns_per_day:.2f} ns/day")
+
+        # Remove positional restraint force
+        print('Production Run')
+        print('\tRemoving positional restraint force')
+        removeHeavyAtomPositionalRestraintForce(system)
+        simulation.context.reinitialize(preserveState=True)
+
+        last_step = 0  # No steps completed in production run
+        chunk = 0
+
+    resume_step = last_step
+    resume_report_step = last_report_step
+    resume_from_report = resume_step == resume_report_step and resume_step > 0
 
     # Run the production simulation in chunks
     for chunk in range(chunk, num_chunks):
         chunk_start_step = chunk * chunk_steps
         chunk_end_step = min(chunk_start_step + chunk_steps, total_steps)
         chunk_suffix = str(chunk + 1).zfill(zfill_length)
-
-        data_file_exists = os.path.isfile(f'production_{chunk_suffix}.data')
-
-        production_reporter = CustomDataReporter(system, f'production_{chunk_suffix}.data', production_data_report_steps, step=True,
-                                                 potentialEnergy=True, temperature=True)
-        production_dcd_reporter = DCDReporter(f'production_{chunk_suffix}.dcd', production_dcd_report_steps, append=data_file_exists)
-        production_chk_reporter = CheckpointReporter(f'production_{chunk_suffix}.chk', production_data_report_steps)
-
-        simulation.reporters = [production_reporter, production_dcd_reporter, production_chk_reporter]
-        simulation.context.reinitialize(preserveState=True)
-
-        print(f'Running production chunk {chunk_suffix} from step {chunk_start_step} to {chunk_end_step}')
-        chunk_start_time = current_time()
 
         if last_step > chunk_start_step:
             print(f"Resuming from step {last_step}.")
@@ -552,6 +632,30 @@ try:
         if steps_to_run <= 0:
             print('\tChunk already complete; skipping.')
             continue
+
+        data_file = f'production_{chunk_suffix}.data'
+        dcd_file = f'production_{chunk_suffix}.dcd'
+        data_file_exists = os.path.isfile(data_file)
+        dcd_file_exists = os.path.isfile(dcd_file)
+        append_data = data_file_exists and resume_from_report and (chunk_start_step < resume_step <= chunk_end_step)
+        append_dcd = dcd_file_exists and append_data
+
+        try:
+            production_reporter = CustomDataReporter(system, data_file, production_data_report_steps, step=True,
+                                                     potentialEnergy=True, temperature=True, append=append_data)
+        except TypeError:
+            data_mode = 'a' if append_data else 'w'
+            production_reporter = CustomDataReporter(system, open(data_file, data_mode), production_data_report_steps,
+                                                     step=True, potentialEnergy=True, temperature=True)
+        production_dcd_reporter = DCDReporter(dcd_file, production_dcd_report_steps, append=append_dcd)
+        production_chk_reporter = CheckpointReporter(f'production_{chunk_suffix}.chk', production_data_report_steps)
+
+        simulation.reporters = [production_reporter, production_dcd_reporter, production_chk_reporter]
+        simulation.context.reinitialize(preserveState=True)
+
+        print(f'Running production chunk {chunk_suffix} from step {chunk_start_step} to {chunk_end_step}')
+        chunk_start_time = current_time()
+
         simulation.step(steps_to_run)
         last_step = chunk_end_step
 
@@ -572,7 +676,7 @@ try:
     with open('final_state.pdb', 'w') as f:
         PDBFile.writeFile(simulation.topology, state.getPositions(), f)
     with open('final_state.xml', 'w') as f:
-        f.write(XmlSerializer.serialize(state))
+        f.write(omm.XmlSerializer.serialize(state))
 
 except Exception as e:
     print(f"An error occurred: {e}")
