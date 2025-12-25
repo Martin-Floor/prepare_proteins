@@ -2893,7 +2893,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         model,
         pdb_file,
         wat_to_hoh=False,
-        covalent_check=True,
+        covalent_check=False,
         atom_mapping=None,
         add_to_path=False,
         conect_update=True,
@@ -3107,6 +3107,39 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                         updated_conect.append((chain_id, new_resid, atom_name))
                     updated_conects.append(updated_conect)
                 self.conects[m] = updated_conects
+
+    def sortModelResidues(self, atom_mapping=None, check_file=False, sort_chains=True):
+        """
+        Sort residues within each chain by residue index for all loaded models.
+        Chains are reordered alphabetically.
+
+        Parameters
+        ==========
+        atom_mapping : dict, optional
+            Atom mapping used when re-writing CONECT records.
+        check_file : bool, optional
+            When True, operate on PDB files only without updating in-memory
+            structures.
+        sort_chains : bool, optional
+            When True (default), reorder chains alphabetically.
+        """
+        for m in self.models_names:
+            if not check_file and m not in self.structures:
+                raise ValueError(f"Model '{m}' is not present in the current session.")
+
+            path = self.models_paths.get(m)
+            if path is None:
+                raise ValueError(
+                    f"PDB path missing for model '{m}'. Ensure it was loaded from disk."
+                )
+
+            self._sortStructureResidues(
+                m,
+                path,
+                atom_mapping=atom_mapping,
+                check_file=check_file,
+                sort_chains=sort_chains,
+            )
 
     def calculateMSA(self, extra_sequences=None, chains=None):
         """
@@ -4845,6 +4878,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         parallelisation="srun",
         mpi_command=None,
         cpus=None,
+        verify_sequences=False,
+        overwrite=False,
     ):
         """
         Create mutations from protein models. Mutations (mutants) must be given as a nested dictionary
@@ -4881,6 +4916,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         mpi_command : str, optional
             Deprecated compatibility alias. Accepted values: "slurm", "openmpi", or
             None. When provided, it is translated to `parallelisation`.
+        verify_sequences : bool, optional
+            When True, append a post-run check to each job that validates the
+            protein sequence in the Rosetta silent output against the expected
+            mutant sequence.
+        overwrite : bool, optional
+            When True, pass -overwrite to Rosetta so existing outputs are
+            regenerated instead of skipped.
         """
         if mpi_command not in (None, "slurm", "openmpi"):
             raise ValueError("mpi_command must be one of: None, 'slurm', 'openmpi'")
@@ -4906,6 +4948,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         # Split inputs into explicit mutant dicts and fasta sources
         explicit_mutants = {}
         fasta_sources = {}
+        fasta_variant_names = defaultdict(set)
+        fasta_chain_ids = {}
         for model, spec in mutants.items():
             if isinstance(spec, str):
                 fasta_sources[model] = spec
@@ -4935,33 +4979,34 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         # Augment mutants with variants defined in fasta files
         all_mutants = copy.deepcopy(explicit_mutants)
+        standard_aas = set("ACDEFGHIKLMNPQRSTVWY")
+
+        def _ensure_model_sequences(model):
+            if model not in self.sequences:
+                raise ValueError(f"Model {model} is not loaded; cannot read sequences for FASTA variants.")
+            # When sequences are stored per chain, drop chains with empty/non-protein sequences
+            if isinstance(self.sequences[model], dict):
+                chain_ids = []
+                chain_seqs = []
+                for cid, seq in self.chain_sequences[model].items():
+                    if seq:
+                        chain_ids.append(cid)
+                        chain_seqs.append(seq)
+                if not chain_ids:
+                    raise ValueError(f"No protein chains with sequences found for model {model}")
+                # If only one valid chain remains, treat it as single-chain for FASTA parsing
+                if len(chain_ids) == 1:
+                    return [None], [chain_seqs[0]]
+                return chain_ids, chain_seqs
+            return [None], [self.sequences[model]]
+
         if fasta_sources:
-            standard_aas = set("ACDEFGHIKLMNPQRSTVWY")
-
-            def _ensure_model_sequences(model):
-                if model not in self.sequences:
-                    raise ValueError(f"Model {model} is not loaded; cannot read sequences for FASTA variants.")
-                # When sequences are stored per chain, drop chains with empty/non-protein sequences
-                if isinstance(self.sequences[model], dict):
-                    chain_ids = []
-                    chain_seqs = []
-                    for cid, seq in self.chain_sequences[model].items():
-                        if seq:
-                            chain_ids.append(cid)
-                            chain_seqs.append(seq)
-                    if not chain_ids:
-                        raise ValueError(f"No protein chains with sequences found for model {model}")
-                    # If only one valid chain remains, treat it as single-chain for FASTA parsing
-                    if len(chain_ids) == 1:
-                        return [None], [chain_seqs[0]]
-                    return chain_ids, chain_seqs
-                return [None], [self.sequences[model]]
-
             for model, fasta_path in fasta_sources.items():
                 if not os.path.exists(fasta_path):
                     raise FileNotFoundError(f"FASTA file for model {model} not found: {fasta_path}")
 
                 chain_ids, chain_sequences = _ensure_model_sequences(model)
+                fasta_chain_ids[model] = chain_ids
                 variant_entries = alignment.readFastaFile(fasta_path)
                 if not variant_entries:
                     raise ValueError(f"No sequences found in FASTA file for model {model}: {fasta_path}")
@@ -5024,6 +5069,132 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                             offset += len(ref_chain_seq)
 
                     all_mutants[model][variant_name] = diffs
+                    fasta_variant_names[model].add(variant_name)
+
+        # Build expected sequences for verification and validate mutation specs
+        base_sequences = {}
+
+        def _get_base_sequence(model):
+            if model in base_sequences:
+                return base_sequences[model]
+            chain_ids, chain_sequences = _ensure_model_sequences(model)
+            base_seq = "".join(chain_sequences)
+            if not base_seq:
+                raise ValueError(f"No protein sequence found for model {model}")
+            base_sequences[model] = base_seq
+            return base_seq
+
+        def _build_expected_sequence(model, mutant_name, mutations):
+            if not isinstance(mutations, list):
+                raise ValueError(
+                    f"Mutations for model {model} variant {mutant_name} must be a list of tuples."
+                )
+            base_seq = _get_base_sequence(model)
+            seq_list = list(base_seq)
+            seen_positions = {}
+            for entry in mutations:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    raise ValueError(
+                        f"Invalid mutation entry for model {model} variant {mutant_name}: {entry!r}"
+                    )
+                resid, new_aa = entry
+                try:
+                    resid_int = int(resid)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"Invalid residue id for model {model} variant {mutant_name}: {resid!r}"
+                    ) from exc
+                if resid_int < 1 or resid_int > len(seq_list):
+                    raise ValueError(
+                        f"Residue id out of range for model {model} variant {mutant_name}: "
+                        f"{resid_int} (1-{len(seq_list)})"
+                    )
+                if not isinstance(new_aa, str) or len(new_aa.strip()) != 1:
+                    raise ValueError(
+                        f"Invalid amino acid code for model {model} variant {mutant_name}: {new_aa!r}"
+                    )
+                aa = new_aa.strip().upper()
+                if aa not in standard_aas:
+                    raise ValueError(
+                        f"Non-standard amino acid for model {model} variant {mutant_name}: {aa}"
+                    )
+                previous = seen_positions.get(resid_int)
+                if previous is not None and previous != aa:
+                    raise ValueError(
+                        f"Conflicting mutations for model {model} variant {mutant_name} "
+                        f"at residue {resid_int}: {previous} vs {aa}"
+                    )
+                seen_positions[resid_int] = aa
+                seq_list[resid_int - 1] = aa
+
+            return "".join(seq_list)
+
+        expected_sequences = {}
+        for model, mutant_dict in all_mutants.items():
+            expected_sequences[model] = {}
+            for mutant_name, mutation_list in mutant_dict.items():
+                expected_sequences[model][mutant_name] = _build_expected_sequence(
+                    model, mutant_name, mutation_list
+                )
+
+        # Convert FASTA-derived mutations from sequence positions to Rosetta pose indices
+        pose_mutants = copy.deepcopy(all_mutants)
+
+        def _resolve_pose_chain_ids(model, chain_ids):
+            if chain_ids == [None]:
+                resolved = [cid for cid, seq in self.chain_sequences[model].items() if seq]
+                if len(resolved) != 1:
+                    raise ValueError(
+                        f"Expected a single protein chain for model {model}, found {resolved}"
+                    )
+                return resolved
+            return chain_ids
+
+        def _sequence_to_pose_map(model, chain_ids):
+            chain_ids = _resolve_pose_chain_ids(model, chain_ids)
+            structure = self.structures[model]
+            pose_index = 0
+            pose_index_by_residue = {}
+            for chain in structure[0]:
+                for residue in chain:
+                    pose_index += 1
+                    pose_index_by_residue[(chain.id, residue.id)] = pose_index
+
+            seq_to_pose = {}
+            seq_pos = 0
+            for chain_id in chain_ids:
+                if chain_id not in structure[0]:
+                    raise ValueError(f"Chain {chain_id} not found in model {model}")
+                for residue in structure[0][chain_id]:
+                    if residue.id[0] != " ":
+                        continue
+                    seq_pos += 1
+                    pose_idx = pose_index_by_residue.get((chain_id, residue.id))
+                    if pose_idx is None:
+                        raise ValueError(
+                            f"Failed to map residue {residue.id} in chain {chain_id} for model {model}"
+                        )
+                    seq_to_pose[seq_pos] = pose_idx
+
+            return seq_to_pose
+
+        pose_maps = {}
+        for model, variant_names in fasta_variant_names.items():
+            chain_ids = fasta_chain_ids.get(model)
+            if chain_ids is None:
+                chain_ids, _ = _ensure_model_sequences(model)
+            pose_maps[model] = _sequence_to_pose_map(model, chain_ids)
+            for mutant_name in variant_names:
+                mapped = []
+                for seq_pos, aa in pose_mutants[model][mutant_name]:
+                    pose_idx = pose_maps[model].get(seq_pos)
+                    if pose_idx is None:
+                        raise ValueError(
+                            f"Failed to map sequence position {seq_pos} in model {model} "
+                            f"variant {mutant_name} to a Rosetta pose index"
+                        )
+                    mapped.append((pose_idx, aa))
+                pose_mutants[model][mutant_name] = mapped
 
         # Save considered models
         considered_models = list(all_mutants.keys())
@@ -5056,6 +5227,45 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 shutil.copyfile(p, params_output_dir / p.name)
 
         jobs = []
+
+        def _build_sequence_verification_command(expected_seq, model, mutant):
+            return (
+                "python - <<'PY'\n"
+                "from pathlib import Path\n"
+                "standard = set('ACDEFGHIKLMNPQRSTVWY')\n"
+                f"silent_path = Path('{model}_{mutant}.out')\n"
+                f"flags_path = Path('../../flags/{model}_{mutant}.flags')\n"
+                f"pdb_path = Path('../../input_models/{model}.pdb')\n"
+                "if not silent_path.exists():\n"
+                "    raise RuntimeError(f'Missing output {silent_path}; Rosetta did not produce a silent file')\n"
+                "silent_mtime = silent_path.stat().st_mtime\n"
+                "flags_mtime = flags_path.stat().st_mtime if flags_path.exists() else 0\n"
+                "pdb_mtime = pdb_path.stat().st_mtime if pdb_path.exists() else 0\n"
+                "if silent_mtime < max(flags_mtime, pdb_mtime):\n"
+                "    raise RuntimeError(\n"
+                "        f'Output {silent_path} is older than inputs; re-run with overwrite=True or remove existing outputs'\n"
+                "    )\n"
+                "seq_line = None\n"
+                "with silent_path.open('r', errors='ignore') as handle:\n"
+                "    for line in handle:\n"
+                "        if line.startswith('SEQUENCE:'):\n"
+                "            seq_line = line.split(':', 1)[1].strip()\n"
+                "            break\n"
+                "if seq_line is None:\n"
+                "    raise RuntimeError(f'No SEQUENCE line found in {silent_path}')\n"
+                "observed = ''.join(ch for ch in seq_line if ch in standard)\n"
+                f"expected = '{expected_seq}'\n"
+                "if len(observed) != len(expected):\n"
+                "    raise RuntimeError(\n"
+                "        f'Sequence length mismatch for {silent_path}: expected {len(expected)}, got {len(observed)}'\n"
+                "    )\n"
+                "for idx, (exp, obs) in enumerate(zip(expected, observed), start=1):\n"
+                "    if exp != obs:\n"
+                "        raise RuntimeError(\n"
+                "            f'Sequence mismatch for {silent_path} at position {idx}: expected {exp}, got {obs}'\n"
+                "        )\n"
+                "PY\n"
+            )
 
         # Create all-atom score function
         score_fxn_name = "ref2015"
@@ -5106,9 +5316,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 os.mkdir(job_folder + "/output_models/" + model)
 
             # Iterate each mutant
-            for mutant in all_mutants[model]:
+            for mutant in pose_mutants[model]:
 
-                if not isinstance(all_mutants[model][mutant], list):
+                if not isinstance(pose_mutants[model][mutant], list):
                     raise ValueError('Mutations for a particular variant should be given as a list of tuples!')
 
                 # Create xml mutation (and minimization) protocol
@@ -5118,7 +5328,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 # Add score function
                 xml.addScorefunction(sfxn)
 
-                for m in all_mutants[model][mutant]:
+                for m in pose_mutants[model][mutant]:
                     mutate = rosettaScripts.movers.mutate(
                         name="mutate_" + str(m[0]),
                         target_residue=m[0],
@@ -5153,6 +5363,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     nstruct=nstruct,
                     s="../../input_models/" + model + ".pdb",
                     output_silent_file=model + "_" + mutant + ".out",
+                    overwrite=overwrite,
                 )
 
                 # Add relaxation with constraints options and write flags file
@@ -5187,6 +5398,15 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     + mutant
                     + ".flags\n"
                 )
+                if verify_sequences:
+                    expected_seq = expected_sequences.get(model, {}).get(mutant)
+                    if expected_seq is None:
+                        raise ValueError(
+                            f"Missing expected sequence for model {model} variant {mutant}"
+                        )
+                    command += _build_sequence_verification_command(
+                        expected_seq, model, mutant
+                    )
                 command += "cd ../../..\n"
                 jobs.append(command.rstrip("\n") + "\n")
 
@@ -11592,7 +11812,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             candidate_paths = []
             if backend_label:
                 candidate_paths.append(os.path.join(path, backend_label))
+                candidate_paths.append(os.path.join(path, 'parameters', backend_label))
             candidate_paths.append(path)
+            candidate_paths.append(os.path.join(path, 'parameters'))
             for candidate in candidate_paths:
                 try:
                     entries = os.listdir(candidate)
@@ -11640,6 +11862,45 @@ make sure of reading the target sequences with the function readTargetSequences(
         backend_label = getattr(backend, "name", str(parameterization_method)).lower()
         ligand_parameters_folder = _select_backend_parameters_folder(ligand_parameters_folder, backend_label)
         resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source, backend_label)
+
+        def _sync_ligand_packs(source_root, dest_root):
+            if not source_root or not os.path.isdir(source_root):
+                return []
+            copied = []
+            for entry in os.listdir(source_root):
+                if not entry.endswith('_parameters'):
+                    continue
+                src_dir = os.path.join(source_root, entry)
+                if not os.path.isdir(src_dir):
+                    continue
+                dst_dir = os.path.join(dest_root, entry)
+                if not os.path.exists(dst_dir):
+                    shutil.copytree(src_dir, dst_dir)
+                    copied.append(entry)
+                    continue
+                updated = False
+                for root, _, files in os.walk(src_dir):
+                    rel = os.path.relpath(root, src_dir)
+                    dest_sub = dst_dir if rel == "." else os.path.join(dst_dir, rel)
+                    os.makedirs(dest_sub, exist_ok=True)
+                    for fname in files:
+                        src_file = os.path.join(root, fname)
+                        dst_file = os.path.join(dest_sub, fname)
+                        if os.path.exists(dst_file):
+                            continue
+                        shutil.copy2(src_file, dst_file)
+                        updated = True
+                if updated:
+                    copied.append(entry)
+            return copied
+
+        if resolved_ligand_pack_root:
+            copied_packs = _sync_ligand_packs(resolved_ligand_pack_root, ligand_parameters_folder)
+            if copied_packs and verbose:
+                print(
+                    f"[prepare_proteins] Copied {len(copied_packs)} ligand pack(s) from "
+                    f"{resolved_ligand_pack_root} to {ligand_parameters_folder}."
+                )
 
         script_folder = os.path.join(job_folder, 'scripts')
         if not os.path.exists(script_folder):
@@ -16689,7 +16950,7 @@ if __name__ == "__main__":
         output_folder,
         separator="-",
         only_extract_new=True,
-        covalent_check=True,
+        covalent_check=False,
         remove_previous=False,
     ):
         """
@@ -16879,7 +17140,7 @@ if __name__ == "__main__":
         prepwizard_folder,
         return_missing=False,
         return_failed=False,
-        covalent_check=True,
+        covalent_check=False,
         models=None,
         atom_mapping=None,
         conect_update=False,
@@ -19178,23 +19439,32 @@ if __name__ == "__main__":
                             self.covalent[model].append(r.id[1])
 
     def _sortStructureResidues(
-        self, model, pdb_file, atom_mapping=None, check_file=False
+        self,
+        model,
+        pdb_file,
+        atom_mapping=None,
+        check_file=False,
+        sort_chains=False,
     ):
+        model_name = model
 
         # Create new structure
         n_structure = PDB.Structure.Structure(0)
 
-        # Create new model
-        n_model = PDB.Model.Model(self.structures[model][0].id)
-
         if check_file:
-            structure = _readPDB(model, pdb_file)
+            structure = _readPDB(model_name, pdb_file)
         else:
-            structure = self.structures[model]
+            structure = self.structures[model_name]
+
+        # Create new model
+        n_model = PDB.Model.Model(structure[0].id)
 
         # Iterate chains from old model
-        model = [m for m in structure][0]
-        for chain in model:
+        pdb_model = structure[0]
+        chains = list(pdb_model)
+        if sort_chains:
+            chains = sorted(chains, key=lambda c: c.id)
+        for chain in chains:
             n_chain = PDB.Chain.Chain(chain.id)
 
             # Gather residues
@@ -19211,14 +19481,17 @@ if __name__ == "__main__":
 
         _saveStructureToPDB(n_structure, pdb_file + ".tmp")
         self._write_conect_lines(
-            model, pdb_file + ".tmp", atom_mapping=atom_mapping, check_file=check_file
+            model_name,
+            pdb_file + ".tmp",
+            atom_mapping=atom_mapping,
+            check_file=check_file,
         )
         shutil.move(pdb_file + ".tmp", pdb_file)
-        n_structure = _readPDB(model, pdb_file)
+        n_structure = _readPDB(model_name, pdb_file)
 
         # Update structure model in library
         if not check_file:
-            self.structures[model] = n_structure
+            self.structures[model_name] = n_structure
 
     def _readPDBConectLines(self, pdb_file, model, only_hetatoms=False):
         """
