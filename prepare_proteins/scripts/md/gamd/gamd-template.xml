@@ -1,0 +1,62 @@
+<?xml version="1.0" ?>
+<gamd>
+    <temperature>{temperature}</temperature> <!-- unit.kelvin -->
+
+    <system>
+        <nonbonded-method>{nonbonded_method}</nonbonded-method>
+        <nonbonded-cutoff>{nonbonded_cutoff}</nonbonded-cutoff> <!-- unit.nanometers -->
+        <constraints>{constraints}</constraints>
+    </system>
+
+    <barostat>
+        <pressure>{pressure}</pressure> <!-- unit.bar -->
+        <frequency>{barostat_frequency}</frequency>
+    </barostat>
+
+    <run-minimization>{run_minimization}</run-minimization>
+
+    <integrator>
+        <algorithm>langevin</algorithm>
+        <boost-type>{boost_type}</boost-type>
+        <sigma0>
+            <primary>{sigma0_primary}</primary> <!-- unit.kilocalories_per_mole -->
+            <secondary>{sigma0_secondary}</secondary> <!-- unit.kilocalories_per_mole -->
+        </sigma0>
+        <random-seed>{random_seed}</random-seed>
+        <dt>{time_step}</dt> <!-- unit.picoseconds -->
+        <friction-coefficient>{friction_coefficient}</friction-coefficient> <!-- unit.picoseconds**-1 -->
+        <number-of-steps>
+            <conventional-md-prep>{conventional_md_prep_steps}</conventional-md-prep>
+            <conventional-md>{conventional_md_steps}</conventional-md>
+            <gamd-equilibration-prep>{gamd_equilibration_prep_steps}</gamd-equilibration-prep>
+            <gamd-equilibration>{gamd_equilibration_steps}</gamd-equilibration>
+            <gamd-production>{gamd_production_steps}</gamd-production>
+            <averaging-window-interval>{averaging_window_interval}</averaging-window-interval>
+        </number-of-steps>
+    </integrator>
+
+    <input-files>
+        <amber>
+            <topology>{topology_path}</topology>
+            <coordinates type="{coordinates_type}">{coordinates_path}</coordinates>
+        </amber>
+    </input-files>
+
+    <outputs>
+        <directory>{output_directory}</directory>
+        <overwrite-output>{overwrite_output}</overwrite-output>
+
+        <reporting>
+            <energy>
+                <interval>{energy_interval}</interval>
+            </energy>
+            <coordinates>
+                <file-type>{coordinates_file_type}</file-type>
+                <interval>{coordinates_interval}</interval>
+            </coordinates>
+            <statistics>
+                <interval>{statistics_interval}</interval>
+            </statistics>
+        </reporting>
+    </outputs>
+</gamd>

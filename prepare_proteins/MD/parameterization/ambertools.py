@@ -11,5 +11,6 @@ class AmberToolsBackend(ParameterizationBackend):
     input_format = "amber"
 
     def prepare_model(self, openmm_md, parameters_folder: str, **kwargs: Any) -> ParameterizationResult:
+        kwargs.pop("verbose", None)
         openmm_md.parameterizePDBLigands(parameters_folder, **kwargs)
         return self.describe_model(openmm_md)

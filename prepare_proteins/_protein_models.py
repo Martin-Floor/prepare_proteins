@@ -5654,8 +5654,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if not os.path.exists(relax_folder + "/symmetry"):
                 os.mkdir(relax_folder + "/symmetry")
 
-        if parallelisation not in ["mpirun", "srun"]:
-            raise ValueError("Are you sure about your parallelisation type?")
+        if parallelisation not in (None, "mpirun", "srun"):
+            raise ValueError("parallelisation must be one of: None, 'mpirun', 'srun'")
 
         if parallelisation == "mpirun" and cpus == None:
             raise ValueError("You must setup the number of cpus when using mpirun")
@@ -5663,6 +5663,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             raise ValueError(
                 "CPUs can only be set up when using mpirun parallelisation!"
             )
+        if parallelisation is None and cpus is not None:
+            raise ValueError("cpus is only used when parallelisation='mpirun'")
 
         if symmetry and interaction_ligand_chains:
             raise ValueError("interaction_ligand_chains is not implemented for symmetry runs.")
@@ -6096,7 +6098,7 @@ has been carried out. Please run compareSequences() function before setting muta
                         + model
                         + "_relax.flags\n"
                     )
-            else:
+            elif parallelisation == "srun":
                 command += (
                     "srun "
                     + executable
@@ -6104,6 +6106,10 @@ has been carried out. Please run compareSequences() function before setting muta
                     + "../../flags/"
                     + model
                     + "_relax.flags\n"
+                )
+            else:
+                command += (
+                    executable + " @ " + "../../flags/" + model + "_relax.flags\n"
                 )
             command += "cd ../../..\n"
             jobs.append(command)
@@ -12342,6 +12348,746 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return simulation_jobs
 
+    def setUpGamdOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
+                                   add_bonds=None, skip_ligands=None, ligand_only=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
+                                   extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,
+                                   non_standard_residues=None, add_hydrogens=True, extra_force_field=None,
+                                   nvt_time=0.1, npt_time=0.2, nvt_temp_scaling_steps=50, npt_restraint_scaling_steps=50,
+                                   restraint_constant=5.0, chunk_size=100.0,
+                                   equilibration_data_report_time=1.0, equilibration_dcd_report_time=0.0, temperature=300.0,
+                                   collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
+                                   extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
+                                   solvate=True,
+                                   verbose=False,
+                                   strict_ligand_atom_check=True,
+                                   ligand_parameters_source=None,
+                                   parameterization_method='ambertools',
+                                   parameterization_options=None,
+                                   only_models=None, skip_models=None,
+                                   ligand_smiles=None,
+                                   ligand_sdf_files=None,
+                                   ligand_xml_files=None,
+                                   skip_ligand_charge_computation=False,
+                                   export_per_residue_ffxml=False,
+                                   gamd_boost_type='lower-dual',
+                                   gamd_sigma0_primary=6.0,
+                                   gamd_sigma0_secondary=6.0,
+                                   gamd_conventional_md_prep_steps=2000,
+                                   gamd_conventional_md_steps=10000,
+                                   gamd_equilibration_prep_steps=2000,
+                                   gamd_equilibration_steps=20000,
+                                   gamd_averaging_window_interval=50,
+                                   gamd_energy_interval=10.0,
+                                   gamd_statistics_interval=100.0,
+                                   gamd_nonbonded_method='PME',
+                                   gamd_nonbonded_cutoff=0.8,
+                                   gamd_constraints='HBonds',
+                                   gamd_pressure=1.0,
+                                   gamd_barostat_frequency=25,
+                                   gamd_run_minimization=True,
+                                   gamd_output_subdir=None,
+                                   gamd_overwrite_output=True,
+                                   gamd_coordinates_file_type='DCD',
+                                   gamd_restart="auto",
+                                   gamd_split_equilibration=True,
+                                   gamd_input_pdb_name=None,
+                                   gamd_runner='gamdRunner',
+                                   gamd_runner_options=None,
+                                   gamd_template_path=None,
+                                   gamd_config_name=None):
+        """
+        Set up GaMD simulations using gamd-openmm.
+
+        This reuses setUpOpenMMSimulations to generate the AMBER input files and
+        then writes per-replica GaMD XML configuration files. The returned list
+        contains the gamdRunner commands to launch the simulations.
+
+        Parameters
+        ----------
+        simulation_time : float
+            GaMD production time in ns. Conventional MD and equilibration steps
+            default to the example values unless overridden with gamd_*_steps.
+        chunk_size : float, optional
+            When provided, split GaMD production into restartable chunks of this
+            length (ns). Multiple commands/configs are generated; subsequent
+            chunks use the gamdRunner restart flag.
+        gamd_restart : bool or str, optional
+            Restart handling for GaMD runs. Accepted values:
+            - "auto" (default): use restart flag only when a checkpoint exists.
+            - True: always include the restart flag (-r).
+            - False: never include the restart flag.
+            Chunked runs write <chunk>.done markers and checkpoint snapshots in
+            the output directory to ensure later chunks only restart after
+            earlier chunks complete.
+        gamd_energy_interval : float, optional
+            Energy reporting interval in ps (default: 10 ps).
+        gamd_statistics_interval : float, optional
+            Statistics/trajectory/checkpoint interval in ps (default: 100 ps).
+        gamd_split_equilibration : bool, optional
+            When True and chunking is enabled, run equilibration as a separate
+            pre-production chunk (production steps = 0), then launch production
+            chunks via restarts.
+        gamd_input_pdb_name : str, optional
+            Override the PDB filename placed in input_files. Defaults to
+            "<base_name>.pdb" when not provided.
+        """
+
+        placeholder_script = script_file
+        if not placeholder_script:
+            placeholder_script = os.path.join(job_folder, "scripts", "gamd_placeholder.py")
+
+        self.setUpOpenMMSimulations(
+            job_folder=job_folder,
+            replicas=replicas,
+            simulation_time=simulation_time,
+            ligand_charges=ligand_charges,
+            residue_names=residue_names,
+            ff=ff,
+            add_bonds=add_bonds,
+            skip_ligands=skip_ligands,
+            ligand_only=ligand_only,
+            metal_ligand=metal_ligand,
+            metal_parameters=metal_parameters,
+            skip_replicas=skip_replicas,
+            extra_frcmod=extra_frcmod,
+            extra_mol2=extra_mol2,
+            dcd_report_time=dcd_report_time,
+            data_report_time=data_report_time,
+            non_standard_residues=non_standard_residues,
+            add_hydrogens=add_hydrogens,
+            extra_force_field=extra_force_field,
+            nvt_time=nvt_time,
+            npt_time=npt_time,
+            nvt_temp_scaling_steps=nvt_temp_scaling_steps,
+            npt_restraint_scaling_steps=npt_restraint_scaling_steps,
+            restraint_constant=restraint_constant,
+            chunk_size=chunk_size,
+            equilibration_data_report_time=equilibration_data_report_time,
+            equilibration_dcd_report_time=equilibration_dcd_report_time,
+            temperature=temperature,
+            collision_rate=collision_rate,
+            time_step=time_step,
+            cuda=cuda,
+            fixed_seed=fixed_seed,
+            script_file=placeholder_script,
+            extra_script_options=extra_script_options,
+            add_counterionsRand=add_counterionsRand,
+            skip_preparation=skip_preparation,
+            solvate=solvate,
+            verbose=verbose,
+            strict_ligand_atom_check=strict_ligand_atom_check,
+            ligand_parameters_source=ligand_parameters_source,
+            parameterization_method=parameterization_method,
+            parameterization_options=parameterization_options,
+            only_models=only_models,
+            skip_models=skip_models,
+            ligand_smiles=ligand_smiles,
+            ligand_sdf_files=ligand_sdf_files,
+            ligand_xml_files=ligand_xml_files,
+            skip_ligand_charge_computation=skip_ligand_charge_computation,
+            export_per_residue_ffxml=export_per_residue_ffxml,
+        )
+
+        def _ns_to_steps(duration_ns, step_ps, label):
+            steps_float = (duration_ns * 1000.0) / step_ps
+            if steps_float < 1:
+                raise ValueError(
+                    f"{label} of {duration_ns} ns produces fewer than one integration step "
+                    f"with a {step_ps} ps time step."
+                )
+            steps = int(round(steps_float))
+            if steps <= 0:
+                raise ValueError(f"{label} results in an invalid number of steps ({steps}).")
+            return steps
+
+        def _coerce_positive_steps(value, label):
+            try:
+                steps = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label} must be an integer.") from exc
+            if steps <= 0:
+                raise ValueError(f"{label} must be positive.")
+            return steps
+
+        def _coerce_nonnegative_steps(value, label):
+            try:
+                steps = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label} must be an integer.") from exc
+            if steps < 0:
+                raise ValueError(f"{label} must be >= 0.")
+            return steps
+
+        def _ps_to_steps(interval_ps, step_ps, label):
+            try:
+                interval = float(interval_ps)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label} must be numeric (ps).") from exc
+            if interval <= 0:
+                raise ValueError(f"{label} must be positive.")
+            steps_float = interval / step_ps
+            if steps_float < 1:
+                raise ValueError(
+                    f"{label} of {interval} ps is shorter than the time step ({step_ps} ps)."
+                )
+            steps = int(round(steps_float))
+            if steps <= 0:
+                raise ValueError(f"{label} results in an invalid number of steps ({steps}).")
+            return steps
+
+        def _normalize_runner_options(options):
+            if options is None:
+                return []
+            if isinstance(options, str):
+                return [opt for opt in options.split() if opt]
+            if isinstance(options, (list, tuple)):
+                return [str(opt) for opt in options if str(opt)]
+            raise TypeError("gamd_runner_options must be a string or list of strings.")
+
+        def _normalize_restart_mode(value):
+            if value is None:
+                return "auto"
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                mode = value.strip().lower()
+                if mode in ("auto", "true", "false"):
+                    return True if mode == "true" else False if mode == "false" else "auto"
+            raise ValueError("gamd_restart must be True, False, or 'auto'.")
+
+        def _load_template(path):
+            if path:
+                with open(path, "r") as handle:
+                    return handle.read()
+            stream = resource_stream(
+                Requirement.parse("prepare_proteins"),
+                "prepare_proteins/scripts/md/gamd/gamd-template.xml",
+            )
+            with io.TextIOWrapper(stream) as handle:
+                return handle.read()
+
+        def _infer_base_name(replica_folder, job_root):
+            rep_path = Path(replica_folder).resolve()
+            job_root_path = Path(job_root).resolve()
+            parent = rep_path.parent
+            grandparent = parent.parent
+            if grandparent == job_root_path:
+                model_name = parent.name
+                registry = getattr(self, "openmm_md", None)
+                if registry and model_name in registry:
+                    return getattr(registry[model_name], "pdb_name", model_name)
+                return model_name
+            if grandparent.parent == job_root_path:
+                ligand_name = grandparent.name
+                model_name = parent.name
+                return f"{model_name}_{ligand_name.upper()}"
+            return parent.name
+
+        def _infer_model_and_ligand(replica_folder, job_root):
+            rep_path = Path(replica_folder).resolve()
+            job_root_path = Path(job_root).resolve()
+            try:
+                rel_parts = rep_path.relative_to(job_root_path).parts
+            except ValueError:
+                return None, None
+            if len(rel_parts) >= 2 and rel_parts[-1].startswith("replica_"):
+                if len(rel_parts) == 2:
+                    return rel_parts[0], None
+                if len(rel_parts) >= 3:
+                    return rel_parts[-2], rel_parts[-3]
+            return None, None
+
+        def _find_parameter_pdb(base_name, job_root):
+            parameters_root = os.path.join(job_root, "parameters")
+            if not os.path.isdir(parameters_root):
+                return None
+            target_name = f"{base_name}_amber.pdb"
+            for root, _, files in os.walk(parameters_root):
+                if target_name in files:
+                    return os.path.join(root, target_name)
+            return None
+
+        def _select_named_file(files, base_name):
+            for fname in files:
+                if os.path.splitext(fname)[0] == base_name:
+                    return fname
+            return files[0] if files else None
+
+        def _as_posix(path):
+            return Path(path).as_posix()
+
+        def _write_pdb_from_amber(prmtop_path, inpcrd_path, output_path):
+            openmm_setup = _require_openmm_support("proteinModels.setUpGamdOpenMMSimulations")
+            prmtop = openmm_setup.AmberPrmtopFile(prmtop_path)
+            inpcrd = openmm_setup.AmberInpcrdFile(inpcrd_path)
+            with open(output_path, "w") as handle:
+                openmm_setup.PDBFile.writeFile(prmtop.topology, inpcrd.positions, handle)
+
+        try:
+            temperature_value = float(temperature)
+            time_step_value = float(time_step)
+            friction_value = float(collision_rate)
+            production_time = float(simulation_time)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("temperature, time_step, collision_rate, and simulation_time must be numeric.") from exc
+
+        if temperature_value <= 0 or time_step_value <= 0 or friction_value <= 0 or production_time <= 0:
+            raise ValueError("temperature, time_step, collision_rate, and simulation_time must be positive.")
+
+        total_production_steps = _ns_to_steps(production_time, time_step_value, "GaMD production time")
+        chunk_size_value = None
+        if chunk_size is not None:
+            try:
+                chunk_size_value = float(chunk_size)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("chunk_size must be a numeric value in ns or None.") from exc
+            if chunk_size_value <= 0:
+                raise ValueError("chunk_size must be positive when provided.")
+        if chunk_size_value is None or chunk_size_value >= production_time:
+            chunk_steps = total_production_steps
+        else:
+            chunk_steps = _ns_to_steps(chunk_size_value, time_step_value, "GaMD chunk size")
+
+        conventional_md_prep_steps = _coerce_nonnegative_steps(
+            gamd_conventional_md_prep_steps, "gamd_conventional_md_prep_steps"
+        )
+        conventional_md_steps = _coerce_nonnegative_steps(
+            gamd_conventional_md_steps, "gamd_conventional_md_steps"
+        )
+        equilibration_prep_steps = _coerce_nonnegative_steps(
+            gamd_equilibration_prep_steps, "gamd_equilibration_prep_steps"
+        )
+        equilibration_steps = _coerce_nonnegative_steps(
+            gamd_equilibration_steps, "gamd_equilibration_steps"
+        )
+        equilibration_total_steps = (
+            conventional_md_prep_steps
+            + conventional_md_steps
+            + equilibration_prep_steps
+            + equilibration_steps
+        )
+        averaging_window_interval = _coerce_positive_steps(
+            gamd_averaging_window_interval, "gamd_averaging_window_interval"
+        )
+        energy_interval = _ps_to_steps(
+            gamd_energy_interval, time_step_value, "gamd_energy_interval"
+        )
+        statistics_interval = _ps_to_steps(
+            gamd_statistics_interval, time_step_value, "gamd_statistics_interval"
+        )
+        coordinates_interval = statistics_interval
+
+        output_subdir = gamd_output_subdir
+        if not output_subdir:
+            output_subdir = os.path.join("gamd-output", str(gamd_boost_type))
+        output_subdir = output_subdir.replace(os.sep, "/")
+        if not output_subdir.endswith("/"):
+            output_subdir += "/"
+        output_dir = output_subdir.rstrip("/")
+
+        template_text = _load_template(gamd_template_path)
+
+        replica_folders = []
+        job_root = os.path.abspath(job_folder)
+        job_folder_rel = os.path.relpath(job_root, os.getcwd())
+        for dirpath, dirnames, _ in os.walk(job_root):
+            if os.path.basename(dirpath).startswith("replica_"):
+                input_dir = os.path.join(dirpath, "input_files")
+                if os.path.isdir(input_dir):
+                    replica_folders.append(dirpath)
+                dirnames[:] = []
+                continue
+            dirnames[:] = [
+                name for name in dirnames
+                if name not in ("input_files", "parameters", "scripts", "quick-output", "gamd-output")
+            ]
+
+        if not replica_folders:
+            raise FileNotFoundError(f"No replica folders with input_files found in {job_folder}.")
+
+        base_config_name = gamd_config_name or f"{gamd_boost_type}.xml"
+        if not base_config_name.endswith(".xml"):
+            base_config_name += ".xml"
+        config_root = os.path.splitext(base_config_name)[0]
+
+        jobs = []
+        runner_options = _normalize_runner_options(gamd_runner_options)
+        restart_mode = _normalize_restart_mode(gamd_restart)
+        if restart_mode is False and chunk_size_value is not None and chunk_size_value < production_time:
+            raise ValueError("Chunked GaMD runs require restarts. Set gamd_restart=True or 'auto'.")
+        output_coord_ext = str(gamd_coordinates_file_type).strip().lower() or "dcd"
+        runner_options = [opt for opt in runner_options if opt not in ("-r", "--restart")]
+
+        for replica_folder in sorted(replica_folders):
+            input_dir = os.path.join(replica_folder, "input_files")
+            prmtops = sorted([f for f in os.listdir(input_dir) if f.endswith(".prmtop")])
+            coords = sorted([f for f in os.listdir(input_dir) if f.endswith(".rst7") or f.endswith(".inpcrd")])
+            base_name = _infer_base_name(replica_folder, job_root)
+
+            prmtop_name = _select_named_file(prmtops, base_name)
+            coord_name = _select_named_file(coords, base_name)
+            if not prmtop_name or not coord_name:
+                raise FileNotFoundError(
+                    f"Missing AMBER inputs in {input_dir} (prmtop: {bool(prmtop_name)}, inpcrd/rst7: {bool(coord_name)})."
+                )
+
+            input_coord_ext = os.path.splitext(coord_name)[1].lstrip(".").lower()
+            coord_type = input_coord_ext if input_coord_ext else "rst7"
+
+            topology_path = _as_posix(os.path.join("input_files", prmtop_name))
+            coordinates_path = _as_posix(os.path.join("input_files", coord_name))
+            prmtop_path = os.path.join(input_dir, prmtop_name)
+            coord_path = os.path.join(input_dir, coord_name)
+
+            seed_value = int(fixed_seed) if fixed_seed is not None else int(np.random.randint(0, 2**31 - 1))
+
+            existing_pdbs = [f for f in os.listdir(input_dir) if f.endswith(".pdb")]
+            if not existing_pdbs:
+                pdb_name = gamd_input_pdb_name or f"{base_name}.pdb"
+                if not pdb_name.endswith(".pdb"):
+                    pdb_name += ".pdb"
+                pdb_dest = os.path.join(input_dir, pdb_name)
+                amber_pdb = _find_parameter_pdb(base_name, job_root)
+                if amber_pdb and os.path.exists(amber_pdb):
+                    if not os.path.exists(pdb_dest):
+                        shutil.copyfile(amber_pdb, pdb_dest)
+                else:
+                    wrote_pdb = False
+                    try:
+                        _write_pdb_from_amber(prmtop_path, coord_path, pdb_dest)
+                        wrote_pdb = True
+                    except Exception as exc:
+                        warnings.warn(
+                            f"Failed to write PDB from AMBER inputs for {base_name}: {exc}.",
+                            RuntimeWarning,
+                        )
+                    if not wrote_pdb:
+                        model_name, _ = _infer_model_and_ligand(replica_folder, job_root)
+                        pdb_source = None
+                        if model_name:
+                            registry = getattr(self, "openmm_md", None)
+                            if registry and model_name in registry:
+                                pdb_source = getattr(registry[model_name], "input_pdb", None)
+                            if pdb_source is None:
+                                pdb_source = self.models_paths.get(model_name)
+                        if pdb_source and os.path.exists(pdb_source) and not os.path.exists(pdb_dest):
+                            shutil.copyfile(pdb_source, pdb_dest)
+
+            total_chunks = int(np.ceil(total_production_steps / chunk_steps)) if chunk_steps else 1
+            split_equilibration = bool(gamd_split_equilibration) and total_chunks > 1
+            eq_config_name = None
+            if split_equilibration:
+                eq_config_name = f"{config_root}_equilibration.xml"
+                eq_template_values = {
+                    "temperature": temperature_value,
+                    "nonbonded_method": gamd_nonbonded_method,
+                    "nonbonded_cutoff": gamd_nonbonded_cutoff,
+                    "constraints": gamd_constraints,
+                    "pressure": gamd_pressure,
+                    "barostat_frequency": gamd_barostat_frequency,
+                    "run_minimization": bool(gamd_run_minimization),
+                    "boost_type": gamd_boost_type,
+                    "sigma0_primary": gamd_sigma0_primary,
+                    "sigma0_secondary": gamd_sigma0_secondary,
+                    "random_seed": seed_value,
+                    "time_step": time_step_value,
+                    "friction_coefficient": friction_value,
+                    "conventional_md_prep_steps": conventional_md_prep_steps,
+                    "conventional_md_steps": conventional_md_steps,
+                    "gamd_equilibration_prep_steps": equilibration_prep_steps,
+                    "gamd_equilibration_steps": equilibration_steps,
+                    "gamd_production_steps": 0,
+                    "averaging_window_interval": averaging_window_interval,
+                    "topology_path": topology_path,
+                    "coordinates_type": coord_type,
+                    "coordinates_path": coordinates_path,
+                    "output_directory": output_subdir,
+                    "overwrite_output": bool(gamd_overwrite_output),
+                    "energy_interval": energy_interval,
+                    "coordinates_file_type": gamd_coordinates_file_type,
+                    "coordinates_interval": coordinates_interval,
+                    "statistics_interval": statistics_interval,
+                }
+
+                eq_rendered = template_text.format(**eq_template_values)
+                eq_config_path = os.path.join(replica_folder, eq_config_name)
+                with open(eq_config_path, "w") as handle:
+                    handle.write(eq_rendered)
+
+            for chunk_index in range(total_chunks):
+                chunk_target_steps = min((chunk_index + 1) * chunk_steps, total_production_steps)
+                if total_chunks > 1:
+                    config_name = f"{config_root}_chunk_{str(chunk_index + 1).zfill(3)}.xml"
+                else:
+                    config_name = base_config_name
+
+                overwrite_output = bool(gamd_overwrite_output) if chunk_index == 0 else False
+
+                template_values = {
+                    "temperature": temperature_value,
+                    "nonbonded_method": gamd_nonbonded_method,
+                    "nonbonded_cutoff": gamd_nonbonded_cutoff,
+                    "constraints": gamd_constraints,
+                    "pressure": gamd_pressure,
+                    "barostat_frequency": gamd_barostat_frequency,
+                    "run_minimization": bool(gamd_run_minimization),
+                    "boost_type": gamd_boost_type,
+                    "sigma0_primary": gamd_sigma0_primary,
+                    "sigma0_secondary": gamd_sigma0_secondary,
+                    "random_seed": seed_value,
+                    "time_step": time_step_value,
+                    "friction_coefficient": friction_value,
+                    "conventional_md_prep_steps": conventional_md_prep_steps,
+                    "conventional_md_steps": conventional_md_steps,
+                    "gamd_equilibration_prep_steps": equilibration_prep_steps,
+                    "gamd_equilibration_steps": equilibration_steps,
+                    "gamd_production_steps": chunk_target_steps,
+                    "averaging_window_interval": averaging_window_interval,
+                    "topology_path": topology_path,
+                    "coordinates_type": coord_type,
+                    "coordinates_path": coordinates_path,
+                    "output_directory": output_subdir,
+                    "overwrite_output": overwrite_output,
+                    "energy_interval": energy_interval,
+                    "coordinates_file_type": gamd_coordinates_file_type,
+                    "coordinates_interval": coordinates_interval,
+                    "statistics_interval": statistics_interval,
+                }
+
+                rendered = template_text.format(**template_values)
+
+                config_path = os.path.join(replica_folder, config_name)
+                with open(config_path, "w") as handle:
+                    handle.write(rendered)
+
+            if total_chunks:
+                runner_opts_str = " ".join(runner_options)
+                restart_mode_label = (
+                    "auto" if restart_mode == "auto" else "true" if restart_mode is True else "false"
+                )
+                use_chunk_configs = 1 if total_chunks > 1 else 0
+                run_cmd_block = (
+                    "run_cmd() {\n"
+                    "  \"$@\"\n"
+                    "  status=$?\n"
+                    "  if [ $status -ne 0 ]; then exit $status; fi\n"
+                    "}\n"
+                )
+                split_gamd_log_block = (
+                    "split_gamd_log() {\n"
+                    "  LOG_PATH=\"$1\"\n"
+                    "  OUT_PATH=\"$2\"\n"
+                    "  START_STEP=\"$3\"\n"
+                    "  END_STEP=\"$4\"\n"
+                    "  if [ ! -f \"$LOG_PATH\" ]; then\n"
+                    "    return\n"
+                    "  fi\n"
+                    "  LOG_PATH=\"$LOG_PATH\" OUT_PATH=\"$OUT_PATH\" "
+                    "START_STEP=\"$START_STEP\" END_STEP=\"$END_STEP\" "
+                    "python - <<'PY'\n"
+                    "import os\n"
+                    "log_path = os.environ['LOG_PATH']\n"
+                    "output_path = os.environ['OUT_PATH']\n"
+                    "start_step = int(os.environ['START_STEP'])\n"
+                    "end_step = int(os.environ['END_STEP'])\n"
+                    "header = []\n"
+                    "chunk_lines = []\n"
+                    "try:\n"
+                    "    with open(log_path, 'r') as handle:\n"
+                    "        for line in handle:\n"
+                    "            if line.lstrip().startswith('#'):\n"
+                    "                header.append(line)\n"
+                    "                continue\n"
+                    "            parts = line.split()\n"
+                    "            if len(parts) < 2:\n"
+                    "                continue\n"
+                    "            try:\n"
+                    "                step = int(float(parts[1]))\n"
+                    "            except ValueError:\n"
+                    "                continue\n"
+                    "            if step > start_step and step <= end_step:\n"
+                    "                chunk_lines.append(line)\n"
+                    "except FileNotFoundError:\n"
+                    "    chunk_lines = []\n"
+                    "if header or chunk_lines:\n"
+                    "    with open(output_path, 'w') as out:\n"
+                    "        out.writelines(header)\n"
+                    "        out.writelines(chunk_lines)\n"
+                    "PY\n"
+                    "}\n"
+                )
+                ensure_dcd_stub_block = (
+                    "ensure_dcd_stub() {\n"
+                    "  if [ \"$OUTPUT_EXT\" != \"dcd\" ]; then\n"
+                    "    return\n"
+                    "  fi\n"
+                    "  if [ -f \"$OUTPUT_DCD\" ]; then\n"
+                    "    return\n"
+                    "  fi\n"
+                    "  OUTPUT_DCD=\"$OUTPUT_DCD\" PRMTOP=\"$PRMTOP\" "
+                    "DT_PS=\"$DT_PS\" COORD_INTERVAL=\"$COORD_INTERVAL\" "
+                    "python - <<'PY'\n"
+                    "import os\n"
+                    "from openmm.app import AmberPrmtopFile\n"
+                    "from openmm.app.dcdfile import DCDFile\n"
+                    "from openmm import unit\n"
+                    "prmtop = AmberPrmtopFile(os.environ['PRMTOP'])\n"
+                    "dt_ps = float(os.environ['DT_PS'])\n"
+                    "interval = int(float(os.environ['COORD_INTERVAL']))\n"
+                    "with open(os.environ['OUTPUT_DCD'], 'wb') as handle:\n"
+                    "    DCDFile(handle, prmtop.topology, dt_ps * unit.picoseconds, "
+                    "firstStep=interval, interval=interval, append=False)\n"
+                    "PY\n"
+                    "}\n"
+                )
+                equilibration_block = (
+                    "if [ \"$SPLIT_EQUIL\" -eq 1 ]; then\n"
+                    "  if [ -f \"$EQ_DONE\" ]; then\n"
+                    "    echo \"Equilibration already completed.\"\n"
+                    "    if [ ! -f \"$EQ_LOG\" ]; then "
+                    "split_gamd_log \"$LOG_PATH\" \"$EQ_LOG\" 0 \"$EQ_STEPS\"; fi\n"
+                    "  elif [ -f \"$CHECKPOINT\" ]; then\n"
+                    "    echo \"Checkpoint present; skipping equilibration.\"\n"
+                    "    touch \"$EQ_DONE\"\n"
+                    "  else\n"
+                    "    run_cmd $RUNNER $RUNNER_OPTS xml \"$EQ_CONFIG\"\n"
+                    "    if [ -f \"$OUTPUT_DCD\" ]; then "
+                    "mv -f \"$OUTPUT_DCD\" "
+                    "\"$OUTPUT_DIR/output_equilibration.$OUTPUT_EXT\"; fi\n"
+                    "    if [ -f \"$CHECKPOINT\" ]; then "
+                    "cp -f \"$CHECKPOINT\" \"$EQ_CHECKPOINT\"; fi\n"
+                    "    split_gamd_log \"$LOG_PATH\" \"$EQ_LOG\" 0 \"$EQ_STEPS\"\n"
+                    "    touch \"$EQ_DONE\"\n"
+                    "  fi\n"
+                    "fi\n"
+                )
+                loop_block = (
+                    "for ((chunk=1; chunk<=TOTAL_CHUNKS; chunk++)); do\n"
+                    "  label=$(printf \"%03d\" \"$chunk\")\n"
+                    "  if [ \"$USE_CHUNK_CONFIGS\" -eq 1 ]; then\n"
+                    "    config_file=\"${CONFIG_ROOT}_chunk_${label}.xml\"\n"
+                    "  else\n"
+                    "    config_file=\"$BASE_CONFIG\"\n"
+                    "  fi\n"
+                    "  done_path=\"$OUTPUT_DIR/chunk_${label}.done\"\n"
+                    "  snapshot_path=\"$OUTPUT_DIR/gamd_restart_chunk_${label}.checkpoint\"\n"
+                    "  chunk_log=\"$OUTPUT_DIR/gamd_chunk_${label}.log\"\n"
+                    "  prod_end=$((chunk * CHUNK_STEPS))\n"
+                    "  if [ \"$prod_end\" -gt \"$TOTAL_PROD_STEPS\" ]; then prod_end=\"$TOTAL_PROD_STEPS\"; fi\n"
+                    "  prod_start=$(((chunk - 1) * CHUNK_STEPS))\n"
+                    "  eq_offset=0\n"
+                    "  if [ \"$SPLIT_EQUIL\" -eq 1 ]; then eq_offset=\"$EQ_STEPS\"; fi\n"
+                    "  start_step=$((eq_offset + prod_start))\n"
+                    "  end_step=$((eq_offset + prod_end))\n"
+                    "  if [ -f \"$done_path\" ]; then\n"
+                    "    echo \"Chunk ${label} already completed.\"\n"
+                    "    if [ ! -f \"$CHECKPOINT\" ]; then\n"
+                    "      if [ -f \"$snapshot_path\" ]; then\n"
+                    "        cp -f \"$snapshot_path\" \"$CHECKPOINT\"\n"
+                    "      else\n"
+                    "        echo \"Missing GaMD checkpoint for chunk ${label}\" >&2\n"
+                    "        exit 1\n"
+                    "      fi\n"
+                    "    fi\n"
+                    "    if [ ! -f \"$chunk_log\" ]; then "
+                    "split_gamd_log \"$LOG_PATH\" \"$chunk_log\" \"$start_step\" \"$end_step\"; fi\n"
+                    "    continue\n"
+                    "  fi\n"
+                    "  if [ \"$chunk\" -gt 1 ]; then\n"
+                    "    prev_label=$(printf \"%03d\" \"$((chunk - 1))\")\n"
+                    "    prev_done=\"$OUTPUT_DIR/chunk_${prev_label}.done\"\n"
+                    "    prev_snapshot=\"$OUTPUT_DIR/gamd_restart_chunk_${prev_label}.checkpoint\"\n"
+                    "    if [ ! -f \"$prev_done\" ]; then\n"
+                    "      echo \"Missing GaMD done marker for chunk $((chunk - 1))\" >&2\n"
+                    "      exit 1\n"
+                    "    fi\n"
+                    "    if [ ! -f \"$CHECKPOINT\" ]; then\n"
+                    "      if [ -f \"$prev_snapshot\" ]; then\n"
+                    "        cp -f \"$prev_snapshot\" \"$CHECKPOINT\"\n"
+                    "      else\n"
+                    "        echo \"Missing GaMD checkpoint for chunk ${label}\" >&2\n"
+                    "        exit 1\n"
+                    "      fi\n"
+                    "    fi\n"
+                    "  else\n"
+                    "    if [ \"$SPLIT_EQUIL\" -eq 1 ]; then\n"
+                    "      if [ ! -f \"$CHECKPOINT\" ]; then\n"
+                    "        if [ -f \"$EQ_CHECKPOINT\" ]; then\n"
+                    "          cp -f \"$EQ_CHECKPOINT\" \"$CHECKPOINT\"\n"
+                    "        else\n"
+                    "          echo \"Missing GaMD checkpoint for production.\" >&2\n"
+                    "          exit 1\n"
+                    "        fi\n"
+                    "      fi\n"
+                    "    fi\n"
+                    "  fi\n"
+                    "  ensure_dcd_stub\n"
+                    "  if [ \"$chunk\" -eq 1 ]; then\n"
+                    "    if [ \"$RESTART_MODE\" = \"false\" ]; then\n"
+                    "      run_cmd $RUNNER $RUNNER_OPTS xml \"$config_file\"\n"
+                    "    elif [ \"$RESTART_MODE\" = \"true\" ]; then\n"
+                    "      run_cmd $RUNNER $RUNNER_OPTS -r xml \"$config_file\"\n"
+                    "    else\n"
+                    "      if [ -f \"$CHECKPOINT\" ]; then\n"
+                    "        run_cmd $RUNNER $RUNNER_OPTS -r xml \"$config_file\"\n"
+                    "      else\n"
+                    "        run_cmd $RUNNER $RUNNER_OPTS xml \"$config_file\"\n"
+                    "      fi\n"
+                    "    fi\n"
+                    "  else\n"
+                    "    if [ \"$RESTART_MODE\" = \"false\" ]; then\n"
+                    "      run_cmd $RUNNER $RUNNER_OPTS xml \"$config_file\"\n"
+                    "    else\n"
+                    "      run_cmd $RUNNER $RUNNER_OPTS -r xml \"$config_file\"\n"
+                    "    fi\n"
+                    "  fi\n"
+                    "  if [ -f \"$OUTPUT_DCD\" ]; then "
+                    "mv -f \"$OUTPUT_DCD\" "
+                    "\"$OUTPUT_DIR/output_chunk_${label}.$OUTPUT_EXT\"; fi\n"
+                    "  if [ -f \"$CHECKPOINT\" ]; then "
+                    "cp -f \"$CHECKPOINT\" \"$snapshot_path\"; fi\n"
+                    "  split_gamd_log \"$LOG_PATH\" \"$chunk_log\" \"$start_step\" \"$end_step\"\n"
+                    "  touch \"$done_path\"\n"
+                    "done\n"
+                )
+                script_lines = [
+                    f"OUTPUT_DIR=\"{output_dir}\"",
+                    f"OUTPUT_EXT=\"{output_coord_ext}\"",
+                    "OUTPUT_DCD=\"$OUTPUT_DIR/output.$OUTPUT_EXT\"",
+                    f"PRMTOP=\"{topology_path}\"",
+                    f"DT_PS=\"{time_step_value}\"",
+                    f"COORD_INTERVAL={coordinates_interval}",
+                    f"TOTAL_CHUNKS={total_chunks}",
+                    f"CHUNK_STEPS={chunk_steps}",
+                    f"TOTAL_PROD_STEPS={total_production_steps}",
+                    f"EQ_STEPS={equilibration_total_steps}",
+                    f"RESTART_MODE=\"{restart_mode_label}\"",
+                    f"CONFIG_ROOT=\"{config_root}\"",
+                    f"BASE_CONFIG=\"{base_config_name}\"",
+                    "CHECKPOINT=\"$OUTPUT_DIR/gamd_restart.checkpoint\"",
+                    "LOG_PATH=\"$OUTPUT_DIR/gamd.log\"",
+                    f"SPLIT_EQUIL={1 if split_equilibration else 0}",
+                    f"USE_CHUNK_CONFIGS={use_chunk_configs}",
+                    f"RUNNER=\"{gamd_runner}\"",
+                    f"RUNNER_OPTS=\"{runner_opts_str}\"",
+                    f"EQ_CONFIG=\"{eq_config_name or ''}\"",
+                    "EQ_DONE=\"$OUTPUT_DIR/equilibration.done\"",
+                    "EQ_CHECKPOINT=\"$OUTPUT_DIR/gamd_restart_equilibration.checkpoint\"",
+                    "EQ_LOG=\"$OUTPUT_DIR/gamd_equilibration.log\"",
+                    "mkdir -p \"$OUTPUT_DIR\"",
+                    run_cmd_block,
+                    split_gamd_log_block,
+                    ensure_dcd_stub_block,
+                    equilibration_block,
+                    loop_block,
+                ]
+                job_body = "\n".join([line for line in script_lines if line])
+                replica_rel = os.path.relpath(replica_folder, job_root)
+                replica_cmd_dir = _as_posix(os.path.normpath(os.path.join(job_folder_rel, replica_rel)))
+                jobs.append(f"(cd {replica_cmd_dir} &&\n{job_body}\n)\n")
+
+        return jobs
+
     def setUpMLCGSimulations(
         self,
         job_folder,
@@ -12381,6 +13127,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         model_shared_dir=None,
         copy_model_file=False,
         per_replica_simulation_time=None,
+        copy_native_pdb=True,
+        native_pdb_name=None,
+        random_seed=None,
     ):
         """
         Set up MLCG simulations (Langevin and parallel tempering) for the current models.
@@ -12438,6 +13187,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         copy_model_file : bool, optional
             If True, copy the pretrained model into each model's input_files folder.
             Defaults to False so the model can be shared across job folders.
+        copy_native_pdb : bool, optional
+            If False, skip copying the all-atom input PDB into input_files (default: True).
+        native_pdb_name : str, optional
+            Filename to use when copying the all-atom PDB into input_files.
+            Defaults to "<model>_native.pdb" when not provided.
+        random_seed : int, optional
+            Random seed for coordinate jitter (if enabled) and simulation configuration.
+            If None, a random seed is generated per model.
         """
 
         mlcg_setup = importlib.import_module("prepare_proteins.MD.mlcg_setup")
@@ -12454,6 +13211,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             output_dir: str,
             structure_name: str,
             cg_pdb_name: str,
+            random_seed: Optional[int] = None,
         ) -> None:
             jitter_repr = "None" if coordinate_jitter is None else repr(float(coordinate_jitter))
             script = f"""
@@ -12847,6 +13605,8 @@ def build_inputs(pdb_path, output_dir, structure_name, cg_pdb_name, replicas, ji
     masses = np.array([e["mass"] for e in entries], dtype=float)
 
     os.makedirs(output_dir, exist_ok=True)
+    if {random_seed!r} is not None:
+        torch.manual_seed(int({random_seed!r}))
     base_pos = torch.tensor(coords, dtype=torch.float32)
     atom_types_t = torch.tensor(atom_types, dtype=torch.long)
     masses_t = torch.tensor(masses, dtype=torch.float32)
@@ -12978,6 +13738,13 @@ conda deactivate
             save_forces=False,
             specialize_priors=bool(specialize_priors),
         )
+        auto_seed = False
+        base_seed = None
+        if random_seed is None:
+            base_seed = int.from_bytes(os.urandom(4), "big")
+            auto_seed = True
+        else:
+            base_seed = int(random_seed)
 
         def _ns_to_steps(ns_value: float, dt_ps: float) -> int:
             steps = int(round((float(ns_value) * 1000.0) / float(dt_ps)))
@@ -13194,16 +13961,37 @@ if __name__ == "__main__":
             return script_path, chunk_config_name
 
         jobs = []
+        seed_offset = 0
         for model in self:
             if only_models and model not in only_models:
                 continue
             if model in skip_models:
                 continue
 
+            model_seed = None
+            if base_seed is not None:
+                model_seed = base_seed + seed_offset if auto_seed else base_seed
+                seed_offset += 1
+
             model_folder = os.path.join(job_folder, model)
             os.makedirs(model_folder, exist_ok=True)
             input_dir = os.path.join(model_folder, "input_files")
             os.makedirs(input_dir, exist_ok=True)
+
+            native_pdb_dest = None
+            if copy_native_pdb:
+                source_pdb = self.models_paths[model]
+                native_name = native_pdb_name or f"{model}_native.pdb"
+                native_name = os.path.basename(native_name)
+                native_pdb_dest = os.path.join(input_dir, native_name)
+                copy_needed = True
+                if os.path.exists(native_pdb_dest):
+                    try:
+                        copy_needed = os.path.getsize(native_pdb_dest) != os.path.getsize(source_pdb)
+                    except OSError:
+                        copy_needed = False
+                if copy_needed:
+                    shutil.copy2(source_pdb, native_pdb_dest)
 
             model_dest_path = model_source_path
             if copy_model_file:
@@ -13230,6 +14018,7 @@ if __name__ == "__main__":
                     cg_pdb_file=None,
                 )
             self.mlcg_md[model] = mlcg_obj
+            mlcg_obj.native_pdb_file = native_pdb_dest or self.models_paths[model]
 
             structure_name = f"{model}_mlcg_structures.pt"
             cg_pdb_name = f"{model}_cg.pdb"
@@ -13243,6 +14032,7 @@ if __name__ == "__main__":
                         input_dir,
                         replicas=replicas,
                         coordinate_jitter=coordinate_jitter,
+                        random_seed=model_seed,
                         strip_hetero=strip_hetero,
                         write_cg_pdb=write_cg_pdb,
                         structure_name=structure_name,
@@ -13254,6 +14044,7 @@ if __name__ == "__main__":
                         input_dir,
                         structure_name,
                         cg_pdb_name,
+                        random_seed=model_seed,
                     )
 
             structure_file = mlcg_obj.structure_file
@@ -13278,6 +14069,10 @@ if __name__ == "__main__":
                 os.makedirs(sims_dir, exist_ok=True)
                 prefix = f"{model}_{protocol}"
 
+                model_simulation = dict(base_simulation)
+                if model_seed is not None:
+                    model_simulation["random_seed"] = int(model_seed)
+
                 if protocol == "langevin":
                     beta = 1.0 / (mlcg_setup.KBOLTZMANN * float(temperature))
                     structure_ref = os.path.relpath(
@@ -13290,7 +14085,7 @@ if __name__ == "__main__":
                         "betas": [float(beta)],
                         "model_file": model_ref,
                         "structure_file": structure_ref,
-                        "simulation": dict(base_simulation),
+                        "simulation": dict(model_simulation),
                     }
                     if extra_langevin_options:
                         config["simulation"].update(extra_langevin_options)
@@ -13364,7 +14159,7 @@ if __name__ == "__main__":
                         "betas": [float(b) for b in betas],
                         "model_file": model_ref,
                         "structure_file": structure_ref,
-                        "simulation": dict(base_simulation),
+                        "simulation": dict(model_simulation),
                     }
                     config["simulation"]["exchange_interval"] = int(
                         pt_exchange_interval
