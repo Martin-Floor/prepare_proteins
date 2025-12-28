@@ -5,7 +5,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Literal, Optional, Tuple
 
 import numpy as np
 from Bio.Data.IUPACData import protein_letters_1to3
@@ -26,6 +26,7 @@ Q_NATIVE_CUTOFF_A = 4.5
 Q_MIN_SEQ_SEPARATION = 3
 Q_LAMBDA = 1.5
 Q_BETA_PER_A = 1.0  # 10 nm^-1 -> 1.0 A^-1
+KBOLTZMANN = 0.0019872041
 
 
 @dataclass
@@ -156,6 +157,31 @@ def _parse_cg_atom_indices(cg_pdb: str) -> Dict[Tuple[str, int, str], int]:
     return atom_indices
 
 
+def _parse_cg_ca_coords(cg_pdb: str) -> Dict[Tuple[str, int], np.ndarray]:
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure("cg", cg_pdb)
+    ca_coords: Dict[Tuple[str, int], np.ndarray] = {}
+    for atom in structure.get_atoms():
+        if atom.get_name().strip().upper() != "CA":
+            continue
+        residue = atom.get_parent()
+        chain = residue.get_parent()
+        chain_id = _normalize_chain_id(chain.id)
+        icode = residue.id[2]
+        if str(icode).strip():
+            raise ValueError(
+                f"Insertion codes are not supported in CG PDB (found {residue.id} in {cg_pdb})."
+            )
+        resid = int(residue.id[1])
+        key = (chain_id, resid)
+        if key in ca_coords:
+            raise ValueError(
+                f"Duplicate CA entry for {chain_id}:{resid} in CG PDB {cg_pdb}."
+            )
+        ca_coords[key] = np.array(atom.coord, dtype=float)
+    return ca_coords
+
+
 def _native_contact_pairs(
     chain_residues: List[Dict],
     cutoff_a: float,
@@ -212,7 +238,12 @@ def build_native_contact_map(
     cutoff_a: float = Q_NATIVE_CUTOFF_A,
     min_seq_separation: int = Q_MIN_SEQ_SEPARATION,
     include_interchain: bool = False,
+    r0_source: Literal["native", "cg"] = "native",
 ) -> NativeContactMap:
+    """
+    Build a native contact map. Contact pairs are defined from native_pdb, while
+    r0 can be taken from the native structure or the CG model.
+    """
     chain_residues = _collect_native_residues(native_pdb)
     contacts = _native_contact_pairs(
         chain_residues,
@@ -221,6 +252,11 @@ def build_native_contact_map(
         include_interchain=include_interchain,
     )
     atom_indices = _parse_cg_atom_indices(cg_pdb)
+    cg_ca_coords = None
+    if r0_source not in ("native", "cg"):
+        raise ValueError(f"Unsupported r0_source '{r0_source}'. Use 'native' or 'cg'.")
+    if r0_source == "cg":
+        cg_ca_coords = _parse_cg_ca_coords(cg_pdb)
 
     residue_ids: List[Tuple[str, int]] = []
     ca_coords: List[np.ndarray] = []
@@ -246,6 +282,18 @@ def build_native_contact_map(
         if key_i not in atom_indices or key_j not in atom_indices:
             raise ValueError(
                 f"Missing CA beads for contact {chain_id}:{resid_i}-{resid_j} in {cg_pdb}."
+            )
+        if r0_source == "cg":
+            ca_key_i = (chain_id, resid_i)
+            ca_key_j = (chain_id, resid_j)
+            if cg_ca_coords is None:
+                raise ValueError("CG CA coordinates were not loaded for r0_source='cg'.")
+            if ca_key_i not in cg_ca_coords or ca_key_j not in cg_ca_coords:
+                raise ValueError(
+                    f"Missing CA coordinates for contact {chain_id}:{resid_i}-{resid_j} in {cg_pdb}."
+                )
+            r0 = float(
+                np.linalg.norm(cg_ca_coords[ca_key_i] - cg_ca_coords[ca_key_j])
             )
         contact_pairs.append([atom_indices[key_i], atom_indices[key_j]])
         contact_r0.append(r0)
@@ -356,7 +404,7 @@ class MLCGAnalysis:
 
         self.runs: List[MLCGRun] = []
         self.model_dirs: List[str] = []
-        self._native_cache: Dict[Tuple[str, str, bool], NativeContactMap] = {}
+        self._native_cache: Dict[Tuple[str, str, bool, str], NativeContactMap] = {}
         self._native_ca_cache: Dict[Tuple[str, str], NativeCAMap] = {}
 
         self._discover_runs()
@@ -622,13 +670,18 @@ class MLCGAnalysis:
     ) -> np.ndarray:
         """
         Compute C-alpha RMSD to a native structure for each trajectory.
+
+        If native_pdb is omitted and a native PDB exists in input_files,
+        it is used by default.
         """
         if not run.coord_chunks:
             raise ValueError("No coordinate chunks available for this run.")
         if native_pdb is None:
+            native_pdb = self._guess_native_pdb(run)
             if not run.cg_pdb:
                 raise ValueError("native_pdb is required when CG PDB is unavailable.")
-            native_pdb = run.cg_pdb
+            if native_pdb is None:
+                native_pdb = run.cg_pdb
         if not run.cg_pdb:
             raise ValueError("CG PDB is required to map C-alpha beads.")
 
@@ -641,13 +694,25 @@ class MLCGAnalysis:
         ref_coords = native_ca.ca_coords
 
         n_traj = None
+        checked = False
         rmsd_chunks: List[List[np.ndarray]] = []
         for coords in _iter_coords_chunks(run.coord_chunks, stride):
             if n_traj is None:
                 n_traj = coords.shape[0]
                 rmsd_chunks = [[] for _ in range(n_traj)]
             for t_idx in range(coords.shape[0]):
-                ca_coords = coords[t_idx, :, ca_indices, :]
+                traj = coords[t_idx]
+                ca_coords = traj[:, ca_indices, :]
+                if not checked:
+                    if ca_coords.shape[1] != ref_coords.shape[0]:
+                        raise ValueError(
+                            "Native/Cg CA count mismatch for "
+                            f"{run.model_name} ({run.protocol}). "
+                            f"Native has {ref_coords.shape[0]} residues, "
+                            f"trajectory has {ca_coords.shape[1]} CA beads. "
+                            "Ensure native_pdb matches the CG model used for simulation."
+                        )
+                    checked = True
                 rmsd_chunks[t_idx].append(
                     _kabsch_rmsd(ca_coords, ref_coords)
                 )
@@ -661,27 +726,40 @@ class MLCGAnalysis:
     def compute_q(
         self,
         run: MLCGRun,
-        native_pdb: str,
+        native_pdb: Optional[str] = None,
         stride: Optional[int] = None,
         beta: float = Q_BETA_PER_A,
         lambda_val: float = Q_LAMBDA,
         include_interchain: bool = False,
         frame_chunk: int = 0,
+        r0_source: Literal["native", "cg"] = "cg",
     ) -> np.ndarray:
         """
         Compute the fraction of native contacts Q for each trajectory.
+
+        By default, native contacts are defined from native_pdb while r0 distances
+        are taken from the CG model (r0_source="cg").
         """
         if not run.coord_chunks:
             raise ValueError("No coordinate chunks available for this run.")
         if not run.cg_pdb:
             raise ValueError("CG PDB is required to compute Q.")
+        if native_pdb is None:
+            native_pdb = self._guess_native_pdb(run)
+            if native_pdb is None:
+                raise FileNotFoundError(
+                    "native_pdb is required when it cannot be inferred from input_files."
+                )
 
         stride = self.stride if stride is None else int(stride)
         if stride < 1:
             raise ValueError("stride must be >= 1.")
 
         native_map = self._get_native_map(
-            native_pdb, run.cg_pdb, include_interchain=include_interchain
+            native_pdb,
+            run.cg_pdb,
+            include_interchain=include_interchain,
+            r0_source=r0_source,
         )
         contact_pairs = native_map.contact_pairs
         r0 = native_map.contact_r0
@@ -709,6 +787,301 @@ class MLCGAnalysis:
             for chunks in q_chunks
         ]
         return np.stack(q_trajs, axis=0)
+
+    def compute_fes_rmsd_q(
+        self,
+        model_name: Optional[str] = None,
+        protocol: Optional[str] = None,
+        prefix: Optional[str] = None,
+        run_index: Optional[int] = None,
+        native_pdb: Optional[str] = None,
+        temperature: Optional[float] = None,
+        beta_idx: Optional[int] = None,
+        beta: Optional[float] = None,
+        stride: Optional[int] = None,
+        bins: Tuple[int, int] = (100, 100),
+        rmsd_range: Optional[Tuple[float, float]] = None,
+        q_range: Tuple[float, float] = (0.0, 1.0),
+        q_beta: float = Q_BETA_PER_A,
+        q_lambda: float = Q_LAMBDA,
+        include_interchain: bool = False,
+        frame_chunk: int = 0,
+        r0_source: Literal["native", "cg"] = "cg",
+    ) -> Dict[str, object]:
+        """
+        Compute a 2D free-energy surface (kT) over RMSD and Q for a selected temperature.
+
+        The trajectory index is assumed to follow the beta ordering stored in the
+        simulation config. If temperature/beta are omitted, the lowest temperature
+        (largest beta) is used by default.
+
+        RMSD values are reported in Angstroms.
+
+        If multiple runs are present, use model_name/protocol/prefix or run_index
+        to select the desired run.
+        """
+        run = self._select_run(
+            model_name=model_name,
+            protocol=protocol,
+            prefix=prefix,
+            run_index=run_index,
+        )
+        if native_pdb is None:
+            native_pdb = self._guess_native_pdb(run)
+            if native_pdb is None:
+                raise FileNotFoundError(
+                    "native_pdb is required when it cannot be inferred from input_files."
+                )
+
+        rmsd = self.compute_rmsd(run, native_pdb=native_pdb, stride=stride)
+        q = self.compute_q(
+            run,
+            native_pdb=native_pdb,
+            stride=stride,
+            beta=q_beta,
+            lambda_val=q_lambda,
+            include_interchain=include_interchain,
+            frame_chunk=frame_chunk,
+            r0_source=r0_source,
+        )
+
+        if rmsd.shape != q.shape:
+            raise ValueError(
+                f"RMSD/Q shape mismatch for {run.prefix}: {rmsd.shape} vs {q.shape}"
+            )
+
+        betas = self._load_betas_for_run(run)
+        selected_idx = self._select_beta_index(
+            betas=betas,
+            temperature=temperature,
+            beta=beta,
+            beta_idx=beta_idx,
+        )
+        if selected_idx is None:
+            if rmsd.shape[0] == 1:
+                selected_idx = 0
+            else:
+                raise ValueError(
+                    "Unable to select a temperature: provide beta_idx, beta, or temperature."
+                )
+        if selected_idx < 0 or selected_idx >= rmsd.shape[0]:
+            raise IndexError(
+                f"beta_idx {selected_idx} is out of range for {rmsd.shape[0]} trajectories."
+            )
+
+        rmsd_vals = rmsd[selected_idx].ravel()
+        q_vals = q[selected_idx].ravel()
+        mask = np.isfinite(rmsd_vals) & np.isfinite(q_vals)
+        if not np.any(mask):
+            raise ValueError("No finite RMSD/Q values found for FES computation.")
+
+        range_spec = [rmsd_range, q_range]
+        counts, rmsd_edges, q_edges = np.histogram2d(
+            rmsd_vals[mask],
+            q_vals[mask],
+            bins=bins,
+            range=range_spec,
+        )
+        total = counts.sum()
+        if total <= 0:
+            raise ValueError("No samples found in RMSD/Q histogram.")
+
+        prob = counts / total
+        fes = np.full_like(prob, np.nan, dtype=float)
+        populated = prob > 0
+        fes[populated] = -np.log(prob[populated])
+        fes -= np.nanmin(fes)
+
+        rmsd_centers = 0.5 * (rmsd_edges[:-1] + rmsd_edges[1:])
+        q_centers = 0.5 * (q_edges[:-1] + q_edges[1:])
+
+        selected_beta = None
+        if betas and selected_idx is not None and selected_idx < len(betas):
+            selected_beta = float(betas[selected_idx])
+
+        return {
+            "fes": fes,
+            "counts": counts,
+            "rmsd_edges": rmsd_edges,
+            "q_edges": q_edges,
+            "rmsd_centers": rmsd_centers,
+            "q_centers": q_centers,
+            "beta": selected_beta,
+            "beta_idx": selected_idx,
+        }
+
+    def summarize_runs(
+        self,
+        model_name: Optional[str] = None,
+        protocol: Optional[str] = None,
+        prefix: Optional[str] = None,
+        run_index: Optional[int] = None,
+        stride: Optional[int] = None,
+        print_summary: bool = True,
+    ) -> List[Dict[str, object]]:
+        """
+        Summarize available simulation outputs.
+
+        If multiple runs are present, use model_name/protocol/prefix or run_index
+        to restrict the selection. Defaults to stride=1 to reflect saved frames.
+        Time estimates assume dt is in ps and are reported in ns. When coordinate
+        chunks are present, time is computed using save_interval (if available),
+        otherwise export_interval.
+        """
+        if stride is None:
+            stride = 1
+        stride = int(stride)
+        if stride < 1:
+            raise ValueError("stride must be >= 1.")
+
+        runs = self._filter_runs(
+            model_name=model_name,
+            protocol=protocol,
+            prefix=prefix,
+            run_index=run_index,
+        )
+        summaries: List[Dict[str, object]] = []
+        for run in runs:
+            n_traj = 0
+            n_beads = 0
+            total_frames = 0
+            ca_beads = None
+            if run.coord_chunks:
+                n_traj, n_beads, total_frames = self._inspect_coords(run, stride)
+                run.n_traj = n_traj
+                run.n_beads = n_beads
+                run.expected_frames = total_frames
+            if run.cg_pdb and os.path.exists(run.cg_pdb):
+                try:
+                    ca_beads = len(_parse_cg_ca_coords(run.cg_pdb))
+                except Exception:
+                    ca_beads = None
+
+            sim_settings = self._load_simulation_settings(run)
+            dt = sim_settings.get("dt")
+            export_interval = sim_settings.get("export_interval")
+            save_interval = sim_settings.get("save_interval")
+            n_timesteps = sim_settings.get("n_timesteps")
+
+            frame_interval = save_interval or export_interval
+            effective_interval = (
+                int(frame_interval) * int(stride) if frame_interval is not None else None
+            )
+            time_per_frame = (
+                float(dt) * float(effective_interval)
+                if dt is not None and effective_interval is not None
+                else None
+            )
+            time_per_traj = (
+                total_frames * time_per_frame if time_per_frame is not None else None
+            )
+            total_time = (
+                time_per_traj * n_traj if time_per_traj is not None else None
+            )
+            expected_frames = None
+            expected_frames_strided = None
+            expected_time_per_traj = None
+            if n_timesteps is not None and frame_interval is not None:
+                expected_frames = int(n_timesteps) // int(frame_interval)
+                expected_frames_strided = (
+                    (expected_frames + stride - 1) // stride
+                    if expected_frames is not None
+                    else None
+                )
+            if dt is not None and n_timesteps is not None:
+                expected_time_per_traj = float(dt) * float(n_timesteps)
+            time_per_frame_ns = (
+                time_per_frame / 1000.0 if time_per_frame is not None else None
+            )
+            time_per_traj_ns = (
+                time_per_traj / 1000.0 if time_per_traj is not None else None
+            )
+            total_time_ns = (
+                total_time / 1000.0 if total_time is not None else None
+            )
+            expected_time_per_traj_ns = (
+                expected_time_per_traj / 1000.0
+                if expected_time_per_traj is not None
+                else None
+            )
+
+            betas = self._load_betas_for_run(run)
+            temps = (
+                [1.0 / (KBOLTZMANN * b) for b in betas]
+                if betas
+                else []
+            )
+
+            summary = {
+                "model_name": run.model_name,
+                "protocol": run.protocol,
+                "prefix": run.prefix,
+                "sims_dir": run.sims_dir,
+                "n_traj": n_traj,
+                "n_beads": n_beads,
+                "n_ca_beads": ca_beads,
+                "frames_per_traj": total_frames,
+                "stride": stride,
+                "dt": dt,
+                "export_interval": export_interval,
+                "save_interval": save_interval,
+                "n_timesteps": n_timesteps,
+                "time_per_frame_ps": time_per_frame,
+                "time_per_traj_ps": time_per_traj,
+                "total_time_ps": total_time,
+                "time_per_frame_ns": time_per_frame_ns,
+                "time_per_traj_ns": time_per_traj_ns,
+                "total_time_ns": total_time_ns,
+                "frames_expected": expected_frames,
+                "frames_expected_strided": expected_frames_strided,
+                "time_per_traj_expected_ps": expected_time_per_traj,
+                "time_per_traj_expected_ns": expected_time_per_traj_ns,
+                "betas": betas,
+                "temperatures": temps,
+            }
+            summaries.append(summary)
+
+            if print_summary:
+                header = f"{run.model_name} | {run.protocol} | {run.prefix}"
+                print(header)
+                print(f"  sims_dir: {run.sims_dir}")
+                if run.coord_chunks:
+                    frame_msg = (
+                        f"  trajectories: {n_traj}, beads: {n_beads}, "
+                        f"frames/trajectory: {total_frames} (stride={stride})"
+                    )
+                    if expected_frames_strided is not None:
+                        frame_msg += f" of {expected_frames_strided}"
+                    print(frame_msg)
+                    if ca_beads is not None:
+                        print(f"  CA beads: {ca_beads}")
+                else:
+                    print("  trajectories: 0 (no coordinate chunks found)")
+                if dt is not None and export_interval is not None:
+                    print(
+                        f"  dt: {dt}, export_interval: {export_interval}, "
+                        f"time/frame: {time_per_frame_ns} ns"
+                    )
+                    if save_interval is not None:
+                        print(f"  save_interval: {save_interval}")
+                    if time_per_traj_ns is not None:
+                        print(f"  time/trajectory: {time_per_traj_ns} ns")
+                    if expected_time_per_traj_ns is not None:
+                        print(
+                            f"  expected time/trajectory: {expected_time_per_traj_ns} ns"
+                        )
+                    if total_time_ns is not None:
+                        print(f"  total time (all trajectories): {total_time_ns} ns")
+                if temps:
+                    temp_min = min(temps)
+                    temp_max = max(temps)
+                    print(
+                        f"  temperatures (K): n={len(temps)}, "
+                        f"min={temp_min:.2f}, max={temp_max:.2f}"
+                    )
+                else:
+                    print("  temperatures (K): not found")
+        return summaries
 
     @staticmethod
     def _compute_q_for_traj(
@@ -750,17 +1123,214 @@ class MLCGAnalysis:
         native_pdb: str,
         cg_pdb: str,
         include_interchain: bool,
+        r0_source: Literal["native", "cg"] = "native",
     ) -> NativeContactMap:
-        key = (os.path.abspath(native_pdb), os.path.abspath(cg_pdb), include_interchain)
+        key = (
+            os.path.abspath(native_pdb),
+            os.path.abspath(cg_pdb),
+            include_interchain,
+            r0_source,
+        )
         native_map = self._native_cache.get(key)
         if native_map is None:
             native_map = build_native_contact_map(
                 native_pdb,
                 cg_pdb,
                 include_interchain=include_interchain,
+                r0_source=r0_source,
             )
             self._native_cache[key] = native_map
         return native_map
+
+    @staticmethod
+    def _parse_betas_from_yaml(config_path: str) -> List[float]:
+        betas: List[float] = []
+        in_betas = False
+        with open(config_path, "r") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if not in_betas:
+                    if stripped.startswith("betas:"):
+                        in_betas = True
+                    continue
+                if stripped.startswith("-"):
+                    token = stripped[1:].strip().split()[0]
+                    try:
+                        betas.append(float(token))
+                    except ValueError:
+                        break
+                else:
+                    if betas:
+                        break
+        return betas
+
+    def _load_betas_for_run(self, run: MLCGRun) -> List[float]:
+        betas: List[float] = []
+        if run.config_path and os.path.exists(run.config_path):
+            try:
+                with open(run.config_path, "r") as handle:
+                    config = json.load(handle)
+                betas = config.get("betas", []) or []
+            except Exception:
+                betas = []
+        if not betas and run.sims_dir and os.path.isdir(run.sims_dir):
+            yaml_paths = sorted(glob.glob(os.path.join(run.sims_dir, "*_config.yaml")))
+            for path in yaml_paths:
+                betas = self._parse_betas_from_yaml(path)
+                if betas:
+                    break
+        return [float(b) for b in betas] if betas else []
+
+    @staticmethod
+    def _parse_simulation_from_yaml(config_path: str) -> Dict[str, Optional[float]]:
+        settings: Dict[str, Optional[float]] = {}
+        in_sim = False
+        targets = {"dt", "export_interval", "n_timesteps", "save_interval"}
+        with open(config_path, "r") as handle:
+            for line in handle:
+                if not in_sim:
+                    if line.strip().startswith("simulation:"):
+                        in_sim = True
+                    continue
+                if not line.startswith((" ", "\t")):
+                    if settings:
+                        break
+                    continue
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                key, sep, value = stripped.partition(":")
+                if not sep:
+                    continue
+                key = key.strip()
+                if key not in targets:
+                    continue
+                value = value.strip()
+                if not value:
+                    continue
+                try:
+                    parsed = float(value) if "." in value else int(value)
+                except ValueError:
+                    continue
+                settings[key] = parsed
+        return settings
+
+    def _load_simulation_settings(self, run: MLCGRun) -> Dict[str, Optional[float]]:
+        settings: Dict[str, Optional[float]] = {}
+        if run.config_path and os.path.exists(run.config_path):
+            try:
+                with open(run.config_path, "r") as handle:
+                    config = json.load(handle)
+                sim_cfg = config.get("simulation", {})
+                for key in ("dt", "export_interval", "n_timesteps", "save_interval"):
+                    if key in sim_cfg:
+                        settings[key] = sim_cfg[key]
+            except Exception:
+                settings = {}
+        if not settings and run.sims_dir and os.path.isdir(run.sims_dir):
+            yaml_paths = sorted(glob.glob(os.path.join(run.sims_dir, "*_config.yaml")))
+            for path in yaml_paths:
+                settings = self._parse_simulation_from_yaml(path)
+                if settings:
+                    break
+        return settings
+
+    def _select_beta_index(
+        self,
+        betas: List[float],
+        temperature: Optional[float],
+        beta: Optional[float],
+        beta_idx: Optional[int],
+    ) -> Optional[int]:
+        if beta_idx is not None:
+            return int(beta_idx)
+        if not betas:
+            return None
+        if beta is None and temperature is None:
+            return int(max(range(len(betas)), key=lambda i: betas[i]))
+        if beta is None and temperature is not None:
+            if temperature <= 0:
+                raise ValueError("temperature must be positive.")
+            beta = 1.0 / (KBOLTZMANN * float(temperature))
+        target_beta = float(beta)
+        return int(min(range(len(betas)), key=lambda i: abs(betas[i] - target_beta)))
+
+    def _select_run(
+        self,
+        model_name: Optional[str],
+        protocol: Optional[str],
+        prefix: Optional[str],
+        run_index: Optional[int],
+    ) -> MLCGRun:
+        if run_index is not None:
+            if run_index < 0 or run_index >= len(self.runs):
+                raise IndexError(f"run_index {run_index} is out of range.")
+            return self.runs[run_index]
+
+        candidates = self.runs
+        if model_name is not None:
+            candidates = [run for run in candidates if run.model_name == model_name]
+        if protocol is not None:
+            candidates = [run for run in candidates if run.protocol == protocol]
+        if prefix is not None:
+            candidates = [run for run in candidates if run.prefix == prefix]
+
+        if not candidates:
+            raise ValueError("No runs match the provided selection.")
+        if len(candidates) > 1:
+            run_list = ", ".join(
+                f"{run.model_name}:{run.protocol}:{run.prefix}" for run in candidates
+            )
+            raise ValueError(
+                "Multiple runs match; specify model_name, protocol, prefix, or run_index. "
+                f"Matches: {run_list}"
+            )
+        return candidates[0]
+
+    def _filter_runs(
+        self,
+        model_name: Optional[str],
+        protocol: Optional[str],
+        prefix: Optional[str],
+        run_index: Optional[int],
+    ) -> List[MLCGRun]:
+        if run_index is not None:
+            if run_index < 0 or run_index >= len(self.runs):
+                raise IndexError(f"run_index {run_index} is out of range.")
+            return [self.runs[run_index]]
+
+        candidates = self.runs
+        if model_name is not None:
+            candidates = [run for run in candidates if run.model_name == model_name]
+        if protocol is not None:
+            candidates = [run for run in candidates if run.protocol == protocol]
+        if prefix is not None:
+            candidates = [run for run in candidates if run.prefix == prefix]
+        if not candidates:
+            raise ValueError("No runs match the provided selection.")
+        return candidates
+
+    def _guess_native_pdb(self, run: MLCGRun) -> Optional[str]:
+        if not run.cg_pdb:
+            return None
+        input_dir = os.path.dirname(run.cg_pdb)
+        preferred = [
+            os.path.join(input_dir, f"{run.model_name}_native.pdb"),
+            os.path.join(input_dir, f"{run.model_name}.pdb"),
+        ]
+        for path in preferred:
+            if os.path.exists(path):
+                return path
+        candidates = [
+            path
+            for path in glob.glob(os.path.join(input_dir, "*.pdb"))
+            if not path.endswith("_cg.pdb")
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
 
     def _get_native_ca_map(
         self,

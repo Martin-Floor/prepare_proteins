@@ -671,6 +671,7 @@ class mlcg_md:
         output_dir: str,
         replicas: int = 1,
         coordinate_jitter: Optional[float] = None,
+        random_seed: Optional[int] = None,
         strip_hetero: bool = True,
         write_cg_pdb: bool = True,
         structure_name: Optional[str] = None,
@@ -693,6 +694,9 @@ class mlcg_md:
         if cg_pdb_name is None:
             cg_pdb_name = f"{self.pdb_name}_cg.pdb"
         cg_pdb_file = os.path.join(output_dir, cg_pdb_name)
+
+        if random_seed is not None:
+            torch.manual_seed(int(random_seed))
 
         base_pos = torch.tensor(coords, dtype=torch.float32)
         atom_types_t = torch.tensor(atom_types, dtype=torch.long)
