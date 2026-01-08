@@ -12737,39 +12737,16 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
         Set up Absolute Binding Free Energy (ABFE) simulations using OpenMM + Amber prmtop/inpcrd.
 
-        Key behavior
-        ------------
-        The user does NOT provide simulation_time anymore.
-        Instead, the chosen `protocol` hardcodes:
-        - total intended sampling per replica (total_ns)
-        - chunk size (chunk_ns)  -> PRODUCTION_STEPS per replica run ("one chunk")
-        - checkpoint/cycle defaults
+        IMPORTANT (AToM constraints)
+        ----------------------------
+        PRNT_FREQUENCY and TRJ_FREQUENCY must be multiples of PRODUCTION_STEPS.
+        Therefore you cannot print multiple samples *within* a single "replica run" (one PRODUCTION_STEPS chunk).
+        To obtain ~N samples, you should instead run ~N cycles (or use MAX_SAMPLES).
 
-        Protocol definitions (defaults you can edit)
-        --------------------------------------------
-        - debug:
-            * Purpose: sanity-check setup quickly (indices, displacement, run command)
-            * total_ns: 0.2 ns per replica
-            * chunk_ns: 0.02 ns (20 ps)  -> many short chunks; fast feedback
-        - fast:
-            * Purpose: quick screening / rough estimate
-            * total_ns: 5 ns per replica
-            * chunk_ns: 0.25 ns
-        - standard:
-            * Purpose: good default for first “real” attempt
-            * total_ns: 20 ns per replica
-            * chunk_ns: 0.5 ns
-        - thorough:
-            * Purpose: more robust sampling
-            * total_ns: 50 ns per replica
-            * chunk_ns: 1.0 ns
-
-        Notes on “total_ns”
-        -------------------
-        Many AToM/ABFE runners run replicas in repeated chunks until WALL_TIME (or another stop condition).
-        Here we compute and PRINT an estimated number of chunks: estimated_chunks = ceil(total_ns/chunk_ns).
-        If you want the job to *enforce* stopping after exactly estimated_chunks, tell me your preferred
-        mechanism (wrapper loop, job array, scheduler constraints), and I’ll add it.
+        This function sets:
+        PRNT_FREQUENCY = PRODUCTION_STEPS
+        TRJ_FREQUENCY  = PRODUCTION_STEPS
+        and uses MAX_SAMPLES to stop after a target number of samples per replica.
 
         Returns
         -------
@@ -12798,7 +12775,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             )
 
         if verbose not in ("yes", "no"):
-            raise ValueError("verbose must be either 'yes' or 'no' (written into .cntl)")
+            raise ValueError(
+                "verbose must be either 'yes' or 'no' (written into .cntl)"
+            )
 
         if rcpt_cm_mode.upper() not in ("AUTO", "CA", "P", "SUGAR", "HEAVY"):
             raise ValueError("rcpt_cm_mode must be one of: AUTO, CA, P, SUGAR, HEAVY")
@@ -12815,37 +12794,35 @@ make sure of reading the target sequences with the function readTargetSequences(
         ligand_resnames = tuple(ligand_charges.keys()) if ligand_charges else ("LIG",)
 
         # ---------------------------------------------------------------------
-        # Protocol → total_ns + chunking + cadence
+        # Protocol → total_ns + chunking + cadence (+ sample target)
         # ---------------------------------------------------------------------
         time_step_ps = 0.002  # must match TIME_STEP in .cntl
 
         PROTOCOLS = {
-            # total_ns = intended total sampling per replica (for planning)
-            # chunk_ns = per-run length (one "replica run") used to set PRODUCTION_STEPS
             "debug": {
-                "total_ns": 0.2,
-                "chunk_ns": 0.02,
+                "chunk_ns": 0.01,  # 10 ps  ->  5000 steps
+                "max_samples": 20,  # ~0.2 ns total per replica
                 "cycle_time_s": 5,
                 "checkpoint_s": 300,
                 "subjobs_buffer": "1.0",
             },
-            "fast": {
-                "total_ns": 5.0,
-                "chunk_ns": 0.25,
+            "short": {
+                "chunk_ns": 0.04,  # 40 ps  -> 20000 steps (example-like)
+                "max_samples": 100,  # ~4 ns total per replica
                 "cycle_time_s": 10,
                 "checkpoint_s": 600,
                 "subjobs_buffer": "1.0",
             },
             "standard": {
-                "total_ns": 20.0,
-                "chunk_ns": 0.5,
+                "chunk_ns": 0.10,  # 100 ps -> 50000 steps
+                "max_samples": 300,  # ~30 ns total per replica
                 "cycle_time_s": 10,
                 "checkpoint_s": 900,
                 "subjobs_buffer": "1.0",
             },
             "thorough": {
-                "total_ns": 50.0,
-                "chunk_ns": 1.0,
+                "chunk_ns": 0.20,  # 200 ps -> 100000 steps
+                "max_samples": 500,  # ~100 ns total per replica
                 "cycle_time_s": 10,
                 "checkpoint_s": 1200,
                 "subjobs_buffer": "1.0",
@@ -12854,10 +12831,14 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         prot = protocol.lower().strip()
         if prot not in PROTOCOLS:
-            raise ValueError(f"protocol must be one of {list(PROTOCOLS.keys())}, got '{protocol}'")
+            raise ValueError(
+                f"protocol must be one of {list(PROTOCOLS.keys())}, got '{protocol}'"
+            )
 
-        total_ns = float(PROTOCOLS[prot]["total_ns"])
         chunk_ns = float(PROTOCOLS[prot]["chunk_ns"])
+        max_samples = int(PROTOCOLS[prot].get("max_samples", 100))
+        total_ns = chunk_ns * max_samples
+
         cycle_time_s = int(PROTOCOLS[prot]["cycle_time_s"])
         checkpoint_s = int(PROTOCOLS[prot]["checkpoint_s"])
         subjobs_buffer = str(PROTOCOLS[prot]["subjobs_buffer"])
@@ -12866,7 +12847,8 @@ make sure of reading the target sequences with the function readTargetSequences(
         production_steps = int(round((chunk_ns * 1000.0) / time_step_ps))
         production_steps = max(1, production_steps)
 
-        # Keep these equal to PRODUCTION_STEPS (safe default; avoids known scheduler edge cases)
+        # AToM requirement: PRNT/TRJ must be multiples of PRODUCTION_STEPS.
+        # Use the smallest valid values (1 write per chunk/run).
         prnt_frequency = production_steps
         trj_frequency = production_steps
 
@@ -12875,7 +12857,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         _log(
             f"Protocol={prot} | total_ns={total_ns:.3f} ns/replica | chunk_ns={chunk_ns:.3f} ns "
             f"-> PRODUCTION_STEPS={production_steps} | PRNT/TRJ={prnt_frequency} "
-            f"| CYCLE_TIME={cycle_time_s}s | CHECKPOINT_TIME={checkpoint_s}s "
+            f"| MAX_SAMPLES={max_samples} | CYCLE_TIME={cycle_time_s}s | CHECKPOINT_TIME={checkpoint_s}s "
             f"| estimated_chunks≈{estimated_chunks}"
         )
 
@@ -12899,7 +12881,9 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             return np.array(positions, dtype=float)
 
-        def _write_pdb_from_amber(prmtop_path: str, inpcrd_path: str, pdb_out: str) -> None:
+        def _write_pdb_from_amber(
+            prmtop_path: str, inpcrd_path: str, pdb_out: str
+        ) -> None:
             """Write a PDB from Amber topology/coordinates using OpenMM."""
             from openmm.app import PDBFile
 
@@ -12957,9 +12941,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     center = 0.5 * (a + b + c)
                     vecs = corners - center
                     norms = np.linalg.norm(vecs, axis=1)
-                    corners = corners - (vecs / np.maximum(norms[:, None], 1e-8)) * float(
-                        padding_ang
-                    )
+                    corners = corners - (
+                        vecs / np.maximum(norms[:, None], 1e-8)
+                    ) * float(padding_ang)
 
                 dists = np.linalg.norm(corners - lig_centroid[None, :], axis=1)
                 corner = corners[int(np.argmax(dists))]
@@ -13031,29 +13015,113 @@ make sure of reading the target sequences with the function readTargetSequences(
             lig_query = lig_heavy if len(lig_heavy) else lig_all
 
             ligand_atoms = lig_all.tolist()
-            ligand_cm_atoms = lig_query.tolist() if ligand_cm_mode.lower() == "heavy" else lig_all.tolist()
-            _log(f"Ligand selection={lig_sel}; ligand atoms(all/heavy)={len(lig_all)}/{len(lig_heavy)}")
+            ligand_cm_atoms = (
+                lig_query.tolist()
+                if ligand_cm_mode.lower() == "heavy"
+                else lig_all.tolist()
+            )
+            _log(
+                f"Ligand selection={lig_sel}; ligand atoms(all/heavy)={len(lig_all)}/{len(lig_heavy)}"
+            )
 
             # Receptor filtering
             PROT = {
-                "ALA","ARG","ASN","ASP","CYS","GLN","GLU","GLY","HIS","ILE","LEU","LYS","MET",
-                "PHE","PRO","SER","THR","TRP","TYR","VAL",
-                "HID","HIE","HIP","CYM","CYX","LYN","ASH","GLH",
+                "ALA",
+                "ARG",
+                "ASN",
+                "ASP",
+                "CYS",
+                "GLN",
+                "GLU",
+                "GLY",
+                "HIS",
+                "ILE",
+                "LEU",
+                "LYS",
+                "MET",
+                "PHE",
+                "PRO",
+                "SER",
+                "THR",
+                "TRP",
+                "TYR",
+                "VAL",
+                "HID",
+                "HIE",
+                "HIP",
+                "CYM",
+                "CYX",
+                "LYN",
+                "ASH",
+                "GLH",
             }
-            NA = {"A","C","G","U","T","DA","DC","DG","DT","DU","RA","RC","RG","RU","ADE","CYT","GUA","URA","THY"}
-            WATER = {"WAT","HOH","TIP3","SOL","H2O"}
-            IONS = {"NA","K","CL","MG","ZN","CA","MN","FE","CU","CO","NI","RB","CS","LI","SR","CD","HG","PB","AL","BA","BR","I"}
+            NA = {
+                "A",
+                "C",
+                "G",
+                "U",
+                "T",
+                "DA",
+                "DC",
+                "DG",
+                "DT",
+                "DU",
+                "RA",
+                "RC",
+                "RG",
+                "RU",
+                "ADE",
+                "CYT",
+                "GUA",
+                "URA",
+                "THY",
+            }
+            WATER = {"WAT", "HOH", "TIP3", "SOL", "H2O"}
+            IONS = {
+                "NA",
+                "K",
+                "CL",
+                "MG",
+                "ZN",
+                "CA",
+                "MN",
+                "FE",
+                "CU",
+                "CO",
+                "NI",
+                "RB",
+                "CS",
+                "LI",
+                "SR",
+                "CD",
+                "HG",
+                "PB",
+                "AL",
+                "BA",
+                "BR",
+                "I",
+            }
 
             is_water = np.isin(res_names, list(WATER))
             is_ion = np.isin(res_names, list(IONS))
-            is_prot = np.isin(res_names, list(PROT)) if include_protein else np.zeros(len(atoms), dtype=bool)
-            is_na = np.isin(res_names, list(NA)) if include_nucleic else np.zeros(len(atoms), dtype=bool)
+            is_prot = (
+                np.isin(res_names, list(PROT))
+                if include_protein
+                else np.zeros(len(atoms), dtype=bool)
+            )
+            is_na = (
+                np.isin(res_names, list(NA))
+                if include_nucleic
+                else np.zeros(len(atoms), dtype=bool)
+            )
             is_target = (is_prot | is_na) & (~is_water) & (~is_ion)
 
             rcpt_mask = (~lig_mask) & is_target & (~is_h)
             rcpt_heavy = np.where(rcpt_mask)[0]
             if len(rcpt_heavy) == 0:
-                raise ValueError("No receptor heavy atoms remain after filtering (protein/NA only; no waters/ions).")
+                raise ValueError(
+                    "No receptor heavy atoms remain after filtering (protein/NA only; no waters/ions)."
+                )
 
             # Binding site by proximity
             lig_xyz = xyz[np.array(lig_query, dtype=int)]
@@ -13061,7 +13129,9 @@ make sure of reading the target sequences with the function readTargetSequences(
             d2 = np.sum((rcpt_xyz[:, None, :] - lig_xyz[None, :, :]) ** 2, axis=2)
             mind = np.sqrt(np.min(d2, axis=1))
             nearby = rcpt_heavy[mind <= float(bs_cutoff_ang)]
-            _log(f"Binding-site cutoff={bs_cutoff_ang:.2f} Å; nearby receptor heavy atoms={len(nearby)}")
+            _log(
+                f"Binding-site cutoff={bs_cutoff_ang:.2f} Å; nearby receptor heavy atoms={len(nearby)}"
+            )
 
             if len(nearby) < int(min_rcpt_atoms):
                 raise ValueError(
@@ -13089,11 +13159,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                 rcpt_cm_atoms, chosen = (p if len(p) >= 1 else nearby.tolist()), "P"
             elif mode == "SUGAR":
                 c1 = [i for i in nearby.tolist() if atom_names[i] == "C1'"]
-                rcpt_cm_atoms, chosen = (c1 if len(c1) >= 1 else nearby.tolist()), "SUGAR"
+                rcpt_cm_atoms, chosen = (
+                    c1 if len(c1) >= 1 else nearby.tolist()
+                ), "SUGAR"
             else:
                 rcpt_cm_atoms, chosen = nearby.tolist(), "HEAVY"
 
-            _log(f"RCPT_CM_MODE={mode}; chosen={chosen}; rcpt_cm_atoms={len(rcpt_cm_atoms)}")
+            _log(
+                f"RCPT_CM_MODE={mode}; chosen={chosen}; rcpt_cm_atoms={len(rcpt_cm_atoms)}"
+            )
 
             pos_restrained_atoms = rcpt_cm_atoms
 
@@ -13160,6 +13234,7 @@ make sure of reading the target sequences with the function readTargetSequences(
     LIGOFFSET = '0., 0., 0.'
 
     WALL_TIME = {wall_time}
+    MAX_SAMPLES = {max_samples}
     CYCLE_TIME = {cycle_time_s}
     CHECKPOINT_TIME = {checkpoint_s}
     NODEFILE = 'nodefile'
@@ -13257,6 +13332,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     basename=base_name,
                     temperature=int(temperature),
                     wall_time=int(wall_time),
+                    max_samples=int(max_samples),
                     cycle_time_s=int(cycle_time_s),
                     checkpoint_s=int(checkpoint_s),
                     subjobs_buffer=subjobs_buffer,
@@ -13271,7 +13347,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                     ligand_atoms=_format_index_list(model_info["ligand_atoms"]),
                     ligand_cm_atoms=_format_index_list(model_info["ligand_cm_atoms"]),
                     rcpt_cm_atoms=_format_index_list(model_info["rcpt_cm_atoms"]),
-                    pos_restrained_atoms=_format_index_list(model_info["pos_restrained_atoms"]),
+                    pos_restrained_atoms=_format_index_list(
+                        model_info["pos_restrained_atoms"]
+                    ),
                 )
 
                 cntl_path = os.path.join(replica_folder, f"{base_name}.cntl")
@@ -13300,12 +13378,10 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             _log(
                 f"Prepared replicas under: {model_folder} | protocol={prot} "
-                f"(total_ns={total_ns:.2f}, chunk_ns={chunk_ns:.2f}, chunks≈{estimated_chunks})"
+                f"(total_ns={total_ns:.2f}, chunk_ns={chunk_ns:.2f}, estimated_chunks≈{estimated_chunks}, max_samples={max_samples})"
             )
 
         return abfe_jobs
-
-
 
     def analyseRosettaDocking(
         self,
