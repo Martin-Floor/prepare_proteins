@@ -432,16 +432,26 @@ class MLCGAnalysis:
         model_dirs: List[str] = []
         if not os.path.isdir(job_root):
             raise FileNotFoundError(f"Job folder not found: {job_root}")
+        first_level: List[str] = []
         for entry in sorted(os.listdir(job_root)):
             path = os.path.join(job_root, entry)
             if not os.path.isdir(path):
                 continue
+            first_level.append(path)
             if os.path.isdir(os.path.join(path, "input_files")):
                 model_dirs.append(path)
         if not model_dirs:
-            raise FileNotFoundError(
-                f"No model folders with input_files found under {job_root}."
-            )
+            for parent in first_level:
+                for entry in sorted(os.listdir(parent)):
+                    path = os.path.join(parent, entry)
+                    if not os.path.isdir(path):
+                        continue
+                    if os.path.isdir(os.path.join(path, "input_files")):
+                        model_dirs.append(path)
+            if not model_dirs:
+                raise FileNotFoundError(
+                    f"No model folders with input_files found under {job_root}."
+                )
         return model_dirs
 
     @staticmethod
@@ -671,7 +681,8 @@ class MLCGAnalysis:
         """
         Compute C-alpha RMSD to a native structure for each trajectory.
 
-        If native_pdb is omitted and a native PDB exists in input_files,
+        If native_pdb is omitted and a native PDB named "<base>_native.pdb"
+        exists in input_files (where <base> is derived from the CG PDB),
         it is used by default.
         """
         if not run.coord_chunks:
@@ -1316,21 +1327,10 @@ class MLCGAnalysis:
         if not run.cg_pdb:
             return None
         input_dir = os.path.dirname(run.cg_pdb)
-        preferred = [
-            os.path.join(input_dir, f"{run.model_name}_native.pdb"),
-            os.path.join(input_dir, f"{run.model_name}.pdb"),
-        ]
-        for path in preferred:
-            if os.path.exists(path):
-                return path
-        candidates = [
-            path
-            for path in glob.glob(os.path.join(input_dir, "*.pdb"))
-            if not path.endswith("_cg.pdb")
-        ]
-        if len(candidates) == 1:
-            return candidates[0]
-        return None
+        cg_name = os.path.splitext(os.path.basename(run.cg_pdb))[0]
+        base = cg_name[:-3] if cg_name.endswith("_cg") else cg_name
+        candidate = os.path.join(input_dir, f"{base}_native.pdb")
+        return candidate if os.path.exists(candidate) else None
 
     def _get_native_ca_map(
         self,

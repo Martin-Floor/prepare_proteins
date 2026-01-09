@@ -929,6 +929,84 @@ class MutationVariabilityAnalyzer:
         mask = df["Model"].isin(selected)
         return df.loc[mask].reset_index(drop=True)
 
+    def mutation_positions(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_wt: bool = False,
+        resids_only: bool = False,
+    ) -> List[Union[int, Tuple[str, int]]]:
+        """Return mutated positions for the selected models.
+
+        Defaults to (chain, resseq) tuples using WT numbering. Set
+        ``resids_only`` to return only resseq values. Insertions relative to WT
+        are omitted because they lack a WT residue index.
+        """
+
+        table = self.build_mutation_table(models=models, include_wt=include_wt)
+        if table.empty:
+            return []
+
+        table = table.loc[table["WT_resseq"].notna(), ["Chain", "WT_resseq"]]
+        if table.empty:
+            return []
+
+        if resids_only:
+            return table["WT_resseq"].astype(int).tolist()
+
+        return list(zip(table["Chain"], table["WT_resseq"].astype(int)))
+
+    def mutation_pairs(
+        self,
+        models: Optional[Union[str, Iterable[str]]] = None,
+        *,
+        include_wt: bool = False,
+        resids_only: bool = False,
+        include_insertions: bool = False,
+    ) -> Union[
+        List[Tuple[Tuple[str, Optional[int]], Tuple[str, Optional[int]]]],
+        List[Tuple[Tuple[str, Optional[int], str], Tuple[str, Optional[int], str]]],
+    ]:
+        """Return mutation pairs as ((original), (mutated)) tuples.
+
+        Defaults to (chain, resseq, residue) tuples using WT numbering and skips
+        insertions (no WT position). Deletions keep the WT position with a "-"
+        mutant residue. Set ``resids_only`` to return (chain, resseq) tuples.
+        Set ``include_insertions`` to include insertions with a None WT position.
+        """
+
+        table = self.build_mutation_table(models=models, include_wt=include_wt)
+        if table.empty:
+            return []
+
+        if not include_insertions:
+            table = table.loc[table["WT_resseq"].notna()]
+            if table.empty:
+                return []
+
+        def _to_int(value):
+            if value is None or pd.isna(value):
+                return None
+            return int(value)
+
+        mutations = []
+        for row in table.itertuples(index=False):
+            chain = row.Chain
+            wt_resseq = _to_int(row.WT_resseq)
+            var_resseq = _to_int(row.Variant_resseq)
+            if var_resseq is None and wt_resseq is not None:
+                var_resseq = wt_resseq
+
+            if resids_only:
+                original = (chain, wt_resseq)
+                mutated = (chain, var_resseq)
+            else:
+                original = (chain, wt_resseq, row.WT_residue)
+                mutated = (chain, var_resseq, row.Mutant_residue)
+            mutations.append((original, mutated))
+
+        return mutations
+
     def summarize_models(
         self,
         models: Optional[Union[str, Iterable[str]]] = None,
@@ -4893,7 +4971,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             Folder path where to place the mutation job.
         mutants : dict
             Mutants specification. Two accepted formats (can be mixed per model):
-              1) Nested dict: {model: {mutant_name: [(resid, new_aa), ...]}, ...}
+              1) Nested dict: {model: {mutant_name: [(seq_pos, new_aa), ...]}, ...}
+                 For multi-chain models, you can instead use chain-aware tuples
+                 (chain_id, resseq, new_aa) or (chain_id, resseq, icode, new_aa),
+                 which are mapped to sequence positions using the model's
+                 structure. Entries must reference protein residues.
               2) FASTA dict: {model: "/path/to/variants.fasta", ...} where each
                  FASTA entry header becomes the mutant name. For multi-chain
                  models, sequences must be separated by '/' per chain in chain
@@ -4978,8 +5060,17 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             self.getModelsSequences()
 
         # Augment mutants with variants defined in fasta files
-        all_mutants = copy.deepcopy(explicit_mutants)
         standard_aas = set("ACDEFGHIKLMNPQRSTVWY")
+
+        def _resolve_chain_ids(model, chain_ids):
+            if chain_ids == [None]:
+                resolved = [cid for cid, seq in self.chain_sequences[model].items() if seq]
+                if len(resolved) != 1:
+                    raise ValueError(
+                        f"Expected a single protein chain for model {model}, found {resolved}"
+                    )
+                return resolved
+            return chain_ids
 
         def _ensure_model_sequences(model):
             if model not in self.sequences:
@@ -4999,6 +5090,93 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     return [None], [chain_seqs[0]]
                 return chain_ids, chain_seqs
             return [None], [self.sequences[model]]
+
+        chain_resseq_maps = {}
+
+        def _chain_resseq_to_seq_map(model):
+            if model in chain_resseq_maps:
+                return chain_resseq_maps[model]
+
+            chain_ids, chain_sequences = _ensure_model_sequences(model)
+            chain_ids = _resolve_chain_ids(model, chain_ids)
+            structure = self.structures[model]
+            seq_pos = 0
+            mapping = {}
+            for chain_id, _ in zip(chain_ids, chain_sequences):
+                if chain_id not in structure[0]:
+                    raise ValueError(f"Chain {chain_id} not found in model {model}")
+                for residue in structure[0][chain_id]:
+                    if residue.id[0] != " ":
+                        continue
+                    seq_pos += 1
+                    resseq = int(residue.id[1])
+                    icode = (residue.id[2] or " ").strip()
+                    mapping[(str(chain_id), resseq, icode)] = seq_pos
+
+            chain_resseq_maps[model] = mapping
+            return mapping
+
+        def _normalize_explicit_mutants(mutant_dict):
+            normalized = {}
+            for model, variants in mutant_dict.items():
+                normalized[model] = {}
+                for mutant_name, mutation_list in variants.items():
+                    if not isinstance(mutation_list, list):
+                        raise ValueError(
+                            f"Mutations for model {model} variant {mutant_name} must be a list of tuples."
+                        )
+                    converted = []
+                    for entry in mutation_list:
+                        if not isinstance(entry, (list, tuple)):
+                            raise ValueError(
+                                f"Invalid mutation entry for model {model} variant {mutant_name}: {entry!r}"
+                            )
+                        if len(entry) == 2:
+                            converted.append(entry)
+                            continue
+                        if len(entry) == 3:
+                            chain_id, resseq, new_aa = entry
+                            icode = ""
+                        elif len(entry) == 4:
+                            chain_id, resseq, icode, new_aa = entry
+                        else:
+                            raise ValueError(
+                                f"Invalid mutation entry for model {model} variant {mutant_name}: {entry!r}"
+                            )
+                        try:
+                            resseq_int = int(resseq)
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(
+                                f"Invalid residue id for model {model} variant {mutant_name}: {resseq!r}"
+                            ) from exc
+                        chain_id = str(chain_id)
+                        icode_norm = (icode or "").strip()
+                        mapping = _chain_resseq_to_seq_map(model)
+                        seq_pos = mapping.get((chain_id, resseq_int, icode_norm))
+                        if seq_pos is None and not icode_norm:
+                            matches = [
+                                pos
+                                for (cid, resid, _), pos in mapping.items()
+                                if cid == chain_id and resid == resseq_int
+                            ]
+                            if len(matches) == 1:
+                                seq_pos = matches[0]
+                            elif len(matches) > 1:
+                                raise ValueError(
+                                    f"Ambiguous insertion code for {model} chain {chain_id} residue {resseq_int}; "
+                                    "specify the insertion code."
+                                )
+                        if seq_pos is None:
+                            raise ValueError(
+                                f"Residue not found for {model} chain {chain_id} residue {resseq_int} "
+                                f"(icode '{icode_norm}')"
+                            )
+                        converted.append((seq_pos, new_aa))
+                    normalized[model][mutant_name] = converted
+            return normalized
+
+        explicit_mutants = _normalize_explicit_mutants(explicit_mutants)
+        all_mutants = copy.deepcopy(explicit_mutants)
 
         if fasta_sources:
             for model, fasta_path in fasta_sources.items():
@@ -5140,18 +5318,8 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         # Convert FASTA-derived mutations from sequence positions to Rosetta pose indices
         pose_mutants = copy.deepcopy(all_mutants)
 
-        def _resolve_pose_chain_ids(model, chain_ids):
-            if chain_ids == [None]:
-                resolved = [cid for cid, seq in self.chain_sequences[model].items() if seq]
-                if len(resolved) != 1:
-                    raise ValueError(
-                        f"Expected a single protein chain for model {model}, found {resolved}"
-                    )
-                return resolved
-            return chain_ids
-
         def _sequence_to_pose_map(model, chain_ids):
-            chain_ids = _resolve_pose_chain_ids(model, chain_ids)
+            chain_ids = _resolve_chain_ids(model, chain_ids)
             structure = self.structures[model]
             pose_index = 0
             pose_index_by_residue = {}
@@ -7067,12 +7235,101 @@ make sure of reading the target sequences with the function readTargetSequences(
         mutational analysis. Pass ``contact_results`` to override cached
         neighbour data (defaults to ``self.models_contacts``).
 
-        ``wild_type`` can be either a single model name or a dictionary mapping
-        each target model to the WT model it should be compared against. When a
-        dictionary is supplied, the return value is a mapping from each target
-        model to its corresponding analyzer (models that share a WT reuse the
-        same analyzer instance).
+        ``wild_type`` can be either a single model name or a PDB path, or a
+        dictionary mapping each target model to the WT model name/PDB path it
+        should be compared against. When a dictionary is supplied, the return
+        value is a mapping from each target model to its corresponding analyzer
+        (models that share a WT reuse the same analyzer instance).
         """
+
+        available_models = list(getattr(self, "models_names", []))
+        available_set = set(available_models)
+        model_paths = getattr(self, "models_paths", {}) or {}
+
+        def _normalize_model_list(value, label):
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, (list, tuple, set)):
+                return [str(v) for v in value]
+            raise TypeError(f"{label} must be a string or an iterable of strings.")
+
+        def _looks_like_path(value):
+            if value in available_set or value in model_paths:
+                return False
+            if value.lower().endswith(".pdb"):
+                return True
+            if os.path.isabs(value) or os.sep in value:
+                return True
+            return False
+
+        def _update_sequences_for_model(model_name):
+            if not self.chain_sequences:
+                return
+            chains = [c for c in self.structures[model_name].get_chains()]
+            per_chain_sequences = {}
+            for chain in chains:
+                per_chain_sequences[chain.id] = self._getChainSequence(chain)
+            self.chain_sequences[model_name] = per_chain_sequences
+            if len(per_chain_sequences) == 1:
+                self.sequences[model_name] = next(iter(per_chain_sequences.values()))
+            else:
+                self.sequences[model_name] = per_chain_sequences
+            valid_sequences = [
+                seq for seq in per_chain_sequences.values() if seq not in (None, "")
+            ]
+            if len(valid_sequences) > 1:
+                self.multi_chain = True
+
+        def _load_external_pdb(pdb_path, label):
+            expanded = os.path.expanduser(pdb_path)
+            if not os.path.isabs(expanded):
+                expanded = os.path.abspath(expanded)
+            if not os.path.exists(expanded):
+                raise ValueError(f"{label} PDB path does not exist: {pdb_path}")
+            resolved = os.path.realpath(expanded)
+            for model_name, path in model_paths.items():
+                if path and os.path.realpath(path) == resolved:
+                    return model_name
+            stem = os.path.splitext(os.path.basename(resolved))[0] or "wild_type"
+            candidate = stem
+            if candidate in available_set:
+                candidate = f"{stem}_wt"
+                suffix = 1
+                while candidate in available_set:
+                    suffix += 1
+                    candidate = f"{stem}_wt{suffix}"
+            self.readModelFromPDB(candidate, resolved, add_to_path=True)
+            available_models.append(candidate)
+            available_set.add(candidate)
+            _update_sequences_for_model(candidate)
+            return candidate
+
+        def _resolve_model_name(value, label):
+            if not isinstance(value, str):
+                return value, False
+            if value in available_set or value in model_paths:
+                return value, False
+            if _looks_like_path(value):
+                return _load_external_pdb(value, label), True
+            return value, False
+
+        wt_from_path = False
+        if isinstance(wild_type, dict):
+            if not wild_type:
+                raise ValueError("wild_type mapping cannot be empty.")
+            wild_type = {
+                model: _resolve_model_name(wt, f"wild_type[{model}]")[0]
+                for model, wt in wild_type.items()
+            }
+        else:
+            wild_type, wt_from_path = _resolve_model_name(wild_type, "wild_type")
+            if wt_from_path and only_models is not None:
+                only_list = _normalize_model_list(only_models, "only_models")
+                if wild_type not in only_list:
+                    only_list.append(wild_type)
+                only_models = only_list
 
         if contact_results is not None:
             analysis_contacts = contact_results
@@ -7083,18 +7340,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                 analysis_contacts = self.models_contacts
 
         if isinstance(wild_type, dict):
-            if not wild_type:
-                raise ValueError("wild_type mapping cannot be empty.")
-
-            def _normalize_model_list(value, label):
-                if value is None:
-                    return []
-                if isinstance(value, str):
-                    return [value]
-                if isinstance(value, (list, tuple, set)):
-                    return [str(v) for v in value]
-                raise TypeError(f"{label} must be a string or an iterable of strings.")
-
             only_list = _normalize_model_list(only_models, "only_models")
             exclude_list = _normalize_model_list(exclude_models, "exclude_models")
 
@@ -7111,8 +7356,6 @@ make sure of reading the target sequences with the function readTargetSequences(
                     "No models left after applying only_models/exclude_models filters to wild_type mapping."
                 )
 
-            available_models = list(getattr(self, "models_names", []))
-            available_set = set(available_models)
             missing_models = [m for m in target_models if m not in available_set]
             if missing_models:
                 raise ValueError(
@@ -7435,7 +7678,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                             high_res_cycles=None, high_res_repack_every_Nth=None, num_conformers=50,
                             prune_rms_threshold=0.5, max_attempts=1000, rosetta_home=None, separator='-',
                             use_exp_torsion_angle_prefs=True, use_basic_knowledge=True, only_scorefile=False,
-                            enforce_chirality=True, skip_conformers_if_found=False, overwrite=False, skip_finished=False, skip_silent_file=False, grid_width=10.0,
+                            enforce_chirality=True, skip_conformers_if_found=False, overwrite=False, skip_finished=False, only_ligands=None, skip_silent_file=False, grid_width=10.0,
                             n_jobs=1, python2_executable='python2.7', store_initial_placement=False,
                             pdb_output=False, atom_pairs=None, angles=None, parallelisation="srun",
                             executable='rosetta_scripts.mpi.linuxgccrelease', ligand_chain='B', nstruct=100):
@@ -7490,6 +7733,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             Re-generate conformers and parameter files even if expected outputs already exist. Default is False.
         skip_finished : bool, optional
             Skip setting up model/ligand combinations when expected docking outputs already exist. Default is False.
+        only_ligands : list or str, optional
+            Optional subset of ligand names to include from the provided ligand input.
         skip_silent_file : bool, optional
             Do not write silent (.out) files; only write score files. Default is False.
         grid_width : float, optional
@@ -7799,6 +8044,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         if sum([bool(ligands_pdb_folder), bool(ligands_sdf_folder), bool(smiles_file), bool(sdf_file)]) != 1:
             raise ValueError('Specify exactly one of ligands_pdb_folder, ligands_sdf_folder, smiles_file, or sdf_file.')
 
+        if isinstance(only_ligands, str):
+            only_ligands = [only_ligands]
+
         # Check given separator compatibility
         for model in self:
             if separator in model:
@@ -7987,6 +8235,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
                 ligand_file_path = os.path.join(ligands_pdb_folder, ligand_file)
                 base_name = os.path.splitext(ligand_file)[0]
+                if only_ligands and base_name not in only_ligands:
+                    continue
                 ligand_dir = os.path.join(ligand_params_folder, base_name)
                 ligands.append(process_ligand_file(ligand_file_path, base_name, ligand_dir))
 
@@ -7997,6 +8247,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
                 ligand_file_path = os.path.join(ligands_sdf_folder, ligand_file)
                 base_name = os.path.splitext(ligand_file)[0]
+                if only_ligands and base_name not in only_ligands:
+                    continue
                 ligand_dir = os.path.join(ligand_params_folder, base_name)
                 ligands.append(process_ligand_file(ligand_file_path, base_name, ligand_dir))
 
@@ -8005,6 +8257,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             with open(smiles_file, 'r') as f:
                 for line in f:
                     smi, name = line.strip().split()
+                    if only_ligands and name not in only_ligands:
+                        continue
                     mol = Chem.MolFromSmiles(smi)
                     if mol is None:
                         raise ValueError(f"Could not parse SMILES: {smi}")
@@ -8035,6 +8289,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     continue
                 mol = Chem.AddHs(mol)
                 name = mol.GetProp("_Name")
+                if only_ligands and name not in only_ligands:
+                    continue
                 ligand_dir = os.path.join(ligand_params_folder, name)
                 os.makedirs(ligand_dir, exist_ok=True)
                 output_sdf_path = os.path.join(ligand_dir, f"{name}.sdf")
@@ -8088,9 +8344,11 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 for ligand_name, pair_entries in ligand_dict.items():
                     if ligand_name not in available_ligands:
-                        raise ValueError(
-                            f"Ligand '{ligand_name}' from atom_pairs is not part of the prepared ligand set."
+                        warnings.warn(
+                            f"Ligand '{ligand_name}' from atom_pairs is not part of the prepared ligand set; skipping.",
+                            UserWarning,
                         )
+                        continue
                     if not pair_entries:
                         continue
                     normalized_pairs: List[
@@ -13842,10 +14100,11 @@ import subprocess
 import sys
 import time
 
-BASE_CONFIG = {os.path.basename(base_config_path)!r}
-CHUNK_CONFIG = {chunk_config_name!r}
-STATE_PATH = {state_name!r}
-SIMS_DIR = {os.path.basename(sims_dir)!r}
+ROOT = os.path.dirname(os.path.abspath(__file__))
+BASE_CONFIG = os.path.join(ROOT, {os.path.basename(base_config_path)!r})
+CHUNK_CONFIG = os.path.join(ROOT, {chunk_config_name!r})
+STATE_PATH = os.path.join(ROOT, {state_name!r})
+SIMS_DIR = os.path.join(ROOT, {os.path.basename(sims_dir)!r})
 PREFIX = {prefix!r}
 CHUNK_STEPS = {int(chunk_steps)}
 PER_REPLICA_STEPS = {int(per_replica_steps)}
@@ -13903,6 +14162,11 @@ def main():
     if resume and not os.path.exists(checkpoint_path):
         print("Checkpoint " + checkpoint_path + " missing; restarting chunk from scratch.")
         resume = False
+    log_path = os.path.join(SIMS_DIR, chunk_prefix + "_log.txt")
+    if os.path.exists(log_path):
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        backup = log_path + "." + stamp + ".bak"
+        os.replace(log_path, backup)
 
     with open(BASE_CONFIG, "r") as handle:
         config = json.load(handle)
@@ -13915,7 +14179,8 @@ def main():
 
     with open(CHUNK_CONFIG, "w") as handle:
         json.dump(config, handle, indent=2)
-    with open(chunk_prefix + ".json", "w") as handle:
+    chunk_json_path = os.path.join(ROOT, chunk_prefix + ".json")
+    with open(chunk_json_path, "w") as handle:
         json.dump(config, handle, indent=2)
 
     state = dict(
@@ -16493,7 +16758,14 @@ if __name__ == "__main__":
 
         return best_poses
 
-    def extractRosettaDockingModels(self, docking_folder, input_df, output_folder, separator='_'):
+    def extractRosettaDockingModels(
+        self,
+        docking_folder,
+        input_df,
+        output_folder,
+        separator="_",
+        include_pose_in_filename=True,
+    ):
         """
         Extract models based on an input DataFrame with index ['Model', 'Ligand', 'Pose'].
 
@@ -16504,7 +16776,10 @@ if __name__ == "__main__":
         input_df : pd.DataFrame
             DataFrame containing the models to be extracted with index ['Model', 'Ligand', 'Pose'].
         separator : str
-            Separator character used in file names. Default is '-'.
+            Separator character used in file names. Default is '_'.
+        include_pose_in_filename : bool
+            When True, name extracted files as model{sep}ligand{sep}pose. When False,
+            the pose suffix is omitted.
 
         Returns
         =======
@@ -16590,21 +16865,27 @@ if __name__ == "__main__":
                 missing_models.append(f"{model}{used_separator}{ligand}")
                 continue
 
+            padding_key = (silent_file, model)
+            pose_padding = pose_padding_cache.get(padding_key)
+            if pose_padding is None:
+                pose_padding = _infer_pose_padding(silent_file, model)
+                pose_padding_cache[padding_key] = pose_padding
+
+            if isinstance(pose, (int, float)) and not isinstance(pose, bool):
+                pose_value = int(pose)
+                pose_str = str(pose_value).zfill(pose_padding)
+            else:
+                pose_str = str(pose)
+
             if 'description' in row.index:
                 best_model_tag = row['description']
             else:
-                padding_key = (silent_file, model)
-                pose_padding = pose_padding_cache.get(padding_key)
-                if pose_padding is None:
-                    pose_padding = _infer_pose_padding(silent_file, model)
-                    pose_padding_cache[padding_key] = pose_padding
-
-                if isinstance(pose, (int, float)) and not isinstance(pose, bool):
-                    pose_value = int(pose)
-                    pose_str = str(pose_value).zfill(pose_padding)
-                else:
-                    pose_str = str(pose)
                 best_model_tag = f"{model}_{pose_str}"
+
+            if include_pose_in_filename:
+                output_tag = f"{model}{used_separator}{ligand}{used_separator}{pose_str}"
+            else:
+                output_tag = f"{model}{used_separator}{ligand}"
 
             command = f"{executable} -silent {silent_file} -tags {best_model_tag}"
             for param_file in shared_params:
@@ -16615,10 +16896,17 @@ if __name__ == "__main__":
             exit_code = os.system(command)
 
             pdb_filename = f"{best_model_tag}.pdb"
+            output_filename = f"{output_tag}.pdb"
 
             if exit_code == 0 and os.path.exists(pdb_filename):
-                shutil.move(pdb_filename, os.path.join(output_folder, pdb_filename))
-                models.append(os.path.join(output_folder, pdb_filename))
+                output_path = os.path.join(output_folder, output_filename)
+                if os.path.exists(output_path):
+                    warnings.warn(
+                        f"Output file '{output_path}' already exists; overwriting.",
+                        UserWarning,
+                    )
+                shutil.move(pdb_filename, output_path)
+                models.append(output_path)
             else:
                 print(f"Failed to extract pose '{best_model_tag}' from {silent_file}.")
 
