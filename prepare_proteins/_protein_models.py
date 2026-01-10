@@ -787,10 +787,27 @@ class MutationVariabilityAnalyzer:
         core_contact_threshold: int = 12,
         surface_contact_threshold: int = 4,
         pocket_neighbor_kinds: Optional[Iterable[str]] = None,
+        wild_type_pdb: Optional[str] = None,
     ):
         self.models = protein_models
         available_models = list(getattr(self.models, "models_names", []))
-        if wild_type not in available_models:
+        self._wt_structure = None
+        self._wt_is_external = False
+        self._wt_source_path = None
+        if wild_type_pdb:
+            if wild_type in available_models:
+                raise ValueError(
+                    f"Wild-type label '{wild_type}' already exists in the current session; "
+                    "choose a different label when providing wild_type_pdb."
+                )
+            expanded = os.path.expanduser(wild_type_pdb)
+            if not os.path.exists(expanded):
+                raise ValueError(f"Wild-type PDB path does not exist: {wild_type_pdb}")
+            resolved = os.path.realpath(expanded)
+            self._wt_structure = _readPDB(str(wild_type), resolved)
+            self._wt_is_external = True
+            self._wt_source_path = resolved
+        elif wild_type not in available_models:
             raise ValueError(f"Wild-type model '{wild_type}' is not available in the current session.")
         self.wt_model = wild_type
 
@@ -815,7 +832,7 @@ class MutationVariabilityAnalyzer:
             exclude_set = set(exclude_list)
             selected = [m for m in selected if m not in exclude_set]
 
-        if self.wt_model not in selected:
+        if not self._wt_is_external and self.wt_model not in selected:
             raise ValueError(
                 "Wild-type model must be part of the analysis set; "
                 "adjust only_models/exclude_models so that it is included."
@@ -834,7 +851,37 @@ class MutationVariabilityAnalyzer:
             self.models.getModelsSequences()
 
         raw_selection = self.models._resolve_chain_selection(chains=chains, models=self.analysis_models)
-        wt_chains = raw_selection.get(self.wt_model, [])
+        if self._wt_is_external:
+            if isinstance(chains, dict):
+                wt_chain_filter = chains.get(self.wt_model)
+            else:
+                wt_chain_filter = chains
+            if wt_chain_filter is None:
+                requested_wt = None
+            elif isinstance(wt_chain_filter, str):
+                requested_wt = [wt_chain_filter]
+            elif isinstance(wt_chain_filter, (list, tuple, set)):
+                requested_wt = list(dict.fromkeys(wt_chain_filter))
+            else:
+                raise TypeError(
+                    "Chain selectors must be strings, iterables, or dictionaries mapping to them."
+                )
+            wt_chains = []
+            structure = self._wt_structure
+            if structure is not None:
+                available = []
+                for pdb_model in structure:
+                    available = [c.id for c in pdb_model.get_chains()]
+                    break
+                candidate_chains = [c for c in available if (requested_wt is None or c in requested_wt)]
+                for chain_id in candidate_chains:
+                    seq, _ = self._extract_chain_sequence(self.wt_model, chain_id)
+                    if seq:
+                        wt_chains.append(chain_id)
+            raw_selection[self.wt_model] = wt_chains
+        else:
+            wt_chains = raw_selection.get(self.wt_model, [])
+
         if not wt_chains:
             raise ValueError(f"No analyzable chains were found for the wild-type model '{self.wt_model}'.")
         wt_set = set(wt_chains)
@@ -1463,7 +1510,7 @@ class MutationVariabilityAnalyzer:
     ) -> None:
         """Write per-residue frequency values into the B-factor field of the WT structure."""
 
-        structure = self.models.structures.get(self.wt_model)
+        structure = self._get_structure(self.wt_model)
         if structure is None:
             raise ValueError("Wild-type structure not available; cannot write B-factors.")
 
@@ -1600,10 +1647,15 @@ class MutationVariabilityAnalyzer:
             )
         return [m for m in requested if (m in available) or (include_wt and m == self.wt_model)]
 
+    def _get_structure(self, model: str):
+        if self._wt_is_external and model == self.wt_model:
+            return self._wt_structure
+        return self.models.structures.get(model)
+
     def _extract_chain_sequence(self, model: str, chain_id: str) -> Tuple[str, List[Dict[str, Any]]]:
         sequence: List[str] = []
         metadata: List[Dict[str, Any]] = []
-        structure = self.models.structures.get(model)
+        structure = self._get_structure(model)
         if structure is None:
             return "", []
         chain_obj = None
@@ -7235,16 +7287,18 @@ make sure of reading the target sequences with the function readTargetSequences(
         mutational analysis. Pass ``contact_results`` to override cached
         neighbour data (defaults to ``self.models_contacts``).
 
-        ``wild_type`` can be either a single model name or a PDB path, or a
-        dictionary mapping each target model to the WT model name/PDB path it
-        should be compared against. When a dictionary is supplied, the return
-        value is a mapping from each target model to its corresponding analyzer
-        (models that share a WT reuse the same analyzer instance).
+        ``wild_type`` can be either a single model name or a PDB path (used as an
+        external reference without loading it into the session), or a dictionary
+        mapping each target model to the WT model name/PDB path it should be
+        compared against. When a dictionary is supplied, the return value is a
+        mapping from each target model to its corresponding analyzer (models
+        that share a WT reuse the same analyzer instance).
         """
 
         available_models = list(getattr(self, "models_names", []))
         available_set = set(available_models)
         model_paths = getattr(self, "models_paths", {}) or {}
+        reserved_labels = set(available_models)
 
         def _normalize_model_list(value, label):
             if value is None:
@@ -7264,72 +7318,57 @@ make sure of reading the target sequences with the function readTargetSequences(
                 return True
             return False
 
-        def _update_sequences_for_model(model_name):
-            if not self.chain_sequences:
-                return
-            chains = [c for c in self.structures[model_name].get_chains()]
-            per_chain_sequences = {}
-            for chain in chains:
-                per_chain_sequences[chain.id] = self._getChainSequence(chain)
-            self.chain_sequences[model_name] = per_chain_sequences
-            if len(per_chain_sequences) == 1:
-                self.sequences[model_name] = next(iter(per_chain_sequences.values()))
-            else:
-                self.sequences[model_name] = per_chain_sequences
-            valid_sequences = [
-                seq for seq in per_chain_sequences.values() if seq not in (None, "")
-            ]
-            if len(valid_sequences) > 1:
-                self.multi_chain = True
-
-        def _load_external_pdb(pdb_path, label):
-            expanded = os.path.expanduser(pdb_path)
-            if not os.path.isabs(expanded):
-                expanded = os.path.abspath(expanded)
-            if not os.path.exists(expanded):
-                raise ValueError(f"{label} PDB path does not exist: {pdb_path}")
-            resolved = os.path.realpath(expanded)
-            for model_name, path in model_paths.items():
-                if path and os.path.realpath(path) == resolved:
-                    return model_name
-            stem = os.path.splitext(os.path.basename(resolved))[0] or "wild_type"
+        def _external_label_for(path_value):
+            stem = os.path.splitext(os.path.basename(path_value))[0] or "wild_type"
             candidate = stem
-            if candidate in available_set:
+            if candidate in reserved_labels:
                 candidate = f"{stem}_wt"
                 suffix = 1
-                while candidate in available_set:
+                while candidate in reserved_labels:
                     suffix += 1
                     candidate = f"{stem}_wt{suffix}"
-            self.readModelFromPDB(candidate, resolved, add_to_path=True)
-            available_models.append(candidate)
-            available_set.add(candidate)
-            _update_sequences_for_model(candidate)
+            reserved_labels.add(candidate)
             return candidate
 
-        def _resolve_model_name(value, label):
+        def _resolve_wt_spec(value, label):
             if not isinstance(value, str):
-                return value, False
+                raise TypeError(f"{label} must be a string or path.")
             if value in available_set or value in model_paths:
-                return value, False
+                return {
+                    "label": value,
+                    "pdb": None,
+                    "external": False,
+                    "key": ("model", value),
+                }
             if _looks_like_path(value):
-                return _load_external_pdb(value, label), True
-            return value, False
+                expanded = os.path.expanduser(value)
+                if not os.path.isabs(expanded):
+                    expanded = os.path.abspath(expanded)
+                if not os.path.exists(expanded):
+                    raise ValueError(f"{label} PDB path does not exist: {value}")
+                resolved = os.path.realpath(expanded)
+                return {
+                    "label": _external_label_for(resolved),
+                    "pdb": resolved,
+                    "external": True,
+                    "key": ("pdb", resolved),
+                }
+            return {
+                "label": value,
+                "pdb": None,
+                "external": False,
+                "key": ("model", value),
+            }
 
-        wt_from_path = False
         if isinstance(wild_type, dict):
             if not wild_type:
                 raise ValueError("wild_type mapping cannot be empty.")
-            wild_type = {
-                model: _resolve_model_name(wt, f"wild_type[{model}]")[0]
+            wt_specs = {
+                model: _resolve_wt_spec(wt, f"wild_type[{model}]")
                 for model, wt in wild_type.items()
             }
         else:
-            wild_type, wt_from_path = _resolve_model_name(wild_type, "wild_type")
-            if wt_from_path and only_models is not None:
-                only_list = _normalize_model_list(only_models, "only_models")
-                if wild_type not in only_list:
-                    only_list.append(wild_type)
-                only_models = only_list
+            wt_spec = _resolve_wt_spec(wild_type, "wild_type")
 
         if contact_results is not None:
             analysis_contacts = contact_results
@@ -7343,7 +7382,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             only_list = _normalize_model_list(only_models, "only_models")
             exclude_list = _normalize_model_list(exclude_models, "exclude_models")
 
-            target_models = list(wild_type.keys())
+            target_models = list(wt_specs.keys())
             if only_list:
                 only_set = set(only_list)
                 target_models = [m for m in target_models if m in only_set]
@@ -7362,20 +7401,39 @@ make sure of reading the target sequences with the function readTargetSequences(
                     "Models not available in the current session: " + ", ".join(sorted(missing_models))
                 )
 
-            wt_models = {wild_type[model] for model in target_models}
+            wt_models = {
+                wt_specs[model]["label"]
+                for model in target_models
+                if not wt_specs[model]["external"]
+            }
             missing_wt = [wt for wt in wt_models if wt not in available_set]
             if missing_wt:
                 raise ValueError(
                     "Wild-type models not available in the current session: " + ", ".join(sorted(missing_wt))
                 )
 
-            grouped_by_wt: Dict[str, List[str]] = defaultdict(list)
+            grouped_by_wt: Dict[Tuple[str, str], Dict[str, Any]] = {}
             for model in target_models:
-                grouped_by_wt[wild_type[model]].append(model)
+                spec = wt_specs[model]
+                entry = grouped_by_wt.setdefault(
+                    spec["key"],
+                    {
+                        "label": spec["label"],
+                        "pdb": spec["pdb"],
+                        "external": spec["external"],
+                        "models": [],
+                    },
+                )
+                entry["models"].append(model)
 
             analyzers: Dict[str, MutationVariabilityAnalyzer] = {}
-            for wt_model, model_list in grouped_by_wt.items():
-                only_for_analyzer = list(dict.fromkeys(model_list + [wt_model]))
+            for entry in grouped_by_wt.values():
+                wt_model = entry["label"]
+                model_list = entry["models"]
+                if entry["external"]:
+                    only_for_analyzer = list(dict.fromkeys(model_list))
+                else:
+                    only_for_analyzer = list(dict.fromkeys(model_list + [wt_model]))
                 analyzer = MutationVariabilityAnalyzer(
                     self,
                     wt_model,
@@ -7389,14 +7447,17 @@ make sure of reading the target sequences with the function readTargetSequences(
                     core_contact_threshold=core_contact_threshold,
                     surface_contact_threshold=surface_contact_threshold,
                     pocket_neighbor_kinds=pocket_neighbor_kinds,
+                    wild_type_pdb=entry["pdb"],
                 )
                 for model in model_list:
                     analyzers[model] = analyzer
             return analyzers
 
+        wild_type_label = wt_spec["label"]
+        wild_type_pdb = wt_spec["pdb"]
         return MutationVariabilityAnalyzer(
             self,
-            wild_type,
+            wild_type_label,
             only_models=only_models,
             exclude_models=exclude_models,
             chains=chains,
@@ -7407,6 +7468,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             core_contact_threshold=core_contact_threshold,
             surface_contact_threshold=surface_contact_threshold,
             pocket_neighbor_kinds=pocket_neighbor_kinds,
+            wild_type_pdb=wild_type_pdb,
         )
 
     def setUprDockGrid(
