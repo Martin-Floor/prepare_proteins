@@ -18956,25 +18956,38 @@ if __name__ == "__main__":
             model_data = self.rosetta_data[
                 self.rosetta_data.index.get_level_values("Model") == model
             ]
-            for metric in filter_values:
+            for metric, threshold in filter_values.items():
                 if not metric.startswith("metric_"):
                     metric_label = "metric_" + metric
                 else:
                     metric_label = metric
-                model_data = model_data[
-                    model_data[metric_label] < filter_values[metric]
-                ]
+
+                if isinstance(threshold, (float, int)):
+                    model_data = model_data[model_data[metric_label] < threshold]
+                elif isinstance(threshold, (tuple, list)):
+                    model_data = model_data[
+                        (model_data[metric_label] >= threshold[0]) &
+                        (model_data[metric_label] <= threshold[1])
+                    ]
+                else:
+                    raise ValueError(f"Invalid threshold type for metric {metric}")
+
                 if model_data.empty:
                     if model not in failed:
                         failed.append(model)
-                    continue
-                if model_data.shape[0] < n_models:
-                    print(
-                        "WARNING: less than %s models passed the filter %s + %s"
-                        % (n_models, model, ligand)
-                    )
-                for i in model_data["score"].nsmallest(n_models).index:
-                    bp.append(i)
+                    break
+
+            if model_data.empty:
+                continue
+
+            if model_data.shape[0] < n_models:
+                print(
+                    "WARNING: less than %s models passed the filter %s"
+                    % (n_models, model)
+                )
+
+            for i in model_data["score"].nsmallest(n_models).index:
+                bp.append(i)
 
         if return_failed:
             return failed, self.rosetta_data[self.rosetta_data.index.isin(bp)]

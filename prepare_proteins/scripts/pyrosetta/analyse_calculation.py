@@ -821,19 +821,25 @@ for model in silent_file:
                 print('\tBinding energy score file %s was found' % binding_energy_file)
             file_exists['be'] = True
 
+    model_atom_pairs = None
     if atom_pairs != None:
-        # Check distance files
-        distance_file = distances_folder+'/'+model+'.csv'
-        if overwrite or not os.path.exists(distance_file):
-            # Create dictionary entries for distances
-            distances = {}
-            distances['Model'] = []
-            distances['Pose'] = []
-            file_exists['distances'] = False
+        model_atom_pairs = atom_pairs.get(model)
+        if model_atom_pairs:
+            # Check distance files
+            distance_file = distances_folder+'/'+model+'.csv'
+            if overwrite or not os.path.exists(distance_file):
+                # Create dictionary entries for distances
+                distances = {}
+                distances['Model'] = []
+                distances['Pose'] = []
+                file_exists['distances'] = False
+            else:
+                if verbose:
+                    print('\tDistance score file %s was found' % distance_file)
+                file_exists['distances'] = True
         else:
-            if verbose:
-                print('\tDistance score file %s was found' % distance_file)
-            file_exists['distances'] = True
+            if verbose and atom_pairs:
+                print('\tNo atom pairs defined for model %s; skipping distances' % model)
 
     if energy_by_residue:
         # Check ebr files
@@ -916,8 +922,8 @@ for model in silent_file:
             be_jobs.append([tag, binding_energy_chains, silent_file[model], params])
 
         # Calculate distances
-        if atom_pairs != None and not file_exists['distances']:
-            distance_jobs.append([tag, atom_pairs[model], silent_file[model], params])
+        if model_atom_pairs and not file_exists['distances']:
+            distance_jobs.append([tag, model_atom_pairs, silent_file[model], params])
 
         # Calculate energy by residue
         if energy_by_residue and not file_exists['ebr']:
