@@ -560,6 +560,7 @@ class openmm_md:
         # Get molecules that need parameterization
         par_folder = {}
         generated_pdb_paths = {}
+        ffxml_converted = set()
 
         for r in getNonProteinResidues(self.modeller.topology, skip_residues=skip_ligands):
 
@@ -607,7 +608,6 @@ class openmm_md:
             except Exception as exc:
                 warnings.warn(f"[prepare_proteins] parmed/openmm unavailable for FFXML conversion: {exc}", RuntimeWarning)
             else:
-                ffxml_converted = set()
                 for resname, pdb_path in generated_pdb_paths.items():
                     if resname not in normalized_ligand_xml:
                         continue
@@ -973,6 +973,8 @@ class openmm_md:
                             )
 
         skip_parameterization_residues = provided_mol2_residues & provided_frcmod_residues
+        if ffxml_converted:
+            skip_parameterization_residues |= ffxml_converted
 
         # Normalize export_per_residue_ffxml target set
         export_ffxml_all = False
@@ -1513,8 +1515,11 @@ class openmm_md:
                 if residue in metal_ligand_values:
                     continue
                 prepi_path = os.path.join(par_folder[residue], f'{residue}.prepi')
+                ffxml_marker = os.path.join(par_folder[residue], f".ffxml_generated_{residue.lower()}")
+                ffxml_marker_root = os.path.join(parameters_folder, f".ffxml_generated_{residue.lower()}")
+                ffxml_generated = os.path.exists(ffxml_marker) or os.path.exists(ffxml_marker_root)
                 if not metal_ligand:
-                    if os.path.exists(prepi_path):
+                    if os.path.exists(prepi_path) and not ffxml_generated:
                         tlf.write(f'loadamberprep {prepi_path}\n')
                     else:
                         mol2_paths = residue_mol2_files.get(residue, [])
