@@ -7455,10 +7455,16 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         wild_type_label = wt_spec["label"]
         wild_type_pdb = wt_spec["pdb"]
+        only_models_arg = only_models
+        if only_models is not None and not wt_spec["external"]:
+            only_list = _normalize_model_list(only_models, "only_models")
+            if wild_type_label not in only_list:
+                only_list = list(dict.fromkeys([wild_type_label] + only_list))
+            only_models_arg = only_list
         return MutationVariabilityAnalyzer(
             self,
             wild_type_label,
-            only_models=only_models,
+            only_models=only_models_arg,
             exclude_models=exclude_models,
             chains=chains,
             alignment_params=alignment_params,
