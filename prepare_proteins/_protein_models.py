@@ -2007,6 +2007,7 @@ class proteinModels:
         only_hetatm_conects=False,
         wat_to_hoh=True,
         maestro_export_options=None,
+        conect_update=True,
     ):
         """
         Read PDB models as Bio.PDB structure objects.
@@ -2029,6 +2030,8 @@ class proteinModels:
             path is a .mae/.maegz file. Supported keys mirror the CLI arguments of
             `scripts/export_maestro_models.py` (e.g. prefix, protein_ct,
             ligand_chain, ligand_resnum, keep_original_ligand_ids, separator).
+        conect_update : bool, optional
+            If False, skips reading and updating CONECT records when loading PDBs.
         """
 
         if ignore_biopython_warnings:
@@ -2098,6 +2101,7 @@ class proteinModels:
         self.sequence_differences = {}  # Store missing/changed sequence information
         self.conects = {}  # Store the conection inforamtion for each model
         self.covalent = {}  # Store covalent residues
+        self.conect_update = conect_update
 
         self.distance_data = {}
         self.models_data = {}
@@ -2123,6 +2127,7 @@ class proteinModels:
                 collect_memory=collect_memory,
                 only_hetatoms=only_hetatm_conects,
                 wat_to_hoh=wat_to_hoh,
+                conect_update=conect_update,
             )
 
         if get_sequences:
