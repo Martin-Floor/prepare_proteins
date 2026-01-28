@@ -173,13 +173,22 @@ class sequenceModels:
         remove_msas=False,
         only_models=None,
         gpu_relax=True,
+        skip_finished=None,
     ):
         """
-        Set up AlphaFold predictions for the loaded sequneces
+        Set up AlphaFold predictions for the loaded sequneces.
+
+        Notes
+        -----
+        ``skip_finished`` is an alias for ``exclude_finished`` and takes
+        precedence when provided.
         """
 
         if isinstance(only_models, str):
             only_models = [only_models]
+
+        if skip_finished is not None:
+            exclude_finished = bool(skip_finished)
 
         # Create Job folders
         if not os.path.exists(job_folder):
