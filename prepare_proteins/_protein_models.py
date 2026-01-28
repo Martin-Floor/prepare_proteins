@@ -5173,9 +5173,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             for model, variants in mutant_dict.items():
                 normalized[model] = {}
                 for mutant_name, mutation_list in variants.items():
-                    if not isinstance(mutation_list, list):
+                    if not isinstance(mutation_list, (list, tuple)):
                         raise ValueError(
-                            f"Mutations for model {model} variant {mutant_name} must be a list of tuples."
+                            f"Mutations for model {model} variant {mutant_name} must be a list/tuple of tuples."
                         )
                     converted = []
                     for entry in mutation_list:
@@ -5315,9 +5315,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             return base_seq
 
         def _build_expected_sequence(model, mutant_name, mutations):
-            if not isinstance(mutations, list):
+            if not isinstance(mutations, (list, tuple)):
                 raise ValueError(
-                    f"Mutations for model {model} variant {mutant_name} must be a list of tuples."
+                    f"Mutations for model {model} variant {mutant_name} must be a list/tuple of tuples."
                 )
             base_seq = _get_base_sequence(model)
             seq_list = list(base_seq)
@@ -18678,6 +18678,200 @@ if __name__ == "__main__":
             self.rosetta_protonation = None
 
         return self.rosetta_data
+
+    def plotRosettaDataDistributions(
+        self,
+        column,
+        level="Model",
+        sort_by="mean",
+        ascending=True,
+        showfliers=False,
+        add_mean_marker=True,
+        title=None,
+        ylabel=None,
+        figsize_base=(10, 4),
+        figsize_per_model=0.35,
+        max_figwidth=28,
+        plot_kind="box",
+        dataframe=None,
+        ax=None,
+        hline=None,
+        hline_kwargs=None,
+    ):
+        """
+        Plot per-model distributions for a column in rosetta_data (or a provided dataframe).
+
+        Parameters
+        ==========
+        column : str
+            Column name to plot.
+        level : str, optional
+            Index level to group by. Default is "Model".
+        sort_by : str, optional
+            Sort order based on "mean" or "median". Default is "mean".
+        ascending : bool, optional
+            Sort direction. Default is True.
+        showfliers : bool, optional
+            Show outliers in boxplots. Default is False.
+        add_mean_marker : bool, optional
+            Overlay mean markers. Default is True.
+        title : str, optional
+            Plot title. Default is generated.
+        ylabel : str, optional
+            Y-axis label. Default is column name.
+        figsize_base : tuple, optional
+            Base figure size (width, height). Default is (10, 4).
+        figsize_per_model : float, optional
+            Extra width per model beyond 10 models. Default is 0.35.
+        max_figwidth : float, optional
+            Maximum figure width. Default is 28.
+        plot_kind : str, optional
+            "box" or "violin". Default is "box".
+        dataframe : pandas.DataFrame, optional
+            DataFrame to use instead of self.rosetta_data.
+        ax : matplotlib.axes.Axes, optional
+            Axis to plot on. If None, a new figure is created.
+        hline : float, optional
+            Draw a horizontal reference line at this y-value.
+        hline_kwargs : dict, optional
+            Styling options passed to ax.axhline (e.g., color, linestyle, linewidth, alpha).
+
+        Returns
+        =======
+        fig, ax
+            The matplotlib figure and axis objects.
+        """
+
+        df = self.rosetta_data if dataframe is None else dataframe
+        if df is None or df.empty:
+            raise ValueError(
+                "Rosetta data is empty. Run analyseRosettaCalculation or pass a dataframe."
+            )
+
+        if column not in df.columns:
+            raise KeyError(f"Column '{column}' not found in dataframe.")
+
+        if not isinstance(df.index, pd.MultiIndex) or level not in df.index.names:
+            raise ValueError(
+                f"dataframe.index must be a MultiIndex and contain a level named '{level}'"
+            )
+
+        series = df[column].dropna()
+        if series.empty:
+            raise ValueError(f"Column '{column}' has no non-NaN values to plot.")
+
+        if sort_by == "mean":
+            stats = series.groupby(level=level).mean()
+        elif sort_by == "median":
+            stats = series.groupby(level=level).median()
+        else:
+            raise ValueError("sort_by must be 'mean' or 'median'")
+
+        if stats.empty:
+            raise ValueError(f"No grouped data found for level '{level}'.")
+
+        stats = stats.sort_values(ascending=ascending)
+        order = list(stats.index)
+
+        data = []
+        for model in order:
+            values = series.xs(model, level=level).to_numpy()
+            data.append(values)
+
+        if not data:
+            raise ValueError("No data available to plot.")
+
+        created_fig = ax is None
+        if created_fig:
+            figw = min(
+                max_figwidth,
+                max(
+                    figsize_base[0],
+                    figsize_base[0] + figsize_per_model * max(0, len(order) - 10),
+                ),
+            )
+            figh = figsize_base[1]
+            fig, ax = plt.subplots(figsize=(figw, figh))
+        else:
+            fig = ax.figure
+
+        if plot_kind not in ["box", "violin"]:
+            raise ValueError("plot_kind must be 'box' or 'violin'")
+
+        positions = np.arange(1, len(order) + 1)
+        colors = plt.cm.Blues(np.linspace(0.35, 0.85, max(1, len(order))))
+        if plot_kind == "box":
+            bp = ax.boxplot(
+                data,
+                labels=order,
+                showfliers=showfliers,
+                patch_artist=True,
+                whis=1.5,
+                widths=0.6,
+                medianprops={"color": "#2f2f2f", "linewidth": 1.4},
+                boxprops={"linewidth": 1.0},
+                whiskerprops={"linewidth": 1.0},
+                capprops={"linewidth": 1.0},
+            )
+            for box, color in zip(bp["boxes"], colors):
+                box.set_facecolor(color)
+                box.set_alpha(0.85)
+        else:
+            vp = ax.violinplot(
+                data,
+                positions=positions,
+                widths=0.75,
+                showmeans=False,
+                showmedians=True,
+                showextrema=False,
+            )
+            for body, color in zip(vp["bodies"], colors):
+                body.set_facecolor(color)
+                body.set_edgecolor("#3a3a3a")
+                body.set_alpha(0.85)
+            if "cmedians" in vp:
+                vp["cmedians"].set_color("#2f2f2f")
+                vp["cmedians"].set_linewidth(1.2)
+            ax.set_xticks(positions)
+            ax.set_xticklabels(order)
+
+        if add_mean_marker:
+            means = [np.mean(values) if len(values) else np.nan for values in data]
+            ax.scatter(
+                positions,
+                means,
+                marker="o",
+                s=24,
+                zorder=3,
+                label="mean",
+                color="#1f1f1f",
+                edgecolor="white",
+                linewidth=0.6,
+            )
+            ax.legend(frameon=False, loc="best")
+
+        if hline is not None:
+            line_kwargs = {"color": "#444444", "linestyle": "--", "linewidth": 1.0, "alpha": 0.8}
+            if hline_kwargs:
+                line_kwargs.update(hline_kwargs)
+            ax.axhline(hline, **line_kwargs)
+
+        if title is None:
+            title = f"{column} by {level} (sorted by {sort_by})"
+        ax.set_title(title)
+        ax.set_ylabel(ylabel if ylabel is not None else column)
+        ax.set_xlabel(level)
+        ax.tick_params(axis="x", labelrotation=60)
+        ax.grid(True, axis="y", color="0.85", linewidth=0.8)
+        ax.set_axisbelow(True)
+        ax.margins(x=0.01)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        if created_fig:
+            fig.tight_layout()
+
+        return fig, ax
 
     def getRosettaModelDistances(self, model):
         """
