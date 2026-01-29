@@ -1470,6 +1470,388 @@ class sequenceModels:
 
         return scores_df
 
+    def collectAlphaFold2Results(
+        self,
+        af_folder,
+        output_folder=None,
+        metric="ranking_confidence",
+        top_models=1,
+        only_models=None,
+        ascending=False,
+        best_only=False,
+        return_selected=False,
+        append_model_index=False,
+        overwrite=False,
+    ):
+        """Collect AlphaFold 2 scores and copy top-ranking predictions as PDBs.
+
+        Parameters
+        ----------
+        af_folder : str
+            Path to the AlphaFold 2 job folder created by :meth:`setUpAlphaFold`.
+            The function will look for ``output_models`` inside this folder. If
+            not found, ``af_folder`` itself is treated as the output root.
+        output_folder : str, optional
+            Destination directory where the selected PDB files will be written.
+            If ``None`` (default) no structural files are generated and the
+            function only returns the scores table.
+        metric : str, optional
+            Column used to rank predictions (default: ``"ranking_confidence"``).
+        top_models : int, optional
+            Number of top predictions per model to export when ``output_folder``
+            is provided. Defaults to ``1``.
+        only_models : iterable or str, optional
+            Restrict the analysis to specific model names.
+        ascending : bool, optional
+            Whether to rank in ascending order. Defaults to ``False`` so that
+            larger scores are better.
+        best_only : bool, optional
+            When ``True`` the returned dataframe contains only the top-scoring
+            prediction per model. This option does not affect the number of
+            structures exported.
+        return_selected : bool, optional
+            If ``True`` the function returns a tuple ``(scores_df,
+            selected_df, copied_paths)``. Otherwise only the full scores
+            dataframe is returned.
+        append_model_index : bool, optional
+            When ``True`` append the AlphaFold model index (e.g. ``_1``) to the
+            exported file name. Defaults to ``False`` so only the base model
+            name is used.
+        overwrite : bool, optional
+            When ``True`` existing files in ``output_folder`` are replaced.
+            Defaults to ``False`` which skips copying any prediction whose
+            target file already exists.
+
+        Returns
+        -------
+        pandas.DataFrame or tuple
+            If ``return_selected`` is ``False`` a dataframe with all parsed
+            scores (or only the best per model when ``best_only`` is ``True``)
+            is returned. When ``return_selected`` is ``True`` the function
+            returns ``(scores_df, selected_df, copied_paths)``.
+        """
+
+        def _sanitize(name):
+            return re.sub(r"[^0-9A-Za-z_.-]+", "_", name)
+
+        def _extract_model_index(model_tag):
+            if not model_tag:
+                return None
+            match = re.search(r"model_(\d+)", str(model_tag))
+            if match:
+                try:
+                    return int(match.group(1))
+                except ValueError:
+                    return None
+            return None
+
+        def _load_ranking_debug(model_dir):
+            path = os.path.join(model_dir, "ranking_debug.json")
+            if not os.path.exists(path):
+                return {}
+            try:
+                with open(path) as handle:
+                    return json.load(handle)
+            except Exception:
+                warnings.warn(f"Failed to read ranking_debug.json in {model_dir}")
+                return {}
+
+        def _get_mapping(data, keys):
+            for key in keys:
+                value = data.get(key)
+                if isinstance(value, dict):
+                    return value
+            return {}
+
+        def _ranked_file_for_rank(model_dir, rank_idx):
+            candidates = [
+                f"ranked_{rank_idx}.pdb",
+                f"ranked_{rank_idx}.pdb.bz2",
+                f"ranked__{rank_idx}.pdb.bz2",
+            ]
+            for fname in candidates:
+                fpath = os.path.join(model_dir, fname)
+                if os.path.exists(fpath):
+                    return fpath
+            return None
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        output_models_root = os.path.join(af_folder, "output_models")
+        models_root = output_models_root if os.path.isdir(output_models_root) else af_folder
+
+        copy_outputs = output_folder is not None
+        if copy_outputs:
+            os.makedirs(output_folder, exist_ok=True)
+
+        scores_rows = []
+        model_dirs = {}
+
+        for model_name in self.sequences_names:
+            if only_models and model_name not in only_models:
+                continue
+
+            model_dir = os.path.join(models_root, model_name)
+            if not os.path.isdir(model_dir):
+                warnings.warn(
+                    f"No AlphaFold 2 output found for model '{model_name}' in {models_root}"
+                )
+                continue
+
+            model_dirs[model_name] = model_dir
+            ranking_data = _load_ranking_debug(model_dir)
+
+            ranking_conf_map = _get_mapping(
+                ranking_data, ("ranking_confidence", "iptm+ptm")
+            )
+            order = ranking_data.get("order")
+            if not isinstance(order, (list, tuple)):
+                order = None
+
+            plddt_map = _get_mapping(ranking_data, ("plddts", "plddt"))
+            ptm_map = _get_mapping(ranking_data, ("ptm", "ptms"))
+            iptm_map = _get_mapping(ranking_data, ("iptm", "iptms"))
+
+            model_metrics = {}
+            for fname in os.listdir(model_dir):
+                if not fname.startswith("result_model") or not fname.endswith(".pkl"):
+                    continue
+                tag = fname.replace("result_", "").replace(".pkl", "")
+                try:
+                    with open(os.path.join(model_dir, fname), "rb") as pkl:
+                        pkl_obj = pickle.load(pkl)
+                except Exception as exc:
+                    warnings.warn(
+                        f"Failed to read {fname} for model '{model_name}' ({exc})"
+                    )
+                    continue
+
+                metrics = {}
+                if "ptm" in pkl_obj:
+                    metrics["ptm"] = pkl_obj["ptm"]
+                if "iptm" in pkl_obj:
+                    metrics["iptm"] = pkl_obj["iptm"]
+                if "plddt" in pkl_obj:
+                    try:
+                        metrics["mean_plddt"] = float(np.mean(pkl_obj["plddt"]))
+                    except Exception:
+                        pass
+                if "ranking_confidence" in pkl_obj:
+                    metrics["ranking_confidence"] = pkl_obj["ranking_confidence"]
+                model_metrics[tag] = metrics
+
+            tags = set()
+            tags.update(model_metrics.keys())
+            tags.update(ranking_conf_map.keys())
+            tags.update(plddt_map.keys())
+            tags.update(ptm_map.keys())
+            tags.update(iptm_map.keys())
+            if order:
+                tags.update(order)
+
+            if not tags:
+                warnings.warn(
+                    f"No AlphaFold 2 outputs found for model '{model_name}' in {model_dir}"
+                )
+                continue
+
+            rank_map = {}
+            if order:
+                rank_map = {tag: idx for idx, tag in enumerate(order)}
+            elif ranking_conf_map:
+                order = sorted(
+                    ranking_conf_map,
+                    key=lambda k: ranking_conf_map.get(k, float("-inf")),
+                    reverse=True,
+                )
+                rank_map = {tag: idx for idx, tag in enumerate(order)}
+            elif model_metrics:
+                order = sorted(
+                    model_metrics,
+                    key=lambda k: model_metrics[k].get("mean_plddt", float("-inf")),
+                    reverse=True,
+                )
+                rank_map = {tag: idx for idx, tag in enumerate(order)}
+
+            for tag in tags:
+                metrics = model_metrics.get(tag, {})
+                row = {
+                    "model": model_name,
+                    "prediction": tag,
+                    "model_index": _extract_model_index(tag),
+                    "rank": rank_map.get(tag),
+                    "ranking_confidence": metrics.get("ranking_confidence"),
+                    "mean_plddt": metrics.get("mean_plddt"),
+                    "ptm": metrics.get("ptm"),
+                    "iptm": metrics.get("iptm"),
+                }
+
+                if row["ranking_confidence"] is None and ranking_conf_map:
+                    row["ranking_confidence"] = ranking_conf_map.get(tag)
+                if row["mean_plddt"] is None and plddt_map:
+                    row["mean_plddt"] = plddt_map.get(tag)
+                if row["ptm"] is None and ptm_map:
+                    row["ptm"] = ptm_map.get(tag)
+                if row["iptm"] is None and iptm_map:
+                    row["iptm"] = iptm_map.get(tag)
+
+                scores_rows.append(row)
+
+        if not scores_rows:
+            raise ValueError(
+                f"No AlphaFold 2 results were found under {af_folder}."
+            )
+
+        scores_df = pd.DataFrame(scores_rows)
+
+        for column in ("ranking_confidence", "mean_plddt", "ptm", "iptm", "rank", "model_index"):
+            if column in scores_df.columns:
+                scores_df[column] = pd.to_numeric(scores_df[column], errors="coerce")
+
+        if "iptm" in scores_df.columns and scores_df["iptm"].isna().all():
+            scores_df = scores_df.drop(columns=["iptm"])
+
+        if "ranking_confidence" not in scores_df.columns:
+            scores_df["ranking_confidence"] = np.nan
+
+        missing_rank_conf = scores_df["ranking_confidence"].isna()
+        if missing_rank_conf.any():
+            if {"iptm", "ptm"}.issubset(scores_df.columns):
+                combo = 0.8 * scores_df["iptm"] + 0.2 * scores_df["ptm"]
+                fill_mask = missing_rank_conf & combo.notna()
+                scores_df.loc[fill_mask, "ranking_confidence"] = combo.loc[fill_mask]
+                missing_rank_conf = scores_df["ranking_confidence"].isna()
+
+            if "mean_plddt" in scores_df.columns:
+                fill_mask = missing_rank_conf & scores_df["mean_plddt"].notna()
+                scores_df.loc[fill_mask, "ranking_confidence"] = scores_df.loc[fill_mask, "mean_plddt"]
+
+        if metric not in scores_df.columns:
+            raise ValueError(
+                f"Requested metric '{metric}' not found in AlphaFold 2 results. "
+                f"Available columns: {list(scores_df.columns)}"
+            )
+
+        scores_df[metric] = pd.to_numeric(scores_df[metric], errors="coerce")
+        if scores_df[metric].isna().all():
+            raise ValueError(
+                f"Metric '{metric}' could not be converted to numeric values for ranking."
+            )
+
+        copied_paths = defaultdict(list)
+        copy_warning_messages = []
+        multi_skip_warned = set()
+        scheduled_targets = set()
+        overwrite_needed = False
+
+        selected_frames = []
+        best_frames = []
+        for model_name, model_scores in scores_df.groupby("model"):
+            valid_scores = model_scores.dropna(subset=[metric])
+            if valid_scores.empty:
+                warnings.warn(
+                    f"No valid scores for model '{model_name}' using metric '{metric}'."
+                )
+                continue
+
+            sorted_scores = valid_scores.sort_values(metric, ascending=ascending)
+            top_df = sorted_scores.head(top_models)
+            selected_frames.append(top_df)
+            best_frames.append(sorted_scores.head(1))
+
+            if copy_outputs:
+                base_name = _sanitize(model_name)
+                model_dir = model_dirs.get(model_name)
+                if not model_dir:
+                    continue
+
+                for rank_idx, (_, row) in enumerate(top_df.iterrows(), start=1):
+                    if not append_model_index and rank_idx > 1:
+                        if model_name not in multi_skip_warned:
+                            copy_warning_messages.append(
+                                f"Multiple predictions requested for model '{model_name}' but append_model_index=False; "
+                                "only the top-ranked structure was copied."
+                            )
+                            multi_skip_warned.add(model_name)
+                        continue
+
+                    rank_value = row.get("rank")
+                    if pd.isna(rank_value):
+                        copy_warning_messages.append(
+                            f"No ranking index for prediction '{row.get('prediction')}' in model '{model_name}'."
+                        )
+                        continue
+
+                    ranked_path = _ranked_file_for_rank(model_dir, int(rank_value))
+                    if not ranked_path:
+                        copy_warning_messages.append(
+                            f"Ranked PDB not found for model '{model_name}' rank {int(rank_value)} in {model_dir}."
+                        )
+                        continue
+
+                    safe_name = base_name
+                    if append_model_index:
+                        model_index = row.get("model_index")
+                        if pd.isna(model_index):
+                            model_index = int(rank_value) + 1
+                        safe_name = f"{base_name}_{int(model_index)}"
+
+                    target_path = os.path.join(output_folder, f"{safe_name}.pdb")
+                    if os.path.exists(target_path) and not overwrite:
+                        overwrite_needed = True
+                        continue
+
+                    if target_path in scheduled_targets:
+                        continue
+                    scheduled_targets.add(target_path)
+
+                    if ranked_path.endswith(".bz2"):
+                        try:
+                            with bz2.BZ2File(ranked_path, "rb") as fh_in, open(target_path, "wb") as fh_out:
+                                shutil.copyfileobj(fh_in, fh_out)
+                        except Exception as exc:
+                            copy_warning_messages.append(
+                                f"Failed to extract {ranked_path} to {target_path} ({exc})."
+                            )
+                            continue
+                    else:
+                        try:
+                            shutil.copyfile(ranked_path, target_path)
+                        except Exception as exc:
+                            copy_warning_messages.append(
+                                f"Failed to copy {ranked_path} to {target_path} ({exc})."
+                            )
+                            continue
+
+                    copied_paths[model_name].append(target_path)
+
+        if overwrite_needed:
+            copy_warning_messages.append(
+                f"Existing files were detected under '{output_folder}'. "
+                "Use overwrite=True to replace them."
+            )
+
+        if copy_warning_messages:
+            for message in copy_warning_messages:
+                warnings.warn(message)
+
+        selected_df = pd.concat(selected_frames).reset_index(drop=True) if selected_frames else pd.DataFrame()
+        best_df = pd.concat(best_frames).reset_index(drop=True) if best_frames else pd.DataFrame()
+
+        if best_only:
+            scores_df = best_df
+
+        if "model" in scores_df.columns:
+            scores_df = scores_df.set_index("model")
+        if return_selected and "model" in selected_df.columns:
+            selected_df = selected_df.set_index("model")
+
+        if return_selected:
+            return scores_df, selected_df, dict(copied_paths)
+
+        return scores_df
+
     @staticmethod
     def compare_to_af3_reference(
         df: pd.DataFrame,
