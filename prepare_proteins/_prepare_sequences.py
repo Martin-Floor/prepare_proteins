@@ -174,6 +174,7 @@ class sequenceModels:
         only_models=None,
         gpu_relax=True,
         skip_finished=None,
+        benchmark=False,
     ):
         """
         Set up AlphaFold predictions for the loaded sequneces.
@@ -182,6 +183,9 @@ class sequenceModels:
         -----
         ``skip_finished`` is an alias for ``exclude_finished`` and takes
         precedence when provided.
+
+        When ``benchmark`` is ``True``, start/end timestamps and elapsed
+        seconds are printed to stdout for each model run.
         """
 
         if isinstance(only_models, str):
@@ -204,12 +208,17 @@ class sequenceModels:
         excluded = []
         if exclude_finished:
             for model in os.listdir(job_folder + "/output_models"):
+                if model.startswith("."):
+                    continue
+                model_path = os.path.join(job_folder, "output_models", model)
+                if not os.path.isdir(model_path):
+                    continue
 
                 if not isinstance(only_models, type(None)):
                     if model not in only_models:
                         continue
 
-                for f in os.listdir(job_folder + "/output_models/" + model):
+                for f in os.listdir(model_path):
                     if f == "ranked_0.pdb" or f == "ranked__0.pdb.bz2":
                         excluded.append(model)
 
@@ -230,17 +239,34 @@ class sequenceModels:
             )
             command = "cd " + job_folder + "\n"
             command += "Path=$(pwd)\n"
-            command += (
+            if benchmark:
+                command += (
+                    f"echo \"[AF2][{model}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\"\n"
+                )
+                command += "AF_BENCH_START_TS=$(date +%s)\n"
+
+            af_command = (
                 "bsc_alphafold --fasta_paths $Path/input_sequences/" + model + ".fasta"
             )
-            command += " --output_dir=$Path/output_models"
-            command += " --model_preset=" + model_preset
-            command += " --max_template_date=2022-01-01"
+            af_command += " --output_dir=$Path/output_models"
+            af_command += " --model_preset=" + model_preset
+            af_command += " --max_template_date=2022-01-01"
             if gpu_relax:
-                command += " --use_gpu_relax=True"
+                af_command += " --use_gpu_relax=True"
             else:
-                command += " --use_gpu_relax=False"
-            command += " --random_seed 1\n"
+                af_command += " --use_gpu_relax=False"
+            af_command += " --random_seed 1"
+            command += af_command + "\n"
+
+            if benchmark:
+                command += "AF_BENCH_EXIT_CODE=$?\n"
+                command += "AF_BENCH_END_TS=$(date +%s)\n"
+                command += "AF_BENCH_ELAPSED_SEC=$((AF_BENCH_END_TS-AF_BENCH_START_TS))\n"
+                command += (
+                    f"echo \"[AF2][{model}] benchmark_end utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\") "
+                    "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\"\n"
+                )
+
             if remove_extras:
                 command += f"rm -r $Path/output_models/{model}/msas\n"
                 command += f"rm -r $Path/output_models/{model}/*.pkl\n"
@@ -263,7 +289,8 @@ class sequenceModels:
         runner_name='runner',
         ligands=None,
         ligand_smiles: list | None = None,
-        skip_finished=False
+        skip_finished=False,
+        benchmark=False,
     ):
         """Create AF3 job folders, per-model JSONs and sbatch commands.
 
@@ -310,6 +337,9 @@ class sequenceModels:
             When ``True`` models that already contain completed AF3 outputs
             (detected via an existing ``ranking_scores.csv`` under the model
             ``output`` directory) are skipped and no new job is prepared.
+        benchmark : bool, optional
+            When ``True`` prints start/end timestamps and elapsed seconds for
+            the ``bsc_alphafold`` command in each generated job command.
 
         Notes
         -----
@@ -576,12 +606,27 @@ class sequenceModels:
                 json.dump(payload, json_fd, indent=2)
                 json_fd.write('\n')
 
-            command_lines = [
-                f"cd {model_dir}",
-                "bsc_alphafold input output $WEIGHTS",
+            command_lines = [f"cd {model_dir}"]
+            if benchmark:
+                command_lines.append(
+                    f"echo \"[AF3][{model_name}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\""
+                )
+                command_lines.append("AF_BENCH_START_TS=$(date +%s)")
+            command_lines.append("bsc_alphafold input output $WEIGHTS")
+            if benchmark:
+                command_lines.append("AF_BENCH_EXIT_CODE=$?")
+                command_lines.append("AF_BENCH_END_TS=$(date +%s)")
+                command_lines.append(
+                    "AF_BENCH_ELAPSED_SEC=$((AF_BENCH_END_TS-AF_BENCH_START_TS))"
+                )
+                command_lines.append(
+                    f"echo \"[AF3][{model_name}] benchmark_end utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\") "
+                    "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\""
+                )
+            command_lines.extend([
                 f"sbatch {runner_name} input",
                 "cd ../..",
-            ]
+            ])
             commands.append("\n".join(command_lines) + "\n")
 
         return commands

@@ -18694,6 +18694,7 @@ if __name__ == "__main__":
         add_mean_marker=True,
         title=None,
         ylabel=None,
+        xlabel_rotation=90,
         figsize_base=(10, 4),
         figsize_per_model=0.35,
         max_figwidth=28,
@@ -18724,6 +18725,8 @@ if __name__ == "__main__":
             Plot title. Default is generated.
         ylabel : str, optional
             Y-axis label. Default is column name.
+        xlabel_rotation : int or float, optional
+            Rotation angle for x-axis tick labels. Default is 90.
         figsize_base : tuple, optional
             Base figure size (width, height). Default is (10, 4).
         figsize_per_model : float, optional
@@ -18866,7 +18869,7 @@ if __name__ == "__main__":
         ax.set_title(title)
         ax.set_ylabel(ylabel if ylabel is not None else column)
         ax.set_xlabel(level)
-        ax.tick_params(axis="x", labelrotation=60)
+        ax.tick_params(axis="x", labelrotation=xlabel_rotation)
         ax.grid(True, axis="y", color="0.85", linewidth=0.8)
         ax.set_axisbelow(True)
         ax.margins(x=0.01)
