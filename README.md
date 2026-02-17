@@ -10,6 +10,7 @@ For instructions, please check the README file located in the dependencies folde
 A tutorial for basic usage is available in the docs folder:
 
  * [Basic protein set up for running PELE](https://github.com/Martin-Floor/prepare_proteins/blob/main/docs/tutorial/01-BasicProteinSetUpForPELE/01-BasicProteinSetUpForPELE.ipynb)
+ * [AF3 tutorial for UPOs with heme and Mg](https://github.com/Martin-Floor/prepare_proteins/blob/main/docs/tutorial/02-AF3UPOWithHemeAndMg/02-AF3UPOWithHemeAndMg.ipynb)
 
 ## MLCG simulations (experimental)
 
