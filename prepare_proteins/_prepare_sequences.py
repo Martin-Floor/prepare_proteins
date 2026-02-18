@@ -286,6 +286,7 @@ class sequenceModels:
         only_models=None,
         exclude_models=None,
         model_seeds=None,
+        unpack_model_seeds=False,
         runner_name='runner',
         ligands=None,
         ligand_smiles: list | None = None,
@@ -311,10 +312,14 @@ class sequenceModels:
             Seed(s) to use per model. If a dictionary is supplied it should map
             model name to seed (or list of seeds). If a single value is supplied
             it will be applied to every model. Defaults to ``[1]``.
-
-            When more than one seed is requested for a model, this method creates
-            one independent AF3 job per seed (same complex input, one seed per
-            JSON) under ``<model>/seed_<seed>/`` and returns one command per seed.
+        unpack_model_seeds : bool, optional
+            When ``True`` each seed is expanded into an independent AF3 job
+            (same complex input, one seed per JSON) and one command is returned
+            per seed. Seed-specific jobs are written under
+            ``<model>/seed_<seed>/input`` and ``<model>/seed_<seed>/output``.
+            Duplicate seeds are disambiguated as ``seed_<seed>_<n>``.
+            Defaults to ``False`` (single AF3 job per model with all seeds in
+            ``modelSeeds``).
         runner_name : str, optional
             File name for the sbatch runner script expected inside each model folder.
         ligands : optional
@@ -598,23 +603,48 @@ class sequenceModels:
                     entries.append({"ligand": ligand})
 
             model_seed_values = _seeds_for_model(model_name)
-            use_seed_subdirs = len(model_seed_values) > 1
-            seed_instance_counts = defaultdict(int)
+            job_specs = []
 
-            for seed_value in model_seed_values:
-                seed_instance_counts[seed_value] += 1
-                seed_instance_index = seed_instance_counts[seed_value]
+            if unpack_model_seeds:
+                use_seed_subdirs = len(model_seed_values) > 1
+                seed_instance_counts = defaultdict(int)
 
-                if use_seed_subdirs:
-                    seed_label = f"seed_{seed_value}"
-                    if seed_instance_index > 1:
-                        seed_label = f"{seed_label}_{seed_instance_index}"
-                    relative_input_dir = os.path.join(seed_label, "input")
-                    relative_output_dir = os.path.join(seed_label, "output")
-                else:
-                    seed_label = None
-                    relative_input_dir = "input"
-                    relative_output_dir = "output"
+                for seed_value in model_seed_values:
+                    seed_instance_counts[seed_value] += 1
+                    seed_instance_index = seed_instance_counts[seed_value]
+
+                    if use_seed_subdirs:
+                        seed_label = f"seed_{seed_value}"
+                        if seed_instance_index > 1:
+                            seed_label = f"{seed_label}_{seed_instance_index}"
+                        relative_input_dir = os.path.join(seed_label, "input")
+                        relative_output_dir = os.path.join(seed_label, "output")
+                    else:
+                        seed_label = None
+                        relative_input_dir = "input"
+                        relative_output_dir = "output"
+
+                    job_specs.append({
+                        "seed_value": int(seed_value),
+                        "seed_label": seed_label,
+                        "relative_input_dir": relative_input_dir,
+                        "relative_output_dir": relative_output_dir,
+                        "model_seeds": [int(seed_value)],
+                    })
+            else:
+                job_specs.append({
+                    "seed_value": None,
+                    "seed_label": None,
+                    "relative_input_dir": "input",
+                    "relative_output_dir": "output",
+                    "model_seeds": [int(seed) for seed in model_seed_values],
+                })
+
+            for job_spec in job_specs:
+                seed_value = job_spec["seed_value"]
+                seed_label = job_spec["seed_label"]
+                relative_input_dir = job_spec["relative_input_dir"]
+                relative_output_dir = job_spec["relative_output_dir"]
 
                 input_dir = os.path.join(model_dir, relative_input_dir)
                 output_dir = os.path.join(model_dir, relative_output_dir)
@@ -625,7 +655,7 @@ class sequenceModels:
                     continue
 
                 payload = dict(base_payload)
-                payload["modelSeeds"] = [int(seed_value)]
+                payload["modelSeeds"] = job_spec["model_seeds"]
                 payload["sequences"] = entries
 
                 if seed_label:
@@ -636,7 +666,11 @@ class sequenceModels:
                     json.dump(payload, json_fd, indent=2)
                     json_fd.write('\n')
 
-                job_tag = f"{model_name}|seed={int(seed_value)}" if seed_label else model_name
+                if seed_value is None:
+                    job_tag = model_name
+                else:
+                    job_tag = f"{model_name}|seed={seed_value}"
+
                 command_lines = [f"cd {model_dir}"]
                 if benchmark:
                     command_lines.append(
@@ -1028,6 +1062,9 @@ class sequenceModels:
             Path to the AlphaFold 3 job folder created by :meth:`setUpAlphaFold3`
             or to a directory containing job subfolders with AlphaFold 3
             outputs (each with a ``ranking_scores.csv`` file).
+            For unpacked seed jobs (``seed_<N>`` folders), the seed is inferred
+            from the folder name when absent in ``ranking_scores.csv`` and
+            exposed through ``seed`` / ``job_seed`` columns.
         output_folder : str, optional
             Destination directory where the selected PDB files will be written.
             If ``None`` (default) no structural files are generated and the
@@ -1122,6 +1159,48 @@ class sequenceModels:
                     matches.append(root)
                     dirs[:] = []
             return matches
+
+        seed_dir_pattern = re.compile(r"^seed_(-?\d+)(?:_(\d+))?$")
+
+        def _job_metadata(model_name, job_dir):
+            rel_parts = []
+            model_root = os.path.join(af_folder, model_name)
+            if os.path.isdir(model_root):
+                rel_path = os.path.relpath(job_dir, model_root)
+                if not rel_path.startswith(".."):
+                    rel_parts = [part for part in rel_path.split(os.sep) if part not in ("", ".")]
+
+            if not rel_parts and os.path.isdir(af_folder):
+                rel_path = os.path.relpath(job_dir, af_folder)
+                if not rel_path.startswith(".."):
+                    rel_parts = [part for part in rel_path.split(os.sep) if part not in ("", ".")]
+
+            seed_dir = None
+            job_seed = None
+            job_seed_instance = None
+            for part in rel_parts:
+                match = seed_dir_pattern.match(part)
+                if match:
+                    seed_dir = part
+                    job_seed = int(match.group(1))
+                    instance_token = match.group(2)
+                    job_seed_instance = int(instance_token) if instance_token else 1
+                    break
+
+            job_basename = os.path.basename(job_dir)
+            if seed_dir and job_basename == "output":
+                job_name = seed_dir
+            elif seed_dir and job_basename:
+                job_name = f"{seed_dir}/{job_basename}"
+            else:
+                job_name = job_basename
+
+            return {
+                "job_name": job_name,
+                "job_seed_dir": seed_dir,
+                "job_seed": job_seed,
+                "job_seed_instance": job_seed_instance,
+            }
 
         def _locate_model_dirs(model_name):
             candidates = []
@@ -1278,6 +1357,7 @@ class sequenceModels:
         def _process_job(model_name, job_dir):
             rows = []
             ranking_csv = os.path.join(job_dir, "ranking_scores.csv")
+            metadata = _job_metadata(model_name, job_dir)
             try:
                 with open(ranking_csv, newline="") as handle:
                     reader = csv.DictReader(handle)
@@ -1285,7 +1365,12 @@ class sequenceModels:
                         clean_row = {k: _auto_type(v) for k, v in row.items()}
                         clean_row["model"] = model_name
                         clean_row["job_dir"] = job_dir
-                        clean_row["job_name"] = os.path.basename(job_dir)
+                        clean_row["job_name"] = metadata["job_name"]
+                        clean_row["job_seed_dir"] = metadata["job_seed_dir"]
+                        clean_row["job_seed"] = metadata["job_seed"]
+                        clean_row["job_seed_instance"] = metadata["job_seed_instance"]
+                        if clean_row.get("seed") is None and metadata["job_seed"] is not None:
+                            clean_row["seed"] = metadata["job_seed"]
                         # Normalise prediction identifier key
                         prediction_key = None
                         for key_candidate in ("prediction_name", "prediction", "name"):
@@ -1960,7 +2045,8 @@ class sequenceModels:
             Name of the reference model against which other entries are compared.
         score_columns : sequence of str, optional
             Metrics used for the comparison. Defaults to all numeric columns
-            excluding ``seed``/``sample`` if not provided.
+            excluding ``seed``/``sample`` and AF3 job-seed bookkeeping columns
+            if not provided.
         lower_is_better : sequence of str, optional
             Subset of ``score_columns`` where smaller values indicate better
             performance.
@@ -2011,8 +2097,9 @@ class sequenceModels:
 
         if score_columns is None:
             numeric_cols = df_work.select_dtypes(include=[np.number]).columns
+            excluded_numeric = {"seed", "sample", "job_seed", "job_seed_instance"}
             score_columns = [
-                col for col in numeric_cols if col not in {"seed", "sample"}
+                col for col in numeric_cols if col not in excluded_numeric
             ]
         else:
             score_columns = [col for col in score_columns if col in df_work.columns]
