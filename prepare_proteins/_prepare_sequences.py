@@ -308,9 +308,13 @@ class sequenceModels:
         exclude_models : str or iterable, optional
             Skip the provided model name(s).
         model_seeds : int, iterable, or dict, optional
-            Seed(s) to use per model.  If a dictionary is supplied it should map
-            model name to seed (or list of seeds).  If a single value is supplied
-            it will be applied to every model.  Defaults to ``[1]``.
+            Seed(s) to use per model. If a dictionary is supplied it should map
+            model name to seed (or list of seeds). If a single value is supplied
+            it will be applied to every model. Defaults to ``[1]``.
+
+            When more than one seed is requested for a model, this method creates
+            one independent AF3 job per seed (same complex input, one seed per
+            JSON) under ``<model>/seed_<seed>/`` and returns one command per seed.
         runner_name : str, optional
             File name for the sbatch runner script expected inside each model folder.
         ligands : optional
@@ -334,9 +338,9 @@ class sequenceModels:
             'id': 'FMD', 'count': 3}`` -> ``FMDA``, ``FMDB``, ``FMDC``). Backslashes
             are auto-escaped for JSON.
         skip_finished : bool, optional
-            When ``True`` models that already contain completed AF3 outputs
-            (detected via an existing ``ranking_scores.csv`` under the model
-            ``output`` directory) are skipped and no new job is prepared.
+            When ``True`` jobs that already contain completed AF3 outputs
+            (detected via an existing ``ranking_scores.csv`` under the
+            corresponding ``output`` directory) are skipped.
         benchmark : bool, optional
             When ``True`` prints start/end timestamps and elapsed seconds for
             the ``bsc_alphafold`` command in each generated job command.
@@ -350,7 +354,7 @@ class sequenceModels:
         Returns
         -------
         list[str]
-            One multi-line command per model that can be used to submit the jobs.
+            One multi-line command per prepared AF3 job.
         """
 
         def _normalise_to_list(value):
@@ -556,14 +560,6 @@ class sequenceModels:
             model_dir = os.path.join(job_folder, model_name)
             os.makedirs(model_dir, exist_ok=True)
 
-            input_dir = os.path.join(model_dir, 'input')
-            output_dir = os.path.join(model_dir, 'output')
-            os.makedirs(input_dir, exist_ok=True)
-            os.makedirs(output_dir, exist_ok=True)
-
-            if skip_finished and _is_finished(output_dir):
-                continue
-
             entries = _sequence_entries(self.sequences[model_name])
             occupied_chain_ids = set()
             for entry in entries:
@@ -590,9 +586,9 @@ class sequenceModels:
                         "smiles": lig["smiles"],
                     }
                 })
-            payload = {
+            base_payload = {
                 "name": model_name,
-                "modelSeeds": _seeds_for_model(model_name),
+                "modelSeeds": [],
                 "dialect": "alphafold3",
                 "version": 1
             }
@@ -600,34 +596,71 @@ class sequenceModels:
             if lig_spec:
                 for ligand in lig_spec:
                     entries.append({"ligand": ligand})
-            payload["sequences"] = entries
-            json_path = os.path.join(input_dir, f"{model_name}.json")
-            with open(json_path, 'w') as json_fd:
-                json.dump(payload, json_fd, indent=2)
-                json_fd.write('\n')
 
-            command_lines = [f"cd {model_dir}"]
-            if benchmark:
+            model_seed_values = _seeds_for_model(model_name)
+            use_seed_subdirs = len(model_seed_values) > 1
+            seed_instance_counts = defaultdict(int)
+
+            for seed_value in model_seed_values:
+                seed_instance_counts[seed_value] += 1
+                seed_instance_index = seed_instance_counts[seed_value]
+
+                if use_seed_subdirs:
+                    seed_label = f"seed_{seed_value}"
+                    if seed_instance_index > 1:
+                        seed_label = f"{seed_label}_{seed_instance_index}"
+                    relative_input_dir = os.path.join(seed_label, "input")
+                    relative_output_dir = os.path.join(seed_label, "output")
+                else:
+                    seed_label = None
+                    relative_input_dir = "input"
+                    relative_output_dir = "output"
+
+                input_dir = os.path.join(model_dir, relative_input_dir)
+                output_dir = os.path.join(model_dir, relative_output_dir)
+                os.makedirs(input_dir, exist_ok=True)
+                os.makedirs(output_dir, exist_ok=True)
+
+                if skip_finished and _is_finished(output_dir):
+                    continue
+
+                payload = dict(base_payload)
+                payload["modelSeeds"] = [int(seed_value)]
+                payload["sequences"] = entries
+
+                if seed_label:
+                    payload["name"] = f"{model_name}_{seed_label}"
+
+                json_path = os.path.join(input_dir, f"{model_name}.json")
+                with open(json_path, 'w') as json_fd:
+                    json.dump(payload, json_fd, indent=2)
+                    json_fd.write('\n')
+
+                job_tag = f"{model_name}|seed={int(seed_value)}" if seed_label else model_name
+                command_lines = [f"cd {model_dir}"]
+                if benchmark:
+                    command_lines.append(
+                        f"echo \"[AF3][{job_tag}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\""
+                    )
+                    command_lines.append("AF_BENCH_START_TS=$(date +%s)")
                 command_lines.append(
-                    f"echo \"[AF3][{model_name}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\""
+                    f"bsc_alphafold {relative_input_dir} {relative_output_dir} $WEIGHTS"
                 )
-                command_lines.append("AF_BENCH_START_TS=$(date +%s)")
-            command_lines.append("bsc_alphafold input output $WEIGHTS")
-            if benchmark:
-                command_lines.append("AF_BENCH_EXIT_CODE=$?")
-                command_lines.append("AF_BENCH_END_TS=$(date +%s)")
-                command_lines.append(
-                    "AF_BENCH_ELAPSED_SEC=$((AF_BENCH_END_TS-AF_BENCH_START_TS))"
-                )
-                command_lines.append(
-                    f"echo \"[AF3][{model_name}] benchmark_end utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\") "
-                    "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\""
-                )
-            command_lines.extend([
-                f"sbatch {runner_name} input",
-                "cd ../..",
-            ])
-            commands.append("\n".join(command_lines) + "\n")
+                if benchmark:
+                    command_lines.append("AF_BENCH_EXIT_CODE=$?")
+                    command_lines.append("AF_BENCH_END_TS=$(date +%s)")
+                    command_lines.append(
+                        "AF_BENCH_ELAPSED_SEC=$((AF_BENCH_END_TS-AF_BENCH_START_TS))"
+                    )
+                    command_lines.append(
+                        f"echo \"[AF3][{job_tag}] benchmark_end utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\") "
+                        "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\""
+                    )
+                command_lines.extend([
+                    f"sbatch {runner_name} {relative_input_dir}",
+                    "cd ../..",
+                ])
+                commands.append("\n".join(command_lines) + "\n")
 
         return commands
 
