@@ -4474,6 +4474,484 @@ class sequenceModels:
 
         return df_q
 
+    def clusterBioEmuByNativeContacts(
+        self,
+        native_contacts,
+        only_models=None,
+        n_clusters=50,
+        random_state=0,
+        return_native_frame=True,
+        n_components=2,
+        pca_before_tsne=True,
+        pca_components=None,
+        pca_variance_threshold=0.95,
+        tsne_perplexity=20,
+        cluster_on_pca=False,
+        n_init=30,
+        max_iter=10000,
+        tol=1e-4,
+    ):
+        """
+        Cluster BioEmu frames from native-contact features using t-SNE + KMeans.
+
+        Parameters
+        ----------
+        native_contacts : dict
+            Mapping model -> feature matrix. Values can be array-like or DataFrame
+            with shape (n_frames, n_features). A row at index/frame 0 can be the
+            native structure.
+        only_models : str or list, optional
+            Restrict processing to this subset of models.
+        n_clusters : int, optional
+            Number of clusters to request for KMeans.
+        random_state : int, optional
+            Random seed for TSNE and KMeans.
+        return_native_frame : bool, optional
+            Whether to return coordinates of frame 0 per model.
+        n_components : int, optional
+            Number of t-SNE dimensions.
+        pca_before_tsne : bool, optional
+            If True, run PCA before t-SNE.
+        pca_components : int, optional
+            Fixed number of PCA components. If None, inferred from cumulative
+            variance threshold.
+        pca_variance_threshold : float, optional
+            Explained-variance threshold to infer PCA dimensionality when
+            ``pca_components`` is None.
+        tsne_perplexity : float, optional
+            t-SNE perplexity. Automatically clipped to ``n_frames - 1``.
+        cluster_on_pca : bool, optional
+            If True, run KMeans on PCA coordinates instead of t-SNE coordinates.
+        n_init : int, optional
+            Number of KMeans initializations.
+        max_iter : int, optional
+            Maximum KMeans iterations.
+        tol : float, optional
+            KMeans tolerance.
+
+        Returns
+        -------
+        tuple
+            ``(tsne_coords_dict, labels_dict, rep_inds_dict, native_coord_dict)``
+            when ``return_native_frame`` is True, otherwise without
+            ``native_coord_dict``.
+        """
+        try:
+            from sklearn.cluster import KMeans
+            from sklearn.decomposition import PCA
+            from sklearn.manifold import TSNE
+            from sklearn.metrics import pairwise_distances_argmin_min
+        except ImportError as exc:
+            raise ImportError(
+                "clusterBioEmuByNativeContacts requires scikit-learn. "
+                "Install scikit-learn to use this method."
+            ) from exc
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        models = only_models if only_models is not None else list(native_contacts.keys())
+        tsne_coords_dict = {}
+        labels_dict = {}
+        rep_inds_dict = {}
+        native_coord_dict = {} if return_native_frame else None
+
+        for model in models:
+            if model not in native_contacts:
+                continue
+
+            arr = native_contacts[model]
+            if isinstance(arr, pd.DataFrame):
+                arr = arr.values
+            arr = np.asarray(arr, dtype=float)
+
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            elif arr.ndim > 2:
+                arr = arr.reshape(arr.shape[0], -1)
+
+            n_frames = arr.shape[0]
+            if n_frames == 0:
+                tsne_coords_dict[model] = np.zeros((0, int(n_components)))
+                labels_dict[model] = np.zeros((0,), dtype=int)
+                rep_inds_dict[model] = np.zeros((0,), dtype=int)
+                if return_native_frame:
+                    native_coord_dict[model] = np.zeros((int(n_components),), dtype=float)
+                continue
+
+            if n_frames == 1:
+                tsne_coords_dict[model] = np.zeros((1, int(n_components)))
+                labels_dict[model] = np.zeros((1,), dtype=int)
+                rep_inds_dict[model] = np.array([0], dtype=int)
+                if return_native_frame:
+                    native_coord_dict[model] = tsne_coords_dict[model][0].copy()
+                continue
+
+            arr_pca = None
+            if cluster_on_pca or pca_before_tsne:
+                pca_full = PCA().fit(arr)
+                if pca_components is None:
+                    cumvar = np.cumsum(pca_full.explained_variance_ratio_)
+                    pca_dim = np.searchsorted(cumvar, pca_variance_threshold) + 1
+                else:
+                    pca_dim = int(pca_components)
+                pca_dim = max(1, min(int(pca_dim), arr.shape[0], arr.shape[1]))
+                arr_pca = PCA(n_components=pca_dim).fit_transform(arr)
+
+            arr_for_tsne = arr_pca if (pca_before_tsne and arr_pca is not None) else arr
+            perplexity = float(max(1.0, min(tsne_perplexity, n_frames - 1)))
+            tsne = TSNE(
+                n_components=int(n_components),
+                perplexity=perplexity,
+                init="pca",
+                learning_rate="auto",
+                random_state=random_state,
+            )
+            coords_nd = tsne.fit_transform(arr_for_tsne)
+            tsne_coords_dict[model] = coords_nd
+
+            clustering_arr = arr_pca if (cluster_on_pca and arr_pca is not None) else coords_nd
+            n_clusters_eff = max(1, min(int(n_clusters), clustering_arr.shape[0]))
+
+            if n_clusters_eff == 1:
+                labels = np.zeros((clustering_arr.shape[0],), dtype=int)
+                rep_inds = np.array([0], dtype=int)
+            else:
+                km = KMeans(
+                    n_clusters=n_clusters_eff,
+                    init="k-means++",
+                    n_init=n_init,
+                    max_iter=max_iter,
+                    tol=tol,
+                    random_state=random_state,
+                    algorithm="elkan",
+                )
+                labels = km.fit_predict(clustering_arr)
+                centers = km.cluster_centers_
+                rep_inds, _ = pairwise_distances_argmin_min(centers, clustering_arr)
+
+            unique, counts = np.unique(labels, return_counts=True)
+            sorted_clusters = [
+                old for old, _ in sorted(zip(unique, counts), key=lambda x: -x[1])
+            ]
+            relabel_map = {old: new for new, old in enumerate(sorted_clusters)}
+            new_labels = np.array([relabel_map[l] for l in labels], dtype=int)
+
+            new_rep_inds = np.zeros((len(sorted_clusters),), dtype=int)
+            for old_cluster, old_rep in enumerate(rep_inds):
+                if old_cluster in relabel_map:
+                    new_cluster = relabel_map[old_cluster]
+                    new_rep_inds[new_cluster] = int(old_rep)
+
+            labels_dict[model] = new_labels
+            rep_inds_dict[model] = new_rep_inds
+
+            if return_native_frame:
+                native_coord_dict[model] = coords_nd[0].copy()
+
+        if return_native_frame:
+            return tsne_coords_dict, labels_dict, rep_inds_dict, native_coord_dict
+        return tsne_coords_dict, labels_dict, rep_inds_dict
+
+    def plotBioEmuClustering(
+        self,
+        clustering_result,
+        variant_colors=None,
+        label_mode="index",
+        point_size=18,
+        show=True,
+    ):
+        """
+        Plot BioEmu t-SNE clustering with optional cluster labels/highlights.
+
+        Parameters
+        ----------
+        clustering_result : dict or tuple
+            One of:
+            - ``tsne_dict``
+            - ``(tsne_dict, native_dict)``
+            - ``(tsne_dict, labels_dict, rep_inds_dict)``
+            - ``(tsne_dict, labels_dict, rep_inds_dict, native_dict)``
+        variant_colors : dict, optional
+            Model -> color mapping used when cluster labels are not provided.
+        label_mode : {"index", "circle", None}, optional
+            How to mark representative frames for each cluster.
+        point_size : float, optional
+            Scatter marker size for all frames.
+        show : bool, optional
+            If True, call ``plt.show()``.
+
+        Returns
+        -------
+        tuple
+            ``(fig, axes)`` where ``axes`` is a list of matplotlib axes.
+        """
+        tsne_dict = {}
+        labels_dict = None
+        rep_inds_dict = None
+        native_dict = {}
+
+        if isinstance(clustering_result, dict):
+            tsne_dict = clustering_result
+        elif isinstance(clustering_result, tuple):
+            if len(clustering_result) == 2:
+                tsne_dict, native_dict = clustering_result
+            elif len(clustering_result) == 3:
+                tsne_dict, labels_dict, rep_inds_dict = clustering_result
+            elif len(clustering_result) == 4:
+                tsne_dict, labels_dict, rep_inds_dict, native_dict = clustering_result
+            else:
+                raise ValueError(
+                    f"Unexpected clustering_result tuple length: {len(clustering_result)}"
+                )
+        else:
+            raise ValueError("clustering_result must be dict or tuple")
+
+        models = list(tsne_dict.keys())
+        if not models:
+            raise ValueError("No models were found in clustering_result.")
+
+        fig, axes = plt.subplots(1, len(models), figsize=(5 * len(models), 6), sharey=True)
+        axes = list(np.atleast_1d(axes))
+
+        for i, model in enumerate(models):
+            ax = axes[i]
+            coords = np.asarray(tsne_dict[model], dtype=float)
+            if coords.ndim != 2 or coords.shape[1] < 2:
+                raise ValueError(
+                    f"Model '{model}' coordinates must have shape (n_frames, >=2)."
+                )
+
+            if labels_dict is not None and model in labels_dict:
+                labels = np.asarray(labels_dict[model], dtype=int)
+                if labels.shape[0] != coords.shape[0]:
+                    raise ValueError(
+                        f"Labels length for model '{model}' does not match coordinate rows."
+                    )
+                n_clusters = len(np.unique(labels))
+                cmap = plt.cm.get_cmap("tab20", max(1, n_clusters))
+                colors = [cmap(int(l)) for l in labels]
+            else:
+                fallback = "cornflowerblue"
+                colors = variant_colors.get(model, fallback) if variant_colors else fallback
+
+            ax.scatter(
+                coords[:, 0],
+                coords[:, 1],
+                c=colors,
+                alpha=0.4,
+                s=point_size,
+                edgecolors="white",
+                linewidth=0.1,
+                marker="o",
+            )
+
+            if rep_inds_dict is not None and model in rep_inds_dict:
+                rep_inds = np.asarray(rep_inds_dict[model], dtype=int)
+                rep_inds = rep_inds[(rep_inds >= 0) & (rep_inds < coords.shape[0])]
+                rep_coords = coords[rep_inds]
+                variant_col = (
+                    variant_colors.get(model, "black") if variant_colors else "black"
+                )
+
+                if label_mode == "circle":
+                    ax.scatter(
+                        rep_coords[:, 0],
+                        rep_coords[:, 1],
+                        s=max(30, point_size * 2.5),
+                        facecolors="none",
+                        edgecolors=variant_col,
+                        linewidth=0.8,
+                        alpha=0.8,
+                        zorder=10,
+                    )
+                elif label_mode == "index":
+                    for k, (x, y) in enumerate(rep_coords):
+                        ax.text(
+                            x,
+                            y,
+                            str(k),
+                            fontsize=6,
+                            weight="bold",
+                            color=variant_col,
+                            ha="center",
+                            va="center",
+                            zorder=6,
+                        )
+
+            if model in native_dict:
+                native = np.asarray(native_dict[model], dtype=float).reshape(-1)
+                if native.size >= 2:
+                    star_col = colors[0] if isinstance(colors, list) else colors
+                    ax.scatter(
+                        native[0],
+                        native[1],
+                        marker="*",
+                        s=max(70, point_size * 3.0),
+                        color=star_col,
+                        edgecolors="black",
+                        linewidth=1.2,
+                        zorder=6,
+                    )
+
+            ax.set_title(model)
+            ax.set_xlabel("t-SNE 1")
+            if i == 0:
+                ax.set_ylabel("t-SNE 2")
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.grid(False)
+
+        plt.tight_layout()
+        if show:
+            plt.show()
+
+        return fig, axes
+
+    def extractBioEmuClusters(
+        self,
+        cluster_result,
+        bioemu_folder,
+        output_folder,
+        only_models=None,
+        cluster_zfill=3,
+        verbose=True,
+    ):
+        """
+        Extract centroid structures and member trajectories per t-SNE cluster.
+
+        Parameters
+        ----------
+        cluster_result : tuple
+            Tuple returned by :meth:`clusterBioEmuByNativeContacts` (length 3 or 4).
+        bioemu_folder : str
+            Path to BioEmu model folders with ``topology.pdb`` and ``samples*.xtc``.
+        output_folder : str
+            Destination root where ``<model>/cluster_<k>/`` outputs are written.
+        only_models : str or list, optional
+            Restrict extraction to this subset of models.
+        cluster_zfill : int, optional
+            Digits used for cluster folder naming (e.g. 003 -> cluster_003).
+        verbose : bool, optional
+            Whether to print status/warning messages.
+
+        Returns
+        -------
+        dict
+            Nested dictionary with basic extraction summary for each model/cluster.
+        """
+        if isinstance(only_models, str):
+            only_models = [only_models]
+
+        if not isinstance(cluster_result, tuple) or len(cluster_result) not in (3, 4):
+            raise ValueError(
+                "Expected a 3- or 4-element tuple from clusterBioEmuByNativeContacts."
+            )
+
+        _, labels_dict, rep_inds_dict = cluster_result[:3]
+        models = only_models if only_models is not None else list(labels_dict.keys())
+        os.makedirs(output_folder, exist_ok=True)
+
+        extraction_summary = {}
+        for model in models:
+            if model not in labels_dict or model not in rep_inds_dict:
+                continue
+
+            labels = np.asarray(labels_dict[model], dtype=int)
+            reps = np.asarray(rep_inds_dict[model], dtype=int)
+
+            model_path = os.path.join(bioemu_folder, model)
+            top_path = os.path.join(model_path, "topology.pdb")
+
+            if not os.path.isdir(model_path):
+                if verbose:
+                    print(f"WARNING: model folder not found for '{model}'. Skipping.")
+                continue
+            if not os.path.exists(top_path):
+                if verbose:
+                    print(f"WARNING: topology file not found for '{model}'. Skipping.")
+                continue
+
+            traj_files = sorted(
+                os.path.join(model_path, f)
+                for f in os.listdir(model_path)
+                if f.endswith(".xtc")
+                and (f.startswith("samples") or f.startswith("samples_"))
+            )
+            if not traj_files:
+                if verbose:
+                    print(f"WARNING: no trajectory found for '{model}'. Skipping.")
+                continue
+
+            traj = md.load(traj_files, top=top_path)
+            model_out = os.path.join(output_folder, model)
+            os.makedirs(model_out, exist_ok=True)
+
+            model_summary = {}
+            for cluster_id in np.unique(labels):
+                cluster_id = int(cluster_id)
+                cluster_name = str(cluster_id).zfill(cluster_zfill)
+                cluster_dir = os.path.join(model_out, f"cluster_{cluster_name}")
+                os.makedirs(cluster_dir, exist_ok=True)
+
+                frame_inds = np.where(labels == cluster_id)[0]
+                frame_inds = frame_inds[frame_inds != 0]  # Exclude native frame.
+
+                if len(frame_inds) == 0:
+                    continue
+                if cluster_id < 0 or cluster_id >= len(reps):
+                    if verbose:
+                        print(
+                            f"WARNING: representative index missing for {model}, cluster {cluster_id}. Skipping."
+                        )
+                    continue
+
+                rep_idx = int(reps[cluster_id])
+                if rep_idx == 0:
+                    if verbose:
+                        print(
+                            f"WARNING: native frame is centroid for {model}, cluster {cluster_id}. Skipping."
+                        )
+                    continue
+
+                rep_frame = rep_idx - 1  # Native frame (0) is not in BioEmu .xtc files.
+                if rep_frame < 0 or rep_frame >= traj.n_frames:
+                    if verbose:
+                        print(
+                            f"WARNING: centroid frame out of range for {model}, cluster {cluster_id}. Skipping."
+                        )
+                    continue
+
+                centroid_name = f"{model}_cluster_{cluster_name}.pdb"
+                traj.slice([rep_frame]).save_pdb(os.path.join(cluster_dir, centroid_name))
+
+                other_inds = [
+                    int(i - 1)
+                    for i in frame_inds
+                    if i != rep_idx and 0 <= (i - 1) < traj.n_frames
+                ]
+                if other_inds:
+                    traj.slice(other_inds).save_xtc(os.path.join(cluster_dir, "frames.xtc"))
+
+                model_summary[f"cluster_{cluster_name}"] = {
+                    "centroid_frame": int(rep_frame),
+                    "n_member_frames": int(len(other_inds)),
+                }
+
+            extraction_summary[model] = model_summary
+
+        return extraction_summary
+
+    # Backward-compatible aliases matching common notebook naming.
+    def clusterBioemuByNativeContacts(self, *args, **kwargs):
+        return self.clusterBioEmuByNativeContacts(*args, **kwargs)
+
+    def plotBioemuClustering(self, *args, **kwargs):
+        return self.plotBioEmuClustering(*args, **kwargs)
+
+    def extractBioemuClusters(self, *args, **kwargs):
+        return self.extractBioEmuClusters(*args, **kwargs)
+
     def computeFoldingFreeEnergy(self, df_q, q_threshold=0.8, temperature=300.0):
         """
         Compute the free energy of folding (ΔG_f) for each model from Q distributions.
