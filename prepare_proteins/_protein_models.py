@@ -20,7 +20,7 @@ import pkg_resources
 from collections import Counter, defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List, Literal, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Set, Tuple, Union
 
 # --- Debug printing helper (no-op if debug=False) ---
 def _dbg(debug: bool, msg: str = "", *args):
@@ -553,6 +553,41 @@ def _prepare_expanded_atom_pairs(
             models_without_pairs.append(model_ligand)
 
     return expanded, missing_ligand_atoms, models_without_pairs
+
+def _createCAConstraintFile(structure, cst_file, sd=1.0):
+    """
+    Write Rosetta coordinate constraints for all CA atoms in `structure`.
+
+    Constraints are written as CoordinateConstraint lines using each CA Cartesian
+    coordinate from the input structure as the harmonic center.
+    """
+    with open(cst_file, "w") as handle:
+        ref_res, ref_chain = None, None
+        for residue in structure.get_residues():
+            # Skip hetero residues and waters
+            if residue.id[0] != " ":
+                continue
+
+            resseq = residue.id[1]
+            chain_id = residue.get_parent().id
+            if ref_res is None:
+                ref_res, ref_chain = resseq, chain_id
+            if ref_chain != chain_id:
+                ref_res, ref_chain = resseq, chain_id
+
+            ca_atom = None
+            for atom in residue.get_atoms():
+                if atom.name == "CA":
+                    ca_atom = atom
+                    break
+
+            if ca_atom is None:
+                continue
+
+            ca_coordinate = list(ca_atom.coord)
+            line = f"CoordinateConstraint CA {resseq}{chain_id} CA {ref_res}{ref_chain} "
+            line += " ".join([f"{coord:.4f}" for coord in ca_coordinate]) + f" HARMONIC 0 {sd}\n"
+            handle.write(line)
 
 def _analyze_mapping_pairs(mapping, r_ca_coord, t_ca_coord, max_ca_ca, verbose_limit=40):
     import numpy as np, bisect
@@ -11847,7 +11882,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                equilibration_data_report_time=1.0, equilibration_dcd_report_time=0.0, temperature=300.0,
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
                                extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
-                               solvate=True,
+                               solvate=True, solvatebox_buffer=12.0, solvatebox_iso=False,
                                verbose=False,
                                strict_ligand_atom_check=True,
                                ligand_parameters_source=None,
@@ -11873,6 +11908,11 @@ make sure of reading the target sequences with the function readTargetSequences(
         - skip_preparation (bool, optional): If True, skip preparation steps (e.g., ligand parameterization and input generation)
           but still return simulation jobs for the models/replicas. This allows running with pre-existing inputs.
         - solvate (bool, optional): When False, request the backends to skip solvent/ion addition (defaults to True).
+        - solvatebox_buffer (float, list, tuple, dict, optional): AmberTools-specific solvent buffer in Angstrom
+          passed to tleap `solvatebox`. A scalar applies isotropically; a 3-element iterable applies x/y/z-specific
+          buffers. You can also pass a dict `{model_name: value}` for per-model buffers.
+        - solvatebox_iso (bool, optional): AmberTools-specific flag to append `iso` to `solvatebox` when
+          `solvatebox_buffer` is scalar. Ignored for 3-element buffers.
         - verbose (bool, optional): When True, emit detailed progress information from the parameterization backends.
         - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
           same atom-name set as the ligand extracted from the PDB; mismatches raise an error. Disable to downgrade to warnings.
@@ -12005,6 +12045,32 @@ make sure of reading the target sequences with the function readTargetSequences(
         if skip_models is None:
             skip_models = []
 
+        if isinstance(residue_names, Mapping):
+            if len(residue_names) == 0:
+                warnings.warn(
+                    "residue_names was provided as an empty mapping; no explicit protonation-state residue names "
+                    "will be applied.",
+                    UserWarning,
+                )
+            selected_models_for_warning = [
+                model_name
+                for model_name in self
+                if (not only_models or model_name in only_models) and model_name not in skip_models
+            ]
+            empty_residue_name_models = [
+                model_name
+                for model_name in selected_models_for_warning
+                if isinstance(residue_names.get(model_name), Mapping) and len(residue_names.get(model_name)) == 0
+            ]
+            if empty_residue_name_models:
+                preview = ", ".join(sorted(empty_residue_name_models)[:10])
+                suffix = " ..." if len(empty_residue_name_models) > 10 else ""
+                warnings.warn(
+                    f"Empty residue_names mapping provided for {len(empty_residue_name_models)} model(s): "
+                    f"{preview}{suffix}. No explicit residue renaming will be applied for these models.",
+                    UserWarning,
+                )
+
         def _replica_has_inputs(replica_folder: str) -> bool:
             input_dir = os.path.join(replica_folder, 'input_files')
             if not os.path.isdir(input_dir):
@@ -12130,6 +12196,23 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             return jobs
 
+        def _compact_openmm_model(md_obj):
+            return SimpleNamespace(
+                input_pdb=getattr(md_obj, "input_pdb", None),
+                pdb_name=getattr(md_obj, "pdb_name", None),
+                prmtop_file=getattr(md_obj, "prmtop_file", None),
+                inpcrd_file=getattr(md_obj, "inpcrd_file", None),
+                parameterization_result=getattr(md_obj, "parameterization_result", None),
+                command_log=list(getattr(md_obj, "command_log", [])),
+            )
+
+        def _release_model_memory(model_name):
+            md_obj = self.openmm_md.get(model_name)
+            if md_obj is None:
+                return
+            self.openmm_md[model_name] = _compact_openmm_model(md_obj)
+            gc.collect()
+
         # Create the base job folder
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
@@ -12199,6 +12282,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         backend_label = getattr(backend, "name", str(parameterization_method)).lower()
         ligand_parameters_folder = _select_backend_parameters_folder(ligand_parameters_folder, backend_label)
         resolved_ligand_pack_root = _resolve_ligand_pack_root(ligand_parameters_source, backend_label)
+
+        def _resolve_model_option(option, model_name, default=None):
+            if isinstance(option, Mapping):
+                return option.get(model_name, default)
+            if option is None:
+                return default
+            return option
 
         def _sync_ligand_packs(source_root, dest_root):
             if not source_root or not os.path.isdir(source_root):
@@ -12489,6 +12579,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                 break
 
             model_ligands = _detect_model_ligands(model)
+            model_residue_names = residue_names.get(model) if residue_names else None
 
             self.openmm_md[model] = openmm_md_cls(self.models_paths[model])
             if not skip_preparation:
@@ -12511,6 +12602,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                         )
 
                 if not selected_ligands:
+                    _release_model_memory(model)
                     continue
 
                 selected_ligands = [lig.upper() for lig in selected_ligands]
@@ -12532,6 +12624,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                             lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
                         )
                     skip_argument = list(skip_for_param) if skip_for_param else None
+                resolved_solvatebox_buffer = _resolve_model_option(solvatebox_buffer, model, default=12.0)
+
                 prepare_kwargs = dict(
                     charges=ligand_charges,
                     metal_ligand=metal_ligand,
@@ -12545,7 +12639,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     return_qm_jobs=True,
                     extra_force_field=extra_force_field,
                     force_field='ff14SB',
-                    residue_names=residue_names.get(model) if residue_names else None,
+                    residue_names=model_residue_names,
                     add_counterions=True,
                     add_counterionsRand=add_counterionsRand,
                     save_amber_pdb=True,
@@ -12561,6 +12655,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
                 elif getattr(backend, "name", "").lower() == "ambertools":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
+                    prepare_kwargs["solvatebox_buffer"] = resolved_solvatebox_buffer
+                    prepare_kwargs["solvatebox_iso"] = bool(solvatebox_iso)
                 prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
                 if "verbose" not in prepare_kwargs:
                     prepare_kwargs["verbose"] = bool(verbose)
@@ -12575,6 +12671,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
                 ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
                 ligand_setup_completed = True
+                _release_model_memory(model)
                 continue
 
             model_folder = os.path.join(job_folder, model)
@@ -12612,6 +12709,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
             if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
                 external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
+                resolved_solvatebox_buffer = _resolve_model_option(solvatebox_buffer, model, default=12.0)
                 prepare_kwargs = dict(
                     charges=ligand_charges,
                     metal_ligand=metal_ligand,
@@ -12625,7 +12723,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     return_qm_jobs=True,
                     extra_force_field=extra_force_field,
                     force_field='ff14SB',
-                    residue_names=residue_names.get(model) if residue_names else None,
+                    residue_names=model_residue_names,
                     add_counterions=True,
                     add_counterionsRand=add_counterionsRand,
                     save_amber_pdb=True,
@@ -12639,6 +12737,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
                 elif getattr(backend, "name", "").lower() == "ambertools":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
+                    prepare_kwargs["solvatebox_buffer"] = resolved_solvatebox_buffer
+                    prepare_kwargs["solvatebox_iso"] = bool(solvatebox_iso)
                 prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
                 if "verbose" not in prepare_kwargs:
                     prepare_kwargs["verbose"] = bool(verbose)
@@ -12670,6 +12770,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                 )
                 simulation_jobs.extend(jobs)
 
+            _release_model_memory(model)
+
         self.openmm_md.openmm_command_logs.clear()
         for model_name, md_obj in self.openmm_md.items():
             self.openmm_md.openmm_command_logs[model_name] = list(getattr(md_obj, "command_log", []))
@@ -12688,7 +12790,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                    equilibration_data_report_time=1.0, equilibration_dcd_report_time=0.0, temperature=300.0,
                                    collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
                                    extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
-                                   solvate=True,
+                                   solvate=True, solvatebox_buffer=12.0, solvatebox_iso=False,
                                    verbose=False,
                                    strict_ligand_atom_check=True,
                                    ligand_parameters_source=None,
@@ -12805,6 +12907,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             add_counterionsRand=add_counterionsRand,
             skip_preparation=skip_preparation,
             solvate=solvate,
+            solvatebox_buffer=solvatebox_buffer,
+            solvatebox_iso=solvatebox_iso,
             verbose=verbose,
             strict_ligand_atom_check=strict_ligand_atom_check,
             ligand_parameters_source=ligand_parameters_source,
@@ -17464,6 +17568,511 @@ if __name__ == "__main__":
         self.protonation_states.set_index(["Model", "Chain", "Residue"], inplace=True)
 
         return self.protonation_states
+
+    def getModelsPropkaProtonationStates(
+        self,
+        pH=7.0,
+        models=None,
+        residues=None,
+        ensemble_structures=None,
+        return_mode="both",
+        ambiguity_margin=1.0,
+        include_ambiguous=False,
+        include_identity_states=True,
+        his_neutral_name="HIE",
+        cys_mode="keep",
+        propka_executable=None,
+        keep_files=False,
+        workdir=None,
+    ):
+        """
+        Estimate residue pKa values with PROPKA and derive protonation-state residue
+        names compatible with ``setUpOpenMMSimulations(residue_names=...)``.
+
+        This method can run PROPKA on one structure per model (default) or on an
+        ensemble of PDB conformations and average the pKa values per residue.
+
+        Parameters
+        ----------
+        pH : float, optional
+            Target pH used to assign protonated/deprotonated states.
+        models : str or list[str], optional
+            Model(s) to process. If omitted, all loaded models are processed.
+        residues : dict, optional
+            Optional per-model residue filter:
+            ``{model: [(chain_id, residue_id), ...], ...}``.
+        ensemble_structures : dict, optional
+            Optional per-model structure specification:
+            ``{model: value, ...}``, where ``value`` can be:
+            - a list/tuple/set of PDB file paths
+            - a path to a folder containing PDB files
+            - a path to a single PDB file
+            If omitted for a model, the model's source PDB is used.
+        return_mode : {"pka", "residue_names", "both"}, optional
+            Select return type:
+            - ``"pka"``: return averaged pKa DataFrame
+            - ``"residue_names"``: return OpenMM-compatible rename mapping
+            - ``"both"``: return ``(pka_dataframe, residue_names_mapping)``
+        ambiguity_margin : float, optional
+            Residues with ``abs(pKa - pH) < ambiguity_margin`` are flagged ambiguous.
+        include_ambiguous : bool, optional
+            If ``True``, ambiguous residues are also included in the residue-name map.
+        include_identity_states : bool, optional
+            If ``True`` (default), include all predicted titratable residue states in the
+            returned ``residue_names`` map, even when the predicted state matches the
+            canonical residue name (e.g., ``ASP -> ASP``). Set to ``False`` to keep only
+            explicit renames (legacy behavior).
+        his_neutral_name : {"HIE", "HID", "HIS"}, optional
+            Residue name used for neutral histidines.
+        cys_mode : {"keep", "cyx"}, optional
+            Handling of deprotonated cysteines:
+            - ``"keep"`` keeps cysteines as ``CYS``
+            - ``"cyx"`` maps deprotonated cysteines to ``CYX``
+        propka_executable : str or sequence[str], optional
+            Optional command prefix for PROPKA execution. If omitted, the method
+            auto-tries ``propka3``, ``propka``, ``python -m propka`` and
+            ``python -m propka.run``.
+        keep_files : bool, optional
+            Keep PROPKA temporary files and outputs.
+        workdir : str, optional
+            Base folder for temporary PROPKA run directories.
+
+        Returns
+        -------
+        pandas.DataFrame or dict or tuple
+            Depending on ``return_mode``.
+        """
+
+        valid_return_modes = {"pka", "residue_names", "both"}
+        if return_mode not in valid_return_modes:
+            raise ValueError(
+                f"Invalid return_mode {return_mode!r}. Valid values are {sorted(valid_return_modes)}."
+            )
+
+        try:
+            pH = float(pH)
+        except (TypeError, ValueError):
+            raise TypeError("pH must be a numeric value.") from None
+
+        try:
+            ambiguity_margin = float(ambiguity_margin)
+        except (TypeError, ValueError):
+            raise TypeError("ambiguity_margin must be a numeric value.") from None
+        if ambiguity_margin < 0.0:
+            raise ValueError("ambiguity_margin must be >= 0.")
+
+        his_neutral_name = str(his_neutral_name).strip().upper()
+        if his_neutral_name not in {"HIE", "HID", "HIS"}:
+            raise ValueError("his_neutral_name must be one of: 'HIE', 'HID', 'HIS'.")
+
+        cys_mode = str(cys_mode).strip().lower()
+        if cys_mode not in {"keep", "cyx"}:
+            raise ValueError("cys_mode must be either 'keep' or 'cyx'.")
+
+        if models is None:
+            selected_models = list(self.models_names)
+        elif isinstance(models, str):
+            selected_models = [models]
+        else:
+            selected_models = list(models)
+
+        if not selected_models:
+            raise ValueError("No models selected for PROPKA analysis.")
+
+        missing_models = [m for m in selected_models if m not in self.models_paths]
+        if missing_models:
+            raise ValueError(f"Model(s) not found: {missing_models}")
+
+        if ensemble_structures is not None and not isinstance(ensemble_structures, Mapping):
+            raise TypeError("ensemble_structures must be a mapping of model -> structure specification.")
+
+        if isinstance(ensemble_structures, Mapping):
+            unknown_models = sorted(set(ensemble_structures.keys()) - set(self.models_names))
+            if unknown_models:
+                raise ValueError(
+                    f"Unknown model key(s) in ensemble_structures: {unknown_models}"
+                )
+
+        def _normalize_residue_name(resname):
+            residue = str(resname).strip().upper()
+            return {
+                "HID": "HIS",
+                "HIE": "HIS",
+                "HIP": "HIS",
+                "ASH": "ASP",
+                "GLH": "GLU",
+                "CYX": "CYS",
+            }.get(residue, residue)
+
+        def _looks_like_float(token):
+            try:
+                float(str(token).rstrip("*"))
+                return True
+            except (TypeError, ValueError):
+                return False
+
+        def _parse_propka_summary(pka_file):
+            records = []
+            in_summary = False
+            with open(pka_file) as handle:
+                for line in handle:
+                    if not in_summary:
+                        if "SUMMARY OF THIS PREDICTION" in line:
+                            in_summary = True
+                        continue
+
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if stripped.startswith("Writing"):
+                        break
+                    if stripped.startswith("Group") or stripped.startswith("----"):
+                        continue
+
+                    fields = stripped.split()
+                    if len(fields) < 4:
+                        continue
+
+                    residue_name = fields[0].upper()
+                    try:
+                        residue_id = int(fields[1])
+                    except (TypeError, ValueError):
+                        # Skip non-residue entries (e.g. ligand atom labels)
+                        continue
+
+                    if len(fields) >= 5 and not _looks_like_float(fields[2]):
+                        chain_id = fields[2]
+                        pka_token = fields[3]
+                        model_pka_token = fields[4]
+                    elif len(fields) >= 4 and _looks_like_float(fields[2]):
+                        # Chain-less output (single-chain structures in some versions)
+                        chain_id = " "
+                        pka_token = fields[2]
+                        model_pka_token = fields[3]
+                    else:
+                        continue
+
+                    try:
+                        pka_value = float(str(pka_token).rstrip("*"))
+                        model_pka_value = float(str(model_pka_token).rstrip("*"))
+                    except (TypeError, ValueError):
+                        continue
+
+                    records.append(
+                        {
+                            "Name": residue_name,
+                            "Chain": chain_id,
+                            "Residue": residue_id,
+                            "pKa": pka_value,
+                            "model_pKa": model_pka_value,
+                        }
+                    )
+
+            return records
+
+        def _resolve_model_pdbs(model_name):
+            if not isinstance(ensemble_structures, Mapping) or model_name not in ensemble_structures:
+                return [self.models_paths[model_name]]
+
+            spec = ensemble_structures[model_name]
+
+            if isinstance(spec, (str, os.PathLike)):
+                path = os.fspath(spec)
+                if os.path.isdir(path):
+                    pdbs = []
+                    for entry in sorted(os.listdir(path)):
+                        full = os.path.join(path, entry)
+                        if os.path.isfile(full) and entry.lower().endswith(".pdb"):
+                            pdbs.append(full)
+                    if not pdbs:
+                        raise ValueError(
+                            f"No PDB files found in ensemble folder for model {model_name!r}: {path}"
+                        )
+                    return pdbs
+
+                if not os.path.exists(path):
+                    raise FileNotFoundError(
+                        f"Ensemble path for model {model_name!r} was not found: {path}"
+                    )
+                if not os.path.isfile(path):
+                    raise ValueError(
+                        f"Ensemble path for model {model_name!r} is not a file or folder: {path}"
+                    )
+                return [path]
+
+            if isinstance(spec, (list, tuple, set)):
+                pdbs = [os.fspath(p) for p in spec]
+                if not pdbs:
+                    raise ValueError(
+                        f"Empty PDB list provided for model {model_name!r} in ensemble_structures."
+                    )
+                for pdb_file in pdbs:
+                    if not os.path.exists(pdb_file):
+                        raise FileNotFoundError(
+                            f"PDB file for model {model_name!r} was not found: {pdb_file}"
+                        )
+                    if not os.path.isfile(pdb_file):
+                        raise ValueError(
+                            f"Path in ensemble_structures for model {model_name!r} is not a file: {pdb_file}"
+                        )
+                return sorted(pdbs)
+
+            raise TypeError(
+                f"Invalid ensemble specification for model {model_name!r}. "
+                "Use a PDB path, folder path, or list of PDB paths."
+            )
+
+        def _build_propka_candidates():
+            candidates = []
+
+            if propka_executable is not None:
+                if isinstance(propka_executable, (list, tuple)):
+                    if len(propka_executable) == 0:
+                        raise ValueError("propka_executable sequence cannot be empty.")
+                    candidates.append([str(x) for x in propka_executable])
+                else:
+                    candidates.append([os.fspath(propka_executable)])
+            else:
+                for executable in ("propka3", "propka"):
+                    resolved = shutil.which(executable)
+                    if resolved:
+                        candidates.append([resolved])
+                candidates.append([sys.executable, "-m", "propka"])
+                candidates.append([sys.executable, "-m", "propka.run"])
+
+            unique = []
+            seen = set()
+            for candidate in candidates:
+                key = tuple(candidate)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique.append(candidate)
+            return unique
+
+        def _find_pka_output(run_folder, pdb_filename):
+            pdb_name = os.path.basename(pdb_filename)
+            stem = os.path.splitext(pdb_name)[0]
+            expected = [
+                os.path.join(run_folder, f"{stem}.pka"),
+                os.path.join(run_folder, f"{pdb_name}.pka"),
+            ]
+            for candidate in expected:
+                if os.path.exists(candidate):
+                    return candidate
+
+            all_pka = [
+                os.path.join(run_folder, f)
+                for f in os.listdir(run_folder)
+                if f.lower().endswith(".pka")
+            ]
+            if not all_pka:
+                return None
+            all_pka.sort(key=os.path.getmtime, reverse=True)
+            return all_pka[0]
+
+        propka_candidates = _build_propka_candidates()
+        if not propka_candidates:
+            raise RuntimeError(
+                "Could not find a PROPKA executable. Install PROPKA or pass propka_executable explicitly."
+            )
+
+        # Optional per-model residue filter
+        residue_filter = None
+        if residues is not None:
+            if not isinstance(residues, Mapping):
+                raise TypeError(
+                    "residues must be a mapping of model -> list of (chain_id, residue_id) tuples."
+                )
+            residue_filter = {}
+            for model_name in selected_models:
+                if model_name not in residues:
+                    raise ValueError(
+                        f"Model {model_name!r} missing from residues filter mapping."
+                    )
+                residue_filter[model_name] = set()
+                for item in residues[model_name]:
+                    if not isinstance(item, (list, tuple)) or len(item) != 2:
+                        raise ValueError(
+                            "Each residue entry must be a 2-item tuple: (chain_id, residue_id)."
+                        )
+                    chain_id, residue_id = item
+                    residue_filter[model_name].add((str(chain_id), int(residue_id)))
+
+        run_root = None
+        if workdir is not None:
+            run_root = os.path.abspath(os.fspath(workdir))
+            os.makedirs(run_root, exist_ok=True)
+
+        raw_records = []
+        preserved_run_dirs = []
+        attempted_commands = []
+
+        for model_name in selected_models:
+            model_pdbs = _resolve_model_pdbs(model_name)
+
+            for conformer_index, pdb_file in enumerate(model_pdbs, start=1):
+                run_dir = tempfile.mkdtemp(prefix=f"propka_{model_name}_", dir=run_root)
+                try:
+                    local_pdb = os.path.join(run_dir, os.path.basename(pdb_file))
+                    shutil.copyfile(pdb_file, local_pdb)
+                    local_name = os.path.basename(local_pdb)
+
+                    parsed_records = None
+                    error_messages = []
+                    for candidate in propka_candidates:
+                        for ph_flag in ("--pH", "-o"):
+                            command = candidate + [ph_flag, str(pH), local_name]
+                            attempted_commands.append(" ".join(command))
+                            completed = subprocess.run(
+                                command,
+                                cwd=run_dir,
+                                capture_output=True,
+                                text=True,
+                            )
+
+                            pka_output = _find_pka_output(run_dir, local_name)
+                            if completed.returncode == 0 and pka_output is not None:
+                                parsed_records = _parse_propka_summary(pka_output)
+                                break
+
+                            stderr = (completed.stderr or "").strip()
+                            stdout = (completed.stdout or "").strip()
+                            error_messages.append(
+                                f"Command {' '.join(command)!r} failed (exit={completed.returncode}). "
+                                f"stdout={stdout!r} stderr={stderr!r}"
+                            )
+                        if parsed_records is not None:
+                            break
+
+                    if parsed_records is None:
+                        raise RuntimeError(
+                            f"PROPKA execution failed for model {model_name!r} with structure {pdb_file!r}.\n"
+                            + "\n".join(error_messages[-6:])
+                        )
+
+                    for record in parsed_records:
+                        raw_records.append(
+                            {
+                                "Model": model_name,
+                                "Conformation": conformer_index,
+                                "StructurePath": os.path.abspath(pdb_file),
+                                "Name": record["Name"],
+                                "Chain": record["Chain"],
+                                "Residue": int(record["Residue"]),
+                                "pKa": float(record["pKa"]),
+                                "model_pKa": float(record["model_pKa"]),
+                            }
+                        )
+
+                finally:
+                    if keep_files:
+                        preserved_run_dirs.append(run_dir)
+                    else:
+                        shutil.rmtree(run_dir, ignore_errors=True)
+
+        if not raw_records:
+            raise ValueError(
+                "No residue pKa values were parsed from PROPKA outputs. "
+                "Check that the structures contain titratable residues."
+            )
+
+        raw_df = pd.DataFrame(raw_records)
+
+        # If PROPKA omits chain IDs, infer from loaded structure when there is one chain.
+        for model_name in selected_models:
+            missing_chain_mask = (raw_df["Model"] == model_name) & (raw_df["Chain"] == " ")
+            if not missing_chain_mask.any():
+                continue
+            structure = self.structures.get(model_name)
+            if structure is None:
+                continue
+            chain_ids = [c.id for c in structure[0]]
+            if len(chain_ids) == 1:
+                raw_df.loc[missing_chain_mask, "Chain"] = chain_ids[0]
+
+        if residue_filter is not None:
+            keep_mask = raw_df.apply(
+                lambda row: (str(row["Chain"]), int(row["Residue"]))
+                in residue_filter[row["Model"]],
+                axis=1,
+            )
+            raw_df = raw_df.loc[keep_mask].copy()
+            if raw_df.empty:
+                raise ValueError("No PROPKA residues matched the given residues filter.")
+
+        pka_df = (
+            raw_df.groupby(["Model", "Chain", "Residue", "Name"], as_index=False)
+            .agg(
+                pKa=("pKa", "mean"),
+                pKa_std=("pKa", "std"),
+                pKa_min=("pKa", "min"),
+                pKa_max=("pKa", "max"),
+                model_pKa=("model_pKa", "mean"),
+                n_conformations=("pKa", "count"),
+            )
+            .sort_values(["Model", "Chain", "Residue", "Name"])
+            .reset_index(drop=True)
+        )
+        pka_df["pKa_std"] = pka_df["pKa_std"].fillna(0.0)
+        pka_df["pH"] = pH
+        pka_df["delta"] = pka_df["pKa"] - pH
+        pka_df["predicted_protonated"] = pka_df["delta"] >= 0.0
+        pka_df["ambiguous"] = pka_df["delta"].abs() < ambiguity_margin
+
+        def _predict_openmm_state(residue_name, protonated):
+            normalized = _normalize_residue_name(residue_name)
+            if normalized == "ASP":
+                return "ASH" if protonated else "ASP"
+            if normalized == "GLU":
+                return "GLH" if protonated else "GLU"
+            if normalized == "HIS":
+                return "HIP" if protonated else his_neutral_name
+            if normalized == "CYS":
+                if protonated:
+                    return "CYS"
+                if cys_mode == "cyx":
+                    return "CYX"
+                return "CYS"
+            return None
+
+        pka_df["predicted_state"] = pka_df.apply(
+            lambda row: _predict_openmm_state(row["Name"], bool(row["predicted_protonated"])),
+            axis=1,
+        )
+
+        residue_names_map = {model_name: {} for model_name in selected_models}
+        for _, row in pka_df.iterrows():
+            state = row["predicted_state"]
+            if state is None:
+                continue
+            if (not include_ambiguous) and bool(row["ambiguous"]):
+                continue
+
+            if not include_identity_states:
+                base_name = _normalize_residue_name(row["Name"])
+                if state == base_name:
+                    # Keep only explicit protonation-fixing renames.
+                    continue
+
+            model_name = row["Model"]
+            residue_key = (str(row["Chain"]), int(row["Residue"]))
+            residue_names_map[model_name][residue_key] = state
+
+        pka_df.set_index(["Model", "Chain", "Residue"], inplace=True)
+
+        self.propka_states = pka_df
+        self.propka_states_raw = raw_df
+        self.propka_residue_names = residue_names_map
+        self.propka_command_attempts = attempted_commands
+        if keep_files:
+            self.propka_run_folders = preserved_run_dirs
+
+        if return_mode == "pka":
+            return pka_df
+        if return_mode == "residue_names":
+            return residue_names_map
+        return pka_df, residue_names_map
 
     def combineDockingDistancesIntoMetrics(self, catalytic_labels, overwrite=False):
         """

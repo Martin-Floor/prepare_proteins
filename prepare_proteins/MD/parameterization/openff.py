@@ -48,6 +48,8 @@ class OpenFFBackend(ParameterizationBackend):
         defaults = {
             "smirnoff_forcefield": "openff-2.2.0.offxml",
             "padding_nm": 1.2,
+            "box_size_nm": None,
+            "box_vectors_nm": None,
             "ionic_strength_m": 0.0,
             "nonbonded_cutoff_nm": 1.0,
             "water_model": "tip3p",
@@ -142,7 +144,7 @@ class OpenFFBackend(ParameterizationBackend):
             raise TypeError("export_per_residue_ffxml must be True, False, a residue name, or a collection of residue names.")
 
         try:
-            from openmm import unit as u
+            from openmm import Vec3, unit as u
             from openmm.app import ForceField, HBonds, Modeller, PME, NoCutoff
         except ImportError as exc:
             raise RuntimeError("openmm is required for the OpenFF parameterization backend.") from exc
@@ -728,15 +730,30 @@ class OpenFFBackend(ParameterizationBackend):
         # ---- Solvate / ions
         if solvate_enabled:
             _log("Adding solvent/ions (Modeller.addSolvent).")
-            modeller.addSolvent(
-                forcefield,
-                model=str(options.get("water_model", "tip3p")),
-                padding=float(options.get("padding_nm", 1.2)) * u.nanometer,
-                ionicStrength=float(options.get("ionic_strength_m", 0.0)) * u.molar,
-                positiveIon=str(options.get("positive_ion", "Na+")),
-                negativeIon=str(options.get("negative_ion", "Cl-")),
-                neutralize=bool(options.get("neutralize", True)),
-            )
+            fixed_box_size = options.get("box_size_nm")
+            fixed_box_vectors = options.get("box_vectors_nm")
+            if fixed_box_size is not None and fixed_box_vectors is not None:
+                raise ValueError("Specify only one of 'box_size_nm' or 'box_vectors_nm'.")
+
+            solvent_kwargs = {
+                "model": str(options.get("water_model", "tip3p")),
+                "ionicStrength": float(options.get("ionic_strength_m", 0.0)) * u.molar,
+                "positiveIon": str(options.get("positive_ion", "Na+")),
+                "negativeIon": str(options.get("negative_ion", "Cl-")),
+                "neutralize": bool(options.get("neutralize", True)),
+            }
+            if fixed_box_vectors is not None:
+                vectors_nm = self._normalize_box_vectors_nm(fixed_box_vectors)
+                solvent_kwargs["boxVectors"] = tuple(
+                    Vec3(*vec) * u.nanometer for vec in vectors_nm
+                )
+            elif fixed_box_size is not None:
+                size_nm = self._normalize_box_size_nm(fixed_box_size)
+                solvent_kwargs["boxSize"] = Vec3(*size_nm) * u.nanometer
+            else:
+                solvent_kwargs["padding"] = float(options.get("padding_nm", 1.2)) * u.nanometer
+
+            modeller.addSolvent(forcefield, **solvent_kwargs)
         else:
             _log("Skipping solvent/ions (solvate=False).")
 
@@ -1030,6 +1047,40 @@ class OpenFFBackend(ParameterizationBackend):
     def _write_ligand_file(path: Path, ligand: Molecule, toolkit: RDKitToolkitWrapper) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         ligand.to_file(str(path), file_format="SDF", toolkit_registry=toolkit)
+
+    @staticmethod
+    def _normalize_box_size_nm(box_size_nm: Any) -> tuple[float, float, float]:
+        if isinstance(box_size_nm, (int, float)):
+            size = float(box_size_nm)
+            if size <= 0.0:
+                raise ValueError("box_size_nm must be > 0.")
+            return (size, size, size)
+        if isinstance(box_size_nm, (list, tuple, np.ndarray)):
+            if len(box_size_nm) != 3:
+                raise ValueError("box_size_nm must be a scalar or a 3-element iterable.")
+            values = tuple(float(v) for v in box_size_nm)
+            if any(v <= 0.0 for v in values):
+                raise ValueError("All box_size_nm elements must be > 0.")
+            return values
+        raise TypeError("box_size_nm must be a float or a 3-element iterable.")
+
+    @staticmethod
+    def _normalize_box_vectors_nm(box_vectors_nm: Any) -> tuple[tuple[float, float, float], ...]:
+        if not isinstance(box_vectors_nm, (list, tuple, np.ndarray)):
+            raise TypeError("box_vectors_nm must be a 3x3 iterable in nanometers.")
+        if len(box_vectors_nm) != 3:
+            raise ValueError("box_vectors_nm must contain exactly 3 vectors.")
+
+        vectors = []
+        for vec in box_vectors_nm:
+            if not isinstance(vec, (list, tuple, np.ndarray)) or len(vec) != 3:
+                raise ValueError("Each box vector must have exactly 3 elements.")
+            parsed = tuple(float(v) for v in vec)
+            if np.linalg.norm(parsed) <= 0.0:
+                raise ValueError("Each box vector must have non-zero length.")
+            vectors.append(parsed)
+
+        return tuple(vectors)
 
     @classmethod
     def _find_residue_charge(cls, resname: str, charges: Any) -> Optional[float]:

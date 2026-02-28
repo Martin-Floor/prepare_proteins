@@ -264,7 +264,7 @@ class openmm_md:
                                regenerate_amber_files=False, non_standard_residues=None, strict_atom_name_check=True,
                                only_residues=None, build_full_system=True, skip_ligand_charge_computation=False,
                                ligand_sdf_files=None, export_per_residue_ffxml=False,
-                               ligand_xml_files=None):
+                               ligand_xml_files=None, solvatebox_buffer=12.0, solvatebox_iso=False):
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -346,6 +346,29 @@ class openmm_md:
                             atom_types[l.split()[0]] = l.split()[4]
             return atom_types
 
+        def formatSolvateboxBuffer(buffer):
+            """
+            Return a tleap-compatible solvatebox buffer expression (Angstrom).
+            Accepts a scalar or a 3-element iterable (x/y/z buffers).
+            """
+            if isinstance(buffer, (int, float)):
+                value = float(buffer)
+                if value <= 0.0:
+                    raise ValueError("solvatebox_buffer scalar must be > 0.")
+                return f"{value:.6f}"
+
+            if isinstance(buffer, (list, tuple, np.ndarray)):
+                if len(buffer) != 3:
+                    raise ValueError("solvatebox_buffer iterable must have exactly 3 elements.")
+                values = [float(v) for v in buffer]
+                if any(v <= 0.0 for v in values):
+                    raise ValueError("All solvatebox_buffer elements must be > 0.")
+                return "{" + " ".join(f"{v:.6f}" for v in values) + "}"
+
+            raise TypeError(
+                "solvatebox_buffer must be a positive float or a 3-element iterable of positive floats."
+            )
+
         def _extract_pdb_atom_names(pdb_path):
             atom_names = set()
             if not os.path.exists(pdb_path):
@@ -407,11 +430,11 @@ class openmm_md:
                 self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
                 self.inpcrd_file = parameters_folder+'/'+self.pdb_name+'.inpcrd'
 
-                self.prmtop = AmberPrmtopFile(self.prmtop_file)
-                self.inpcrd = AmberInpcrdFile(self.inpcrd_file)
+                prmtop = AmberPrmtopFile(self.prmtop_file)
+                inpcrd = AmberInpcrdFile(self.inpcrd_file)
 
-                self.modeller.topology = self.prmtop.topology
-                self.modeller.positions = self.inpcrd.positions
+                self.modeller.topology = prmtop.topology
+                self.modeller.positions = inpcrd.positions
 
                 print('Parameters were already created. Give overwrite=True to recompute them.')
                 return
@@ -496,6 +519,13 @@ class openmm_md:
                 if not resname:
                     continue
                 normalized_ligand_xml[resname] = os.fspath(value)
+
+        if residue_names is not None and isinstance(residue_names, Mapping) and len(residue_names) == 0:
+            warnings.warn(
+                "residue_names was provided as an empty mapping; no explicit protonation-state residue names "
+                "will be applied.",
+                UserWarning,
+            )
 
         # Modify protonation state names and save state
         for chain in self.modeller.topology.chains():
@@ -1645,7 +1675,11 @@ class openmm_md:
                     )
 
             if solvate:
-                tlf.write('solvatebox mol TIP3PBOX 12\n')
+                buffer_expr = formatSolvateboxBuffer(solvatebox_buffer)
+                solvate_command = f"solvatebox mol TIP3PBOX {buffer_expr}"
+                if bool(solvatebox_iso) and isinstance(solvatebox_buffer, (int, float)):
+                    solvate_command += " iso"
+                tlf.write(solvate_command + '\n')
 
             #Add ions with addIons2 (fast) or addIonsRand (slow)
             if add_counterionsRand:
@@ -1670,11 +1704,11 @@ class openmm_md:
         self.inpcrd_file = parameters_folder+'/'+self.pdb_name+'.inpcrd'
 
         # Set topology and positions to amber's
-        self.prmtop = AmberPrmtopFile(self.prmtop_file)
-        self.inpcrd = AmberInpcrdFile(self.inpcrd_file)
+        prmtop = AmberPrmtopFile(self.prmtop_file)
+        inpcrd = AmberInpcrdFile(self.inpcrd_file)
 
-        self.modeller.topology = self.prmtop.topology
-        self.modeller.positions = self.inpcrd.positions
+        self.modeller.topology = prmtop.topology
+        self.modeller.positions = inpcrd.positions
 
     def savePDB(self, output_file):
         with open(output_file, 'w') as of:
