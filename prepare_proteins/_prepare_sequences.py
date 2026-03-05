@@ -133,6 +133,140 @@ def _count_trajectory_frames(
     return frame_count
 
 
+def _get_bioemu_sample_files(model_folder: str) -> list[str]:
+    """Return BioEmu sample trajectories in deterministic order."""
+    traj_files = [
+        os.path.join(model_folder, xtc)
+        for xtc in sorted(os.listdir(model_folder))
+        if xtc.endswith(".xtc") and xtc.startswith("samples_")
+    ]
+    merged_traj = os.path.join(model_folder, "samples.xtc")
+    if not traj_files and os.path.exists(merged_traj):
+        traj_files = [merged_traj]
+    return traj_files
+
+
+def _load_bioemu_trajectory(
+    trajectory_files: Sequence[str] | str,
+    topology_file: str,
+    max_frames: Optional[int] = None,
+    chunk_size: int = 1000,
+):
+    """
+    Load BioEmu trajectories, optionally capping the number of frames.
+
+    When ``max_frames`` is set, frames are read in order using chunked
+    iteration to avoid loading more than needed.
+    """
+    if isinstance(trajectory_files, str):
+        traj_files = [trajectory_files]
+    else:
+        traj_files = list(trajectory_files)
+
+    if not traj_files:
+        raise ValueError("No trajectory files provided.")
+
+    if max_frames is None:
+        load_target = traj_files[0] if len(traj_files) == 1 else traj_files
+        return md.load(load_target, top=topology_file)
+
+    max_frames = int(max_frames)
+    if max_frames < 1:
+        raise ValueError("max_frames must be >= 1 when provided.")
+
+    chunks = []
+    remaining = max_frames
+    for traj_file in traj_files:
+        if remaining <= 0:
+            break
+        read_chunk = min(int(chunk_size), remaining)
+        for chunk in md.iterload(traj_file, top=topology_file, chunk=read_chunk):
+            if chunk.n_frames > remaining:
+                chunk = chunk[:remaining]
+            chunks.append(chunk)
+            remaining -= int(chunk.n_frames)
+            if remaining <= 0:
+                break
+
+    if not chunks:
+        raise ValueError("Trajectory files were found but no frames could be read.")
+
+    return chunks[0] if len(chunks) == 1 else chunks[0].join(chunks[1:])
+
+
+def _resolve_bioemu_max_frames(
+    max_frames,
+    bioemu_folder: str,
+    models: Optional[Sequence[str]] = None,
+) -> Optional[int]:
+    """
+    Normalize max_frames to an integer cap.
+
+    Supports:
+    - None: no cap
+    - int-like: explicit cap
+    - "min": minimum readable frame count across the selected models
+    """
+    if max_frames is None:
+        return None
+
+    if isinstance(max_frames, str):
+        if max_frames != "min":
+            raise ValueError("max_frames must be an integer, None, or 'min'.")
+
+        if models is None:
+            models = sorted(
+                m
+                for m in os.listdir(bioemu_folder)
+                if os.path.isdir(os.path.join(bioemu_folder, m))
+                and m not in {"fastas", "msas"}
+            )
+        else:
+            models = list(models)
+
+        counts = []
+        for model in models:
+            model_folder = os.path.join(bioemu_folder, model)
+            if not os.path.isdir(model_folder):
+                continue
+
+            traj_files = _get_bioemu_sample_files(model_folder)
+            if not traj_files:
+                continue
+
+            top_file = os.path.join(model_folder, "topology.pdb")
+            top_for_count = top_file if os.path.exists(top_file) else None
+
+            n_frames = 0
+            count_ok = True
+            for traj_file in traj_files:
+                try:
+                    n_frames += _count_trajectory_frames(traj_file, top_for_count)
+                except Exception:
+                    count_ok = False
+                    break
+
+            if count_ok and n_frames > 0:
+                counts.append(int(n_frames))
+
+        if not counts:
+            raise ValueError(
+                "max_frames='min' requested but no readable BioEmu trajectories were found."
+            )
+
+        return int(min(counts))
+
+    try:
+        max_frames = int(max_frames)
+    except (TypeError, ValueError):
+        raise ValueError("max_frames must be an integer, None, or 'min'.") from None
+
+    if max_frames < 1:
+        raise ValueError("max_frames must be >= 1 when provided.")
+
+    return max_frames
+
+
 class sequenceModels:
 
     def __init__(self, sequences_fasta):
@@ -3613,7 +3747,13 @@ class sequenceModels:
         return model_half_evalues, model_slopes
 
     def computeBioEmuRMSF(
-        self, bioemu_folder, ref_pdb=None, plot=False, ylim=None, plot_legend=True
+        self,
+        bioemu_folder,
+        ref_pdb=None,
+        plot=False,
+        ylim=None,
+        plot_legend=True,
+        max_frames=None,
     ):
         """
         Computes RMSF values for all models in the specified folder and optionally plots RMSF by residue.
@@ -3622,6 +3762,10 @@ class sequenceModels:
         - bioemu_folder (str): Path to the folder containing model subdirectories with trajectory and topology files.
         - ref_pdb (dict): Dictionary with paths to the reference PDB structures for RMSF calculation for each model.
         - plot (bool, optional): Whether to generate a plot of RMSF vs. residue. Default is False.
+        - max_frames (int or "min", optional): Maximum number of trajectory frames
+                                               to load per model. If "min", use the
+                                               smallest readable trajectory length
+                                               among considered models.
 
         Returns:
         - rmsf (dict): Dictionary containing RMSF arrays for each model.
@@ -3639,11 +3783,21 @@ class sequenceModels:
                 "No reference PDBs given. Computing RMSF relative to the average positions"
             )
 
+        model_names = sorted(os.listdir(bioemu_folder))
+        if ref_pdb:
+            model_names = [m for m in model_names if m in ref_pdb]
+
+        max_frames_resolved = _resolve_bioemu_max_frames(
+            max_frames=max_frames,
+            bioemu_folder=bioemu_folder,
+            models=model_names,
+        )
+
         # Dictionary to store RMSF values for each model
         rmsf = {}
 
         # Iterate through each model folder
-        for model in os.listdir(bioemu_folder):
+        for model in model_names:
 
             if not os.path.isdir(f"{bioemu_folder}/{model}/"):
                 continue
@@ -3653,22 +3807,16 @@ class sequenceModels:
                 ref = md.load(ref_pdb[model])
                 ref_bb_atoms = ref.topology.select("name CA")
 
-            traj_files = []
-            for xtc in sorted(os.listdir(f"{bioemu_folder}/{model}/")):
-                if not xtc.endswith(".xtc"):
-                    continue
-                if xtc.startswith("samples_"):
-                    traj_files.append(f"{bioemu_folder}/{model}/" + xtc)
-            if not traj_files and os.path.exists(
-                f"{bioemu_folder}/{model}/samples.xtc"
-            ):
-                traj_files = f"{bioemu_folder}/{model}/samples.xtc"
+            model_folder = os.path.join(bioemu_folder, model)
+            traj_files = _get_bioemu_sample_files(model_folder)
 
             if not traj_files:
                 continue
 
-            top_file = f"{bioemu_folder}/{model}/topology.pdb"
-            traj = md.load(traj_files, top=top_file)
+            top_file = os.path.join(model_folder, "topology.pdb")
+            traj = _load_bioemu_trajectory(
+                traj_files, top_file, max_frames=max_frames_resolved
+            )
             traj_bb_atoms = traj.topology.select("name CA")
 
             if not ref_pdb:
@@ -3700,7 +3848,9 @@ class sequenceModels:
 
         return rmsf
 
-    def computeBioEmuRMSD(self, bioemu_folder, ref_pdb, residues=None, plot=False):
+    def computeBioEmuRMSD(
+        self, bioemu_folder, ref_pdb, residues=None, plot=False, max_frames=None
+    ):
         """
         Computes RMSD values for all models in the specified folder and optionally plots a violin plot.
 
@@ -3708,6 +3858,10 @@ class sequenceModels:
         - bioemu_folder (str): Path to the folder containing model subdirectories with trajectory and topology files.
         - ref_pdb (dict): Dictionary with paths to the reference PDB structure for RMSD calculation for each model.
         - plot (bool, optional): Whether to generate a violin plot. Default is True.
+        - max_frames (int or "min", optional): Maximum number of trajectory frames
+                                               to load per model. If "min", use the
+                                               smallest readable trajectory length
+                                               among considered models.
 
         Returns:
         - rmsd (dict): Dictionary containing RMSD arrays for each model.
@@ -3719,14 +3873,24 @@ class sequenceModels:
             for model in os.listdir(bioemu_folder):
                 ref_pdb[model] = unique_ref
 
+        model_names = sorted(
+            m
+            for m in os.listdir(bioemu_folder)
+            if m not in {"fastas", "msas"}
+        )
+        model_names = [m for m in model_names if m in ref_pdb]
+
+        max_frames_resolved = _resolve_bioemu_max_frames(
+            max_frames=max_frames,
+            bioemu_folder=bioemu_folder,
+            models=model_names,
+        )
+
         # Dictionary to store RMSD values
         rmsd = {}
 
         # Iterate through each model folder
-        for model in os.listdir(bioemu_folder):
-
-            if model in {"fastas", "msas"}:
-                continue
+        for model in model_names:
 
             if not os.path.isdir(f"{bioemu_folder}/{model}/"):
                 continue
@@ -3748,22 +3912,16 @@ class sequenceModels:
                         ref_bb_atoms.append(atom.index)
             ref_bb_atoms = np.array(ref_bb_atoms)
 
-            traj_files = []
-            for xtc in sorted(os.listdir(f"{bioemu_folder}/{model}/")):
-                if not xtc.endswith(".xtc"):
-                    continue
-                if xtc.startswith("samples_"):
-                    traj_files.append(f"{bioemu_folder}/{model}/" + xtc)
-            if not traj_files and os.path.exists(
-                f"{bioemu_folder}/{model}/samples.xtc"
-            ):
-                traj_files = f"{bioemu_folder}/{model}/samples.xtc"
+            model_folder = os.path.join(bioemu_folder, model)
+            traj_files = _get_bioemu_sample_files(model_folder)
 
             if not traj_files:
                 continue
 
-            top_file = f"{bioemu_folder}/{model}/topology.pdb"
-            traj = md.load(traj_files, top=top_file)
+            top_file = os.path.join(model_folder, "topology.pdb")
+            traj = _load_bioemu_trajectory(
+                traj_files, top_file, max_frames=max_frames_resolved
+            )
 
             traj_bb_atoms = []
             for residue in traj.topology.residues:
@@ -3784,6 +3942,97 @@ class sequenceModels:
             self.plotBioEmuRMSD(rmsd)
 
         return rmsd
+
+    def computeBioEmuFrameCounts(
+        self,
+        bioemu_folder,
+        models=None,
+        include_missing=True,
+    ):
+        """
+        Return per-model BioEmu frame counts as a DataFrame.
+
+        Parameters
+        ----------
+        bioemu_folder : str
+            Path to BioEmu model folders.
+        models : str or list, optional
+            Restrict counting to this subset of model names. If ``None``,
+            model folders are discovered from ``bioemu_folder``.
+        include_missing : bool, optional
+            If ``True``, requested models missing from ``bioemu_folder`` are
+            included with ``n_frames = 0`` and status ``missing_model_folder``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Indexed by model name with columns:
+            ``n_frames``, ``n_trajectory_files``, and ``status``.
+        """
+        if isinstance(models, str):
+            models = [models]
+
+        if models is None:
+            models = sorted(
+                m
+                for m in os.listdir(bioemu_folder)
+                if os.path.isdir(os.path.join(bioemu_folder, m))
+                and m not in {"fastas", "msas"}
+            )
+        else:
+            models = list(models)
+
+        rows = []
+        for model in models:
+            model_folder = os.path.join(bioemu_folder, model)
+            if not os.path.isdir(model_folder):
+                if include_missing:
+                    rows.append(
+                        {
+                            "model": model,
+                            "n_frames": 0,
+                            "n_trajectory_files": 0,
+                            "status": "missing_model_folder",
+                        }
+                    )
+                continue
+
+            traj_files = _get_bioemu_sample_files(model_folder)
+            top_file = os.path.join(model_folder, "topology.pdb")
+            top_for_count = top_file if os.path.exists(top_file) else None
+
+            n_frames = 0
+            n_count_errors = 0
+            for traj_file in traj_files:
+                try:
+                    n_frames += _count_trajectory_frames(traj_file, top_for_count)
+                except Exception:
+                    n_count_errors += 1
+
+            if not traj_files:
+                status = "no_trajectory"
+            elif n_count_errors == 0:
+                status = "ok"
+            elif n_count_errors == len(traj_files):
+                status = "count_error"
+            else:
+                status = "partial_count_error"
+
+            rows.append(
+                {
+                    "model": model,
+                    "n_frames": int(n_frames),
+                    "n_trajectory_files": int(len(traj_files)),
+                    "status": status,
+                }
+            )
+
+        if not rows:
+            return pd.DataFrame(
+                columns=["n_frames", "n_trajectory_files", "status"], index=pd.Index([], name="model")
+            )
+
+        return pd.DataFrame(rows).set_index("model").sort_index()
 
     def plotBioEmuRMSD(
         self,
@@ -4137,6 +4386,7 @@ class sequenceModels:
         only_models=None,
         show_smog_output=False,
         show_progress=True,
+        max_frames=None,
     ):
         """
         Compute the distances between native contacts across frames for each model in the dataset.
@@ -4157,6 +4407,10 @@ class sequenceModels:
                                             all models, or a dictionary mapping model → native PDB path.
         - show_smog_output (bool, optional): Whether to display SMOG2 stdout/stderr. Defaults to False.
         - show_progress (bool, optional): Whether to display a progress bar. Defaults to True.
+        - max_frames (int or "min", optional): Maximum number of trajectory frames
+                                               to load per model. If "min", use the
+                                               smallest readable trajectory length
+                                               among considered models.
 
         Returns:
         - df_distances (dict): Dictionary with model names as keys and DataFrames as values.
@@ -4260,6 +4514,22 @@ class sequenceModels:
                 "native_models_folder should  be a existing path or a dictionary!"
             )
 
+        models_for_max_frames = []
+        for model in models:
+            if only_models and model not in only_models:
+                continue
+            if not os.path.isdir(f"{bioemu_folder}/{model}/"):
+                continue
+            if model not in native_models:
+                continue
+            models_for_max_frames.append(model)
+
+        max_frames_resolved = _resolve_bioemu_max_frames(
+            max_frames=max_frames,
+            bioemu_folder=bioemu_folder,
+            models=models_for_max_frames,
+        )
+
         df_distances = {}
 
         progress_iter = tqdm(
@@ -4332,22 +4602,16 @@ class sequenceModels:
                 (ca_atoms[c[0] - 1], ca_atoms[c[1] - 1]) for c in native_contacts
             ]
 
-            traj_files = []
-            for xtc in sorted(os.listdir(f"{bioemu_folder}/{model}/")):
-                if not xtc.endswith(".xtc"):
-                    continue
-                if xtc.startswith("samples_"):
-                    traj_files.append(f"{bioemu_folder}/{model}/" + xtc)
-            if not traj_files and os.path.exists(
-                f"{bioemu_folder}/{model}/samples.xtc"
-            ):
-                traj_files = f"{bioemu_folder}/{model}/samples.xtc"
+            model_folder = os.path.join(bioemu_folder, model)
+            traj_files = _get_bioemu_sample_files(model_folder)
 
             if not traj_files:
                 continue
 
             # Load trajectory
-            traj = md.load(traj_files, top=top_file)
+            traj = _load_bioemu_trajectory(
+                traj_files, top_file, max_frames=max_frames_resolved
+            )
 
             # Compute distances from trajectory
             D = md.compute_distances(traj, native_pairs)
