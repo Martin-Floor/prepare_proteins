@@ -105,6 +105,34 @@ def _normalise_ligand_resnames(structure):
             residue.resname = trimmed[:3].upper().ljust(3)
 
 
+def _count_trajectory_frames(
+    trajectory_file: str,
+    topology_file: Optional[str] = None,
+    chunk_size: int = 1000,
+) -> int:
+    """
+    Count trajectory frames without loading all coordinates in memory.
+
+    The fast path uses ``len(md.open(...))`` which is lightweight for XTC.
+    If unavailable for a given trajectory format, it falls back to chunked
+    iteration with ``md.iterload``.
+    """
+    try:
+        with md.open(trajectory_file) as traj_file:
+            return int(len(traj_file))
+    except Exception:
+        pass
+
+    load_kwargs: Dict[str, Any] = {"chunk": int(chunk_size)}
+    if topology_file is not None:
+        load_kwargs["top"] = topology_file
+
+    frame_count = 0
+    for chunk in md.iterload(trajectory_file, **load_kwargs):
+        frame_count += int(chunk.n_frames)
+    return frame_count
+
+
 class sequenceModels:
 
     def __init__(self, sequences_fasta):
@@ -2663,9 +2691,9 @@ class sequenceModels:
                 topology_file = os.path.join(model_folder, "topology.pdb")
 
                 if os.path.exists(sample_file) and os.path.exists(topology_file):
-                    traj = md.load(sample_file, top=topology_file)
+                    n_frames = _count_trajectory_frames(sample_file, topology_file)
 
-                    if traj.n_frames >= num_samples:
+                    if n_frames >= num_samples:
                         print(
                             f"{model} has already sampled {num_samples} poses. Skipping it."
                         )
@@ -2728,15 +2756,11 @@ class sequenceModels:
             command += f"--output_dir {model_folder}\n"
             if filter_samples:
                 command += (
-                    "NUM_SAMPLES=$(python -c \"import mdtraj as md; traj = md.load_xtc('"
+                    "NUM_SAMPLES=$(python -c \"import mdtraj as md; print(len(md.open('"
                     + job_folder
                     + "/"
                     + model
-                    + "/samples.xtc', top='"
-                    + job_folder
-                    + "/"
-                    + model
-                    + "/topology.pdb'); print(traj.n_frames)\")\n"
+                    + "/samples.xtc', 'r')))\")\n"
                 )
                 command += 'if [ "$NUM_SAMPLES" -ge ' + str(num_samples) + " ]; then\n"
                 command += 'echo "All samples computed. Exiting."\n'
