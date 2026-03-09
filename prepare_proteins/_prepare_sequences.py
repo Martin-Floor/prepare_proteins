@@ -8,6 +8,7 @@ import math
 import os
 import pickle
 import re
+import shlex
 import shutil
 import subprocess
 from collections import defaultdict
@@ -517,6 +518,9 @@ class sequenceModels:
         The generated commands assume that an environment variable named
         ``WEIGHTS`` already points to the AlphaFold 3 parameters, and that a
         runnable ``runner`` script is available inside each per-model folder.
+        The launcher ``cd`` path is normalized relative to the current working
+        directory so the returned commands remain portable across mirrored
+        project roots.
 
         Returns
         -------
@@ -702,6 +706,12 @@ class sequenceModels:
 
         os.makedirs(job_folder, exist_ok=True)
 
+        def _launcher_cd_path(path_value):
+            normalized_path = os.path.normpath(path_value)
+            if os.path.isabs(normalized_path):
+                return os.path.relpath(normalized_path, start=os.getcwd())
+            return normalized_path
+
         def _is_finished(output_dir):
             if not os.path.isdir(output_dir):
                 return False
@@ -833,14 +843,19 @@ class sequenceModels:
                 else:
                     job_tag = f"{model_name}|seed={seed_value}"
 
-                command_lines = [f"cd {model_dir}"]
+                launcher_model_dir = _launcher_cd_path(model_dir)
+
+                command_lines = [
+                    'AF3_START_DIR="$(pwd)"',
+                    f"cd {shlex.quote(launcher_model_dir)}",
+                ]
                 if benchmark:
                     command_lines.append(
                         f"echo \"[AF3][{job_tag}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\""
                     )
                     command_lines.append("AF_BENCH_START_TS=$(date +%s)")
                 command_lines.append(
-                    f"bsc_alphafold {relative_input_dir} {relative_output_dir} $WEIGHTS"
+                    f"bsc_alphafold {shlex.quote(relative_input_dir)} {shlex.quote(relative_output_dir)} $WEIGHTS"
                 )
                 if benchmark:
                     command_lines.append("AF_BENCH_EXIT_CODE=$?")
@@ -853,8 +868,8 @@ class sequenceModels:
                         "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\""
                     )
                 command_lines.extend([
-                    f"sbatch {runner_name} {relative_input_dir}",
-                    "cd ../..",
+                    f"sbatch {shlex.quote(runner_name)} {shlex.quote(relative_input_dir)}",
+                    'cd "$AF3_START_DIR"',
                 ])
                 commands.append("\n".join(command_lines) + "\n")
 
