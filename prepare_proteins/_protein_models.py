@@ -822,6 +822,33 @@ _OPENMM_NME_RENAME_MAP = {
     "HH32": "HH32",
     "HH33": "HH33",
 }
+_TERMINAL_BACKBONE_N_H_NAMES = {
+    "H",
+    "H1",
+    "H2",
+    "H3",
+    "1H",
+    "2H",
+    "3H",
+    "HT1",
+    "HT2",
+    "HT3",
+    "HN",
+    "HN1",
+    "HN2",
+    "HN3",
+    "1HN",
+    "2HN",
+    "3HN",
+}
+_TERMINAL_BACKBONE_O_H_NAMES = {
+    "HXT",
+    "HOXT",
+    "HO",
+    "HO1",
+    "HO2",
+    "HOC",
+}
 _ROSETTA_CAP_TEMPLATE = {
     "anchor": {
         "N": np.array([2.116412, -0.910657, 0.764132], dtype=float),
@@ -1192,6 +1219,67 @@ def _add_missing_openmm_nme_hydrogens(nme_residue, last_residue, serial_start):
             added += 1
 
     return added
+
+
+def _chain_atom_key_set(chain):
+    return {
+        (chain.id, residue.id[1], atom.name)
+        for residue in chain
+        for atom in residue
+    }
+
+
+def _remove_atoms_near_anchor(residue, anchor_names, cutoff=1.25, element="H"):
+    removed = 0
+    anchors = [residue[name].coord for name in anchor_names if name in residue]
+    if not anchors:
+        return removed
+
+    for atom in list(residue):
+        if atom.element != element:
+            continue
+        if any(np.linalg.norm(atom.coord - anchor_coord) <= cutoff for anchor_coord in anchors):
+            residue.detach_child(atom.id)
+            removed += 1
+    return removed
+
+
+def _normalize_internal_n_hydrogen(residue, cap_carbon_coord, serial_start):
+    if "N" not in residue or "CA" not in residue:
+        return 0
+
+    for atom in list(residue):
+        if atom.element == "H" and atom.name in _TERMINAL_BACKBONE_N_H_NAMES:
+            residue.detach_child(atom.id)
+    _remove_atoms_near_anchor(residue, ("N",), cutoff=1.25, element="H")
+
+    if residue.resname.strip().upper() == "PRO":
+        return 0
+
+    if "H" in residue:
+        residue.detach_child("H")
+
+    coord = _build_amide_hydrogen_coord(
+        residue["N"].coord,
+        cap_carbon_coord,
+        residue["CA"].coord,
+    )
+    residue.add(_create_atom("H", coord, serial_start, "H"))
+    return 1
+
+
+def _normalize_internal_c_terminal_atoms(residue):
+    removed = 0
+    if "OXT" in residue:
+        residue.detach_child("OXT")
+        removed += 1
+
+    for atom in list(residue):
+        if atom.element == "H" and atom.name in _TERMINAL_BACKBONE_O_H_NAMES:
+            residue.detach_child(atom.id)
+            removed += 1
+    removed += _remove_atoms_near_anchor(residue, ("O", "OXT"), cutoff=1.25, element="H")
+    return removed
 
 
 if "_protein_letters_1to3" in globals():
@@ -3473,9 +3561,13 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 next_serial += _add_missing_rosetta_ace_hydrogens(
                     residue_copy, next_serial
                 )
+                if "CO" in residue_copy:
+                    next_serial += _normalize_internal_n_hydrogen(
+                        residue_copy, residue_copy["CO"].coord, next_serial
+                    )
 
-            if residue.id == last_residue.id and "OXT" in residue_copy:
-                residue_copy.detach_child("OXT")
+            if residue.id == last_residue.id:
+                _normalize_internal_c_terminal_atoms(residue_copy)
 
             new_chain.add(residue_copy)
 
@@ -3615,8 +3707,12 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             for atom_name in _ROSETTA_ACE_ATOM_NAMES:
                 if atom_name in residue_copy:
                     residue_copy.detach_child(atom_name)
-            if residue.id == last_residue.id and "OXT" in residue_copy:
-                residue_copy.detach_child("OXT")
+            if residue.id == first_residue.id and "C" in converted_ace:
+                next_serial += _normalize_internal_n_hydrogen(
+                    residue_copy, converted_ace["C"].coord, next_serial
+                )
+            if residue.id == last_residue.id:
+                _normalize_internal_c_terminal_atoms(residue_copy)
 
             new_chain.add(residue_copy)
 
@@ -3643,9 +3739,11 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             self.conects.setdefault(model, [])
             model_entity = next(self.structures[model].get_models())
             chains_by_id = {chain.id: chain for chain in model_entity.get_chains()}
+            removed_atoms = set()
 
             for chain_id in chain_selection[model]:
                 chain = chains_by_id[chain_id]
+                original_atom_keys = _chain_atom_key_set(chain)
                 if style == "rosetta":
                     replacement_chain = self._build_internal_rosetta_capped_chain(chain)
                 elif style == "openmm":
@@ -3656,7 +3754,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     )
                 if replacement_chain is None:
                     continue
+                removed_atoms.update(original_atom_keys - _chain_atom_key_set(replacement_chain))
                 self._replace_chain_contents(chain, replacement_chain)
+
+            self._filter_conect_entries(model, removed_atoms)
 
     def addCappingGroups(self, rosetta_style_caps=False, prepwizard_style_caps=False,
                          openmm_style_caps=False, stdout=False, stderr=False,

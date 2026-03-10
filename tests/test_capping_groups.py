@@ -17,9 +17,14 @@ ATOM      7  C   GLY A   2      15.412   9.850   2.010  1.00 20.00           C
 ATOM      8  OXT GLY A   2      15.962   8.743   1.970  1.00 20.00           O
 TER
 ATOM      9  N   GLY B   1      15.500  12.400   4.400  1.00 20.00           N
-ATOM     10  CA  GLY B   1      16.040  11.110   4.880  1.00 20.00           C
-ATOM     11  C   GLY B   1      15.220  10.050   4.140  1.00 20.00           C
-ATOM     12  O   GLY B   1      15.620   8.890   4.030  1.00 20.00           O
+ATOM     10  H1  GLY B   1      15.300  13.250   4.900  1.00 20.00           H
+ATOM     11  H2  GLY B   1      16.350  12.450   4.250  1.00 20.00           H
+ATOM     12  H3  GLY B   1      15.050  12.150   3.520  1.00 20.00           H
+ATOM     13  CA  GLY B   1      16.040  11.110   4.880  1.00 20.00           C
+ATOM     14  C   GLY B   1      15.220  10.050   4.140  1.00 20.00           C
+ATOM     15  O   GLY B   1      15.620   8.890   4.030  1.00 20.00           O
+ATOM     16  OXT GLY B   1      14.120  10.250   3.610  1.00 20.00           O
+ATOM     17  HXT GLY B   1      13.700   9.510   3.120  1.00 20.00           H
 TER
 END
 """
@@ -62,6 +67,8 @@ def test_add_capping_groups_internal_rosetta_caps_selected_chain_and_saves(tmp_p
     first_b = next(residue for residue in chain_b if residue.id[0] == " ")
     assert not any(atom_name in first_a for atom_name in ("CP2", "CO", "OP1"))
     assert {"CP2", "CO", "OP1", "1HP2", "2HP2", "3HP2"}.issubset(first_b.child_dict)
+    assert "H" in first_b
+    assert not any(atom_name in first_b for atom_name in ("H1", "H2", "H3", "OXT", "HXT"))
 
     residues_b = list(chain_b)
     assert residues_b[1].resname == "NMA"
@@ -93,6 +100,8 @@ def test_add_capping_groups_rosetta_bool_flag_uses_internal_backend(tmp_path, mo
     chain_b = list(models.structures["modelA"].get_chains())[1]
     first_b = next(residue for residue in chain_b if residue.id[0] == " ")
     assert {"CP2", "CO", "OP1", "1HP2", "2HP2", "3HP2"}.issubset(first_b.child_dict)
+    assert "H" in first_b
+    assert not any(atom_name in first_b for atom_name in ("H1", "H2", "H3", "OXT", "HXT"))
 
 
 def test_remove_caps_removes_merged_rosetta_ace_and_nma(tmp_path):
@@ -134,6 +143,8 @@ def test_add_capping_groups_internal_openmm_caps_selected_chain_and_saves(tmp_pa
     assert residues_b[0].resname == "ACE"
     assert {"CH3", "C", "O", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[0]}
     assert residues_b[1].resname == "GLY"
+    assert "H" in residues_b[1]
+    assert not any(atom_name in residues_b[1] for atom_name in ("H1", "H2", "H3", "OXT", "HXT"))
     assert residues_b[2].resname == "NME"
     assert {"N", "H", "CH3", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[2]}
 
@@ -162,6 +173,8 @@ def test_add_capping_groups_openmm_bool_flag_uses_internal_backend(tmp_path, mon
     residues_b = list(chain_b)
     assert residues_b[0].resname == "ACE"
     assert residues_b[2].resname == "NME"
+    assert "H" in residues_b[1]
+    assert not any(atom_name in residues_b[1] for atom_name in ("H1", "H2", "H3", "OXT", "HXT"))
     assert {"CH3", "C", "O", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[0]}
     assert {"N", "H", "CH3", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[2]}
 
