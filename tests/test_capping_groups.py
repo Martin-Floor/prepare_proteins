@@ -61,11 +61,11 @@ def test_add_capping_groups_internal_rosetta_caps_selected_chain_and_saves(tmp_p
     first_a = next(residue for residue in chain_a if residue.id[0] == " ")
     first_b = next(residue for residue in chain_b if residue.id[0] == " ")
     assert not any(atom_name in first_a for atom_name in ("CP2", "CO", "OP1"))
-    assert {"CP2", "CO", "OP1"}.issubset(first_b.child_dict)
+    assert {"CP2", "CO", "OP1", "1HP2", "2HP2", "3HP2"}.issubset(first_b.child_dict)
 
     residues_b = list(chain_b)
     assert residues_b[1].resname == "NMA"
-    assert [atom.name for atom in residues_b[1]] == ["N", "C"]
+    assert {"N", "C", "HN2", "H1", "H2", "H3"} == {atom.name for atom in residues_b[1]}
 
     output_dir = tmp_path / "saved"
     models.saveModels(str(output_dir))
@@ -92,7 +92,7 @@ def test_add_capping_groups_rosetta_bool_flag_uses_internal_backend(tmp_path, mo
     # First chain returned is A, second is B.
     chain_b = list(models.structures["modelA"].get_chains())[1]
     first_b = next(residue for residue in chain_b if residue.id[0] == " ")
-    assert {"CP2", "CO", "OP1"}.issubset(first_b.child_dict)
+    assert {"CP2", "CO", "OP1", "1HP2", "2HP2", "3HP2"}.issubset(first_b.child_dict)
 
 
 def test_remove_caps_removes_merged_rosetta_ace_and_nma(tmp_path):
@@ -132,10 +132,10 @@ def test_add_capping_groups_internal_openmm_caps_selected_chain_and_saves(tmp_pa
     residues_b = list(chain_b)
     assert residues_a[0].resname == "ALA"
     assert residues_b[0].resname == "ACE"
-    assert [atom.name for atom in residues_b[0]] == ["CH3", "C", "O"]
+    assert {"CH3", "C", "O", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[0]}
     assert residues_b[1].resname == "GLY"
     assert residues_b[2].resname == "NME"
-    assert [atom.name for atom in residues_b[2]] == ["N", "CH3"]
+    assert {"N", "H", "CH3", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[2]}
 
     output_dir = tmp_path / "saved_openmm"
     models.saveModels(str(output_dir))
@@ -162,6 +162,8 @@ def test_add_capping_groups_openmm_bool_flag_uses_internal_backend(tmp_path, mon
     residues_b = list(chain_b)
     assert residues_b[0].resname == "ACE"
     assert residues_b[2].resname == "NME"
+    assert {"CH3", "C", "O", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[0]}
+    assert {"N", "H", "CH3", "HH31", "HH32", "HH33"} == {atom.name for atom in residues_b[2]}
 
 
 def test_remove_caps_removes_openmm_ace_and_nme(tmp_path):

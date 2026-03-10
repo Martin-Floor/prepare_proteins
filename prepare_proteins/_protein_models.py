@@ -912,6 +912,64 @@ def _apply_rotran_to_coord(coord, rotran):
     return np.dot(np.array(coord, dtype=float), rotation) + translation
 
 
+def _normalize_vector(vector):
+    vector = np.array(vector, dtype=float)
+    norm = np.linalg.norm(vector)
+    if norm == 0.0:
+        raise ValueError("Cannot normalize a zero-length vector.")
+    return vector / norm
+
+
+def _get_perpendicular_basis(axis, reference=None):
+    axis = _normalize_vector(axis)
+
+    if reference is not None:
+        reference = np.array(reference, dtype=float)
+        reference = reference - np.dot(reference, axis) * axis
+    else:
+        reference = np.zeros(3, dtype=float)
+
+    if np.linalg.norm(reference) < 1e-8:
+        trial = np.array([1.0, 0.0, 0.0], dtype=float)
+        if abs(np.dot(trial, axis)) > 0.9:
+            trial = np.array([0.0, 1.0, 0.0], dtype=float)
+        reference = trial - np.dot(trial, axis) * axis
+
+    e1 = _normalize_vector(reference)
+    e2 = _normalize_vector(np.cross(axis, e1))
+    return axis, e1, e2
+
+
+def _build_methyl_hydrogen_coords(center_coord, bonded_coord, reference_coord=None, bond_length=1.09):
+    axis, e1, e2 = _get_perpendicular_basis(
+        np.array(bonded_coord, dtype=float) - np.array(center_coord, dtype=float),
+        None if reference_coord is None else np.array(reference_coord, dtype=float) - np.array(center_coord, dtype=float),
+    )
+    theta = np.deg2rad(109.47)
+    center = np.array(center_coord, dtype=float)
+    coords = []
+    for phi_deg in (0.0, 120.0, 240.0):
+        phi = np.deg2rad(phi_deg)
+        direction = (
+            np.cos(theta) * axis
+            + np.sin(theta) * (np.cos(phi) * e1 + np.sin(phi) * e2)
+        )
+        coords.append(center + bond_length * _normalize_vector(direction))
+    return coords
+
+
+def _build_amide_hydrogen_coord(n_coord, neighbor1_coord, neighbor2_coord, bond_length=1.01):
+    n_coord = np.array(n_coord, dtype=float)
+    u1 = _normalize_vector(np.array(neighbor1_coord, dtype=float) - n_coord)
+    u2 = _normalize_vector(np.array(neighbor2_coord, dtype=float) - n_coord)
+    bisector = -(u1 + u2)
+    if np.linalg.norm(bisector) < 1e-8:
+        bisector = np.cross(u1, np.array([1.0, 0.0, 0.0], dtype=float))
+        if np.linalg.norm(bisector) < 1e-8:
+            bisector = np.cross(u1, np.array([0.0, 1.0, 0.0], dtype=float))
+    return n_coord + bond_length * _normalize_vector(bisector)
+
+
 def _get_rosetta_cap_template_rotran(residue):
     required_atoms = ("N", "CA", "C", "O")
     missing = [name for name in required_atoms if name not in residue]
@@ -1020,6 +1078,120 @@ def _build_internal_openmm_nme_residue(last_residue, residue_number, serial_star
         )
     )
     return residue
+
+
+def _add_missing_rosetta_ace_hydrogens(first_residue, serial_start):
+    if "CP2" not in first_residue or "CO" not in first_residue:
+        return 0
+
+    added = 0
+    hydrogen_names = ("1HP2", "2HP2", "3HP2")
+    if not any(name not in first_residue for name in hydrogen_names):
+        return 0
+
+    reference_coord = first_residue["OP1"].coord if "OP1" in first_residue else None
+    coords = _build_methyl_hydrogen_coords(
+        first_residue["CP2"].coord,
+        first_residue["CO"].coord,
+        reference_coord=reference_coord,
+    )
+    serial = serial_start
+    for atom_name, coord in zip(hydrogen_names, coords):
+        if atom_name in first_residue:
+            continue
+        first_residue.add(_create_atom(atom_name, coord, serial, "H"))
+        serial += 1
+        added += 1
+    return added
+
+
+def _add_missing_rosetta_nma_hydrogens(nma_residue, last_residue, serial_start):
+    added = 0
+    serial = serial_start
+
+    if "HN2" not in nma_residue and "N" in nma_residue and "C" in nma_residue:
+        coord = _build_amide_hydrogen_coord(
+            nma_residue["N"].coord,
+            last_residue["C"].coord,
+            nma_residue["C"].coord,
+        )
+        nma_residue.add(_create_atom("HN2", coord, serial, "H"))
+        serial += 1
+        added += 1
+
+    methyl_h_names = ("H1", "H2", "H3")
+    if "C" in nma_residue and "N" in nma_residue:
+        reference_coord = last_residue["C"].coord if "C" in last_residue else None
+        coords = _build_methyl_hydrogen_coords(
+            nma_residue["C"].coord,
+            nma_residue["N"].coord,
+            reference_coord=reference_coord,
+        )
+        for atom_name, coord in zip(methyl_h_names, coords):
+            if atom_name in nma_residue:
+                continue
+            nma_residue.add(_create_atom(atom_name, coord, serial, "H"))
+            serial += 1
+            added += 1
+
+    return added
+
+
+def _add_missing_openmm_ace_hydrogens(ace_residue, serial_start):
+    if "CH3" not in ace_residue or "C" not in ace_residue:
+        return 0
+
+    added = 0
+    hydrogen_names = ("HH31", "HH32", "HH33")
+    if not any(name not in ace_residue for name in hydrogen_names):
+        return 0
+
+    reference_coord = ace_residue["O"].coord if "O" in ace_residue else None
+    coords = _build_methyl_hydrogen_coords(
+        ace_residue["CH3"].coord,
+        ace_residue["C"].coord,
+        reference_coord=reference_coord,
+    )
+    serial = serial_start
+    for atom_name, coord in zip(hydrogen_names, coords):
+        if atom_name in ace_residue:
+            continue
+        ace_residue.add(_create_atom(atom_name, coord, serial, "H"))
+        serial += 1
+        added += 1
+    return added
+
+
+def _add_missing_openmm_nme_hydrogens(nme_residue, last_residue, serial_start):
+    added = 0
+    serial = serial_start
+
+    if "H" not in nme_residue and "N" in nme_residue and "CH3" in nme_residue:
+        coord = _build_amide_hydrogen_coord(
+            nme_residue["N"].coord,
+            last_residue["C"].coord,
+            nme_residue["CH3"].coord,
+        )
+        nme_residue.add(_create_atom("H", coord, serial, "H"))
+        serial += 1
+        added += 1
+
+    methyl_h_names = ("HH31", "HH32", "HH33")
+    if "CH3" in nme_residue and "N" in nme_residue:
+        reference_coord = last_residue["C"].coord if "C" in last_residue else None
+        coords = _build_methyl_hydrogen_coords(
+            nme_residue["CH3"].coord,
+            nme_residue["N"].coord,
+            reference_coord=reference_coord,
+        )
+        for atom_name, coord in zip(methyl_h_names, coords):
+            if atom_name in nme_residue:
+                continue
+            nme_residue.add(_create_atom(atom_name, coord, serial, "H"))
+            serial += 1
+            added += 1
+
+    return added
 
 
 if "_protein_letters_1to3" in globals():
@@ -3298,6 +3470,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     for atom in merged_ace_atoms:
                         if atom.name not in residue_copy:
                             residue_copy.add(atom)
+                next_serial += _add_missing_rosetta_ace_hydrogens(
+                    residue_copy, next_serial
+                )
 
             if residue.id == last_residue.id and "OXT" in residue_copy:
                 residue_copy.detach_child("OXT")
@@ -3328,6 +3503,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                     )
                     next_serial += len(converted_nma.child_list)
 
+                next_serial += _add_missing_rosetta_nma_hydrogens(
+                    converted_nma, residue_copy, next_serial
+                )
                 new_chain.add(converted_nma)
 
         return new_chain
@@ -3394,6 +3572,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             )
             next_serial += len(converted_ace.child_list)
 
+        next_serial += _add_missing_openmm_ace_hydrogens(
+            converted_ace, next_serial
+        )
+
         converted_nme = None
         if cterm_cap_residue is not None:
             converted_nme = PDB.Residue.Residue(("H_NME", nme_residue_number, " "), "NME", "")
@@ -3410,6 +3592,10 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 last_residue, nme_residue_number, next_serial
             )
             next_serial += len(converted_nme.child_list)
+
+        next_serial += _add_missing_openmm_nme_hydrogens(
+            converted_nme, last_residue, next_serial
+        )
 
         new_chain = PDB.Chain.Chain(chain.id)
         ace_inserted = False
