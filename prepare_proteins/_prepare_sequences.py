@@ -30,13 +30,13 @@ import seaborn as sns
 from Bio.PDB import PDBIO, MMCIFParser
 from ipywidgets import interact
 from matplotlib.lines import Line2D
-from pkg_resources import Requirement, resource_listdir, resource_stream
 import pandas as pd
 from tqdm.auto import tqdm
 
 from typing import Any, Dict, Literal, Optional, Sequence
 
 from . import alignment
+from ._resources import resource_stream
 
 
 def _escape_smiles(smiles: str) -> str:
@@ -5896,11 +5896,6 @@ def _copyScriptFile(
     if subfolder != None:
         path = path + "/" + subfolder
 
-    script_file = resource_stream(
-        Requirement.parse("prepare_proteins"), path + "/" + script_name
-    )
-    script_file = io.TextIOWrapper(script_file)
-
     # Write control script to output folder
     if no_py == True:
         script_name = script_name.replace(".py", "")
@@ -5910,6 +5905,8 @@ def _copyScriptFile(
     else:
         output_path = output_folder + "/" + script_name
 
-    with open(output_path, "w") as sof:
-        for l in script_file:
-            sof.write(l)
+    with resource_stream("prepare_proteins", path + "/" + script_name) as stream:
+        with io.TextIOWrapper(stream) as script_file:
+            with open(output_path, "w") as sof:
+                for l in script_file:
+                    sof.write(l)

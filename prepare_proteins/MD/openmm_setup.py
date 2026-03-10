@@ -17,10 +17,9 @@ else:  # pragma: no cover - heavy optional dependency
 OPENMM_AVAILABLE = _OPENMM_AVAILABLE
 OPENMM_IMPORT_ERROR = _OPENMM_IMPORT_ERROR
 
-from pkg_resources import resource_filename, Requirement
-
 from Bio.PDB.Polypeptide import aa3
 
+import io
 import numpy as np
 from sys import stdout
 from collections import defaultdict
@@ -34,6 +33,7 @@ import shlex
 import warnings
 
 from .parameterization.utils import extract_residue_subsystem
+from .._resources import resource_listdir, resource_stream
 
 
 def _ensure_openmm(feature: str = "OpenMM functionality") -> None:
@@ -1861,35 +1861,33 @@ def _copyFFFiles(output_folder, ff):
     if ff not in ffs:
         raise ValueError(f"{ff} not implemented!")
 
-    # Path to the folder containing the forcefield files
-    ff_folder_path = resource_filename(
-        Requirement.parse("prepare_proteins"), f"prepare_proteins/MD/ff_files/{ff}"
-    )
-
     # Ensure the output directory exists
     os.makedirs(output_folder, exist_ok=True)
 
     # Iterate over all files in the forcefield folder and copy them to the output folder
-    for filename in os.listdir(ff_folder_path):
-        source_file = os.path.join(ff_folder_path, filename)
-
-        # Skip directories like __pycache__
-        if os.path.isdir(source_file):
-            continue
-
-        if source_file == '__init__.py':
+    for filename in resource_listdir(
+        "prepare_proteins", f"prepare_proteins/MD/ff_files/{ff}"
+    ):
+        if filename == '__init__.py':
             continue
 
         destination_file = os.path.join(output_folder, filename)
 
         # Give ff path to leaprc file
         if 'leaprc.bsc' in destination_file:
-            destination_file = open(destination_file, 'w')
-            with open(source_file) as sf:
-                for line in sf:
-                    line = line.replace('FF_PATH', output_folder)
-                    destination_file.write(line)
-            destination_file.close()
+            with resource_stream(
+                "prepare_proteins",
+                f"prepare_proteins/MD/ff_files/{ff}/{filename}",
+            ) as stream:
+                with io.TextIOWrapper(stream) as source_file:
+                    with open(destination_file, 'w') as dest_handle:
+                        for line in source_file:
+                            line = line.replace('FF_PATH', output_folder)
+                            dest_handle.write(line)
         else:
-            # Copy the file to the output directory
-            shutil.copy(source_file, destination_file)
+            with resource_stream(
+                "prepare_proteins",
+                f"prepare_proteins/MD/ff_files/{ff}/{filename}",
+            ) as source_file:
+                with open(destination_file, 'wb') as dest_handle:
+                    shutil.copyfileobj(source_file, dest_handle)

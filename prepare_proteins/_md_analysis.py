@@ -6,11 +6,12 @@ import shutil
 import pandas as pd
 import subprocess
 import mdtraj as md
-from pkg_resources import resource_stream, Requirement
 import matplotlib.pyplot as plt
 import ipywidgets as widgets
 from ipywidgets import interact, fixed
 from scipy.stats import linregress
+
+from ._resources import resource_stream
 
 class md_analysis:
     """
@@ -267,14 +268,14 @@ class md_analysis:
 
         # Get control script
         script_name = "calculateDistances.py"
-        control_script = resource_stream(Requirement.parse("prepare_proteins"),
-                                         "prepare_proteins/scripts/md/analysis/" + script_name)
-        control_script = io.TextIOWrapper(control_script)
-
-        # Write control script to job folder
-        with open(job_folder + '/._' + script_name, 'w') as sof:
-            for l in control_script:
-                sof.write(l)
+        with resource_stream(
+            "prepare_proteins",
+            "prepare_proteins/scripts/md/analysis/" + script_name,
+        ) as stream:
+            with io.TextIOWrapper(stream) as control_script:
+                with open(job_folder + '/._' + script_name, 'w') as sof:
+                    for l in control_script:
+                        sof.write(l)
 
         jobs = []
         for model in self.traj_paths[step]:

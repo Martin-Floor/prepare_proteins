@@ -16,7 +16,6 @@ import uuid
 import warnings
 import copy
 import re
-import pkg_resources
 from collections import Counter, defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -695,12 +694,12 @@ from Bio import PDB, BiopythonWarning, pairwise2
 from Bio.PDB.DSSP import DSSP
 from Bio.PDB.Polypeptide import aa3, is_aa
 from ipywidgets import interactive_output, VBox, IntSlider, Checkbox, interact, fixed, Dropdown, FloatSlider, FloatRangeSlider
-from pkg_resources import Requirement, resource_listdir, resource_stream
 from scipy.spatial import distance_matrix
 from scipy.spatial.distance import cdist
 
 import prepare_proteins
 from . import MD, _atom_selectors, alignment, rosettaScripts
+from ._resources import module_available, resource_listdir, resource_path, resource_stream
 from .analysis import find_neighbours_in_pdb
 from .MD.parameterization import get_backend
 from .MD.parameterization.utils import DEFAULT_PARAMETERIZATION_SKIP_RESIDUES
@@ -11276,11 +11275,14 @@ make sure of reading the target sequences with the function readTargetSequences(
         """
 
         def _copyScriptFile(dest_folder, file, subfolder=None):
-            source = resource_stream(Requirement.parse("prepare_proteins"), f"prepare_proteins/scripts/{subfolder}/{file}")
             if not os.path.exists(dest_folder):
                 os.makedirs(dest_folder)
-            with open(os.path.join(dest_folder, file), 'wb') as dest_file:
-                shutil.copyfileobj(source, dest_file)
+            with resource_stream(
+                "prepare_proteins",
+                f"prepare_proteins/scripts/{subfolder}/{file}",
+            ) as source:
+                with open(os.path.join(dest_folder, file), 'wb') as dest_file:
+                    shutil.copyfileobj(source, dest_file)
 
         def _readGromacsIndexFile(file):
             with open(file, 'r') as f:
@@ -11506,11 +11508,15 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         self.saveModels(f"{md_folder}/input_models")
 
-        for file in resource_listdir(Requirement.parse("prepare_proteins"), "prepare_proteins/scripts/md/gromacs/mdp"):
+        for file in resource_listdir(
+            "prepare_proteins", "prepare_proteins/scripts/md/gromacs/mdp"
+        ):
             if not file.startswith("__"):
                 _copyScriptFile(f"{md_folder}/scripts", file, subfolder="md/gromacs/mdp")
 
-        for file in resource_listdir(Requirement.parse("prepare_proteins"), f"prepare_proteins/scripts/md/gromacs/ff/{ff}"):
+        for file in resource_listdir(
+            "prepare_proteins", f"prepare_proteins/scripts/md/gromacs/ff/{ff}"
+        ):
             if not file.startswith("__"):
                 _copyScriptFile(f"{md_folder}/FF/{ff}.ff", file, subfolder=f"md/gromacs/ff/{ff}")
 
@@ -12994,12 +13000,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             if path:
                 with open(path, "r") as handle:
                     return handle.read()
-            stream = resource_stream(
-                Requirement.parse("prepare_proteins"),
+            with resource_stream(
+                "prepare_proteins",
                 "prepare_proteins/scripts/md/gamd/gamd-template.xml",
-            )
-            with io.TextIOWrapper(stream) as handle:
-                return handle.read()
+            ) as stream:
+                with io.TextIOWrapper(stream) as handle:
+                    return handle.read()
 
         def _infer_base_name(replica_folder, job_root):
             rep_path = Path(replica_folder).resolve()
@@ -15388,8 +15394,7 @@ if __name__ == "__main__":
 
         if missing:
             if not pyrosetta_env:
-                installed = {pkg.key for pkg in pkg_resources.working_set}
-                if 'pyrosetta' not in installed:
+                if not module_available("pyrosetta"):
                     raise ValueError(
                         'PyRosetta was not found in your Python environment. '
                         'Consider using return_jobs=True or activating an environment that does have it.'
@@ -19186,8 +19191,7 @@ if __name__ == "__main__":
 
             if count or overwrite:
                 if not pyrosetta_env:
-                    installed = {pkg.key for pkg in pkg_resources.working_set}
-                    if 'pyrosetta' not in installed:
+                    if not module_available("pyrosetta"):
                         raise ValueError('PyRosetta was not found in your Python environment.\
                         Consider using return_jobs=True or activating an environment the does have it.')
                 exec_command = command
@@ -21559,10 +21563,6 @@ if __name__ == "__main__":
 
         output_dir = tempfile.mkdtemp(prefix="maestro_models_")
         manifest_path = os.path.join(output_dir, "maestro_manifest.json")
-        script_path = pkg_resources.resource_filename(
-            "prepare_proteins.scripts", "export_maestro_models.py"
-        )
-
         schrodinger_root = os.environ.get("SCHRODINGER")
         schrodinger_run = None
         if schrodinger_root:
@@ -21583,70 +21583,73 @@ if __name__ == "__main__":
             launcher = [sys.executable]
             launcher_name = sys.executable
 
-        cmd = launcher + [
-            script_path,
-            str(path),
-            "--output-dir",
-            output_dir,
-            "--manifest",
-            manifest_path,
-        ]
+        with resource_path(
+            "prepare_proteins.scripts", "export_maestro_models.py"
+        ) as script_path:
+            cmd = launcher + [
+                str(script_path),
+                str(path),
+                "--output-dir",
+                output_dir,
+                "--manifest",
+                manifest_path,
+            ]
 
-        option_map = {
-            "prefix": "--prefix",
-            "ligand_chain": "--ligand-chain",
-            "separator": "--separator",
-        }
-        int_option_map = {
-            "protein_ct": "--protein-ct",
-            "ligand_resnum": "--ligand-resnum",
-        }
-        bool_option_map = {"keep_original_ligand_ids": "--keep-original-ligand-ids"}
-        allowed_keys = set(option_map) | set(int_option_map) | set(bool_option_map)
+            option_map = {
+                "prefix": "--prefix",
+                "ligand_chain": "--ligand-chain",
+                "separator": "--separator",
+            }
+            int_option_map = {
+                "protein_ct": "--protein-ct",
+                "ligand_resnum": "--ligand-resnum",
+            }
+            bool_option_map = {"keep_original_ligand_ids": "--keep-original-ligand-ids"}
+            allowed_keys = set(option_map) | set(int_option_map) | set(bool_option_map)
 
-        if maestro_export_options:
-            for key, value in maestro_export_options.items():
-                if key not in allowed_keys:
-                    raise ValueError(
-                        f"Unsupported maestro_export_options key '{key}'. "
-                        "Valid keys are: prefix, protein_ct, ligand_chain, "
-                        "ligand_resnum, keep_original_ligand_ids, separator."
+            if maestro_export_options:
+                for key, value in maestro_export_options.items():
+                    if key not in allowed_keys:
+                        raise ValueError(
+                            f"Unsupported maestro_export_options key '{key}'. "
+                            "Valid keys are: prefix, protein_ct, ligand_chain, "
+                            "ligand_resnum, keep_original_ligand_ids, separator."
+                        )
+                    if key in option_map and value is not None:
+                        cmd.extend([option_map[key], str(value)])
+                    elif key in int_option_map and value is not None:
+                        cmd.extend([int_option_map[key], str(int(value))])
+                    elif key in bool_option_map and value:
+                        cmd.append(bool_option_map[key])
+
+            used_run_launcher = launcher_name != sys.executable
+
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr or ""
+                stdout = exc.stdout or ""
+                extra = ""
+                if "No module named 'schrodinger'" in stderr:
+                    extra = (
+                        " The invoked Python interpreter cannot import the 'schrodinger' "
+                        "module. Make sure the Schrodinger 'run' command is available "
+                        "(it is typically added to PATH after sourcing the Schrodinger "
+                        "environment) or set the SCHRODINGER environment variable so the "
+                        "launcher can be located automatically."
                     )
-                if key in option_map and value is not None:
-                    cmd.extend([option_map[key], str(value)])
-                elif key in int_option_map and value is not None:
-                    cmd.extend([int_option_map[key], str(int(value))])
-                elif key in bool_option_map and value:
-                    cmd.append(bool_option_map[key])
-
-        used_run_launcher = launcher_name != sys.executable
-
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr or ""
-            stdout = exc.stdout or ""
-            extra = ""
-            if "No module named 'schrodinger'" in stderr:
-                extra = (
-                    " The invoked Python interpreter cannot import the 'schrodinger' "
-                    "module. Make sure the Schrodinger 'run' command is available "
-                    "(it is typically added to PATH after sourcing the Schrodinger "
-                    "environment) or set the SCHRODINGER environment variable so the "
-                    "launcher can be located automatically."
-                )
-            elif not used_run_launcher:
-                extra = (
-                    " Neither the 'run' command nor the SCHRODINGER environment "
-                    "variable were detected. The current Python interpreter was used "
-                    "instead, which typically cannot import the 'schrodinger' module. "
-                    "Ensure the Schrodinger environment is sourced so that 'run' is "
-                    "available on PATH."
-                )
-            raise RuntimeError(
-                "Failed to convert Maestro file into PDB models."
-                f"{extra}\nCommand: {' '.join(cmd)}\nStdout:\n{stdout}\nStderr:\n{stderr}"
-            ) from exc
+                elif not used_run_launcher:
+                    extra = (
+                        " Neither the 'run' command nor the SCHRODINGER environment "
+                        "variable were detected. The current Python interpreter was used "
+                        "instead, which typically cannot import the 'schrodinger' module. "
+                        "Ensure the Schrodinger environment is sourced so that 'run' is "
+                        "available on PATH."
+                    )
+                raise RuntimeError(
+                    "Failed to convert Maestro file into PDB models."
+                    f"{extra}\nCommand: {' '.join(cmd)}\nStdout:\n{stdout}\nStderr:\n{stderr}"
+                ) from exc
 
         pdb_files = [
             entry
@@ -21843,11 +21846,6 @@ def _copyScriptFile(
     if subfolder != None:
         path = path + "/" + subfolder
 
-    script_file = resource_stream(
-        Requirement.parse("prepare_proteins"), path + "/" + script_name
-    )
-    script_file = io.TextIOWrapper(script_file)
-
     # Write control script to output folder
     if no_py == True:
         script_name = script_name.replace(".py", "")
@@ -21857,9 +21855,11 @@ def _copyScriptFile(
     else:
         output_path = output_folder + "/" + script_name
 
-    with open(output_path, "w") as sof:
-        for l in script_file:
-            sof.write(l)
+    with resource_stream("prepare_proteins", path + "/" + script_name) as stream:
+        with io.TextIOWrapper(stream) as script_file:
+            with open(output_path, "w") as sof:
+                for l in script_file:
+                    sof.write(l)
 
 
 def make_model_path_batches(

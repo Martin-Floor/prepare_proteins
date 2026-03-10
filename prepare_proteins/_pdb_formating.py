@@ -1,15 +1,29 @@
 import os
 import shutil
-import networkx as nx
 import pandas as pd
 import math
 import prepare_proteins
 from Bio import PDB
 
+try:
+    import networkx as nx
+except ModuleNotFoundError as exc:
+    if exc.name not in (None, "networkx"):
+        raise
+    nx = None
+
 class pdb_formating:
 
     def __init__(self):
         pass
+
+    @staticmethod
+    def _require_networkx():
+        if nx is None:
+            raise ImportError(
+                "networkx is required for graph-based topology helpers in "
+                "prepare_proteins._pdb_formating. Install 'networkx' to use this feature."
+            )
 
     
     def _getBondPele(self, pele_params, ligand_name):
@@ -107,6 +121,7 @@ class pdb_formating:
         matrix_pdb_an:
             Matrix with the bound topology for each atom name
         """
+        self._require_networkx()
         G = nx.from_pandas_edgelist(df_pdb, source='AnSource', target='AnTarget')
         dist_pdb = dict(nx.all_pairs_shortest_path_length(G))
         matrix_pdb_an = {}

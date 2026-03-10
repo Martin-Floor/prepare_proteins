@@ -1,18 +1,32 @@
 import math
 import shutil
 import os
-import networkx as nx
 import pandas as pd
 import uuid
 import re
 import prepare_proteins
 import numpy as np
 
+try:
+    import networkx as nx
+except ModuleNotFoundError as exc:
+    if exc.name not in (None, "networkx"):
+        raise
+    nx = None
+
 class tricks:
     """
     Collection of useful functions to fix PDB formats that, ideally, should not be
     useful.
     """
+
+    @staticmethod
+    def _require_networkx():
+        if nx is None:
+            raise ImportError(
+                "networkx is required for graph-based topology helpers in "
+                "prepare_proteins.tricks. Install 'networkx' to use this feature."
+            )
 
     def getProteinLigandInputFiles(pele_folder, protein, ligand, separator='-'):
         """
@@ -355,6 +369,7 @@ check
         matrix_pdb_an:
             Matrix with the bound topology for each atom name
         """
+        tricks._require_networkx()
         G = nx.from_pandas_edgelist(df_pdb, source='AnSource', target='AnTarget')
         dist_pdb = dict(nx.all_pairs_shortest_path_length(G))
         # dist_pdb = dict(nx.all_pairs_dijkstra_path_length(G))
