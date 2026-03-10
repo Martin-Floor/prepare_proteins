@@ -13471,6 +13471,12 @@ make sure of reading the target sequences with the function readTargetSequences(
             self.openmm_md[model_name] = _compact_openmm_model(md_obj)
             gc.collect()
 
+        selected_models_for_setup = [
+            model_name
+            for model_name in self
+            if (not only_models or model_name in only_models) and model_name not in skip_models
+        ]
+
         # Create the base job folder
         if not os.path.exists(job_folder):
             os.mkdir(job_folder)
@@ -13594,6 +13600,16 @@ make sure of reading the target sequences with the function readTargetSequences(
         if not script_file:
             _copyScriptFile(script_folder, "openmm_simulation.py", subfolder='md/openmm', hidden=False)
             script_file = script_folder + '/openmm_simulation.py'
+
+        current_models_folder = os.path.join(job_folder, 'input_models')
+        os.makedirs(current_models_folder, exist_ok=True)
+        current_model_paths = {}
+        if selected_models_for_setup:
+            self.saveModels(current_models_folder, models=selected_models_for_setup)
+            current_model_paths = {
+                model_name: os.path.join(current_models_folder, f"{model_name}.pdb")
+                for model_name in selected_models_for_setup
+            }
 
         aa3_residues = set(openmm_setup.aa3)
         ALL_LIGANDS = "__ALL__"
@@ -13839,7 +13855,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             model_ligands = _detect_model_ligands(model)
             model_residue_names = residue_names.get(model) if residue_names else None
 
-            self.openmm_md[model] = openmm_md_cls(self.models_paths[model])
+            model_input_pdb = current_model_paths.get(model, self.models_paths[model])
+            self.openmm_md[model] = openmm_md_cls(model_input_pdb)
             if not skip_preparation:
                 self.openmm_md[model].setUpFF(ff)
                 if add_hydrogens:
