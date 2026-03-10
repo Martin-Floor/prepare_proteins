@@ -18854,6 +18854,7 @@ if __name__ == "__main__":
         include_ambiguous=False,
         include_identity_states=True,
         his_neutral_name="HIE",
+        histidine_tautomer_margin=0.25,
         cys_mode="keep",
         propka_executable=None,
         keep_files=False,
@@ -18897,7 +18898,12 @@ if __name__ == "__main__":
             canonical residue name (e.g., ``ASP -> ASP``). Set to ``False`` to keep only
             explicit renames (legacy behavior).
         his_neutral_name : {"HIE", "HID", "HIS"}, optional
-            Residue name used for neutral histidines.
+            Fallback residue name used for neutral histidines when the automatic tautomer
+            scorer cannot choose ``HID`` or ``HIE`` confidently.
+        histidine_tautomer_margin : float, optional
+            Minimum score difference required for the automatic histidine tautomer scorer
+            to choose ``HID`` or ``HIE`` confidently. Smaller differences are treated as
+            ambiguous and fall back to ``his_neutral_name``.
         cys_mode : {"keep", "cyx"}, optional
             Handling of deprotonated cysteines:
             - ``"keep"`` keeps cysteines as ``CYS``
@@ -18938,6 +18944,13 @@ if __name__ == "__main__":
         his_neutral_name = str(his_neutral_name).strip().upper()
         if his_neutral_name not in {"HIE", "HID", "HIS"}:
             raise ValueError("his_neutral_name must be one of: 'HIE', 'HID', 'HIS'.")
+
+        try:
+            histidine_tautomer_margin = float(histidine_tautomer_margin)
+        except (TypeError, ValueError):
+            raise TypeError("histidine_tautomer_margin must be a numeric value.") from None
+        if histidine_tautomer_margin < 0.0:
+            raise ValueError("histidine_tautomer_margin must be >= 0.")
 
         cys_mode = str(cys_mode).strip().lower()
         if cys_mode not in {"keep", "cyx"}:
@@ -19145,6 +19158,160 @@ if __name__ == "__main__":
             all_pka.sort(key=os.path.getmtime, reverse=True)
             return all_pka[0]
 
+        def _atom_element(atom):
+            element = getattr(atom, "element", "") or ""
+            element = str(element).strip().upper()
+            if element:
+                return element
+            atom_name = re.sub(r"[^A-Za-z]", "", atom.get_name()).upper()
+            return atom_name[:1] if atom_name else ""
+
+        def _is_metal_atom(atom):
+            return _atom_element(atom) in {
+                "ZN", "MG", "MN", "FE", "CO", "NI", "CU", "CA", "CD", "NA", "K"
+            }
+
+        def _is_hbond_acceptor(atom):
+            if _is_metal_atom(atom):
+                return False
+            element = _atom_element(atom)
+            if element in {"O", "S"}:
+                return True
+            return False
+
+        def _is_hbond_donor(atom):
+            if _is_metal_atom(atom):
+                return False
+
+            residue = atom.get_parent()
+            resname = str(residue.resname).strip().upper()
+            atom_name = atom.get_name().strip().upper()
+            element = _atom_element(atom)
+
+            if element == "N":
+                if atom_name == "N" and resname == "PRO":
+                    return False
+                return True
+
+            if element == "O":
+                return (resname, atom_name) in {
+                    ("SER", "OG"),
+                    ("THR", "OG1"),
+                    ("TYR", "OH"),
+                    ("HOH", "O"),
+                    ("WAT", "O"),
+                    ("H2O", "O"),
+                }
+
+            if element == "S":
+                return (resname, atom_name) == ("CYS", "SG")
+
+            return False
+
+        def _distance_weight(distance_value, cutoff):
+            if distance_value > cutoff:
+                return 0.0
+            return max(cutoff - distance_value, 0.0)
+
+        def _score_histidine_site(site_atom, all_atoms):
+            donor_support = 0.0
+            acceptor_support = 0.0
+            for other_atom in all_atoms:
+                if other_atom is site_atom:
+                    continue
+                if other_atom.get_parent() == site_atom.get_parent():
+                    continue
+
+                distance_value = float(site_atom - other_atom)
+                if _is_hbond_acceptor(other_atom):
+                    donor_support += _distance_weight(distance_value, 3.6)
+                if _is_hbond_donor(other_atom):
+                    acceptor_support += _distance_weight(distance_value, 3.6)
+                if _is_metal_atom(other_atom):
+                    acceptor_support += 2.0 * _distance_weight(distance_value, 3.0)
+
+            return donor_support, acceptor_support
+
+        def _score_neutral_histidine_tautomer(residue, all_atoms):
+            nd1_atom = residue.child_dict.get("ND1")
+            ne2_atom = residue.child_dict.get("NE2")
+            if nd1_atom is None or ne2_atom is None:
+                return {
+                    "hid_score": 0.0,
+                    "hie_score": 0.0,
+                    "best_state": None,
+                }
+
+            nd1_donor_support, nd1_acceptor_support = _score_histidine_site(nd1_atom, all_atoms)
+            ne2_donor_support, ne2_acceptor_support = _score_histidine_site(ne2_atom, all_atoms)
+
+            hid_score = nd1_donor_support + ne2_acceptor_support
+            hie_score = ne2_donor_support + nd1_acceptor_support
+
+            if max(hid_score, hie_score) == 0.0:
+                best_state = None
+            elif abs(hid_score - hie_score) <= histidine_tautomer_margin:
+                best_state = None
+            elif hid_score > hie_score:
+                best_state = "HID"
+            else:
+                best_state = "HIE"
+
+            return {
+                "hid_score": hid_score,
+                "hie_score": hie_score,
+                "best_state": best_state,
+            }
+
+        def _score_histidines_in_structure(pdb_file, model_name, conformer_index, histidine_records):
+            parser = PDB.PDBParser(QUIET=True)
+            structure = parser.get_structure(f"{model_name}_{conformer_index}", pdb_file)
+            model_entity = next(structure.get_models())
+            all_atoms = list(model_entity.get_atoms())
+            residues_by_key = {}
+            chain_ids = []
+
+            for chain in model_entity:
+                chain_id = str(chain.id) if str(chain.id) else " "
+                chain_ids.append(chain_id)
+                for residue in chain:
+                    residues_by_key[(chain_id, int(residue.id[1]))] = residue
+
+            results = []
+            seen_keys = set()
+            for record in histidine_records:
+                chain_id = str(record["Chain"])
+                if chain_id == " " and len(chain_ids) == 1:
+                    chain_id = chain_ids[0]
+                residue_id = int(record["Residue"])
+                residue_key = (chain_id, residue_id)
+                if residue_key in seen_keys:
+                    continue
+                seen_keys.add(residue_key)
+
+                residue = residues_by_key.get(residue_key)
+                if residue is None:
+                    score_data = {
+                        "hid_score": 0.0,
+                        "hie_score": 0.0,
+                        "best_state": None,
+                    }
+                else:
+                    score_data = _score_neutral_histidine_tautomer(residue, all_atoms)
+
+                results.append(
+                    {
+                        "Model": model_name,
+                        "Conformation": conformer_index,
+                        "StructurePath": os.path.abspath(pdb_file),
+                        "Chain": chain_id,
+                        "Residue": residue_id,
+                        **score_data,
+                    }
+                )
+
+            return results
+
         propka_candidates = _build_propka_candidates()
         if not propka_candidates:
             raise RuntimeError(
@@ -19179,6 +19346,7 @@ if __name__ == "__main__":
             os.makedirs(run_root, exist_ok=True)
 
         raw_records = []
+        histidine_tautomer_records = []
         preserved_run_dirs = []
         attempted_commands = []
 
@@ -19223,6 +19391,21 @@ if __name__ == "__main__":
                         raise RuntimeError(
                             f"PROPKA execution failed for model {model_name!r} with structure {pdb_file!r}.\n"
                             + "\n".join(error_messages[-6:])
+                        )
+
+                    histidine_records = [
+                        record
+                        for record in parsed_records
+                        if _normalize_residue_name(record["Name"]) == "HIS"
+                    ]
+                    if histidine_records:
+                        histidine_tautomer_records.extend(
+                            _score_histidines_in_structure(
+                                pdb_file,
+                                model_name,
+                                conformer_index,
+                                histidine_records,
+                            )
                         )
 
                     for record in parsed_records:
@@ -19292,16 +19475,115 @@ if __name__ == "__main__":
         pka_df["pH"] = pH
         pka_df["delta"] = pka_df["pKa"] - pH
         pka_df["predicted_protonated"] = pka_df["delta"] >= 0.0
-        pka_df["ambiguous"] = pka_df["delta"].abs() < ambiguity_margin
+        pka_df["pka_ambiguous"] = pka_df["delta"].abs() < ambiguity_margin
+        pka_df["histidine_tautomer"] = None
+        pka_df["histidine_tautomer_score_hid"] = np.nan
+        pka_df["histidine_tautomer_score_hie"] = np.nan
+        pka_df["histidine_tautomer_score_gap"] = np.nan
+        pka_df["histidine_tautomer_votes_hid"] = 0
+        pka_df["histidine_tautomer_votes_hie"] = 0
+        pka_df["histidine_tautomer_votes_ambiguous"] = 0
+        pka_df["histidine_tautomer_ambiguous"] = False
 
-        def _predict_openmm_state(residue_name, protonated):
-            normalized = _normalize_residue_name(residue_name)
+        histidine_tautomer_raw_df = None
+        histidine_tautomer_df = None
+        if histidine_tautomer_records:
+            histidine_tautomer_raw_df = pd.DataFrame(histidine_tautomer_records)
+            histidine_tautomer_df = (
+                histidine_tautomer_raw_df.groupby(["Model", "Chain", "Residue"], as_index=False)
+                .agg(
+                    histidine_tautomer_score_hid=("hid_score", "mean"),
+                    histidine_tautomer_score_hie=("hie_score", "mean"),
+                    histidine_tautomer_votes_hid=(
+                        "best_state",
+                        lambda values: int((pd.Series(values) == "HID").sum()),
+                    ),
+                    histidine_tautomer_votes_hie=(
+                        "best_state",
+                        lambda values: int((pd.Series(values) == "HIE").sum()),
+                    ),
+                    histidine_tautomer_votes_ambiguous=(
+                        "best_state",
+                        lambda values: int(pd.Series(values).isna().sum()),
+                    ),
+                )
+            )
+            histidine_tautomer_df["histidine_tautomer_score_gap"] = (
+                histidine_tautomer_df["histidine_tautomer_score_hid"]
+                - histidine_tautomer_df["histidine_tautomer_score_hie"]
+            )
+            histidine_tautomer_df["histidine_tautomer"] = None
+            hid_mask = histidine_tautomer_df["histidine_tautomer_score_gap"] > histidine_tautomer_margin
+            hie_mask = histidine_tautomer_df["histidine_tautomer_score_gap"] < -histidine_tautomer_margin
+            histidine_tautomer_df.loc[hid_mask, "histidine_tautomer"] = "HID"
+            histidine_tautomer_df.loc[hie_mask, "histidine_tautomer"] = "HIE"
+            histidine_tautomer_df["histidine_tautomer_ambiguous"] = (
+                histidine_tautomer_df["histidine_tautomer"].isna()
+            )
+
+            pka_df = pka_df.merge(
+                histidine_tautomer_df,
+                on=["Model", "Chain", "Residue"],
+                how="left",
+                suffixes=("", "_auto"),
+            )
+
+            for column_name in (
+                "histidine_tautomer_score_hid",
+                "histidine_tautomer_score_hie",
+                "histidine_tautomer_score_gap",
+            ):
+                if f"{column_name}_auto" in pka_df:
+                    pka_df[column_name] = pka_df[f"{column_name}_auto"].combine_first(pka_df[column_name])
+                    pka_df.drop(columns=[f"{column_name}_auto"], inplace=True)
+
+            for column_name in (
+                "histidine_tautomer_votes_hid",
+                "histidine_tautomer_votes_hie",
+                "histidine_tautomer_votes_ambiguous",
+            ):
+                if f"{column_name}_auto" in pka_df:
+                    pka_df[column_name] = (
+                        pka_df[f"{column_name}_auto"].fillna(pka_df[column_name]).astype(int)
+                    )
+                    pka_df.drop(columns=[f"{column_name}_auto"], inplace=True)
+
+            if "histidine_tautomer_auto" in pka_df:
+                pka_df["histidine_tautomer"] = pka_df["histidine_tautomer_auto"].where(
+                    pd.notna(pka_df["histidine_tautomer_auto"]),
+                    pka_df["histidine_tautomer"],
+                )
+                pka_df.drop(columns=["histidine_tautomer_auto"], inplace=True)
+
+            if "histidine_tautomer_ambiguous_auto" in pka_df:
+                pka_df["histidine_tautomer_ambiguous"] = (
+                    pka_df["histidine_tautomer_ambiguous_auto"]
+                    .fillna(pka_df["histidine_tautomer_ambiguous"])
+                    .astype(bool)
+                )
+                pka_df.drop(columns=["histidine_tautomer_ambiguous_auto"], inplace=True)
+
+        histidine_mask = pka_df["Name"].map(_normalize_residue_name) == "HIS"
+        neutral_histidine_mask = histidine_mask & (~pka_df["predicted_protonated"])
+        pka_df.loc[
+            neutral_histidine_mask & pka_df["histidine_tautomer"].isna(),
+            "histidine_tautomer_ambiguous",
+        ] = True
+        pka_df["ambiguous"] = pka_df["pka_ambiguous"] | pka_df["histidine_tautomer_ambiguous"]
+
+        def _predict_openmm_state(row):
+            normalized = _normalize_residue_name(row["Name"])
+            protonated = bool(row["predicted_protonated"])
             if normalized == "ASP":
                 return "ASH" if protonated else "ASP"
             if normalized == "GLU":
                 return "GLH" if protonated else "GLU"
             if normalized == "HIS":
-                return "HIP" if protonated else his_neutral_name
+                if protonated:
+                    return "HIP"
+                if isinstance(row.get("histidine_tautomer"), str):
+                    return row["histidine_tautomer"]
+                return his_neutral_name
             if normalized == "CYS":
                 if protonated:
                     return "CYS"
@@ -19311,7 +19593,7 @@ if __name__ == "__main__":
             return None
 
         pka_df["predicted_state"] = pka_df.apply(
-            lambda row: _predict_openmm_state(row["Name"], bool(row["predicted_protonated"])),
+            _predict_openmm_state,
             axis=1,
         )
 
@@ -19320,11 +19602,13 @@ if __name__ == "__main__":
             state = row["predicted_state"]
             if state is None:
                 continue
-            if (not include_ambiguous) and bool(row["ambiguous"]):
+            normalized_name = _normalize_residue_name(row["Name"])
+            is_histidine = normalized_name == "HIS"
+            if (not include_ambiguous) and bool(row["ambiguous"]) and not is_histidine:
                 continue
 
-            if not include_identity_states:
-                base_name = _normalize_residue_name(row["Name"])
+            if not include_identity_states and not is_histidine:
+                base_name = normalized_name
                 if state == base_name:
                     # Keep only explicit protonation-fixing renames.
                     continue
@@ -19338,6 +19622,8 @@ if __name__ == "__main__":
         self.propka_states = pka_df
         self.propka_states_raw = raw_df
         self.propka_residue_names = residue_names_map
+        self.propka_histidine_tautomers = histidine_tautomer_df
+        self.propka_histidine_tautomers_raw = histidine_tautomer_raw_df
         self.propka_command_attempts = attempted_commands
         if keep_files:
             self.propka_run_folders = preserved_run_dirs
