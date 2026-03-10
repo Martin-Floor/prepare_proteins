@@ -8,6 +8,7 @@ import itertools
 import json
 import os
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -328,6 +329,34 @@ def _locate_relax_input_model(rosetta_folder: str, model: str) -> Optional[Path]
     for candidate in candidates:
         if candidate.exists():
             return candidate
+    return None
+
+
+def _find_rosetta_silent_file(
+    rosetta_folder: Union[str, os.PathLike],
+    model: str,
+    preferred_basename: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Return the Rosetta silent file for ``model`` inside ``rosetta_folder/output_models``.
+
+    When ``preferred_basename`` is given, that file is tried first; otherwise the first
+    ``.out`` file in the model folder is returned.
+    """
+
+    model_dir = Path(rosetta_folder) / "output_models" / str(model)
+    if not model_dir.is_dir():
+        return None
+
+    if preferred_basename is not None:
+        preferred_path = model_dir / preferred_basename
+        if preferred_path.exists():
+            return str(preferred_path)
+
+    for candidate in sorted(model_dir.iterdir()):
+        if candidate.is_file() and candidate.name.endswith(".out"):
+            return str(candidate)
+
     return None
 
 
@@ -729,6 +758,271 @@ except AttributeError:
             return _protein_letters_3to1_extended[key]
         raise KeyError(resname)
 
+
+_ROSETTA_ACE_ATOM_NAMES = ("CO", "OP1", "CP2", "1HP2", "2HP2", "3HP2")
+_ROSETTA_ACE_RENAME_MAP = {
+    "CH3": "CP2",
+    "C": "CO",
+    "O": "OP1",
+    "1H": "1HP2",
+    "2H": "2HP2",
+    "3H": "3HP2",
+    "CP2": "CP2",
+    "CO": "CO",
+    "OP1": "OP1",
+    "1HP2": "1HP2",
+    "2HP2": "2HP2",
+    "3HP2": "3HP2",
+}
+_ROSETTA_NMA_RENAME_MAP = {
+    "H": "HN2",
+    "CA": "C",
+    "1HA": "H1",
+    "2HA": "H2",
+    "3HA": "H3",
+    "HN2": "HN2",
+    "C": "C",
+    "H1": "H1",
+    "H2": "H2",
+    "H3": "H3",
+    "N": "N",
+}
+_OPENMM_ACE_ATOM_NAMES = ("CH3", "C", "O", "HH31", "HH32", "HH33")
+_OPENMM_ACE_RENAME_MAP = {
+    "CH3": "CH3",
+    "C": "C",
+    "O": "O",
+    "1H": "HH31",
+    "2H": "HH32",
+    "3H": "HH33",
+    "CP2": "CH3",
+    "CO": "C",
+    "OP1": "O",
+    "1HP2": "HH31",
+    "2HP2": "HH32",
+    "3HP2": "HH33",
+    "HH31": "HH31",
+    "HH32": "HH32",
+    "HH33": "HH33",
+}
+_OPENMM_NME_RENAME_MAP = {
+    "N": "N",
+    "H": "H",
+    "CA": "CH3",
+    "1HA": "HH31",
+    "2HA": "HH32",
+    "3HA": "HH33",
+    "HN2": "H",
+    "C": "CH3",
+    "H1": "HH31",
+    "H2": "HH32",
+    "H3": "HH33",
+    "CH3": "CH3",
+    "HH31": "HH31",
+    "HH32": "HH32",
+    "HH33": "HH33",
+}
+_ROSETTA_CAP_TEMPLATE = {
+    "anchor": {
+        "N": np.array([2.116412, -0.910657, 0.764132], dtype=float),
+        "CA": np.array([3.571420, -1.003062, 0.841669], dtype=float),
+        "C": np.array([4.052932, -2.369939, 0.383201], dtype=float),
+        "O": np.array([3.434265, -3.386574, 0.694013], dtype=float),
+    },
+    "ace": {
+        "CP2": np.array([0.0, 0.0, 0.0], dtype=float),
+        "CO": np.array([1.52, 0.0, 0.0], dtype=float),
+        "OP1": np.array([2.144489, 0.811759, -0.681147], dtype=float),
+    },
+    "nma": {
+        "N": np.array([5.157835, -2.395773, -0.356678], dtype=float),
+        "C": np.array([5.711703, -3.652405, -0.852366], dtype=float),
+    },
+}
+
+
+def _normalize_capping_style(style, rosetta_style_caps, prepwizard_style_caps, openmm_style_caps):
+    selected = [
+        name
+        for enabled, name in (
+            (rosetta_style_caps, "rosetta"),
+            (prepwizard_style_caps, "prepwizard"),
+            (openmm_style_caps, "openmm"),
+        )
+        if enabled
+    ]
+
+    if len(selected) > 1:
+        raise ValueError("You must give only one cap style option.")
+
+    if style is not None:
+        style = style.lower()
+        if style not in {"rosetta", "prepwizard", "openmm"}:
+            raise ValueError(f"Unsupported cap style '{style}'.")
+        if selected and style != selected[0]:
+            raise ValueError(
+                f"Conflicting cap styles were requested: style='{style}' and {selected[0]!r}."
+            )
+        return style
+
+    if selected:
+        return selected[0]
+
+    return None
+
+
+def _is_cappable_protein_residue(residue):
+    return residue.id[0] == " " and is_aa(residue, standard=False)
+
+
+def _copy_atom_with_name(atom, new_name=None, serial_number=None, element=None):
+    atom_name = new_name or atom.get_name()
+    serial = atom.get_serial_number() if serial_number is None else serial_number
+    element = atom.element if element is None else element
+    occupancy = atom.get_occupancy()
+    if occupancy is None:
+        occupancy = 1.0
+    return PDB.Atom.Atom(
+        atom_name,
+        atom.get_coord().copy(),
+        atom.get_bfactor(),
+        occupancy,
+        atom.get_altloc(),
+        "%-4s" % atom_name,
+        serial,
+        element,
+    )
+
+
+def _create_atom(name, coord, serial_number, element):
+    return PDB.Atom.Atom(
+        name,
+        np.array(coord, dtype=float),
+        0.0,
+        1.0,
+        " ",
+        "%-4s" % name,
+        serial_number,
+        element,
+    )
+
+
+def _apply_rotran_to_coord(coord, rotran):
+    rotation, translation = rotran
+    return np.dot(np.array(coord, dtype=float), rotation) + translation
+
+
+def _get_rosetta_cap_template_rotran(residue):
+    required_atoms = ("N", "CA", "C", "O")
+    missing = [name for name in required_atoms if name not in residue]
+    if missing:
+        raise ValueError(
+            f"Cannot build internal caps for residue {residue.resname} {residue.id}: "
+            f"missing backbone atoms {missing}."
+        )
+
+    fixed_atoms = [residue[name] for name in required_atoms]
+    moving_atoms = [
+        _create_atom(name, _ROSETTA_CAP_TEMPLATE["anchor"][name], index + 1, name[0])
+        for index, name in enumerate(required_atoms)
+    ]
+    superimposer = PDB.Superimposer()
+    superimposer.set_atoms(fixed_atoms, moving_atoms)
+    return superimposer.rotran
+
+
+def _build_internal_rosetta_ace_atoms(first_residue, serial_start):
+    rotran = _get_rosetta_cap_template_rotran(first_residue)
+    atoms = []
+    serial = serial_start
+    for atom_name in ("CP2", "CO", "OP1"):
+        atoms.append(
+            _create_atom(
+                atom_name,
+                _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["ace"][atom_name], rotran),
+                serial,
+                "C" if atom_name in {"CP2", "CO"} else "O",
+            )
+        )
+        serial += 1
+    return atoms
+
+
+def _build_internal_rosetta_nma_residue(last_residue, residue_number, serial_start):
+    rotran = _get_rosetta_cap_template_rotran(last_residue)
+    residue = PDB.Residue.Residue(("H_NMA", residue_number, " "), "NMA", "")
+    residue.add(
+        _create_atom(
+            "N",
+            _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["nma"]["N"], rotran),
+            serial_start,
+            "N",
+        )
+    )
+    residue.add(
+        _create_atom(
+            "C",
+            _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["nma"]["C"], rotran),
+            serial_start + 1,
+            "C",
+        )
+    )
+    return residue
+
+
+def _build_internal_openmm_ace_residue(first_residue, residue_number, serial_start):
+    rotran = _get_rosetta_cap_template_rotran(first_residue)
+    residue = PDB.Residue.Residue(("H_ACE", residue_number, " "), "ACE", "")
+    residue.add(
+        _create_atom(
+            "CH3",
+            _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["ace"]["CP2"], rotran),
+            serial_start,
+            "C",
+        )
+    )
+    residue.add(
+        _create_atom(
+            "C",
+            _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["ace"]["CO"], rotran),
+            serial_start + 1,
+            "C",
+        )
+    )
+    residue.add(
+        _create_atom(
+            "O",
+            _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["ace"]["OP1"], rotran),
+            serial_start + 2,
+            "O",
+        )
+    )
+    return residue
+
+
+def _build_internal_openmm_nme_residue(last_residue, residue_number, serial_start):
+    rotran = _get_rosetta_cap_template_rotran(last_residue)
+    residue = PDB.Residue.Residue(("H_NME", residue_number, " "), "NME", "")
+    residue.add(
+        _create_atom(
+            "N",
+            _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["nma"]["N"], rotran),
+            serial_start,
+            "N",
+        )
+    )
+    residue.add(
+        _create_atom(
+            "CH3",
+            _apply_rotran_to_coord(_ROSETTA_CAP_TEMPLATE["nma"]["C"], rotran),
+            serial_start + 1,
+            "C",
+        )
+    )
+    return residue
+
+
+if "_protein_letters_1to3" in globals():
     def _one_to_three(rescode):
         """Map one-letter amino acid code to three-letter code."""
         key = f"{rescode}".strip().upper()
@@ -2926,9 +3220,302 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             if verbose:
                 print(f"Removed {count} from conect lines of model {model}")
 
+    def _replace_chain_contents(self, chain, replacement_chain):
+        for residue in list(chain):
+            chain.detach_child(residue.id)
+        for residue in list(replacement_chain):
+            chain.add(residue)
+
+    def _filter_conect_entries(self, model, removed_atoms):
+        if model not in self.conects:
+            return
+
+        filtered = []
+        for conect in self.conects[model]:
+            new_conect = [atom for atom in conect if atom not in removed_atoms]
+            if new_conect:
+                filtered.append(new_conect)
+        self.conects[model] = filtered
+
+    def _build_internal_rosetta_capped_chain(self, chain):
+        protein_residues = [residue for residue in chain if _is_cappable_protein_residue(residue)]
+        if not protein_residues:
+            return None
+
+        first_residue = protein_residues[0]
+        last_residue = protein_residues[-1]
+
+        ace_residue = None
+        nma_residue = None
+        for residue in chain:
+            if residue.resname == "ACE" and residue.id[1] <= first_residue.id[1]:
+                if ace_residue is None or residue.id[1] > ace_residue.id[1]:
+                    ace_residue = residue
+            elif residue.resname == "NMA" and residue.id[1] >= last_residue.id[1]:
+                if nma_residue is None or residue.id[1] < nma_residue.id[1]:
+                    nma_residue = residue
+
+        serial_numbers = [
+            atom.serial_number
+            for atom in chain.get_atoms()
+            if getattr(atom, "serial_number", None) is not None
+        ]
+        next_serial = max(serial_numbers, default=0) + 1
+        used_residue_numbers = {residue.id[1] for residue in chain}
+        nma_residue_number = last_residue.id[1] + 1
+        while nma_residue_number in used_residue_numbers:
+            nma_residue_number += 1
+
+        new_chain = PDB.Chain.Chain(chain.id)
+
+        for residue in chain:
+            if residue == ace_residue or residue == nma_residue:
+                continue
+
+            if not _is_cappable_protein_residue(residue):
+                new_chain.add(residue.copy())
+                continue
+
+            residue_copy = residue.copy()
+
+            if residue.id == first_residue.id:
+                has_rosetta_ace = any(atom_name in residue_copy for atom_name in _ROSETTA_ACE_ATOM_NAMES)
+                if not has_rosetta_ace:
+                    merged_ace_atoms = []
+                    if ace_residue is not None:
+                        for atom in ace_residue:
+                            atom_name = _ROSETTA_ACE_RENAME_MAP.get(atom.get_name())
+                            if atom_name is None:
+                                continue
+                            merged_ace_atoms.append(_copy_atom_with_name(atom, atom_name))
+
+                    if not merged_ace_atoms:
+                        merged_ace_atoms = _build_internal_rosetta_ace_atoms(
+                            residue_copy, next_serial
+                        )
+                        next_serial += len(merged_ace_atoms)
+
+                    for atom in merged_ace_atoms:
+                        if atom.name not in residue_copy:
+                            residue_copy.add(atom)
+
+            if residue.id == last_residue.id and "OXT" in residue_copy:
+                residue_copy.detach_child("OXT")
+
+            new_chain.add(residue_copy)
+
+            if residue.id == last_residue.id:
+                if nma_residue is not None:
+                    converted_nma = PDB.Residue.Residue(
+                        ("H_NMA", nma_residue_number, " "),
+                        "NMA",
+                        nma_residue.segid,
+                    )
+                    for atom in nma_residue:
+                        atom_name = _ROSETTA_NMA_RENAME_MAP.get(atom.get_name())
+                        if atom_name is None:
+                            continue
+                        converted_nma.add(_copy_atom_with_name(atom, atom_name))
+
+                    if len(converted_nma.child_list) == 0:
+                        converted_nma = _build_internal_rosetta_nma_residue(
+                            residue_copy, nma_residue_number, next_serial
+                        )
+                        next_serial += len(converted_nma.child_list)
+                else:
+                    converted_nma = _build_internal_rosetta_nma_residue(
+                        residue_copy, nma_residue_number, next_serial
+                    )
+                    next_serial += len(converted_nma.child_list)
+
+                new_chain.add(converted_nma)
+
+        return new_chain
+
+    def _build_internal_openmm_capped_chain(self, chain):
+        protein_residues = [residue for residue in chain if _is_cappable_protein_residue(residue)]
+        if not protein_residues:
+            return None
+
+        first_residue = protein_residues[0]
+        last_residue = protein_residues[-1]
+
+        ace_residue = None
+        cterm_cap_residue = None
+        for residue in chain:
+            if residue.resname == "ACE" and residue.id[1] <= first_residue.id[1]:
+                if ace_residue is None or residue.id[1] > ace_residue.id[1]:
+                    ace_residue = residue
+            elif residue.resname in {"NMA", "NME"} and residue.id[1] >= last_residue.id[1]:
+                if cterm_cap_residue is None or residue.id[1] < cterm_cap_residue.id[1]:
+                    cterm_cap_residue = residue
+
+        serial_numbers = [
+            atom.serial_number
+            for atom in chain.get_atoms()
+            if getattr(atom, "serial_number", None) is not None
+        ]
+        next_serial = max(serial_numbers, default=0) + 1
+        used_residue_numbers = {residue.id[1] for residue in chain}
+        ace_residue_number = first_residue.id[1] - 1
+        while ace_residue_number in used_residue_numbers:
+            ace_residue_number -= 1
+        nme_residue_number = last_residue.id[1] + 1
+        while nme_residue_number in used_residue_numbers:
+            nme_residue_number += 1
+
+        converted_ace = None
+        if ace_residue is not None:
+            converted_ace = PDB.Residue.Residue(("H_ACE", ace_residue_number, " "), "ACE", "")
+            for atom in ace_residue:
+                atom_name = _OPENMM_ACE_RENAME_MAP.get(atom.get_name())
+                if atom_name is None:
+                    continue
+                converted_ace.add(_copy_atom_with_name(atom, atom_name))
+            if len(converted_ace.child_list) == 0:
+                converted_ace = None
+
+        if converted_ace is None:
+            merged_ace_atoms = []
+            for atom_name in _ROSETTA_ACE_ATOM_NAMES:
+                if atom_name in first_residue:
+                    merged_ace_atoms.append(first_residue[atom_name])
+            if merged_ace_atoms:
+                converted_ace = PDB.Residue.Residue(("H_ACE", ace_residue_number, " "), "ACE", "")
+                for atom in merged_ace_atoms:
+                    atom_name = _OPENMM_ACE_RENAME_MAP.get(atom.get_name())
+                    if atom_name is None:
+                        continue
+                    converted_ace.add(_copy_atom_with_name(atom, atom_name))
+
+        if converted_ace is None:
+            converted_ace = _build_internal_openmm_ace_residue(
+                first_residue, ace_residue_number, next_serial
+            )
+            next_serial += len(converted_ace.child_list)
+
+        converted_nme = None
+        if cterm_cap_residue is not None:
+            converted_nme = PDB.Residue.Residue(("H_NME", nme_residue_number, " "), "NME", "")
+            for atom in cterm_cap_residue:
+                atom_name = _OPENMM_NME_RENAME_MAP.get(atom.get_name())
+                if atom_name is None:
+                    continue
+                converted_nme.add(_copy_atom_with_name(atom, atom_name))
+            if len(converted_nme.child_list) == 0:
+                converted_nme = None
+
+        if converted_nme is None:
+            converted_nme = _build_internal_openmm_nme_residue(
+                last_residue, nme_residue_number, next_serial
+            )
+            next_serial += len(converted_nme.child_list)
+
+        new_chain = PDB.Chain.Chain(chain.id)
+        ace_inserted = False
+        for residue in chain:
+            if residue == ace_residue or residue == cterm_cap_residue:
+                continue
+
+            if not ace_inserted and residue.id == first_residue.id:
+                new_chain.add(converted_ace)
+                ace_inserted = True
+
+            if not _is_cappable_protein_residue(residue):
+                new_chain.add(residue.copy())
+                continue
+
+            residue_copy = residue.copy()
+            for atom_name in _ROSETTA_ACE_ATOM_NAMES:
+                if atom_name in residue_copy:
+                    residue_copy.detach_child(atom_name)
+            if residue.id == last_residue.id and "OXT" in residue_copy:
+                residue_copy.detach_child("OXT")
+
+            new_chain.add(residue_copy)
+
+            if residue.id == last_residue.id:
+                new_chain.add(converted_nme)
+
+        return new_chain
+
+    def _add_internal_capping_groups(self, style, models=None, chains=None):
+        if models is None:
+            selected_models = list(self.models_names)
+        elif isinstance(models, str):
+            selected_models = [models]
+        else:
+            selected_models = list(models)
+
+        missing_models = [model for model in selected_models if model not in self.models_names]
+        if missing_models:
+            raise ValueError(f"Models not loaded in prepare_proteins: {missing_models}")
+
+        chain_selection = self._resolve_chain_selection(chains=chains, models=selected_models)
+
+        for model in selected_models:
+            self.conects.setdefault(model, [])
+            model_entity = next(self.structures[model].get_models())
+            chains_by_id = {chain.id: chain for chain in model_entity.get_chains()}
+
+            for chain_id in chain_selection[model]:
+                chain = chains_by_id[chain_id]
+                if style == "rosetta":
+                    replacement_chain = self._build_internal_rosetta_capped_chain(chain)
+                elif style == "openmm":
+                    replacement_chain = self._build_internal_openmm_capped_chain(chain)
+                else:
+                    raise NotImplementedError(
+                        f"The internal capping backend currently does not support style='{style}'."
+                    )
+                if replacement_chain is None:
+                    continue
+                self._replace_chain_contents(chain, replacement_chain)
+
     def addCappingGroups(self, rosetta_style_caps=False, prepwizard_style_caps=False,
                          openmm_style_caps=False, stdout=False, stderr=False,
-                         conect_update=True, only_hetatoms=False):
+                         conect_update=True, only_hetatoms=False, style=None,
+                         backend="auto", models=None, chains=None):
+
+        if models is None:
+            selected_models = list(self.models_names)
+        elif isinstance(models, str):
+            selected_models = [models]
+        else:
+            selected_models = list(models)
+
+        missing_models = [model for model in selected_models if model not in self.models_names]
+        if missing_models:
+            raise ValueError(f"Models not loaded in prepare_proteins: {missing_models}")
+
+        style = _normalize_capping_style(
+            style,
+            rosetta_style_caps,
+            prepwizard_style_caps,
+            openmm_style_caps,
+        )
+
+        if backend not in {"auto", "internal", "schrodinger"}:
+            raise ValueError(
+                "backend must be one of 'auto', 'internal', or 'schrodinger'."
+            )
+
+        resolved_backend = backend
+        if resolved_backend == "auto":
+            resolved_backend = "internal" if style in {"rosetta", "openmm"} else "schrodinger"
+
+        if resolved_backend == "internal":
+            if style not in {"rosetta", "openmm"}:
+                raise NotImplementedError(
+                    "The internal capping backend currently supports only style='rosetta' or style='openmm'."
+                )
+            self._add_internal_capping_groups(style=style, models=selected_models, chains=chains)
+            return
+
+        if chains is not None:
+            raise NotImplementedError(
+                "Chain-restricted capping is currently supported only by backend='internal'."
+            )
 
         if sum([bool(rosetta_style_caps), bool(prepwizard_style_caps), bool(openmm_style_caps)]) > 1:
             raise ValueError('You must give only on cap style option!')
@@ -2953,23 +3540,28 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if not os.path.exists('_capping_/output_models'):
             os.mkdir('_capping_/output_models')
 
-        self.saveModels('_capping_/input_models')
+        for model in selected_models:
+            self.conects.setdefault(model, [])
+
+        self.saveModels('_capping_/input_models', models=selected_models)
 
         _copyScriptFile('_capping_', "addCappingGroups.py")
         command =  'run python3 _capping_/._addCappingGroups.py '
         command += '_capping_/input_models/ '
         command += '_capping_/output_models/ '
-        if rosetta_style_caps:
+        if style == "rosetta":
             command += '--rosetta_style_caps '
-        elif prepwizard_style_caps:
+        elif style == "prepwizard":
             command += '--prepwizard_style_caps '
-        elif openmm_style_caps:
+        elif style == "openmm":
             command += '--openmm_style_caps '
 
         subprocess.run(command, shell=True, stdout=stdout, stderr=stderr)
 
         for f in os.listdir('_capping_/output_models'):
             model = f.replace('.pdb', '')
+            if model not in selected_models:
+                continue
             self.readModelFromPDB(model, '_capping_/output_models/'+f, conect_update=conect_update, only_hetatoms=only_hetatoms)
         shutil.rmtree('_capping_')
 
@@ -2978,51 +3570,57 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         Remove caps from models.
         """
 
+        if models is None:
+            selected_models = list(self.models_names)
+        elif isinstance(models, str):
+            selected_models = [models]
+        else:
+            selected_models = list(models)
+
+        missing_models = [model for model in selected_models if model not in self.models_names]
+        if missing_models:
+            raise ValueError(f"Models not loaded in prepare_proteins: {missing_models}")
+
         for model in self:
 
-            if models and model not in models:
+            if model not in selected_models:
                 continue
+
+            removed_atoms = set()
 
             for chain in self.structures[model].get_chains():
 
-                st_residues = [r for r in chain if r.resname in aa3]
+                st_residues = [r for r in chain if _is_cappable_protein_residue(r)]
+                if not st_residues:
+                    continue
 
                 ACE = None
                 NMA = None
-                NT = None
-                CT = None
 
-                for residue in self.structures[model].get_residues():
+                first_residue = st_residues[0]
+                for atom_name in _ROSETTA_ACE_ATOM_NAMES:
+                    if atom_name in first_residue and remove_ace:
+                        removed_atoms.add((chain.id, first_residue.id[1], atom_name))
+                        first_residue.detach_child(atom_name)
+
+                for residue in list(chain):
                     if residue.resname == "ACE":
                         ACE = residue
-                    elif residue.resname == "NMA":
+                    elif residue.resname in {"NMA", "NME"}:
                         NMA = residue
-
-                for i, residue in enumerate(chain):
-
-                    if (
-                        ACE
-                        and residue.id[1] == ACE.id[1] + 1
-                        and residue.resname in aa3
-                    ):
-                        NT = residue
-                    elif not ACE and i == 0:
-                        NT = residue
-                    if NMA and residue.id[1] == NMA.id[1] and residue.resname in aa3:
-                        CT = residue
-                    elif not NMA and i == len(st_residues) - 1:
-                        CT = residue
 
                 # Remove termini
                 if ACE and remove_ace:
                     for a in ACE:
-                        self.removeAtomFromConectLines("ACE", a.name, verbose=False)
+                        removed_atoms.add((chain.id, ACE.id[1], a.name))
                     ACE.get_parent().detach_child(ACE.id)
 
                 if NMA and remove_nma:
                     for a in NMA:
-                        self.removeAtomFromConectLines("NMA", a.name, verbose=False)
+                        removed_atoms.add((chain.id, NMA.id[1], a.name))
                     NMA.get_parent().detach_child(NMA.id)
+
+            self._filter_conect_entries(model, removed_atoms)
 
     def addOXTAtoms(self):
         """
@@ -6370,6 +6968,373 @@ has been carried out. Please run compareSequences() function before setting muta
                 command += (
                     executable + " @ " + "../../flags/" + model + "_relax.flags\n"
                 )
+            command += "cd ../../..\n"
+            jobs.append(command)
+
+        return jobs
+
+    def setUpRosettaFlexPepDock(
+        self,
+        flexpepdock_folder,
+        peptide_chain=None,
+        receptor_chain=None,
+        nstruct=100,
+        models=None,
+        param_files=None,
+        cst_files=None,
+        min_only=False,
+        pep_refine=True,
+        lowres_abinitio=False,
+        ppk_only=False,
+        extra_scoring=False,
+        scorefxn="ref2015",
+        parallelisation="srun",
+        executable="rosetta_scripts.mpi.linuxgccrelease",
+        cpus=None,
+        skip_finished=True,
+        extra_flags=None,
+        pdb_output=False,
+    ):
+        """
+        Set up FlexPepDock Rosetta jobs for protein-peptide complexes already present
+        in the input PDB models.
+
+        Parameters
+        ==========
+        flexpepdock_folder : str
+            Folder path where the FlexPepDock job files will be created.
+        peptide_chain : str or dict, optional
+            Peptide chain identifier, or a mapping ``{model: chain_id}``. When omitted
+            alongside ``receptor_chain``, the second chain in the PDB is used to match
+            the RosettaScripts FlexPepDockMover defaults.
+        receptor_chain : str or dict, optional
+            Receptor chain identifier(s), or a mapping ``{model: chain_ids}``. When
+            omitted alongside ``peptide_chain``, the first chain in the PDB is used to
+            match the RosettaScripts FlexPepDockMover defaults. When only one of the two
+            chain arguments is given, the missing side is inferred from the remaining
+            chains in the model.
+        nstruct : int, optional
+            Number of output structures to generate per model.
+        models : list, optional
+            Optional subset of models to process.
+        param_files : str or sequence, optional
+            Rosetta params files, patch files, or directories containing them.
+        cst_files : dict, optional
+            Optional mapping ``{model: [constraint_file1, ...]}`` of Rosetta constraint
+            files to apply before FlexPepDock.
+        min_only, pep_refine, lowres_abinitio, ppk_only : bool, optional
+            FlexPepDock protocol modes. At most one mode can be enabled at a time.
+        extra_scoring : bool, optional
+            Enable Rosetta FlexPepDock extra scoring output.
+        scorefxn : str or Rosetta scorefunction object, optional
+            Scorefunction name or pre-built scorefunction object to use.
+        parallelisation : {"srun", "mpirun", None}, optional
+            How to launch Rosetta.
+        executable : str, optional
+            Rosetta executable to invoke.
+        cpus : int, optional
+            CPU count when ``parallelisation="mpirun"``.
+        skip_finished : bool, optional
+            Skip models that already contain at least ``nstruct`` score rows.
+        extra_flags : list, optional
+            Extra Rosetta flags added verbatim. Strings map to flag names and tuples map
+            to ``(flag, value)``.
+        pdb_output : bool, optional
+            Write PDB output instead of silent files.
+        """
+
+        def _resolve_chain_setting(chain_setting, model_name, label):
+            resolved = chain_setting
+            if isinstance(chain_setting, Mapping):
+                if model_name not in chain_setting:
+                    raise ValueError(
+                        f"Missing {label} entry for model '{model_name}'."
+                    )
+                resolved = chain_setting[model_name]
+
+            if resolved is None:
+                return None
+
+            if not isinstance(resolved, str):
+                raise TypeError(
+                    f"{label} must be provided as a string or a {{model: string}} mapping."
+                )
+
+            values = [value.strip() for value in resolved.split(",") if value.strip()]
+            if not values:
+                raise ValueError(f"{label} for model '{model_name}' is empty.")
+
+            return values
+
+        if parallelisation not in (None, "mpirun", "srun"):
+            raise ValueError("parallelisation must be one of: None, 'mpirun', 'srun'")
+
+        if parallelisation == "mpirun" and cpus is None:
+            raise ValueError("You must setup the number of cpus when using mpirun")
+        if parallelisation == "srun" and cpus is not None:
+            raise ValueError(
+                "CPUs can only be set up when using mpirun parallelisation!"
+            )
+        if parallelisation is None and cpus is not None:
+            raise ValueError("cpus is only used when parallelisation='mpirun'")
+
+        enabled_modes = [
+            mode_name
+            for mode_name, enabled in (
+                ("min_only", min_only),
+                ("pep_refine", pep_refine),
+                ("lowres_abinitio", lowres_abinitio),
+                ("ppk_only", ppk_only),
+                ("extra_scoring", extra_scoring),
+            )
+            if enabled
+        ]
+        if len(enabled_modes) > 1:
+            raise ValueError(
+                "FlexPepDock modes are mutually exclusive; enable only one of "
+                "min_only, pep_refine, lowres_abinitio, ppk_only, or extra_scoring."
+            )
+
+        os.makedirs(flexpepdock_folder, exist_ok=True)
+        for subfolder in ("input_models", "flags", "xml", "output_models"):
+            os.makedirs(os.path.join(flexpepdock_folder, subfolder), exist_ok=True)
+
+        self.saveModels(os.path.join(flexpepdock_folder, "input_models"), models=models)
+
+        params_output_dir = None
+        patch_entries: List[str] = []
+        if param_files is not None:
+            params_output_dir = Path(flexpepdock_folder) / "params"
+            params_output_dir.mkdir(exist_ok=True)
+
+            if isinstance(param_files, (str, os.PathLike)):
+                param_sources = [param_files]
+            else:
+                param_sources = list(param_files)
+
+            for source in param_sources:
+                source_path = Path(source)
+                if source_path.is_dir():
+                    for entry in sorted(source_path.iterdir()):
+                        if not entry.is_file():
+                            continue
+                        destination = params_output_dir / entry.name
+                        if not destination.exists():
+                            shutil.copyfile(entry, destination)
+                else:
+                    destination = params_output_dir / source_path.name
+                    if not source_path.exists():
+                        raise FileNotFoundError(
+                            f"Parameter file not found: {source_path}"
+                        )
+                    if not destination.exists():
+                        shutil.copyfile(source_path, destination)
+                    if not source_path.name.endswith(".params"):
+                        patch_entries.append("../../params/" + source_path.name)
+
+        jobs = []
+        for model in self.models_names:
+
+            if models is not None and model not in models:
+                continue
+
+            model_output_folder = os.path.join(
+                flexpepdock_folder, "output_models", model
+            )
+            os.makedirs(model_output_folder, exist_ok=True)
+
+            expected_score_file = f"{model}_flexpepdock.sc"
+            expected_score_path = os.path.join(model_output_folder, expected_score_file)
+
+            if skip_finished and os.path.exists(expected_score_path):
+                scores = _readRosettaScoreFile(expected_score_path, skip_empty=True)
+                pdbs_ready = True
+                if pdb_output:
+                    pdbs_ready = any(
+                        entry.lower().endswith(".pdb")
+                        for entry in os.listdir(model_output_folder)
+                    )
+                if (
+                    scores is not None
+                    and scores.shape[0] >= nstruct
+                    and (not pdb_output or pdbs_ready)
+                ):
+                    continue
+
+            ordered_chain_ids = [
+                chain.id for chain in self.structures[model].get_chains()
+            ]
+            model_chain_ids = set(ordered_chain_ids)
+
+            peptide_chain_ids = _resolve_chain_setting(
+                peptide_chain, model, "peptide_chain"
+            )
+            receptor_chain_ids = _resolve_chain_setting(
+                receptor_chain, model, "receptor_chain"
+            )
+
+            if peptide_chain_ids is None and receptor_chain_ids is None:
+                if len(ordered_chain_ids) < 2:
+                    raise ValueError(
+                        f"Model {model} must contain at least two chains when peptide_chain and receptor_chain are omitted."
+                    )
+                receptor_chain_ids = [ordered_chain_ids[0]]
+                peptide_chain_ids = [ordered_chain_ids[1]]
+            elif peptide_chain_ids is None:
+                peptide_chain_ids = [
+                    chain_id
+                    for chain_id in ordered_chain_ids
+                    if chain_id not in receptor_chain_ids
+                ]
+                if not peptide_chain_ids:
+                    raise ValueError(
+                        f"No peptide chains were left to infer for model {model} after selecting receptor chain(s) {receptor_chain_ids}."
+                    )
+                peptide_chain_ids = [peptide_chain_ids[0]]
+
+            missing_peptide = sorted(set(peptide_chain_ids) - model_chain_ids)
+            if missing_peptide:
+                raise ValueError(
+                    f"Peptide chain(s) {missing_peptide} not found in model {model}."
+                )
+
+            if receptor_chain_ids is None:
+                receptor_chain_ids = [
+                    chain_id
+                    for chain_id in ordered_chain_ids
+                    if chain_id not in peptide_chain_ids
+                ]
+
+            if not receptor_chain_ids:
+                raise ValueError(
+                    f"No receptor chains were found for model {model} after excluding peptide chain(s) {peptide_chain_ids}."
+                )
+
+            missing_receptor = sorted(set(receptor_chain_ids) - model_chain_ids)
+            if missing_receptor:
+                raise ValueError(
+                    f"Receptor chain(s) {missing_receptor} not found in model {model}."
+                )
+
+            overlap = sorted(set(peptide_chain_ids) & set(receptor_chain_ids))
+            if overlap:
+                raise ValueError(
+                    f"Peptide and receptor chains overlap in model {model}: {overlap}."
+                )
+
+            xml = rosettaScripts.xmlScript()
+            protocol = []
+
+            if isinstance(scorefxn, str):
+                sfxn = rosettaScripts.scorefunctions.new_scorefunction(
+                    scorefxn, weights_file=scorefxn
+                )
+            else:
+                sfxn = scorefxn
+            xml.addScorefunction(sfxn)
+
+            if cst_files is not None:
+                model_cst_files = cst_files.get(model, [])
+                if isinstance(model_cst_files, str):
+                    model_cst_files = [model_cst_files]
+
+                if model_cst_files:
+                    cst_root = os.path.join(flexpepdock_folder, "cst_files", model)
+                    os.makedirs(cst_root, exist_ok=True)
+                    for cst_file in model_cst_files:
+                        cst_name = os.path.basename(cst_file)
+                        destination = os.path.join(cst_root, cst_name)
+                        if not os.path.exists(destination):
+                            shutil.copyfile(cst_file, destination)
+
+                        set_cst = rosettaScripts.movers.constraintSetMover(
+                            add_constraints=True,
+                            cst_file=f"../../cst_files/{model}/{cst_name}",
+                        )
+                        xml.addMover(set_cst)
+                        protocol.append(set_cst)
+
+            flexpep = rosettaScripts.movers.flexPepDock(
+                name="flexPepDock",
+                min_only=min_only,
+                pep_refine=pep_refine,
+                lowres_abinitio=lowres_abinitio,
+                peptide_chain=",".join(peptide_chain_ids),
+                receptor_chain=",".join(receptor_chain_ids),
+                ppk_only=ppk_only,
+                scorefxn=sfxn,
+                extra_scoring=extra_scoring,
+            )
+            xml.addMover(flexpep)
+            protocol.append(flexpep)
+
+            xml.setProtocol(protocol)
+            xml.addOutputScorefunction(sfxn)
+            xml_output = os.path.join(
+                flexpepdock_folder, "xml", f"{model}_flexpepdock.xml"
+            )
+            xml.write_xml(xml_output)
+
+            output_silent_file = None if pdb_output else f"{model}_flexpepdock.out"
+            flags = rosettaScripts.flags(
+                f"../../xml/{model}_flexpepdock.xml",
+                nstruct=nstruct,
+                s=f"../../input_models/{model}.pdb",
+                output_silent_file=output_silent_file,
+                output_score_file=expected_score_file,
+            )
+
+            # FlexPepDock benefits from aggressive rotamer sampling of nearby sidechains.
+            flags.add_relax_options()
+            flags.addOption("ex1aro")
+            flags.addOption("ex2aro")
+
+            if extra_flags is not None:
+                for option in extra_flags:
+                    if isinstance(option, tuple):
+                        flags.addOption(*option)
+                    else:
+                        flags.addOption(option)
+
+            if params_output_dir is not None:
+                needs_nma_params = any(
+                    residue.resname == "NMA"
+                    for residue in self.structures[model].get_residues()
+                )
+                if needs_nma_params:
+                    _copyScriptFile(
+                        str(params_output_dir),
+                        "NMA.params",
+                        subfolder="rosetta_params",
+                        path="prepare_proteins",
+                        hidden=False,
+                    )
+
+                flags.addOption("in:file:extra_res_path", "../../params")
+                if patch_entries:
+                    flags.addOption("in:file:extra_patch_fa", " ".join(patch_entries))
+
+            flags_output = os.path.join(
+                flexpepdock_folder, "flags", f"{model}_flexpepdock.flags"
+            )
+            flags.write_flags(flags_output)
+
+            command = f"cd {shlex.quote(str(model_output_folder))}\n"
+            if parallelisation == "mpirun":
+                if cpus == 1:
+                    command += (
+                        executable + f" @ ../../flags/{model}_flexpepdock.flags\n"
+                    )
+                else:
+                    command += (
+                        f"mpirun -np {cpus} "
+                        + executable
+                        + f" @ ../../flags/{model}_flexpepdock.flags\n"
+                    )
+            elif parallelisation == "srun":
+                command += f"srun {executable} @ ../../flags/{model}_flexpepdock.flags\n"
+            else:
+                command += f"{executable} @ ../../flags/{model}_flexpepdock.flags\n"
             command += "cd ../../..\n"
             jobs.append(command)
 
@@ -19161,8 +20126,12 @@ if __name__ == "__main__":
         if return_jobs:
             commands = []
             for m in self:
-
-                if not os.path.exists(f'{rosetta_folder}/output_models/{m}/{m}_relax.out'):
+                silent_file = _find_rosetta_silent_file(
+                    rosetta_folder,
+                    m,
+                    preferred_basename=f"{m}_relax.out",
+                )
+                if silent_file is None:
                     print(f'Silent file for model {m} was not found!')
                     continue
 
@@ -19183,7 +20152,12 @@ if __name__ == "__main__":
         else:
             count = 0
             for m in self:
-                if not os.path.exists(f'{rosetta_folder}/output_models/{m}/{m}_relax.out'):
+                silent_file = _find_rosetta_silent_file(
+                    rosetta_folder,
+                    m,
+                    preferred_basename=f"{m}_relax.out",
+                )
+                if silent_file is None:
                     print(f'Silent file for model {m} was not found!')
                     continue
                 if not os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
@@ -21563,6 +22537,7 @@ if __name__ == "__main__":
 
         output_dir = tempfile.mkdtemp(prefix="maestro_models_")
         manifest_path = os.path.join(output_dir, "maestro_manifest.json")
+
         schrodinger_root = os.environ.get("SCHRODINGER")
         schrodinger_run = None
         if schrodinger_root:

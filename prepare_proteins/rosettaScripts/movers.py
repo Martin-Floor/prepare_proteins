@@ -927,6 +927,24 @@ class movers:
             self.scorefxn = scorefxn
             self.extra_scoring = extra_scoring
 
+            enabled_modes = [
+                label
+                for label, enabled in (
+                    ("min_only", self.min_only),
+                    ("pep_refine", self.pep_refine),
+                    ("lowres_abinitio", self.lowres_abinitio),
+                    ("ppk_only", self.ppk_only),
+                    ("extra_scoring", self.extra_scoring),
+                )
+                if enabled
+            ]
+            if len(enabled_modes) > 1:
+                raise ValueError(
+                    "FlexPepDock RosettaScripts mode options are mutually exclusive; "
+                    "enable only one of min_only, pep_refine, lowres_abinitio, "
+                    "ppk_only, or extra_scoring."
+                )
+
         def generateXml(self):
             self.xml = ElementTree
             self.root = self.xml.Element('FlexPepDock')
