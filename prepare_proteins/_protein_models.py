@@ -3773,6 +3773,364 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return report
 
+    def getLigandFormalCharges(
+        self,
+        models=None,
+        target_names=None,
+        skip_names=None,
+        include_names=None,
+        cofactor_names=None,
+        return_report=False,
+        verbose=False,
+    ):
+        """
+        Infer ligand net formal charges from the loaded PDB models using RDKit.
+
+        The returned mapping is keyed by ligand residue name and is intended to be
+        compatible with ``setUpOpenMMSimulations(ligand_charges=...)``. Charge
+        inference is only as reliable as the chemistry encoded in the input PDB:
+        hydrogens, atom charge fields, and/or explicit CONECT records should be
+        present for charged ligands.
+
+        Parameters
+        ----------
+        models : iterable or str, optional
+            Specific model name(s) to inspect. Defaults to all loaded models.
+        target_names : iterable or str, optional
+            Restrict the analysis to these residue names.
+        skip_names : iterable or str, optional
+            Residue names that should never be analyzed.
+        include_names : iterable or str, optional
+            Additional residue names to include even if they would otherwise be
+            excluded as protein-like residues, waters, ions, or default cofactors.
+        cofactor_names : iterable or str, optional
+            Additional cofactor names to exclude from the analysis. These names
+            are added to a conservative built-in default set.
+        return_report : bool, optional
+            If True, return ``(charges_dict, per_instance_report)``.
+        verbose : bool, optional
+            Print the inferred charge for each analyzed ligand instance.
+
+        Returns
+        -------
+        dict
+            Mapping of ligand residue name to inferred integer formal charge.
+        tuple
+            When ``return_report=True``, return ``(charges_dict, report_df)``.
+        """
+
+        try:
+            from rdkit import Chem
+        except ImportError as exc:
+            raise ImportError(
+                "RDKit is required to infer ligand formal charges. "
+                "Install it first (e.g. `conda install -c conda-forge rdkit`)."
+            ) from exc
+
+        def _normalize_name_set(values, label):
+            if values is None:
+                return set()
+            if isinstance(values, str):
+                values = [values]
+            elif not isinstance(values, (list, tuple, set, frozenset)):
+                raise TypeError(f"{label} must be a string, an iterable of strings, or None.")
+
+            normalized = set()
+            for value in values:
+                if not isinstance(value, str):
+                    raise TypeError(f"{label} entries must be strings.")
+                name = _normalize_residue_name_token(value)
+                if not name:
+                    raise ValueError(f"{label} entries must not be empty.")
+                normalized.add(name)
+            return normalized
+
+        def _infer_atom_element(atom):
+            element = str(getattr(atom, "element", "") or "").strip()
+            if element:
+                return element[:2].upper()
+
+            atom_name = atom.get_name().strip()
+            letters = "".join(ch for ch in atom_name if ch.isalpha())
+            if not letters:
+                return "  "
+            if len(letters) >= 2 and letters[0].upper() == "H":
+                return "H"
+            return letters[0].upper()
+
+        def _build_structure_residue_block(model_name, residue):
+            chain_id = residue.get_parent().id
+            residue_icode = residue.id[2] if residue.id[2] else " "
+            record_name = "ATOM" if residue.id[0] == " " else "HETATM"
+
+            block_lines = []
+            atom_serial_map = {}
+            residue_atom_keys = set()
+
+            for serial, atom in enumerate(residue.get_atoms(), start=1):
+                atom_key = _get_atom_tuple(atom)
+                residue_atom_keys.add(atom_key)
+                atom_serial_map[atom_key] = serial
+
+                atom_name = atom.get_name().strip()
+                altloc = atom.get_altloc()
+                altloc = altloc if isinstance(altloc, str) and altloc.strip() else " "
+                occupancy = atom.get_occupancy()
+                if occupancy is None:
+                    occupancy = 1.0
+                bfactor = atom.get_bfactor()
+                if bfactor is None:
+                    bfactor = 0.0
+                x, y, z = atom.get_coord()
+                element = _infer_atom_element(atom)
+
+                block_lines.append(
+                    f"{record_name:<6}{serial:5d} {atom_name:>4s}{altloc}{residue.resname:>3s} "
+                    f"{chain_id:1s}{residue.id[1]:4d}{residue_icode:1s}   "
+                    f"{x:8.3f}{y:8.3f}{z:8.3f}{occupancy:6.2f}{bfactor:6.2f}          "
+                    f"{element:>2s}  "
+                )
+
+            conect_lines = []
+            for entry in self.conects.get(model_name, []):
+                if entry and all(atom_key in residue_atom_keys for atom_key in entry):
+                    conect_lines.append(
+                        "CONECT" + "".join(f"{atom_serial_map[atom_key]:5d}" for atom_key in entry)
+                    )
+
+            block_lines.extend(conect_lines)
+            block_lines.append("END")
+            return "\n".join(block_lines) + "\n", bool(conect_lines), "structure"
+
+        def _build_source_residue_block(model_name, residue):
+            model_path = self.models_paths.get(model_name)
+            if not model_path or not os.path.exists(model_path):
+                return None, False, None
+
+            chain_id = residue.get_parent().id
+            residue_id = residue.id[1]
+            residue_icode = residue.id[2] if residue.id[2] else " "
+            target_atom_names = [atom.get_name().strip() for atom in residue.get_atoms()]
+            target_atom_set = set(target_atom_names)
+
+            atom_lines = {}
+            selected_serials = set()
+
+            with open(model_path, "r") as handle:
+                source_lines = handle.readlines()
+
+            for line in source_lines:
+                if not line.startswith(("ATOM", "HETATM")):
+                    continue
+                try:
+                    line_residue_id = int(line[22:26])
+                except ValueError:
+                    continue
+                if line[21] != chain_id or line_residue_id != residue_id:
+                    continue
+                if line[26] != residue_icode:
+                    continue
+                atom_name = line[12:16].strip()
+                if atom_name not in target_atom_set or atom_name in atom_lines:
+                    continue
+                atom_lines[atom_name] = line.rstrip("\n")
+                try:
+                    selected_serials.add(int(line[6:11]))
+                except ValueError:
+                    return None, False, None
+
+            if len(atom_lines) != len(target_atom_names):
+                return None, False, None
+
+            conect_lines = []
+            for line in source_lines:
+                if not line.startswith("CONECT"):
+                    continue
+                payload = line[6:].rstrip()
+                if not payload:
+                    continue
+                serials = []
+                valid = True
+                for index in range(0, len(payload), 5):
+                    chunk = payload[index : index + 5].strip()
+                    if not chunk:
+                        continue
+                    try:
+                        serials.append(int(chunk))
+                    except ValueError:
+                        valid = False
+                        break
+                if not valid or len(serials) < 2:
+                    continue
+                if all(serial in selected_serials for serial in serials):
+                    conect_lines.append(line.rstrip("\n"))
+
+            block_lines = [atom_lines[atom_name] for atom_name in target_atom_names]
+            block_lines.extend(conect_lines)
+            block_lines.append("END")
+            return "\n".join(block_lines) + "\n", bool(conect_lines), "source"
+
+        if not isinstance(return_report, bool):
+            raise TypeError("return_report must be a boolean.")
+        if not isinstance(verbose, bool):
+            raise TypeError("verbose must be a boolean.")
+
+        target_name_set = _normalize_name_set(target_names, "target_names")
+        if target_names is not None and not target_name_set:
+            raise ValueError("target_names was provided but no valid residue names were found.")
+
+        skip_name_set = _normalize_name_set(skip_names, "skip_names")
+        include_name_set = _normalize_name_set(include_names, "include_names")
+        extra_cofactor_names = _normalize_name_set(cofactor_names, "cofactor_names")
+        effective_cofactor_names = set(_UNIQUE_LIGAND_NAME_COFATORS)
+        effective_cofactor_names.update(extra_cofactor_names)
+
+        forced_name_set = set(include_name_set)
+        forced_name_set.update(target_name_set)
+        forced_name_set.difference_update(skip_name_set)
+
+        if isinstance(models, str):
+            target_models = [models]
+        elif models is None:
+            target_models = list(self.models_names)
+        else:
+            target_models = list(models)
+
+        target_models = list(dict.fromkeys(target_models))
+        missing_models = [m for m in target_models if m not in self.structures]
+        if missing_models:
+            raise KeyError(
+                "Requested models are not loaded: %s" % ", ".join(sorted(missing_models))
+            )
+
+        def _is_eligible_name(resname):
+            normalized = _normalize_residue_name_token(resname)
+            if not normalized:
+                return False
+            if normalized in skip_name_set:
+                return False
+            if target_name_set and normalized not in target_name_set:
+                return False
+            if normalized in forced_name_set:
+                return True
+            return not _is_excluded_from_unique_ligand_naming(
+                normalized,
+                cofactor_names=effective_cofactor_names,
+            )
+
+        report_records = []
+        charges_by_name = defaultdict(set)
+
+        for model_name in target_models:
+            structure = self.structures[model_name]
+            for stored_model in structure.get_models():
+                for chain in stored_model.get_chains():
+                    for residue in chain.get_residues():
+                        residue_name = _normalize_residue_name_token(
+                            getattr(residue, "resname", "")
+                        )
+                        if not _is_eligible_name(residue_name):
+                            continue
+
+                        pdb_block, has_conect, block_source = _build_source_residue_block(
+                            model_name, residue
+                        )
+                        if pdb_block is None:
+                            pdb_block, has_conect, block_source = _build_structure_residue_block(
+                                model_name, residue
+                            )
+
+                        mol = Chem.MolFromPDBBlock(
+                            pdb_block,
+                            removeHs=False,
+                            sanitize=False,
+                            proximityBonding=not has_conect,
+                        )
+                        if mol is None:
+                            raise ValueError(
+                                f"RDKit could not read ligand {residue_name} in model {model_name} "
+                                f"(chain {chain.id}, residue {residue.id[1]})."
+                            )
+
+                        try:
+                            Chem.SanitizeMol(mol)
+                        except Exception as exc:
+                            raise ValueError(
+                                f"RDKit could not sanitize ligand {residue_name} in model {model_name} "
+                                f"(chain {chain.id}, residue {residue.id[1]}). Ensure the PDB contains "
+                                "sufficient bonding/protonation information for this ligand."
+                            ) from exc
+
+                        formal_charge = int(Chem.GetFormalCharge(mol))
+                        charges_by_name[residue_name].add(formal_charge)
+
+                        report_record = {
+                            "model": model_name,
+                            "chain": chain.id,
+                            "resid": residue.id[1],
+                            "icode": residue.id[2].strip() if residue.id[2] else "",
+                            "resname": residue_name,
+                            "formal_charge": formal_charge,
+                            "atom_count": int(mol.GetNumAtoms()),
+                            "has_hydrogens": bool(any(atom.GetAtomicNum() == 1 for atom in mol.GetAtoms())),
+                            "charged_atoms": int(
+                                sum(1 for atom in mol.GetAtoms() if atom.GetFormalCharge() != 0)
+                            ),
+                            "used_conect": bool(has_conect),
+                            "block_source": block_source,
+                        }
+                        report_records.append(report_record)
+
+                        if verbose:
+                            print(
+                                f"[{model_name}] chain {chain.id} residue {residue.id[1]}"
+                                f"{report_record['icode'] or ''} {residue_name}: "
+                                f"formal charge {formal_charge}"
+                            )
+
+        report = pd.DataFrame(
+            report_records,
+            columns=[
+                "model",
+                "chain",
+                "resid",
+                "icode",
+                "resname",
+                "formal_charge",
+                "atom_count",
+                "has_hydrogens",
+                "charged_atoms",
+                "used_conect",
+                "block_source",
+            ],
+        )
+        self.ligand_formal_charge_report = report.copy()
+
+        conflicting_names = {
+            resname: sorted(charges)
+            for resname, charges in charges_by_name.items()
+            if len(charges) > 1
+        }
+        if conflicting_names:
+            conflict_summary = ", ".join(
+                f"{resname}={charges}" for resname, charges in sorted(conflicting_names.items())
+            )
+            raise ValueError(
+                "Conflicting formal charges were inferred for repeated ligand residue names: "
+                f"{conflict_summary}. If these residues represent different chemistries, "
+                "rename them first with makeLigandNamesUnique()."
+            )
+
+        charges = {
+            resname: int(next(iter(charges_set)))
+            for resname, charges_set in sorted(charges_by_name.items())
+        }
+        self.ligand_formal_charges = dict(charges)
+
+        if return_report:
+            return charges, report
+        return charges
+
     def removeAtomFromConectLines(self, residue_name, atom_name, verbose=True):
         """
         Remove the given (atom_name) atoms from all the connect lines involving
