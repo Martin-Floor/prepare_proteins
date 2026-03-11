@@ -3773,57 +3773,28 @@ are given. See the calculateMSA() method for selecting which chains will be algi
 
         return report
 
-    def getLigandFormalCharges(
+    def _collectLigandRdkitMolecules(
         self,
         models=None,
         target_names=None,
         skip_names=None,
         include_names=None,
         cofactor_names=None,
-        return_report=False,
         verbose=False,
     ):
         """
-        Infer ligand net formal charges from the loaded PDB models using RDKit.
+        Collect eligible ligand residues as sanitized RDKit molecules.
 
-        The returned mapping is keyed by ligand residue name and is intended to be
-        compatible with ``setUpOpenMMSimulations(ligand_charges=...)``. Charge
-        inference is only as reliable as the chemistry encoded in the input PDB:
-        hydrogens, atom charge fields, and/or explicit CONECT records should be
-        present for charged ligands.
-
-        Parameters
-        ----------
-        models : iterable or str, optional
-            Specific model name(s) to inspect. Defaults to all loaded models.
-        target_names : iterable or str, optional
-            Restrict the analysis to these residue names.
-        skip_names : iterable or str, optional
-            Residue names that should never be analyzed.
-        include_names : iterable or str, optional
-            Additional residue names to include even if they would otherwise be
-            excluded as protein-like residues, waters, ions, or default cofactors.
-        cofactor_names : iterable or str, optional
-            Additional cofactor names to exclude from the analysis. These names
-            are added to a conservative built-in default set.
-        return_report : bool, optional
-            If True, return ``(charges_dict, per_instance_report)``.
-        verbose : bool, optional
-            Print the inferred charge for each analyzed ligand instance.
-
-        Returns
-        -------
-        dict
-            Mapping of ligand residue name to inferred integer formal charge.
-        tuple
-            When ``return_report=True``, return ``(charges_dict, report_df)``.
+        Returns one dictionary per ligand instance. Each dictionary includes the
+        parsed RDKit molecule under ``mol`` plus residue metadata and
+        ligand-level descriptors derived from the sanitized molecule.
         """
 
         try:
             from rdkit import Chem
         except ImportError as exc:
             raise ImportError(
-                "RDKit is required to infer ligand formal charges. "
+                "RDKit is required for ligand RDKit processing. "
                 "Install it first (e.g. `conda install -c conda-forge rdkit`)."
             ) from exc
 
@@ -3970,8 +3941,6 @@ are given. See the calculateMSA() method for selecting which chains will be algi
             block_lines.append("END")
             return "\n".join(block_lines) + "\n", bool(conect_lines), "source"
 
-        if not isinstance(return_report, bool):
-            raise TypeError("return_report must be a boolean.")
         if not isinstance(verbose, bool):
             raise TypeError("verbose must be a boolean.")
 
@@ -4018,8 +3987,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 cofactor_names=effective_cofactor_names,
             )
 
-        report_records = []
-        charges_by_name = defaultdict(set)
+        ligand_records = []
 
         for model_name in target_models:
             structure = self.structures[model_name]
@@ -4061,32 +4029,125 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                                 "sufficient bonding/protonation information for this ligand."
                             ) from exc
 
-                        formal_charge = int(Chem.GetFormalCharge(mol))
-                        charges_by_name[residue_name].add(formal_charge)
+                        try:
+                            Chem.AssignStereochemistryFrom3D(mol, replaceExistingTags=True)
+                        except Exception:
+                            pass
 
-                        report_record = {
+                        smiles_mol = Chem.Mol(mol)
+                        try:
+                            smiles_mol = Chem.RemoveHs(smiles_mol)
+                        except Exception:
+                            smiles_mol = Chem.Mol(mol)
+
+                        formal_charge = int(Chem.GetFormalCharge(mol))
+                        canonical_smiles = Chem.MolToSmiles(
+                            smiles_mol,
+                            canonical=True,
+                            isomericSmiles=True,
+                        )
+
+                        ligand_record = {
                             "model": model_name,
                             "chain": chain.id,
                             "resid": residue.id[1],
                             "icode": residue.id[2].strip() if residue.id[2] else "",
                             "resname": residue_name,
                             "formal_charge": formal_charge,
+                            "canonical_smiles": canonical_smiles,
                             "atom_count": int(mol.GetNumAtoms()),
-                            "has_hydrogens": bool(any(atom.GetAtomicNum() == 1 for atom in mol.GetAtoms())),
+                            "has_hydrogens": bool(
+                                any(atom.GetAtomicNum() == 1 for atom in mol.GetAtoms())
+                            ),
                             "charged_atoms": int(
                                 sum(1 for atom in mol.GetAtoms() if atom.GetFormalCharge() != 0)
                             ),
                             "used_conect": bool(has_conect),
                             "block_source": block_source,
+                            "mol": mol,
                         }
-                        report_records.append(report_record)
+                        ligand_records.append(ligand_record)
 
                         if verbose:
                             print(
                                 f"[{model_name}] chain {chain.id} residue {residue.id[1]}"
-                                f"{report_record['icode'] or ''} {residue_name}: "
+                                f"{ligand_record['icode'] or ''} {residue_name}: "
                                 f"formal charge {formal_charge}"
                             )
+
+        return ligand_records
+
+    def getLigandFormalCharges(
+        self,
+        models=None,
+        target_names=None,
+        skip_names=None,
+        include_names=None,
+        cofactor_names=None,
+        return_report=False,
+        verbose=False,
+    ):
+        """
+        Infer ligand net formal charges from the loaded PDB models using RDKit.
+
+        The returned mapping is keyed by ligand residue name and is intended to be
+        compatible with ``setUpOpenMMSimulations(ligand_charges=...)``. Charge
+        inference is only as reliable as the chemistry encoded in the input PDB:
+        hydrogens, atom charge fields, and/or explicit CONECT records should be
+        present for charged ligands.
+
+        Parameters
+        ----------
+        models : iterable or str, optional
+            Specific model name(s) to inspect. Defaults to all loaded models.
+        target_names : iterable or str, optional
+            Restrict the analysis to these residue names.
+        skip_names : iterable or str, optional
+            Residue names that should never be analyzed.
+        include_names : iterable or str, optional
+            Additional residue names to include even if they would otherwise be
+            excluded as protein-like residues, waters, ions, or default cofactors.
+        cofactor_names : iterable or str, optional
+            Additional cofactor names to exclude from the analysis. These names
+            are added to a conservative built-in default set.
+        return_report : bool, optional
+            If True, return ``(charges_dict, per_instance_report)``.
+        verbose : bool, optional
+            Print the inferred charge for each analyzed ligand instance.
+
+        Returns
+        -------
+        dict
+            Mapping of ligand residue name to inferred integer formal charge.
+        tuple
+            When ``return_report=True``, return ``(charges_dict, report_df)``.
+        """
+
+        if not isinstance(return_report, bool):
+            raise TypeError("return_report must be a boolean.")
+        ligand_records = self._collectLigandRdkitMolecules(
+            models=models,
+            target_names=target_names,
+            skip_names=skip_names,
+            include_names=include_names,
+            cofactor_names=cofactor_names,
+            verbose=verbose,
+        )
+
+        report_records = []
+        charges_by_name = defaultdict(set)
+
+        for ligand_record in ligand_records:
+            residue_name = ligand_record["resname"]
+            formal_charge = int(ligand_record["formal_charge"])
+            charges_by_name[residue_name].add(formal_charge)
+            report_records.append(
+                {
+                    key: value
+                    for key, value in ligand_record.items()
+                    if key != "mol"
+                }
+            )
 
         report = pd.DataFrame(
             report_records,
@@ -4130,6 +4191,159 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         if return_report:
             return charges, report
         return charges
+
+    def writeLigandMolFiles(
+        self,
+        output_folder,
+        models=None,
+        target_names=None,
+        skip_names=None,
+        include_names=None,
+        cofactor_names=None,
+        return_report=False,
+        verbose=False,
+    ):
+        """
+        Write representative MOL files for eligible ligands using RDKit.
+
+        Parameters
+        ----------
+        output_folder : str or path-like
+            Directory where the MOL files will be written.
+        models : iterable or str, optional
+            Specific model name(s) to inspect. Defaults to all loaded models.
+        target_names : iterable or str, optional
+            Restrict the export to these residue names.
+        skip_names : iterable or str, optional
+            Residue names that should never be exported.
+        include_names : iterable or str, optional
+            Additional residue names to include even if they would otherwise be
+            excluded as protein-like residues, waters, ions, or default cofactors.
+        cofactor_names : iterable or str, optional
+            Additional cofactor names to exclude from the export. These names
+            are added to a conservative built-in default set.
+        return_report : bool, optional
+            If True, return ``(path_dict, report_df)``.
+        verbose : bool, optional
+            Print each written MOL file.
+
+        Returns
+        -------
+        dict
+            Mapping of ligand residue name to written MOL file path.
+        tuple
+            When ``return_report=True``, return ``(path_dict, report_df)``.
+        """
+
+        try:
+            from rdkit import Chem
+        except ImportError as exc:
+            raise ImportError(
+                "RDKit is required to write ligand MOL files. "
+                "Install it first (e.g. `conda install -c conda-forge rdkit`)."
+            ) from exc
+
+        if not isinstance(return_report, bool):
+            raise TypeError("return_report must be a boolean.")
+        if not isinstance(verbose, bool):
+            raise TypeError("verbose must be a boolean.")
+
+        output_path = Path(output_folder).expanduser()
+        output_path.mkdir(parents=True, exist_ok=True)
+
+        ligand_records = self._collectLigandRdkitMolecules(
+            models=models,
+            target_names=target_names,
+            skip_names=skip_names,
+            include_names=include_names,
+            cofactor_names=cofactor_names,
+            verbose=False,
+        )
+
+        grouped_records = defaultdict(list)
+        for ligand_record in ligand_records:
+            grouped_records[ligand_record["resname"]].append(ligand_record)
+
+        conflicting_names = {}
+        for resname, records in grouped_records.items():
+            charge_values = sorted({int(record["formal_charge"]) for record in records})
+            smiles_values = sorted({record["canonical_smiles"] for record in records})
+            if len(charge_values) > 1 or len(smiles_values) > 1:
+                conflicting_names[resname] = {
+                    "formal_charge": charge_values,
+                    "canonical_smiles": smiles_values,
+                }
+
+        if conflicting_names:
+            conflict_summary = ", ".join(
+                (
+                    f"{resname}=charges{values['formal_charge']},"
+                    f"chemistry{values['canonical_smiles']}"
+                )
+                for resname, values in sorted(conflicting_names.items())
+            )
+            raise ValueError(
+                "Conflicting ligand chemistries were inferred for repeated residue names: "
+                f"{conflict_summary}. If these residues represent different ligands, "
+                "rename them first with makeLigandNamesUnique()."
+            )
+
+        written_paths = {}
+        report_records = []
+
+        for resname in sorted(grouped_records):
+            representative = grouped_records[resname][0]
+            mol_file_path = output_path / f"{resname}.mol"
+            Chem.MolToMolFile(representative["mol"], str(mol_file_path))
+            resolved_path = str(mol_file_path.resolve())
+            written_paths[resname] = resolved_path
+
+            report_record = {
+                "resname": resname,
+                "output_path": resolved_path,
+                "instance_count": len(grouped_records[resname]),
+                "formal_charge": int(representative["formal_charge"]),
+                "canonical_smiles": representative["canonical_smiles"],
+                "model": representative["model"],
+                "chain": representative["chain"],
+                "resid": representative["resid"],
+                "icode": representative["icode"],
+                "atom_count": int(representative["atom_count"]),
+                "has_hydrogens": bool(representative["has_hydrogens"]),
+                "charged_atoms": int(representative["charged_atoms"]),
+                "used_conect": bool(representative["used_conect"]),
+                "block_source": representative["block_source"],
+            }
+            report_records.append(report_record)
+
+            if verbose:
+                print(f"Wrote {resname} MOL file to {resolved_path}")
+
+        report = pd.DataFrame(
+            report_records,
+            columns=[
+                "resname",
+                "output_path",
+                "instance_count",
+                "formal_charge",
+                "canonical_smiles",
+                "model",
+                "chain",
+                "resid",
+                "icode",
+                "atom_count",
+                "has_hydrogens",
+                "charged_atoms",
+                "used_conect",
+                "block_source",
+            ],
+        )
+        self.ligand_mol_file_report = report.copy()
+        self.ligand_mol_files = dict(written_paths)
+
+        if return_report:
+            return written_paths, report
+        return written_paths
 
     def removeAtomFromConectLines(self, residue_name, atom_name, verbose=True):
         """
