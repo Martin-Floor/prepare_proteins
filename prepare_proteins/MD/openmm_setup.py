@@ -264,6 +264,7 @@ class openmm_md:
                                regenerate_amber_files=False, non_standard_residues=None, strict_atom_name_check=True,
                                only_residues=None, build_full_system=True, skip_ligand_charge_computation=False,
                                ligand_sdf_files=None, export_per_residue_ffxml=False,
+                               run_acdoctor=True,
                                ligand_xml_files=None, solvatebox_buffer=12.0, solvatebox_iso=False):
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
@@ -1126,7 +1127,8 @@ class openmm_md:
             lig_par = ligandParameters(residue+'.pdb', metal_pdb=metal_pdb, command_log=self.command_log)
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
                                        metal_charge=metal_charge,charge_model=charge_model,
-                                       skip_ligand_charge_computation=skip_ligand_charge_computation)
+                                       skip_ligand_charge_computation=skip_ligand_charge_computation,
+                                       run_acdoctor=run_acdoctor)
             os.chdir('../'*len(par_folder[residue].split('/')))
 
         # Copy newly generated parameters to the root folder so they can be reused directly.
@@ -1745,7 +1747,7 @@ class ligandParameters:
             raise ValueError('A PDB with a single residue must be given for parameterization!')
 
     def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False,
-                           skip_ligand_charge_computation=False):
+                           skip_ligand_charge_computation=False, run_acdoctor=True):
         def _run_acdoctor_on_mol2(mol2_file):
             marker_path = f".ffxml_generated_{self.resname.lower()}"
             if os.path.exists(marker_path) or os.path.exists(os.path.join(os.getcwd(), marker_path)):
@@ -1814,7 +1816,7 @@ class ligandParameters:
         # Run parmchk to check which forcefield parameters will be used
         frcmod_path = self.resname+'.frcmod'
         need_parmchk = overwrite or not os.path.exists(frcmod_path)
-        if need_parmchk and not mol2_generated:
+        if need_parmchk and not mol2_generated and run_acdoctor:
             _run_acdoctor_on_mol2(mol2_path)
         if need_parmchk:
             command  = 'parmchk2 '

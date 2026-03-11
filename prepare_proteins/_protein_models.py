@@ -14038,6 +14038,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                solvate=True, solvatebox_buffer=12.0, solvatebox_iso=False,
                                verbose=False,
                                strict_ligand_atom_check=True,
+                               run_acdoctor=True,
                                ligand_parameters_source=None,
                                parameterization_method='ambertools',
                                parameterization_options=None,
@@ -14069,6 +14070,9 @@ make sure of reading the target sequences with the function readTargetSequences(
         - verbose (bool, optional): When True, emit detailed progress information from the parameterization backends.
         - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
           same atom-name set as the ligand extracted from the PDB; mismatches raise an error. Disable to downgrade to warnings.
+        - run_acdoctor (bool, optional): If True (default), run AmberTools/acdoctor validation on reused ligand MOL2 files
+          before `parmchk2`. Set to False to skip that validation when acdoctor rejects otherwise usable ligands. Ignored
+          by non-AmberTools backends.
         - ligand_only (bool or str or list of str, optional): If set, skip protein + ligand simulations and instead
           prepare solvated ligand-only systems. Use True to process every ligand detected in each model, a single
           residue name to limit the run to that ligand, or a list of residue names for multiple ligands.
@@ -14820,6 +14824,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     only_residues=selected_ligands_set,
                     build_full_system=False,
                     ligand_sdf_files=ligand_sdf_files,
+                    run_acdoctor=run_acdoctor,
                 )
                 if getattr(backend, "name", "").lower() == "openff":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
@@ -14902,6 +14907,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     non_standard_residues=non_standard_residues,
                     strict_atom_name_check=strict_ligand_atom_check,
                     ligand_sdf_files=ligand_sdf_files,
+                    run_acdoctor=run_acdoctor,
                 )
                 if getattr(backend, "name", "").lower() == "openff":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
@@ -14963,6 +14969,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                                    solvate=True, solvatebox_buffer=12.0, solvatebox_iso=False,
                                    verbose=False,
                                    strict_ligand_atom_check=True,
+                                   run_acdoctor=True,
                                    ligand_parameters_source=None,
                                    parameterization_method='ambertools',
                                    parameterization_options=None,
@@ -15081,6 +15088,7 @@ make sure of reading the target sequences with the function readTargetSequences(
             solvatebox_iso=solvatebox_iso,
             verbose=verbose,
             strict_ligand_atom_check=strict_ligand_atom_check,
+            run_acdoctor=run_acdoctor,
             ligand_parameters_source=ligand_parameters_source,
             parameterization_method=parameterization_method,
             parameterization_options=parameterization_options,

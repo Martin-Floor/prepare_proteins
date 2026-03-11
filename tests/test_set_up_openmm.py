@@ -73,6 +73,7 @@ def test_set_up_openmm_simulations_uses_current_saved_models(tmp_path, monkeypat
         name = "ambertools"
 
         def prepare_model(self, md_obj, ligand_parameters_folder, **kwargs):
+            captured["prepare_kwargs"] = dict(kwargs)
             md_obj.prmtop_file = str(prmtop_file)
             md_obj.inpcrd_file = str(inpcrd_file)
 
@@ -109,4 +110,77 @@ def test_set_up_openmm_simulations_uses_current_saved_models(tmp_path, monkeypat
     assert input_pdb.parent == tmp_path / "jobs" / "input_models"
     assert " ACE B   0" in captured["pdb_text"]
     assert " NME B   2" in captured["pdb_text"]
+    assert captured["prepare_kwargs"]["run_acdoctor"] is True
     assert len(jobs) == 1
+
+
+def test_set_up_openmm_simulations_can_disable_acdoctor(tmp_path, monkeypatch):
+    models = _load_models(tmp_path)
+    models.conects.setdefault("modelA", [])
+
+    script_file = tmp_path / "openmm_simulation.py"
+    script_file.write_text("print('stub')\n")
+    prmtop_file = tmp_path / "modelA.prmtop"
+    inpcrd_file = tmp_path / "modelA.inpcrd"
+    prmtop_file.write_text("")
+    inpcrd_file.write_text("")
+
+    captured = {}
+
+    class FakeOpenMMMD:
+        def __init__(self, input_pdb):
+            self.input_pdb = input_pdb
+            self.pdb_name = Path(input_pdb).stem
+            self.command_log = []
+
+        def setUpFF(self, ff_name):
+            return None
+
+        def getProtonationStates(self):
+            return []
+
+        def removeHydrogens(self):
+            return None
+
+        def addHydrogens(self, variants=None):
+            return None
+
+    class FakeBackend:
+        name = "ambertools"
+
+        def prepare_model(self, md_obj, ligand_parameters_folder, **kwargs):
+            captured["prepare_kwargs"] = dict(kwargs)
+            md_obj.prmtop_file = str(prmtop_file)
+            md_obj.inpcrd_file = str(inpcrd_file)
+
+        def describe_model(self, md_obj):
+            return SimpleNamespace(
+                input_format="amber",
+                prmtop_path=md_obj.prmtop_file,
+                coordinates_path=md_obj.inpcrd_file,
+            )
+
+    fake_openmm_setup = SimpleNamespace(
+        openmm_md=FakeOpenMMMD,
+        aa3=["ALA", "GLY", "ACE", "NME"],
+    )
+    monkeypatch.setattr(
+        protein_models_module,
+        "_require_openmm_support",
+        lambda feature: fake_openmm_setup,
+    )
+    monkeypatch.setattr(
+        protein_models_module,
+        "get_backend",
+        lambda method, **kwargs: FakeBackend(),
+    )
+
+    models.setUpOpenMMSimulations(
+        str(tmp_path / "jobs"),
+        replicas=1,
+        simulation_time=1,
+        script_file=str(script_file),
+        run_acdoctor=False,
+    )
+
+    assert captured["prepare_kwargs"]["run_acdoctor"] is False
