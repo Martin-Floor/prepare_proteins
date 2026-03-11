@@ -866,6 +866,108 @@ _ROSETTA_CAP_TEMPLATE = {
         "C": np.array([5.711703, -3.652405, -0.852366], dtype=float),
     },
 }
+_UNIQUE_LIGAND_NAME_COFATORS = frozenset(
+    {
+        "AMP",
+        "ADP",
+        "ATP",
+        "GDP",
+        "GTP",
+        "FAD",
+        "FMN",
+        "NAD",
+        "NAP",
+        "COA",
+        "HEM",
+        "PLP",
+        "SAM",
+        "SAH",
+    }
+)
+_UNIQUE_LIGAND_NAME_PROTEIN_ALIASES = {
+    "HIE": "HIS",
+    "HID": "HIS",
+    "HIP": "HIS",
+    "ASH": "ASP",
+    "GLH": "GLU",
+    "CYX": "CYS",
+}
+_UNIQUE_LIGAND_NAME_SUFFIX_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _normalize_residue_name_token(value):
+    if value is None:
+        return ""
+    return str(value).strip().upper()
+
+
+def _normalize_protein_like_residue_name(resname):
+    normalized = _normalize_residue_name_token(resname)
+    return _UNIQUE_LIGAND_NAME_PROTEIN_ALIASES.get(normalized, normalized)
+
+
+def _is_excluded_from_unique_ligand_naming(resname, cofactor_names=None):
+    normalized = _normalize_residue_name_token(resname)
+    if not normalized:
+        return True
+
+    normalized_protein = _normalize_protein_like_residue_name(normalized)
+    if normalized_protein in {"ACE", "NMA", "NME"}:
+        return True
+    if is_aa(normalized_protein, standard=False):
+        return True
+    if normalized in DEFAULT_PARAMETERIZATION_SKIP_RESIDUES:
+        return True
+    if cofactor_names and normalized in cofactor_names:
+        return True
+    return False
+
+
+def _iter_unique_ligand_name_prefixes(resname):
+    seen = set()
+    for char in _normalize_residue_name_token(resname):
+        if char.isalnum() and char not in seen:
+            seen.add(char)
+            yield char
+
+    for fallback in ("L", "X"):
+        if fallback not in seen:
+            yield fallback
+
+
+def _encode_unique_ligand_name_suffix(value):
+    if value < 0:
+        raise ValueError("Ligand name suffix index must be non-negative.")
+
+    alphabet = _UNIQUE_LIGAND_NAME_SUFFIX_ALPHABET
+    if value == 0:
+        return alphabet[0]
+
+    encoded = ""
+    base = len(alphabet)
+    current = value
+    while current:
+        current, remainder = divmod(current, base)
+        encoded = alphabet[remainder] + encoded
+    return encoded
+
+
+def _generate_unique_ligand_resname(source_name, start_index, reserved_names):
+    max_suffix_index = len(_UNIQUE_LIGAND_NAME_SUFFIX_ALPHABET) ** 2 - 1
+    first_index = max(1, int(start_index))
+
+    for prefix_position, prefix in enumerate(_iter_unique_ligand_name_prefixes(source_name)):
+        prefix_start = first_index if prefix_position == 0 else 1
+        for suffix_index in range(prefix_start, max_suffix_index + 1):
+            suffix = _encode_unique_ligand_name_suffix(suffix_index).rjust(2, "0")
+            candidate = f"{prefix}{suffix}"
+            if candidate not in reserved_names:
+                reserved_names.add(candidate)
+                return candidate
+
+    raise RuntimeError(
+        f"Could not generate a unique ligand residue name for '{source_name}'."
+    )
 
 
 def _normalize_capping_style(style, rosetta_style_caps, prepwizard_style_caps, openmm_style_caps):
@@ -3449,6 +3551,227 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 print("No atom names were updated.")
 
         return total_replacements
+
+    def makeLigandNamesUnique(
+        self,
+        models=None,
+        target_names=None,
+        skip_names=None,
+        include_names=None,
+        cofactor_names=None,
+        keep_first=True,
+        dry_run=False,
+        verbose=False,
+    ):
+        """
+        Rename repeated ligand residue names so later duplicates become unique.
+
+        Parameters
+        ----------
+        models : iterable or str, optional
+            Specific model name(s) to process. Defaults to all loaded models.
+        target_names : iterable or str, optional
+            Restrict renaming to these residue names. Supplying target names also
+            forces them into the ligand-rename pass unless skipped explicitly.
+        skip_names : iterable or str, optional
+            Residue names that should never be renamed. This overrides
+            ``target_names`` and ``include_names``.
+        include_names : iterable or str, optional
+            Additional residue names to include in history-based renaming even if
+            they would otherwise be excluded as protein-like residues, waters,
+            ions, or default cofactors.
+        cofactor_names : iterable or str, optional
+            Additional cofactor names to exclude from history-based renaming.
+            These names are added to a conservative built-in default set.
+        keep_first : bool, optional
+            If True, keep the first occurrence of each eligible residue name and
+            rename only subsequent repeats.
+        dry_run : bool, optional
+            If True, return the planned renames without mutating the structures.
+        verbose : bool, optional
+            Print each rename as it is planned/applied.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per renamed residue with the original and assigned names.
+        """
+
+        def _normalize_name_set(values, label):
+            if values is None:
+                return set()
+            if isinstance(values, str):
+                values = [values]
+            elif not isinstance(values, (list, tuple, set, frozenset)):
+                raise TypeError(f"{label} must be a string, an iterable of strings, or None.")
+
+            normalized = set()
+            for value in values:
+                if not isinstance(value, str):
+                    raise TypeError(f"{label} entries must be strings.")
+                name = _normalize_residue_name_token(value)
+                if not name:
+                    raise ValueError(f"{label} entries must not be empty.")
+                normalized.add(name)
+            return normalized
+
+        if not isinstance(keep_first, bool):
+            raise TypeError("keep_first must be a boolean.")
+        if not isinstance(dry_run, bool):
+            raise TypeError("dry_run must be a boolean.")
+        if not isinstance(verbose, bool):
+            raise TypeError("verbose must be a boolean.")
+
+        target_name_set = _normalize_name_set(target_names, "target_names")
+        if target_names is not None and not target_name_set:
+            raise ValueError("target_names was provided but no valid residue names were found.")
+
+        skip_name_set = _normalize_name_set(skip_names, "skip_names")
+        include_name_set = _normalize_name_set(include_names, "include_names")
+        extra_cofactor_names = _normalize_name_set(cofactor_names, "cofactor_names")
+        effective_cofactor_names = set(_UNIQUE_LIGAND_NAME_COFATORS)
+        effective_cofactor_names.update(extra_cofactor_names)
+
+        forced_name_set = set(include_name_set)
+        forced_name_set.update(target_name_set)
+        forced_name_set.difference_update(skip_name_set)
+
+        if isinstance(models, str):
+            target_models = [models]
+        elif models is None:
+            target_models = list(self.models_names)
+        else:
+            target_models = list(models)
+
+        if not target_models:
+            empty_report = pd.DataFrame(
+                columns=[
+                    "model",
+                    "chain",
+                    "resid",
+                    "icode",
+                    "old_name",
+                    "new_name",
+                    "occurrence",
+                    "reason",
+                ]
+            )
+            self.unique_ligand_name_report = empty_report
+            self.unique_ligand_name_aliases = {}
+            self.unique_ligand_name_map = {}
+            return empty_report
+
+        target_models = list(dict.fromkeys(target_models))
+        missing_models = [m for m in target_models if m not in self.structures]
+        if missing_models:
+            raise KeyError(
+                "Requested models are not loaded: %s" % ", ".join(sorted(missing_models))
+            )
+
+        reserved_names = set()
+        for structure in self.structures.values():
+            for residue in structure.get_residues():
+                current_name = _normalize_residue_name_token(getattr(residue, "resname", ""))
+                if current_name:
+                    reserved_names.add(current_name)
+        reserved_names.update(skip_name_set)
+        reserved_names.update(effective_cofactor_names)
+
+        def _is_eligible_name(resname):
+            normalized = _normalize_residue_name_token(resname)
+            if not normalized:
+                return False
+            if normalized in skip_name_set:
+                return False
+            if target_name_set and normalized not in target_name_set:
+                return False
+            if normalized in forced_name_set:
+                return True
+            return not _is_excluded_from_unique_ligand_naming(
+                normalized,
+                cofactor_names=effective_cofactor_names,
+            )
+
+        rename_records = []
+        residue_name_map = defaultdict(dict)
+        alias_map = {}
+        seen_name_counts = Counter()
+
+        for model_name in target_models:
+            structure = self.structures[model_name]
+            for stored_model in structure.get_models():
+                for chain in stored_model.get_chains():
+                    for residue in chain.get_residues():
+                        original_name = _normalize_residue_name_token(
+                            getattr(residue, "resname", "")
+                        )
+                        if not _is_eligible_name(original_name):
+                            continue
+
+                        occurrence = seen_name_counts[original_name] + 1
+                        should_rename = occurrence > 1 if keep_first else True
+                        seen_name_counts[original_name] = occurrence
+                        if not should_rename:
+                            continue
+
+                        start_index = occurrence - 1 if keep_first else occurrence
+                        new_name = _generate_unique_ligand_resname(
+                            original_name,
+                            start_index,
+                            reserved_names,
+                        )
+                        record = {
+                            "model": model_name,
+                            "chain": chain.id,
+                            "resid": residue.id[1],
+                            "icode": residue.id[2].strip() if residue.id[2] else "",
+                            "old_name": original_name,
+                            "new_name": new_name,
+                            "occurrence": occurrence,
+                            "reason": (
+                                "target_name_repeat"
+                                if target_name_set
+                                else "historical_name_repeat"
+                            ),
+                        }
+                        rename_records.append(record)
+                        residue_name_map[model_name][
+                            (chain.id, residue.id[1], record["icode"])
+                        ] = new_name
+                        alias_map[new_name] = original_name
+
+                        if verbose:
+                            print(
+                                f"[{model_name}] chain {chain.id} residue {residue.id[1]}"
+                                f"{record['icode'] or ''}: {original_name} -> {new_name}"
+                            )
+
+                        if not dry_run:
+                            residue.resname = new_name
+
+        report = pd.DataFrame(
+            rename_records,
+            columns=[
+                "model",
+                "chain",
+                "resid",
+                "icode",
+                "old_name",
+                "new_name",
+                "occurrence",
+                "reason",
+            ],
+        )
+        self.unique_ligand_name_report = report.copy()
+        self.unique_ligand_name_aliases = dict(alias_map)
+        self.unique_ligand_name_map = {
+            model_name: dict(mapping) for model_name, mapping in residue_name_map.items()
+        }
+
+        if rename_records and not dry_run:
+            self.getModelsSequences()
+
+        return report
 
     def removeAtomFromConectLines(self, residue_name, atom_name, verbose=True):
         """
