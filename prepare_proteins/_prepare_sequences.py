@@ -3786,6 +3786,30 @@ class sequenceModels:
         - rmsf (dict): Dictionary containing RMSF arrays for each model.
           Each array holds the per-residue RMSF (in nm) for the selected backbone (Cα) atoms.
         """
+
+        def _get_protein_ca_atoms(topology):
+            ca_indices = []
+            ca_keys = []
+            residue_ids = []
+            for residue in topology.residues:
+                if not residue.is_protein:
+                    continue
+                for atom in residue.atoms:
+                    if atom.name != "CA":
+                        continue
+                    ca_indices.append(atom.index)
+                    chain_id = getattr(residue.chain, "chain_id", None)
+                    if chain_id is None:
+                        chain_id = residue.chain.index
+                    ca_keys.append((chain_id, residue.resSeq, residue.name))
+                    residue_ids.append(residue.resSeq)
+                    break
+            return (
+                np.array(ca_indices, dtype=int),
+                ca_keys,
+                np.array(residue_ids, dtype=int),
+            )
+
         # Load reference structure and select backbone Cα atoms
         if isinstance(ref_pdb, str):
             unique_ref = ref_pdb
@@ -3810,17 +3834,13 @@ class sequenceModels:
 
         # Dictionary to store RMSF values for each model
         rmsf = {}
+        residue_ids_by_model = {}
 
         # Iterate through each model folder
         for model in model_names:
 
             if not os.path.isdir(f"{bioemu_folder}/{model}/"):
                 continue
-
-            # Load reference structure
-            if ref_pdb and model in ref_pdb:
-                ref = md.load(ref_pdb[model])
-                ref_bb_atoms = ref.topology.select("name CA")
 
             model_folder = os.path.join(bioemu_folder, model)
             traj_files = _get_bioemu_sample_files(model_folder)
@@ -3832,24 +3852,86 @@ class sequenceModels:
             traj = _load_bioemu_trajectory(
                 traj_files, top_file, max_frames=max_frames_resolved
             )
-            traj_bb_atoms = traj.topology.select("name CA")
+            traj_ca_indices, traj_ca_keys, traj_residue_ids = _get_protein_ca_atoms(
+                traj.topology
+            )
+
+            if traj_ca_indices.size == 0:
+                warnings.warn(
+                    f"Model '{model}' has no protein C-alpha atoms in the trajectory; skipping RMSF.",
+                    UserWarning,
+                )
+                continue
 
             if not ref_pdb:
-                ref = md.load(top_file)
-                ref.xyz = np.mean(
-                    ref.xyz, axis=0
+                traj_ca = traj.atom_slice(traj_ca_indices)
+                ref = traj_ca[0]
+                ref.xyz[0] = np.mean(
+                    traj_ca.xyz, axis=0
                 )  # Set reference to the average positions
+                rmsf[model] = md.rmsf(traj_ca, ref)
+                residue_ids_by_model[model] = traj_residue_ids.tolist()
+                continue
+
+            if model not in ref_pdb:
+                warnings.warn(
+                    f"Model '{model}' has no reference PDB entry; skipping RMSF.",
+                    UserWarning,
+                )
+                continue
+
+            ref = md.load(ref_pdb[model])
+            ref_ca_indices, ref_ca_keys, ref_residue_ids = _get_protein_ca_atoms(
+                ref.topology
+            )
+            ref_index_by_key = {key: idx for key, idx in zip(ref_ca_keys, ref_ca_indices)}
+            ref_resseq_by_key = {
+                key: resseq for key, resseq in zip(ref_ca_keys, ref_residue_ids)
+            }
+
+            common_keys = [key for key in traj_ca_keys if key in ref_index_by_key]
+            if common_keys:
+                traj_index_by_key = {
+                    key: idx for key, idx in zip(traj_ca_keys, traj_ca_indices)
+                }
+                traj_sel = np.array([traj_index_by_key[key] for key in common_keys], dtype=int)
+                ref_sel = np.array([ref_index_by_key[key] for key in common_keys], dtype=int)
+                residue_ids = [ref_resseq_by_key[key] for key in common_keys]
+            else:
+                n_common = min(traj_ca_indices.size, ref_ca_indices.size)
+                if n_common == 0:
+                    warnings.warn(
+                        f"Model '{model}' has no overlapping C-alpha atoms with its reference; skipping RMSF.",
+                        UserWarning,
+                    )
+                    continue
+                warnings.warn(
+                    (
+                        f"Model '{model}' has no CA matches by (chain_id, resSeq, residue name). "
+                        f"Falling back to positional matching for the first {n_common} C-alpha atoms."
+                    ),
+                    UserWarning,
+                )
+                traj_sel = traj_ca_indices[:n_common]
+                ref_sel = ref_ca_indices[:n_common]
+                residue_ids = ref_residue_ids[:n_common].tolist()
+
+            traj_ca = traj.atom_slice(traj_sel)
+            ref_ca = ref.atom_slice(ref_sel)
+            if ref_ca.n_frames > 1:
+                ref_ca = ref_ca[0]
 
             # Compute RMSF for the selected atoms (per-residue fluctuations)
-            rmsf[model] = md.rmsf(traj, ref, atom_indices=traj_bb_atoms)
+            rmsf[model] = md.rmsf(traj_ca, ref_ca)
+            residue_ids_by_model[model] = residue_ids
 
         if plot:
-            # Get the residue numbers corresponding to the selected Cα atoms from the reference structure
-            residue_ids = [ref.topology.atom(i).residue.resSeq for i in ref_bb_atoms]
-
             plt.figure(figsize=(12, 6))
             # Plot each model's RMSF as a line plot
             for model, rmsf_values in rmsf.items():
+                residue_ids = residue_ids_by_model.get(model)
+                if residue_ids is None or len(residue_ids) != len(rmsf_values):
+                    residue_ids = np.arange(1, len(rmsf_values) + 1)
                 plt.plot(residue_ids, rmsf_values, label=model)
 
             if ylim:
