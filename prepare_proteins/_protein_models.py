@@ -14957,6 +14957,299 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return simulation_jobs
 
+    def setUpOpenMMInteractionEnergyCalculations(
+        self,
+        job_folder,
+        replicas,
+        partner_residue_names,
+        *,
+        by_residue=False,
+        residue_indexes=None,
+        only_indexes=None,
+        partner_interaction_groups=None,
+        overwrite=False,
+        skip_finished=False,
+        skip_replicas=None,
+        only_models=None,
+        skip_models=None,
+        output_folder=None,
+        script_file=None,
+        root_dir_env_var=None,
+        root_dir_fallback=None,
+    ):
+        """
+        Prepare per-replica interaction-energy jobs for an existing OpenMM setup.
+
+        The expected folder layout matches ``setUpOpenMMSimulations``:
+        ``job_folder/<model>/replica_##/input_files``. The generated commands
+        change into each replica folder and run the shared
+        ``computeInteractions.py`` helper against the requested partner residue
+        names, which can represent a ligand or a polymer residue set.
+
+        Parameters
+        ----------
+        job_folder : str or path-like
+            Root folder that already contains the OpenMM replica tree.
+        replicas : int
+            Number of replicas to stage per model.
+        partner_residue_names : str or sequence of str
+            Partner residue name or residue-name collection. Example:
+            ``["ROH", "4GB", "0GB"]`` for a cellulose chain.
+        by_residue : bool, optional
+            When True, compute protein-residue decomposed interactions.
+        residue_indexes : sequence of int, optional
+            Restrict residue decomposition to these topology residue indexes.
+        only_indexes : sequence of int or mapping, optional
+            Restrict frames globally or per replica number.
+        partner_interaction_groups : mapping, optional
+            Optional partner atom-name groups written as JSON and passed to the
+            interaction script.
+        overwrite : bool, optional
+            Forwarded to the script to rebuild existing outputs.
+        skip_finished : bool, optional
+            Skip replicas whose output CSV already exists.
+        skip_replicas : sequence of int, optional
+            Replica numbers to skip.
+        only_models : str or sequence of str, optional
+            Restrict staged jobs to these models.
+        skip_models : str or sequence of str, optional
+            Exclude these models.
+        output_folder : str or path-like, optional
+            Optional root folder for interaction CSV outputs. When omitted, the
+            script default cache under ``job_folder/.analyzer_cache`` is used.
+        script_file : str or path-like, optional
+            Explicit path to ``computeInteractions.py``. When omitted the method
+            attempts to resolve the script from the installed
+            ``md_enzyme_analysis`` package.
+        root_dir_env_var : str, optional
+            When provided, generate portable commands that resolve the job root
+            from this environment variable at runtime before changing into a
+            replica directory.
+        root_dir_fallback : str or path-like, optional
+            Fallback root used when ``root_dir_env_var`` is set but the
+            environment variable is unset. Defaults to ``job_folder``.
+        """
+
+        def _normalise_residue_names(value):
+            if isinstance(value, str):
+                tokens = value.split(",")
+            else:
+                try:
+                    tokens = list(value)
+                except TypeError as exc:
+                    raise TypeError(
+                        "partner_residue_names must be a comma-separated string or an iterable of residue names."
+                    ) from exc
+            names = []
+            for token in tokens:
+                name = str(token).strip().upper()
+                if name:
+                    names.append(name)
+            if not names:
+                raise ValueError("partner_residue_names must contain at least one residue name.")
+            return names
+
+        def _normalise_frame_filters(value):
+            if value is None:
+                return None, None
+            if isinstance(value, Mapping):
+                per_replica = {}
+                for replica_id, frames in value.items():
+                    replica_key = int(replica_id)
+                    if frames is None:
+                        per_replica[replica_key] = []
+                        continue
+                    if isinstance(frames, (str, bytes)):
+                        raise TypeError("Frame collections must not be provided as strings.")
+                    per_replica[replica_key] = sorted({int(frame) for frame in frames})
+                return None, per_replica
+            if isinstance(value, (str, bytes)):
+                raise TypeError("Frame collections must not be provided as strings.")
+            shared = sorted({int(frame) for frame in value})
+            return shared, None
+
+        def _resolve_script_source(value):
+            if value is not None:
+                source_path = Path(value).expanduser().resolve()
+            else:
+                package_spec = importlib.util.find_spec("md_enzyme_analysis")
+                if package_spec is None or package_spec.origin is None:
+                    raise FileNotFoundError(
+                        "Could not locate md_enzyme_analysis.computeInteractions.py. "
+                        "Provide script_file explicitly."
+                    )
+                source_path = Path(package_spec.origin).resolve().parent / "scripts" / "computeInteractions.py"
+            if not source_path.exists():
+                raise FileNotFoundError(f"Interaction script not found: {source_path}")
+            return source_path
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        if isinstance(skip_models, str):
+            skip_models = [skip_models]
+        if skip_models is None:
+            skip_models = []
+
+        try:
+            replicas = int(replicas)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("replicas must be a positive integer.") from exc
+        if replicas <= 0:
+            raise ValueError("replicas must be a positive integer.")
+
+        partner_names = _normalise_residue_names(partner_residue_names)
+        partner_arg = ",".join(partner_names)
+
+        residue_index_arg = None
+        if residue_indexes is not None:
+            if isinstance(residue_indexes, (str, bytes)):
+                raise TypeError("residue_indexes must be an iterable of integers.")
+            residue_index_arg = ",".join(str(int(idx)) for idx in residue_indexes)
+
+        shared_only_indexes, per_replica_only_indexes = _normalise_frame_filters(only_indexes)
+        skipped_replicas = {int(replica_id) for replica_id in (skip_replicas or [])}
+
+        job_folder_path = Path(job_folder).expanduser().resolve()
+        if not job_folder_path.exists():
+            raise FileNotFoundError(f"OpenMM job folder not found: {job_folder_path}")
+
+        scripts_folder = job_folder_path / "scripts"
+        scripts_folder.mkdir(parents=True, exist_ok=True)
+
+        script_source = _resolve_script_source(script_file)
+        script_destination = scripts_folder / "computeInteractions.py"
+        source_bytes = script_source.read_bytes()
+        if not script_destination.exists() or script_destination.read_bytes() != source_bytes:
+            script_destination.write_bytes(source_bytes)
+
+        group_json_path = None
+        if partner_interaction_groups:
+            group_json_path = scripts_folder / "._partner_interaction_groups.json"
+            with group_json_path.open("w", encoding="utf-8") as handle:
+                json.dump(partner_interaction_groups, handle, indent=2)
+
+        output_root = None
+        if output_folder is not None:
+            output_root = Path(output_folder).expanduser()
+            if not output_root.is_absolute():
+                output_root = (job_folder_path / output_root).resolve()
+            output_root.mkdir(parents=True, exist_ok=True)
+
+        selected_models = [
+            model_name
+            for model_name in self
+            if (not only_models or model_name in only_models) and model_name not in skip_models
+        ]
+
+        commands = []
+        zfill = max(len(str(replicas)), 2)
+        for model_name in selected_models:
+            model_folder = job_folder_path / model_name
+            if not model_folder.exists():
+                warnings.warn(f"Model folder not found for interaction-energy setup: {model_folder}", RuntimeWarning)
+                continue
+
+            model_output_folder = None
+            if output_root is not None:
+                model_output_folder = output_root / model_name
+                model_output_folder.mkdir(parents=True, exist_ok=True)
+
+            for replica in range(1, replicas + 1):
+                if replica in skipped_replicas:
+                    continue
+
+                replica_name = f"replica_{str(replica).zfill(zfill)}"
+                replica_folder = model_folder / replica_name
+                if not replica_folder.exists():
+                    warnings.warn(f"Replica folder not found for interaction-energy setup: {replica_folder}", RuntimeWarning)
+                    continue
+
+                output_csv_path = None
+                if model_output_folder is not None:
+                    output_csv_path = model_output_folder / f"Replica_{replica}.csv"
+                else:
+                    output_csv_path = (
+                        job_folder_path
+                        / ".analyzer_cache"
+                        / "interaction_data"
+                        / model_name
+                        / f"Replica_{replica}.csv"
+                    )
+
+                if skip_finished and output_csv_path.exists() and not overwrite:
+                    continue
+
+                if per_replica_only_indexes is not None:
+                    frames = per_replica_only_indexes.get(replica)
+                    if frames is None:
+                        continue
+                else:
+                    frames = shared_only_indexes
+                if frames is not None and len(frames) == 0:
+                    continue
+
+                script_path_rel = os.path.relpath(script_destination, start=replica_folder)
+                if os.sep != "/":
+                    script_path_rel = script_path_rel.replace(os.sep, "/")
+
+                python_cmd = [
+                    "python",
+                    script_path_rel,
+                    replica_name,
+                    partner_arg,
+                ]
+
+                if frames is not None:
+                    python_cmd.extend(["--only_indexes", ",".join(str(frame) for frame in frames)])
+
+                if residue_index_arg:
+                    python_cmd.extend(["--residue_indexes", residue_index_arg])
+
+                if by_residue:
+                    python_cmd.append("--by_residue")
+
+                if group_json_path is not None:
+                    groups_rel = os.path.relpath(group_json_path, start=replica_folder)
+                    if os.sep != "/":
+                        groups_rel = groups_rel.replace(os.sep, "/")
+                    python_cmd.extend(["--partner_interaction_groups", groups_rel])
+
+                if overwrite:
+                    python_cmd.append("--overwrite")
+
+                if output_csv_path is not None:
+                    output_csv_path.parent.mkdir(parents=True, exist_ok=True)
+                    output_rel = os.path.relpath(output_csv_path, start=replica_folder)
+                    if os.sep != "/":
+                        output_rel = output_rel.replace(os.sep, "/")
+                    python_cmd.extend(["--output_csv", output_rel])
+
+                if root_dir_env_var:
+                    if root_dir_fallback is None:
+                        fallback_root = str(job_folder_path)
+                    else:
+                        fallback_root = str(Path(root_dir_fallback).expanduser().resolve())
+                    replica_rel = os.path.relpath(replica_folder, start=job_folder_path)
+                    if os.sep != "/":
+                        replica_rel = replica_rel.replace(os.sep, "/")
+                    shell_lines = [
+                        "(",
+                        f"  ROOT_DIR=\"${{{root_dir_env_var}:-{fallback_root}}}\"",
+                        f"  cd \"$ROOT_DIR/{replica_rel}\"",
+                        "  " + " ".join(shlex.quote(token) for token in python_cmd),
+                        ")",
+                    ]
+                else:
+                    shell_lines = [
+                        "(",
+                        f"  cd {shlex.quote(str(replica_folder))}",
+                        "  " + " ".join(shlex.quote(token) for token in python_cmd),
+                        ")",
+                    ]
+                commands.append("\n".join(shell_lines))
+
+        return commands
+
     def setUpGamdOpenMMSimulations(self, job_folder, replicas, simulation_time, ligand_charges=None, residue_names=None, ff='amber14',
                                    add_bonds=None, skip_ligands=None, ligand_only=None, metal_ligand=None, metal_parameters=None, skip_replicas=None,
                                    extra_frcmod=None, extra_mol2=None, dcd_report_time=100.0, data_report_time=100.0,

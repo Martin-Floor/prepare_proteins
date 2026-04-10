@@ -89,15 +89,22 @@ class openmm_md:
 
     def setUpFF(self, ff_name):
 
-        # Check forcefield
-        available_ffs = ['amber14']
-        if ff_name not in available_ffs:
-            raise ValueError(f'{ff_name} not found in available forcefields: {available_ffs}')
-        self.ff_name = ff_name
+        preset_ffs = {
+            'amber14': ['amber14-all.xml', 'amber14/tip3pfb.xml'],
+            'charmm36': ['charmm36.xml'],
+        }
 
-        # Define ff definition files
-        if self.ff_name == 'amber14':
-            self.ff_files = ['amber14-all.xml', 'amber14/tip3pfb.xml']
+        if isinstance(ff_name, (list, tuple)):
+            if len(ff_name) == 0:
+                raise ValueError('Custom forcefield file list must not be empty.')
+            self.ff_name = 'custom'
+            self.ff_files = [str(ff_file) for ff_file in ff_name]
+        else:
+            if ff_name not in preset_ffs:
+                available_ffs = sorted(preset_ffs)
+                raise ValueError(f'{ff_name} not found in available forcefields: {available_ffs}')
+            self.ff_name = ff_name
+            self.ff_files = preset_ffs[self.ff_name]
         self.forcefield = ForceField(*self.ff_files)
 
     def setPeriodicBoundaryConditions(self, radius=1.5):

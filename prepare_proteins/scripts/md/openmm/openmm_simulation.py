@@ -7,6 +7,7 @@ except Exception:  # pragma: no cover - fallback for older installs
     from simtk import unit as u
     from simtk.openmm.app import *
 import argparse
+import json
 import time
 import re
 import os
@@ -29,6 +30,7 @@ parser.add_argument('--npt_restraint_scaling_steps', type=int, default=50, help=
 parser.add_argument('--restraint_constant', type=float, default=100.0, help='Force constant for positional restraints (kcal/mol/Å²).')
 parser.add_argument('--equilibration_data_report_time', type=float, default=1.0, help='Data report interval during equilibration in ps.')
 parser.add_argument('--equilibration_dcd_report_time', type=float, default=0.0, help='DCD report interval during equilibration in ps (0 disables reporting).')
+parser.add_argument('--restraint_residue_pairs_json', help='Optional JSON file describing the heavy-atom restraint selection during equilibration. Accepted forms are [["A", 1], ["B", 2], ...], {"residue_pairs": [["A", 1], ...]}, or {"residue_ids": [1, 2, ...]} for topology-wide residue IDs. By default all heavy atoms are restrained.')
 parser.add_argument('--seed', type=int, help='Seed for initial velocities (int)')
 args = parser.parse_args()
 
@@ -90,6 +92,7 @@ try:
     restraint_constant = float(args.restraint_constant)
     equilibration_data_report_time = float(args.equilibration_data_report_time)
     equilibration_dcd_report_time = float(args.equilibration_dcd_report_time)
+    restraint_residue_pairs_json = args.restraint_residue_pairs_json
     seed = args.seed
 
     if (simulation_time <= 0 or chunk_size <= 0 or temperature <= 0 or time_step <= 0 or
@@ -110,8 +113,6 @@ try:
     equilibration_steps = nvt_steps + npt_steps
     equilibration_data_report_steps = _interval_to_steps(equilibration_data_report_time, time_step, "Equilibration data report time")
     equilibration_dcd_report_steps = _interval_to_steps(equilibration_dcd_report_time, time_step, "Equilibration DCD report time", allow_zero=True)
-    if equilibration_dcd_report_steps is None and equilibration_data_report_steps is not None:
-        equilibration_dcd_report_steps = equilibration_data_report_steps
     production_data_report_steps = _interval_to_steps(data_report_time, time_step, "Data report time")
     production_dcd_report_steps = _interval_to_steps(dcd_report_time, time_step, "DCD report time")
     nvt_step_schedule = _split_steps(nvt_steps, nvt_temp_scaling_steps, "NVT temperature scaling steps")
@@ -121,7 +122,75 @@ except ValueError as e:
     exit(1)
 
 
-def getHeavyAtoms(topology, exclude_solvent=True):
+def _normalize_chain_id(chain_id):
+    if chain_id is None:
+        return ""
+    return str(chain_id).strip()
+
+
+def _residue_pair_key(chain_id, residue_id):
+    chain = _normalize_chain_id(chain_id)
+    try:
+        residue = int(str(residue_id).strip())
+    except Exception as exc:
+        raise ValueError(f"Invalid residue ID in restraint selection: {residue_id!r}") from exc
+    return (chain, residue)
+
+
+def _normalize_residue_id(residue_id):
+    try:
+        return int(str(residue_id).strip())
+    except Exception as exc:
+        raise ValueError(f"Invalid residue ID in restraint selection: {residue_id!r}") from exc
+
+
+def _load_restraint_residue_pairs(json_path):
+    if json_path is None:
+        return None, None
+    with open(json_path, "r") as handle:
+        payload = json.load(handle)
+    residue_pairs = None
+    residue_ids = None
+    if isinstance(payload, dict):
+        if "residue_pairs" in payload:
+            pairs = payload["residue_pairs"]
+            if not isinstance(pairs, list):
+                raise ValueError("'residue_pairs' must be a list.")
+            residue_pairs = set()
+            for entry in pairs:
+                if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                    raise ValueError(f"Invalid restraint residue-pair entry: {entry!r}")
+                residue_pairs.add(_residue_pair_key(entry[0], entry[1]))
+        if "residue_ids" in payload:
+            ids = payload["residue_ids"]
+            if not isinstance(ids, list):
+                raise ValueError("'residue_ids' must be a list.")
+            residue_ids = {_normalize_residue_id(entry) for entry in ids}
+        if residue_pairs is None and residue_ids is None:
+            raise ValueError("Restraint selection JSON must contain 'residue_pairs' and/or 'residue_ids'.")
+    elif isinstance(payload, list):
+        residue_pairs = set()
+        for entry in payload:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                raise ValueError(f"Invalid restraint residue-pair entry: {entry!r}")
+            residue_pairs.add(_residue_pair_key(entry[0], entry[1]))
+    else:
+        raise ValueError("Restraint selection JSON must be a list or a dict.")
+    if residue_pairs is not None and not residue_pairs:
+        raise ValueError("Restraint selection JSON did not contain any valid residue pairs.")
+    if residue_ids is not None and not residue_ids:
+        raise ValueError("Restraint selection JSON did not contain any valid residue IDs.")
+    return residue_pairs, residue_ids
+
+
+try:
+    restraint_residue_pairs, restraint_residue_ids = _load_restraint_residue_pairs(restraint_residue_pairs_json)
+except ValueError as e:
+    print(f"Parameter error: {e}")
+    exit(1)
+
+
+def getHeavyAtoms(topology, exclude_solvent=True, residue_pairs=None, residue_ids=None):
     """Return non-hydrogen atoms, skipping water and common ions."""
     heavy_atoms = []
     ion_names = {"NA", "K", "CL", "MG", "CA", "ZN", "LI", "RB", "SR", "BA", "CU"}
@@ -134,6 +203,21 @@ def getHeavyAtoms(topology, exclude_solvent=True):
             continue
         if residue.name.upper() in ion_names:
             continue
+        residue_id = getattr(residue, "id", None)
+        if residue_pairs is not None or residue_ids is not None:
+            chain = getattr(getattr(residue, "chain", None), "id", None)
+            try:
+                pair = _residue_pair_key(chain, residue_id)
+            except ValueError:
+                continue
+            residue_number = pair[1]
+            selected = False
+            if residue_pairs is not None and pair in residue_pairs:
+                selected = True
+            if residue_ids is not None and residue_number in residue_ids:
+                selected = True
+            if not selected:
+                continue
         for atom in residue.atoms():
             element = getattr(atom, "element", None)
             symbol = getattr(element, "symbol", None)
@@ -142,7 +226,7 @@ def getHeavyAtoms(topology, exclude_solvent=True):
             heavy_atoms.append(atom)
     return heavy_atoms
 
-def addHeavyAtomsPositionalRestraintForce(system, positions, topology, restraint_constant, has_box):
+def addHeavyAtomsPositionalRestraintForce(system, positions, topology, restraint_constant, has_box, residue_pairs=None, residue_ids=None):
     """
     Add a positional restraint force for heavy atoms.
 
@@ -156,7 +240,7 @@ def addHeavyAtomsPositionalRestraintForce(system, positions, topology, restraint
     Returns:
     CustomExternalForce: The positional restraint force.
     """
-    heavy_atoms = getHeavyAtoms(topology)
+    heavy_atoms = getHeavyAtoms(topology, residue_pairs=residue_pairs, residue_ids=residue_ids)
     dist_expr = "periodicdistance(x, y, z, x0, y0, z0)" if has_box else "sqrt((x-x0)^2 + (y-y0)^2 + (z-z0)^2)"
     posres_force = omm.CustomExternalForce(f"k*{dist_expr}^2")
     force_constant = (
@@ -166,6 +250,9 @@ def addHeavyAtomsPositionalRestraintForce(system, positions, topology, restraint
     posres_force.addPerParticleParameter("x0")
     posres_force.addPerParticleParameter("y0")
     posres_force.addPerParticleParameter("z0")
+
+    if not heavy_atoms:
+        raise ValueError("No heavy atoms matched the requested positional-restraint selection.")
 
     for atom in heavy_atoms:
         posres_force.addParticle(atom.index, positions[atom.index].value_in_unit(u.nanometers))
@@ -511,7 +598,15 @@ try:
     else:
         print('\tAdding positional restraint force')
         # Add a restraint force to the system
-        posres_force = addHeavyAtomsPositionalRestraintForce(system, inpcrd.positions, prmtop.topology, restraint_constant, has_box)
+        posres_force = addHeavyAtomsPositionalRestraintForce(
+            system,
+            inpcrd.positions,
+            prmtop.topology,
+            restraint_constant,
+            has_box,
+            residue_pairs=restraint_residue_pairs,
+            residue_ids=restraint_residue_ids,
+        )
 
         # Set up equilibration reporters
         equilibration_reporter = CustomDataReporter(system, 'equilibration.data', equilibration_data_report_steps, step=True,

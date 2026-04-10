@@ -284,6 +284,64 @@ class OpenFFBackend(ParameterizationBackend):
                 return None
             return charges if length == mol.n_atoms else None
 
+        def _reorder_to_pose_atom_order(
+            ligand: Molecule,
+            *,
+            pose_path: Path,
+            resname: str,
+            sanitize_flags,
+        ) -> Molecule:
+            from rdkit import Chem
+            from rdkit.Chem import AllChem
+
+            template_rdmol = ligand.to_rdkit()
+            residue_pdb_mol = Chem.MolFromPDBFile(
+                str(pose_path),
+                removeHs=False,
+                sanitize=False,
+                proximityBonding=True,
+            )
+            if residue_pdb_mol is None or residue_pdb_mol.GetNumAtoms() != template_rdmol.GetNumAtoms():
+                return ligand
+            template_atomic_numbers = [atom.GetAtomicNum() for atom in template_rdmol.GetAtoms()]
+            pdb_atomic_numbers = [atom.GetAtomicNum() for atom in residue_pdb_mol.GetAtoms()]
+            if template_atomic_numbers == pdb_atomic_numbers:
+                return ligand
+
+            reordered_rdmol = AllChem.AssignBondOrdersFromTemplate(template_rdmol, residue_pdb_mol)
+            Chem.SanitizeMol(reordered_rdmol, sanitizeOps=sanitize_flags)
+
+            reordered_ligand = Molecule.from_rdkit(
+                reordered_rdmol,
+                allow_undefined_stereo=True,
+                hydrogens_are_explicit=True,
+            )
+            reordered_ligand.name = ligand.name
+            reordered_ligand.properties.update(ligand.properties)
+
+            partial_charges = _extract_partial_charges(ligand)
+            if partial_charges is None:
+                return reordered_ligand
+
+            match = reordered_rdmol.GetSubstructMatch(template_rdmol)
+            if len(match) != ligand.n_atoms:
+                warnings.warn(
+                    f"[prepare_proteins] Failed to remap cached partial charges for {resname}; "
+                    "reordered ligand will be returned without partial charges.",
+                    RuntimeWarning,
+                )
+                return reordered_ligand
+
+            charge_values = np.asarray(partial_charges.value_in_unit(u.elementary_charge), dtype=float)
+            reordered_charge_values = np.zeros(ligand.n_atoms, dtype=float)
+            for template_idx, reordered_idx in enumerate(match):
+                reordered_charge_values[reordered_idx] = charge_values[template_idx]
+            if off_unit is not None:  # pragma: no cover - requires openff.units
+                reordered_ligand.partial_charges = reordered_charge_values * off_unit.elementary_charge
+            else:
+                reordered_ligand.partial_charges = reordered_charge_values * u.elementary_charge
+            return reordered_ligand
+
         # ---- Process each ligand residue group
         ligand_molecules: Dict[str, Molecule] = {}
         residue_atom_names_map: Dict[str, list[str]] = {}
@@ -295,10 +353,11 @@ class OpenFFBackend(ParameterizationBackend):
             # Require a user-provided total charge for clarity and validation
             residue_charge = self._find_residue_charge(resname, provided_charges)
             if residue_charge is None:
-                raise ValueError(
-                    f"No total charge provided for ligand residue '{resname}'. "
-                    "Specify it via the 'ligand_charges' option when calling setUpOpenMMSimulations."
-                )
+                    raise ValueError(
+                        f"No total charge provided for ligand residue '{resname}'. "
+                        "Specify it via the 'ligand_charges' option when calling setUpOpenMMSimulations."
+                    )
+            sanitize_flags = None
 
             # Determine source (prefer SDF; use SMILES otherwise)
             sdf_entry = ligand_sdf_map.get(resname)
@@ -398,6 +457,38 @@ class OpenFFBackend(ParameterizationBackend):
                     base_ligand = lig
 
             base_ligand.properties.setdefault("residue_name", resname)
+            if sdf_entry is not None and sanitize_flags is not None:
+                try:
+                    base_ligand = _reorder_to_pose_atom_order(
+                        base_ligand,
+                        pose_path=pose_path,
+                        resname=resname,
+                        sanitize_flags=sanitize_flags,
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"[prepare_proteins] Failed to reorder {resname} to the residue PDB atom order: {exc}. "
+                        "Continuing with the template atom order.",
+                        RuntimeWarning,
+                    )
+            elif sdf_entry is not None:
+                from rdkit import Chem
+
+                sanitize_flags = Chem.SanitizeFlags.SANITIZE_ALL ^ Chem.SanitizeFlags.SANITIZE_ADJUSTHS
+                try:
+                    base_ligand = _reorder_to_pose_atom_order(
+                        base_ligand,
+                        pose_path=pose_path,
+                        resname=resname,
+                        sanitize_flags=sanitize_flags,
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        f"[prepare_proteins] Failed to reorder cached {resname} to the residue PDB atom order: {exc}. "
+                        "Continuing with the cached template atom order.",
+                        RuntimeWarning,
+                    )
+            cached_partial_charges = _extract_partial_charges(base_ligand)
 
             # ---- Validate user-provided total charge vs formal charge from the molecule
             try:

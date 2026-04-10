@@ -1,6 +1,20 @@
 from .alignment import alignTrajectoryBySequenceAlignment
 from .gromacs_files import mdp
 from . import parameterization
+from .polymer_builders import (
+    CelluloseCrystalChain,
+    CelluloseCrystalResidue,
+    CelluloseCrystalSurface,
+    CelluloseCrystalSurfaceResidue,
+    PolymerAtomTemplate,
+    PolymerBuildSpec,
+    PolymerBuilder,
+    PolymerChainSpec,
+    PolymerRepeatUnit,
+    PolymerResidueTemplate,
+    PolymerTemplate,
+    assign_pdb_chain_ids_by_ter,
+)
 try:
     import openmm
     from .openmm_setup import openmm_md
