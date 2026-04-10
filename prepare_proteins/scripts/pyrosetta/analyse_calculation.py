@@ -51,7 +51,13 @@ parser.add_argument('--energy_by_residue', action='store_true', default=False, h
 parser.add_argument('--interacting_residues', action='store_true', default=False, help='Calculate interacting neighbour residues')
 parser.add_argument('--protonation_states', action='store_true', default=False, help='Get the protonation states of a group of tritable residues.')
 parser.add_argument('--cpus', default=None, help='Number of CPUs for parallelization')
-parser.add_argument('--binding_energy', default=None, help='Calculate binding energy for the given chains.')
+parser.add_argument(
+    '--interface_metrics',
+    '--binding_energy',
+    dest='interface_metrics',
+    default=None,
+    help='Calculate Rosetta InterfaceAnalyzer metrics for the given chains or interface specifications.',
+)
 parser.add_argument('--query_residues',
                     help='Comma separated (no spaces) list of residues. Works together with --interacting_residues or --protonation_states')
 parser.add_argument('--decompose_bb_hb_into_pair_energies', action='store_true', default=False,
@@ -67,7 +73,7 @@ atom_pairs = args.atom_pairs
 energy_by_residue = args.energy_by_residue
 interacting_residues = args.interacting_residues
 protonation_states = args.protonation_states
-binding_energy = args.binding_energy
+interface_metrics = args.interface_metrics
 verbose = args.verbose
 overwrite = args.overwrite
 
@@ -84,9 +90,14 @@ if query_residues != None:
     query_residues = [int(r) for r in query_residues.split(',')]
 decompose_bb_hb_into_pair_energies = args.decompose_bb_hb_into_pair_energies
 
-if binding_energy != None:
-    binding_energy_chains = binding_energy.split(',')
-    binding_energy = True
+if interface_metrics is not None:
+    interface_specs = [spec.strip().upper() for spec in interface_metrics.split(',') if spec.strip()]
+    if not interface_specs:
+        raise ValueError(
+            "At least one non-empty interface specification must be provided to --interface_metrics."
+        )
+else:
+    interface_specs = None
 
 # Collect params directories before initializing PyRosetta
 params_dirs = _collect_param_dirs(rosetta_folder)
@@ -452,49 +463,6 @@ def deltaEMutation(pose, mutant_position, mutant_aa, by_residue=False,
 
     return De
 
-def calculateInterfaceScore(pose, target_chain):
-    """
-    Calculate interaface score for a specified jump.
-
-    Paramters
-    =========
-    pose : rosetta.
-
-    """
-
-    sfxn = get_fa_scorefxn()
-
-    interface_pose = pose.clone()
-
-    rosetta.core.scoring.constraints.remove_constraints_of_type(interface_pose, 'AtomPair')
-
-    jump_id = rosetta.core.pose.get_jump_id_from_chain(target_chain, interface_pose)
-    chain_id = rosetta.core.pose.get_chain_id_from_chain(target_chain, interface_pose)
-    chain_residues = rosetta.core.pose.get_chain_residues(interface_pose,chain_id)
-    chain_residues_id = [x.seqpos() for x in list(chain_residues)]
-    protein_residues_id = [r for r in range(1,interface_pose.total_residue()) if r not in  chain_residues_id]
-
-    chains_coor = getCoordinates(interface_pose,chain_residues_id)
-    protein_coor = getCoordinates(interface_pose, protein_residues_id)
-
-    chain_centroid = np.average(chains_coor, axis=0)
-    protein_centroid = np.average(protein_coor, axis=0)
-    vector =  chain_centroid - protein_centroid
-    vector = vector/np.linalg.norm(vector)
-    vector = rosetta.numeric.xyzVector_double_t(vector[0], vector[1], vector[2])
-
-    Ei = sfxn(interface_pose)
-
-    chain_mover = rosetta.protocols.rigid.RigidBodyTransMover()
-    chain_mover.trans_axis(vector)
-    chain_mover.step_size(1000)
-    chain_mover.rb_jump(jump_id)
-    chain_mover.apply(interface_pose)
-
-    Ef = sfxn(interface_pose)
-
-    return Ei-Ef
-
 def getCoordinates(pose, residues=None, bb_only=False, sc_only=False):
     """
     Get all the pose atoms coordinates. An optional list of residues can be given
@@ -551,16 +519,131 @@ def getCoordinates(pose, residues=None, bb_only=False, sc_only=False):
 
     return coordinates
 
-def _calculateBE(arguments):
-    # Compute binding energies for ALL requested chains for this tag
-    tag, chains, silent_file, params = arguments
+def _split_pose_tag(tag):
+    model_name = '_'.join(tag.split('_')[:-1])
+    pose_label = tag.split('_')[-1]
+    try:
+        pose_id = int(pose_label)
+    except ValueError:
+        pose_id = pose_label
+    return model_name, pose_id
+
+
+def _interface_metric_suffix(interface_spec):
+    suffix = ''.join(
+        char if (char.isalnum() or char == '_') else '_'
+        for char in str(interface_spec).strip().upper()
+    ).strip('_')
+    if not suffix:
+        raise ValueError(f"Invalid interface specification: {interface_spec!r}")
+    return suffix
+
+
+def _validate_interface_spec_for_pose(pose, interface_spec):
+    available_chains = {
+        rosetta.core.pose.get_chain_from_chain_id(chain_id, pose)
+        for chain_id in rosetta.core.pose.get_chains(pose)
+    }
+    requested_chains = {char for char in interface_spec if char != '_'}
+    missing = sorted(requested_chains - available_chains)
+    if missing:
+        raise ValueError(
+            f"Interface specification '{interface_spec}' references missing chain(s): "
+            f"{', '.join(missing)}. Available chains: {', '.join(sorted(available_chains))}"
+        )
+
+
+def _calculateInterfaceMetricsForSpec(pose, interface_spec):
+    interface_spec = str(interface_spec).strip().upper()
+    _validate_interface_spec_for_pose(pose, interface_spec)
+
+    sfxn = get_fa_scorefxn()
+    iam = rosetta.protocols.analysis.InterfaceAnalyzerMover(
+        interface_spec,
+        False,
+        sfxn,
+        True,
+        False,
+        False,
+        False,
+        False,
+    )
+    iam.set_calc_dSASA(True)
+    iam.set_compute_packstat(True)
+    iam.set_compute_interface_sc(True)
+    iam.set_compute_interface_delta_hbond_unsat(True)
+    iam.set_compute_separated_sasa(True)
+    iam.apply(pose)
+
+    data = iam.get_all_data()
+    suffix = _interface_metric_suffix(interface_spec)
+    interface_dg = iam.get_interface_dG()
+
+    return {
+        'interface_score_' + suffix: interface_dg,
+        'interface_dG_' + suffix: interface_dg,
+        'interface_delta_sasa_' + suffix: iam.get_interface_delta_sasa(),
+        'interface_packstat_' + suffix: iam.get_interface_packstat(),
+        'interface_delta_hbond_unsat_' + suffix: iam.get_interface_delta_hbond_unsat(),
+        'interface_nres_' + suffix: iam.get_num_interface_residues(),
+        'interface_hbonds_' + suffix: int(data.interface_hbonds),
+        'interface_sc_' + suffix: float(data.sc_value),
+        'interface_dG_dSASA_ratio_' + suffix: float(data.dG_dSASA_ratio),
+        'interface_total_hbond_E_' + suffix: iam.get_total_Hbond_E(),
+    }
+
+
+def _calculateInterfaceMetrics(arguments):
+    tag, interface_specs, silent_file, params = arguments
     pose = getPoseFromTag(tag, silent_file, params_dir=params)
 
-    be = {}
-    be['Model'], be['Pose'] = '_'.join(tag.split('_')[:-1]), tag.split('_')[-1]
-    for chain in chains:
-        be['interface_score_' + chain] = calculateInterfaceScore(pose, chain)
-    return be
+    model_name, pose_id = _split_pose_tag(tag)
+    interface_metrics = {'Model': model_name, 'Pose': pose_id}
+    for interface_spec in interface_specs:
+        try:
+            interface_metrics.update(
+                _calculateInterfaceMetricsForSpec(pose, interface_spec)
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to calculate interface metrics for interface '{interface_spec}' "
+                f"in pose '{tag}'."
+            ) from exc
+    return interface_metrics
+
+
+def _expected_interface_metric_columns(interface_specs):
+    columns = set()
+    for interface_spec in interface_specs:
+        suffix = _interface_metric_suffix(interface_spec)
+        columns.update(
+            {
+                'interface_score_' + suffix,
+                'interface_dG_' + suffix,
+                'interface_delta_sasa_' + suffix,
+                'interface_packstat_' + suffix,
+                'interface_delta_hbond_unsat_' + suffix,
+                'interface_nres_' + suffix,
+                'interface_hbonds_' + suffix,
+                'interface_sc_' + suffix,
+                'interface_dG_dSASA_ratio_' + suffix,
+                'interface_total_hbond_E_' + suffix,
+            }
+        )
+    return columns
+
+
+def _interface_metrics_csv_complete(csv_path, interface_specs):
+    if not os.path.exists(csv_path):
+        return False
+    expected_columns = _expected_interface_metric_columns(interface_specs)
+    if not expected_columns:
+        return True
+    try:
+        available_columns = set(pd.read_csv(csv_path, nrows=0).columns)
+    except Exception:
+        return False
+    return expected_columns.issubset(available_columns)
 
 def _calculateDistances(arguments):
     """
@@ -615,6 +698,12 @@ def _calculateEnergyByResidue(arguments):
 
     tag, silent_file, params = arguments
     pose = getPoseFromTag(tag, silent_file, params_dir=params)
+    model_name = '_'.join(tag.split('_')[:-1])
+    pose_label = tag.split('_')[-1]
+    try:
+        pose_id = int(pose_label)
+    except ValueError:
+        pose_id = pose_label
 
     residue_energies = getResidueEnergies(pose,
     decompose_bb_hb_into_pair_energies=decompose_bb_hb_into_pair_energies)
@@ -631,7 +720,8 @@ def _calculateEnergyByResidue(arguments):
         res = res_info.split()[0]
         chain = res_info.split()[1]
 
-        ebr['Model'], ebr['Pose'] = '_'.join(tag.split('_')[:-1]), tag.split('_')[-1]
+        ebr['Model'].append(model_name)
+        ebr['Pose'].append(pose_id)
         ebr['Chain'].append(chain)
         ebr['Residue'].append(res)
         for st in residue_energies:
@@ -757,11 +847,11 @@ scores_folder = rosetta_folder+'/.analysis/scores'
 if not os.path.exists(scores_folder):
     os.mkdir(scores_folder)
 
-# Create subfolder to binding energies
-if binding_energy:
-    binding_energy_folder = rosetta_folder+'/.analysis/binding_energy'
-    if not os.path.exists(binding_energy_folder):
-        os.mkdir(binding_energy_folder)
+# Create subfolder to store interface metrics
+if interface_specs:
+    interface_metrics_folder = rosetta_folder+'/.analysis/binding_energy'
+    if not os.path.exists(interface_metrics_folder):
+        os.mkdir(interface_metrics_folder)
 
 # Create subfolder to store distances
 if atom_pairs != None:
@@ -806,20 +896,17 @@ for model in silent_file:
         if verbose:
             print('\tScore file %s was found' % score_file)
 
-    if binding_energy:
-        binding_energy_file = binding_energy_folder+'/'+model+'.csv'
-        if overwrite or not os.path.exists(binding_energy_file):
-            be = {}
-            be['Model'] = []
-            be['Pose'] = []
-            for chain in binding_energy_chains:
-                be['interface_score_'+chain] = []
-
-            file_exists['be'] = False
+    if interface_specs:
+        interface_metrics_file = interface_metrics_folder+'/'+model+'.csv'
+        if overwrite or not _interface_metrics_csv_complete(interface_metrics_file, interface_specs):
+            interface_data = {}
+            interface_data['Model'] = []
+            interface_data['Pose'] = []
+            file_exists['interface_metrics'] = False
         else:
             if verbose:
-                print('\tBinding energy score file %s was found' % binding_energy_file)
-            file_exists['be'] = True
+                print('\tInterface metric score file %s was found' % interface_metrics_file)
+            file_exists['interface_metrics'] = True
 
     model_atom_pairs = None
     if atom_pairs != None:
@@ -907,7 +994,7 @@ for model in silent_file:
             print('\tAll calculations were completed for model %s' % model)
         continue
 
-    be_jobs = []
+    interface_jobs = []
     distance_jobs = []
     ebr_jobs = []
     neighbours_jobs = []
@@ -916,10 +1003,9 @@ for model in silent_file:
     # for pose in readPosesFromSilent(silent_file[model], params_dir=params):
     for tag in getTagsFromSilent(silent_file[model], params_dir=params):
 
-        # Calculate binding energy
-        if binding_energy and not file_exists['be']:
-            # one job per tag covering all chains
-            be_jobs.append([tag, binding_energy_chains, silent_file[model], params])
+        # Calculate interface metrics
+        if interface_specs and not file_exists['interface_metrics']:
+            interface_jobs.append([tag, interface_specs, silent_file[model], params])
 
         # Calculate distances
         if model_atom_pairs and not file_exists['distances']:
@@ -941,17 +1027,18 @@ for model in silent_file:
         cpus = cpu_count()
     pool = Pool(cpus)
 
-    if len(be_jobs) > 0:
+    if len(interface_jobs) > 0:
         if verbose:
-            print('\tCalculating %s binding energies' % len(be_jobs))
-        be_results = pool.map(_calculateBE, be_jobs)
+            print('\tCalculating %s interface metric sets' % len(interface_jobs))
+        interface_results = pool.map(_calculateInterfaceMetrics, interface_jobs)
 
-        for ber in be_results:
-            for k in ber:
-                be[k].append(ber[k])
+        for interface_result in interface_results:
+            for key, value in interface_result.items():
+                interface_data.setdefault(key, [])
+                interface_data[key].append(value)
 
-        be = pd.DataFrame(be)
-        be.to_csv(binding_energy_file, index=False)
+        interface_data = pd.DataFrame(interface_data)
+        interface_data.to_csv(interface_metrics_file, index=False)
 
     if len(distance_jobs) > 0:
         if verbose:
@@ -979,12 +1066,12 @@ for model in silent_file:
                 ebr.setdefault(k, [])
                 ebr[k] += ebr_result[k]
 
-        # Sort ebr data by residue index
-        for s in ebr:
-            ebr[s] = [x for _,x in sorted(zip(ebr['Residue'],ebr[s]))]
-
-        # Convert ebr dictionary to DataFrame
+        # Convert ebr dictionary to DataFrame and keep a deterministic row order
+        # without mixing chains that share the same residue number.
         ebr = pd.DataFrame(ebr)
+        ebr["_Pose_sort"] = pd.to_numeric(ebr["Pose"], errors="coerce")
+        sort_columns = ["Model", "_Pose_sort", "Pose", "Chain", "Residue"]
+        ebr = ebr.sort_values(sort_columns, kind="stable").drop(columns="_Pose_sort")
         ebr.to_csv(ebr_file, index=False)
 
     if len(neighbours_jobs) > 0:

@@ -511,6 +511,141 @@ def _normalize_relax_atom_pairs(atom_pairs: Dict[str, Any], rosetta_folder: str)
     return normalized
 
 
+def _normalize_interface_spec_list(
+    value: Optional[Union[str, Iterable[str]]],
+    *,
+    option_name: str,
+) -> Optional[List[str]]:
+    """
+    Normalise a user-provided interface specification list.
+
+    Accepted formats are a comma-separated string (``"B,A_B"``) or an iterable of
+    strings (``["B", "A_B"]``). A bare chain ID means "this chain versus the rest
+    of the pose", which matches how InterfaceAnalyzerMover behaves for simple dimers.
+    """
+
+    if value in (None, False):
+        return None
+
+    if value is True:
+        raise ValueError(
+            f"{option_name} requires one or more chain/interface specifications, "
+            "for example 'B' or 'A_B'."
+        )
+
+    if isinstance(value, str):
+        items = value.split(",")
+    else:
+        try:
+            items = list(value)
+        except TypeError as exc:
+            raise TypeError(
+                f"{option_name} must be a comma-separated string or an iterable of strings."
+            ) from exc
+
+    specs: List[str] = []
+    for item in items:
+        spec = str(item).strip().upper()
+        if spec:
+            specs.append(spec)
+
+    if not specs:
+        raise ValueError(
+            f"{option_name} requires at least one non-empty chain/interface specification."
+        )
+
+    return specs
+
+
+def _resolve_interface_specs(
+    interface_chains: Optional[Union[str, Iterable[str]]],
+    binding_energy: Optional[Union[str, Iterable[str], bool]],
+) -> Optional[List[str]]:
+    """
+    Resolve the canonical interface specification list, preserving the legacy
+    ``binding_energy`` argument as an alias for ``interface_chains``.
+    """
+
+    interface_specs = _normalize_interface_spec_list(
+        interface_chains,
+        option_name="interface_chains",
+    )
+    binding_specs = _normalize_interface_spec_list(
+        binding_energy,
+        option_name="binding_energy",
+    )
+
+    if interface_specs and binding_specs and interface_specs != binding_specs:
+        raise ValueError(
+            "binding_energy and interface_chains specify different interfaces. "
+            "Use only interface_chains, or provide the same values to both."
+        )
+
+    return interface_specs or binding_specs
+
+
+def _interface_metric_suffix(interface_spec: str) -> str:
+    """
+    Produce a stable column suffix from a Rosetta interface specification.
+    """
+
+    suffix = "".join(
+        char if (char.isalnum() or char == "_") else "_"
+        for char in str(interface_spec).strip().upper()
+    ).strip("_")
+
+    if not suffix:
+        raise ValueError(f"Invalid interface specification: {interface_spec!r}")
+
+    return suffix
+
+
+def _expected_interface_metric_columns(interface_specs: Iterable[str]) -> Set[str]:
+    """
+    Return the interface metric columns expected in a per-model analysis CSV.
+    """
+
+    columns: Set[str] = set()
+    for spec in interface_specs:
+        suffix = _interface_metric_suffix(spec)
+        columns.update(
+            {
+                f"interface_score_{suffix}",
+                f"interface_dG_{suffix}",
+                f"interface_delta_sasa_{suffix}",
+                f"interface_packstat_{suffix}",
+                f"interface_delta_hbond_unsat_{suffix}",
+                f"interface_nres_{suffix}",
+                f"interface_hbonds_{suffix}",
+                f"interface_sc_{suffix}",
+                f"interface_dG_dSASA_ratio_{suffix}",
+                f"interface_total_hbond_E_{suffix}",
+            }
+        )
+    return columns
+
+
+def _interface_metrics_csv_complete(csv_path: str, interface_specs: Iterable[str]) -> bool:
+    """
+    Return True when ``csv_path`` exists and already contains the full interface
+    metric set requested for ``interface_specs``.
+    """
+
+    if not os.path.exists(csv_path):
+        return False
+
+    expected_columns = _expected_interface_metric_columns(interface_specs)
+    if not expected_columns:
+        return True
+
+    try:
+        available_columns = set(pd.read_csv(csv_path, nrows=0).columns)
+    except Exception:
+        return False
+
+    return expected_columns.issubset(available_columns)
+
+
 def _prepare_expanded_atom_pairs(
     atom_pairs,
     docking_folder,
@@ -21785,6 +21920,7 @@ if __name__ == "__main__":
         skip_finished=False,
         pyrosetta_env=None,
         param_files=None,
+        interface_chains=None,
     ):
         """
         Analyse Rosetta calculation folder. The analysis reads the energies and calculate distances
@@ -21826,13 +21962,19 @@ if __name__ == "__main__":
         decompose_bb_hb_into_pair_energies : bool
             Store backbone hydrogen bonds in the energy graph on a per-residue basis (this doubles the
             number of calculations, so is off by default).
-        binding_energy : str
-            Comma-separated list of chains for which calculate the binding energy.
+        binding_energy : str, optional
+            Legacy alias for ``interface_chains``. Accepts a comma-separated list
+            of chain/interface specifications.
         pyrosetta_env : str, optional
             Name of the conda environment to activate before invoking the PyRosetta script.
         param_files : Union[str, Sequence[str]], optional
             Additional Rosetta params files or directories containing params files to
             mirror into `docking_folder/params` before running the PyRosetta analysis.
+        interface_chains : str or Sequence[str], optional
+            Chain/interface specifications to analyse with Rosetta's
+            InterfaceAnalyzerMover. A bare chain ID such as ``"B"`` means that
+            chain versus the rest of the pose; explicit interface strings such as
+            ``"A_B"`` are also accepted.
         """
 
         if not os.path.exists(rosetta_folder):
@@ -21865,12 +22007,57 @@ if __name__ == "__main__":
                 if os.path.abspath(destination) != abs_param:
                     shutil.copyfile(abs_param, destination)
 
+        interface_specs = _resolve_interface_specs(interface_chains, binding_energy)
+        interface_specs_arg = ",".join(interface_specs) if interface_specs else None
+
         atom_pairs_payload = None
         # Write atom_pairs dictionary to json file
         if atom_pairs is not None:
             atom_pairs_payload = _normalize_relax_atom_pairs(atom_pairs, rosetta_folder)
             with open(rosetta_folder + "/._atom_pairs.json", "w") as jf:
                 json.dump(atom_pairs_payload, jf)
+
+        analysis_folder = os.path.join(rosetta_folder, ".analysis")
+
+        def _model_analysis_complete(model_name: str) -> bool:
+            scores_csv = os.path.join(analysis_folder, "scores", f"{model_name}.csv")
+            if not os.path.exists(scores_csv):
+                return False
+
+            if interface_specs:
+                interface_csv = os.path.join(
+                    analysis_folder, "binding_energy", f"{model_name}.csv"
+                )
+                if not _interface_metrics_csv_complete(interface_csv, interface_specs):
+                    return False
+
+            if atom_pairs_payload is not None and atom_pairs_payload.get(str(model_name)):
+                distances_csv = os.path.join(
+                    analysis_folder, "distances", f"{model_name}.csv"
+                )
+                if not os.path.exists(distances_csv):
+                    return False
+
+            if energy_by_residue:
+                ebr_csv = os.path.join(analysis_folder, "ebr", f"{model_name}.csv")
+                if not os.path.exists(ebr_csv):
+                    return False
+
+            if interacting_residues:
+                neighbours_csv = os.path.join(
+                    analysis_folder, "neighbours", f"{model_name}.csv"
+                )
+                if not os.path.exists(neighbours_csv):
+                    return False
+
+            if protonation_states:
+                protonation_csv = os.path.join(
+                    analysis_folder, "protonation", f"{model_name}.csv"
+                )
+                if not os.path.exists(protonation_csv):
+                    return False
+
+            return True
 
         # Copy analyse docking script (it depends on Schrodinger Python API so we leave it out to minimise dependencies)
         _copyScriptFile(rosetta_folder, "analyse_calculation.py", subfolder="pyrosetta")
@@ -21884,8 +22071,8 @@ if __name__ == "__main__":
             + " "
         )
 
-        if binding_energy:
-            command += "--binding_energy " + binding_energy + " "
+        if interface_specs_arg:
+            command += "--interface_metrics " + interface_specs_arg + " "
         if atom_pairs_payload is not None:
             command += "--atom_pairs " + rosetta_folder + "/._atom_pairs.json "
         if return_jobs:
@@ -21921,7 +22108,7 @@ if __name__ == "__main__":
                     print(f'Silent file for model {m} was not found!')
                     continue
 
-                if skip_finished and not overwrite and os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
+                if skip_finished and not overwrite and _model_analysis_complete(m):
                     continue
 
                 job_command = command.replace("MODEL", m)
@@ -21946,7 +22133,7 @@ if __name__ == "__main__":
                 if silent_file is None:
                     print(f'Silent file for model {m} was not found!')
                     continue
-                if not os.path.exists(f'{rosetta_folder}/.analysis/scores/{m}.csv'):
+                if not _model_analysis_complete(m):
                     count += 1
 
             if count or overwrite:
@@ -21965,10 +22152,7 @@ if __name__ == "__main__":
         self.rosetta_ebr = []
         self.rosetta_neighbours = []
         self.rosetta_protonation = []
-        binding_energy_df = []
-
-        output_folder = '.analysis'
-        analysis_folder = rosetta_folder + '/'+output_folder
+        interface_metrics_df = []
         for model in self:
 
             # Read scores
@@ -21977,11 +22161,11 @@ if __name__ == "__main__":
             if os.path.exists(scores_csv):
                 self.rosetta_data.append(pd.read_csv(scores_csv))
 
-            # Read binding energies
+            # Read interface metrics
             be_folder = analysis_folder + "/binding_energy"
             be_csv = be_folder + "/" + model + ".csv"
             if os.path.exists(be_csv):
-                binding_energy_df.append(pd.read_csv(be_csv))
+                interface_metrics_df.append(pd.read_csv(be_csv))
 
             # Read distances
             distances_folder = analysis_folder + "/distances"
@@ -22014,22 +22198,19 @@ if __name__ == "__main__":
         self.rosetta_data = pd.concat(self.rosetta_data)
         self.rosetta_data.set_index(["Model", "Pose"], inplace=True)
 
-        if binding_energy:
+        if interface_specs:
+            if not interface_metrics_df:
+                raise ValueError(
+                    "Interface metrics were requested but no interface metric output "
+                    f"was found in {analysis_folder}/binding_energy."
+                )
 
-            binding_energy_df = pd.concat(binding_energy_df)
-            binding_energy_df.set_index(["Model", "Pose"], inplace=True)
-
-            # Add interface scores to rosetta_data
-            for score in binding_energy_df:
-                index_value_map = {}
-                for i, v in binding_energy_df.iterrows():
-                    index_value_map[i] = v[score]
-
-                values = []
-                for i in self.rosetta_data.index:
-                    values.append(index_value_map[i])
-
-                self.rosetta_data[score] = values
+            interface_metrics_df = pd.concat(interface_metrics_df)
+            interface_metrics_df.set_index(["Model", "Pose"], inplace=True)
+            interface_metrics_df = interface_metrics_df[
+                ~interface_metrics_df.index.duplicated(keep="last")
+            ]
+            self.rosetta_data = self.rosetta_data.join(interface_metrics_df, how="left")
 
         if energy_by_residue and self.rosetta_ebr != []:
             self.rosetta_ebr = pd.concat(self.rosetta_ebr)
