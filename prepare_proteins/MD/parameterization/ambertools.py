@@ -13,4 +13,8 @@ class AmberToolsBackend(ParameterizationBackend):
     def prepare_model(self, openmm_md, parameters_folder: str, **kwargs: Any) -> ParameterizationResult:
         kwargs.pop("verbose", None)
         openmm_md.parameterizePDBLigands(parameters_folder, **kwargs)
-        return self.describe_model(openmm_md)
+        result = self.describe_model(openmm_md)
+        mcpb_config = getattr(openmm_md, "mcpb_config", None)
+        if mcpb_config:
+            result.metadata["mcpb_config"] = mcpb_config
+        return result

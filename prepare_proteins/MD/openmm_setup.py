@@ -20,6 +20,7 @@ OPENMM_IMPORT_ERROR = _OPENMM_IMPORT_ERROR
 from Bio.PDB.Polypeptide import aa3
 
 import io
+import json
 import numpy as np
 from sys import stdout
 from collections import defaultdict
@@ -46,9 +47,29 @@ def _ensure_openmm(feature: str = "OpenMM functionality") -> None:
             "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
         ) from OPENMM_IMPORT_ERROR
 
-aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYX', 'ACE', 'NME']
+aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYM', 'CYX', 'ACE', 'NME']
 ions = ['MG', 'NA', 'CL', 'CU']
 aa3 += ions
+
+_SUPPORTED_MEMBRANE_LIPIDS = {
+    "POPC": {
+        "openmm_lipid_type": "POPC",
+        "tleap_sources": ("oldff/leaprc.lipid17",),
+        "skip_residue_names": ("POPC", "POP"),
+    }
+}
+_SUPPORTED_MEMBRANE_ORIENTATION_MODES = {"as_is", "use_oriented_pdb"}
+
+_MCPB_STRUCTURE_RESIDUE_ALIASES = {
+    "ASH": ("ASP",),
+    "CYM": ("CYS",),
+    "CYX": ("CYS",),
+    "GLH": ("GLU",),
+    "HID": ("HIS",),
+    "HIE": ("HIS",),
+    "HIP": ("HIS",),
+    "LYN": ("LYS",),
+}
 
 
 def _copyfile_if_needed(src, dst):
@@ -60,6 +81,75 @@ def _copyfile_if_needed(src, dst):
         # Destination does not exist yet, fall back to regular copy.
         pass
     shutil.copyfile(src, dst)
+
+
+def _normalize_membrane_system(membrane_system):
+    """Validate and normalize membrane builder options."""
+    if membrane_system is None:
+        return None
+    if not isinstance(membrane_system, Mapping):
+        raise TypeError("membrane_system must be a mapping of membrane builder options.")
+
+    lipid_type = str(membrane_system.get("lipid_type", "POPC")).strip().upper()
+    if lipid_type not in _SUPPORTED_MEMBRANE_LIPIDS:
+        supported = ", ".join(sorted(_SUPPORTED_MEMBRANE_LIPIDS))
+        raise ValueError(
+            f"Unsupported lipid_type {lipid_type!r}. Supported phase-1 membrane lipids: {supported}."
+        )
+
+    orientation_mode = str(membrane_system.get("orientation_mode", "as_is")).strip().lower()
+    if orientation_mode not in _SUPPORTED_MEMBRANE_ORIENTATION_MODES:
+        supported = ", ".join(sorted(_SUPPORTED_MEMBRANE_ORIENTATION_MODES))
+        raise ValueError(
+            f"Unsupported membrane orientation_mode {orientation_mode!r}. Supported values: {supported}."
+        )
+
+    minimum_padding_nm = float(membrane_system.get("minimum_padding_nm", 1.0))
+    if minimum_padding_nm <= 0.0:
+        raise ValueError("membrane_system minimum_padding_nm must be > 0.")
+
+    membrane_center_z_nm = float(membrane_system.get("membrane_center_z_nm", 0.0))
+    ionic_strength_molar = float(membrane_system.get("ionic_strength_molar", 0.15))
+    if ionic_strength_molar < 0.0:
+        raise ValueError("membrane_system ionic_strength_molar must be >= 0.")
+    build_retries = int(membrane_system.get("build_retries", 1))
+    if build_retries < 1:
+        raise ValueError("membrane_system build_retries must be >= 1.")
+
+    positive_ion = str(membrane_system.get("positive_ion", "Na+")).strip()
+    negative_ion = str(membrane_system.get("negative_ion", "Cl-")).strip()
+    if not positive_ion or not negative_ion:
+        raise ValueError("membrane_system positive_ion and negative_ion must be non-empty.")
+
+    exclude_chain_ids_raw = membrane_system.get("exclude_chain_ids", ())
+    if exclude_chain_ids_raw is None:
+        exclude_chain_ids = ()
+    elif isinstance(exclude_chain_ids_raw, str):
+        exclude_chain_ids = (exclude_chain_ids_raw.strip(),) if exclude_chain_ids_raw.strip() else ()
+    else:
+        try:
+            exclude_chain_ids = tuple(
+                chain_id.strip()
+                for chain_id in exclude_chain_ids_raw
+                if str(chain_id).strip()
+            )
+        except TypeError as exc:
+            raise TypeError("membrane_system exclude_chain_ids must be a string or an iterable of chain ids.") from exc
+
+    normalized = {
+        "lipid_type": lipid_type,
+        "orientation_mode": orientation_mode,
+        "minimum_padding_nm": minimum_padding_nm,
+        "membrane_center_z_nm": membrane_center_z_nm,
+        "ionic_strength_molar": ionic_strength_molar,
+        "build_retries": build_retries,
+        "positive_ion": positive_ion,
+        "negative_ion": negative_ion,
+        "neutralize": bool(membrane_system.get("neutralize", True)),
+        "exclude_chain_ids": exclude_chain_ids,
+    }
+    normalized.update(_SUPPORTED_MEMBRANE_LIPIDS[lipid_type])
+    return normalized
 
 
 def _run_command(command, command_log=None):
@@ -74,6 +164,967 @@ def _run_command(command, command_log=None):
     return ret
 
 
+def _normalize_residue_id(value):
+    """Return a residue identifier preserving integers when possible."""
+    if value is None:
+        raise ValueError("Residue identifier cannot be None.")
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Residue identifier cannot be empty.")
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def _normalize_optional_residue_name(value):
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    return text or None
+
+
+def _mcpb_structure_residue_candidates(residue_name, structure_residue_name=None):
+    candidates = []
+    if structure_residue_name:
+        candidates.append(str(structure_residue_name).strip().upper())
+    residue_name = str(residue_name).strip().upper()
+    if residue_name:
+        candidates.append(residue_name)
+        candidates.extend(_MCPB_STRUCTURE_RESIDUE_ALIASES.get(residue_name, ()))
+    return _ordered_unique([candidate for candidate in candidates if candidate])
+
+
+def _normalize_mcpb_atom_spec(atom_spec, label="atom"):
+    """Normalize an MCPB atom specification into a canonical mapping."""
+    role = None
+    structure_residue_name = None
+    if isinstance(atom_spec, Mapping):
+        chain_id = atom_spec.get("chain_id", atom_spec.get("chain"))
+        residue_id = atom_spec.get("residue_id", atom_spec.get("resid", atom_spec.get("residue")))
+        residue_name = atom_spec.get("residue_name", atom_spec.get("resname"))
+        structure_residue_name = _normalize_optional_residue_name(
+            atom_spec.get(
+                "structure_residue_name",
+                atom_spec.get(
+                    "structure_resname",
+                    atom_spec.get("input_residue_name", atom_spec.get("input_resname")),
+                ),
+            )
+        )
+        atom_name = atom_spec.get("atom_name", atom_spec.get("atom"))
+        role = atom_spec.get("role")
+    elif isinstance(atom_spec, (tuple, list)) and len(atom_spec) == 4:
+        chain_id, residue_id, residue_name, atom_name = atom_spec
+    else:
+        raise TypeError(
+            f"{label} must be a mapping or a 4-item sequence "
+            "(chain_id, residue_id, residue_name, atom_name)."
+        )
+
+    if chain_id is None:
+        raise ValueError(f"{label} is missing 'chain_id'.")
+    if residue_name is None:
+        raise ValueError(f"{label} is missing 'residue_name'.")
+    if atom_name is None:
+        raise ValueError(f"{label} is missing 'atom_name'.")
+
+    chain_text = str(chain_id).strip()
+    residue_name_text = str(residue_name).strip().upper()
+    atom_name_text = str(atom_name).strip().upper()
+    if not chain_text:
+        raise ValueError(f"{label} chain_id cannot be empty.")
+    if not residue_name_text:
+        raise ValueError(f"{label} residue_name cannot be empty.")
+    if not atom_name_text:
+        raise ValueError(f"{label} atom_name cannot be empty.")
+
+    normalized = {
+        "chain_id": chain_text,
+        "residue_id": _normalize_residue_id(residue_id),
+        "residue_name": residue_name_text,
+        "atom_name": atom_name_text,
+        "lookup_residue_names": _mcpb_structure_residue_candidates(
+            residue_name_text,
+            structure_residue_name=structure_residue_name,
+        ),
+    }
+    if structure_residue_name is not None:
+        normalized["structure_residue_name"] = structure_residue_name
+    if role is not None:
+        role_text = str(role).strip()
+        if role_text:
+            normalized["role"] = role_text
+    return normalized
+
+
+def _normalize_mcpb_site(site_spec, index):
+    """Normalize a single MCPB site definition."""
+    if not isinstance(site_spec, Mapping):
+        raise TypeError("Each MCPB site definition must be a mapping.")
+
+    site_id = site_spec.get("site_id", site_spec.get("id"))
+    if site_id is None:
+        site_id = f"site_{index}"
+    site_id = str(site_id).strip()
+    if not site_id:
+        raise ValueError("MCPB site_id cannot be empty.")
+
+    metal_spec = site_spec.get("metal", site_spec.get("metal_atom"))
+    if metal_spec is None:
+        raise ValueError(f"MCPB site '{site_id}' is missing the 'metal' atom specification.")
+
+    coordinating_atoms = (
+        site_spec.get("coordinating_atoms")
+        or site_spec.get("ligating_atoms")
+        or site_spec.get("coordinators")
+        or site_spec.get("atoms")
+    )
+    if coordinating_atoms is None:
+        raise ValueError(
+            f"MCPB site '{site_id}' is missing 'coordinating_atoms'."
+        )
+    if not isinstance(coordinating_atoms, (list, tuple)):
+        raise TypeError(f"MCPB site '{site_id}' coordinating_atoms must be a list or tuple.")
+    if not coordinating_atoms:
+        raise ValueError(f"MCPB site '{site_id}' must define at least one coordinating atom.")
+
+    cut_off = site_spec.get("cut_off", 2.8)
+    try:
+        cut_off = float(cut_off)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"MCPB site '{site_id}' cut_off must be numeric.") from exc
+
+    normalized_site = {
+        "site_id": site_id,
+        "group_name": str(site_spec.get("group_name", site_id)).strip() or site_id,
+        "metal": _normalize_mcpb_atom_spec(metal_spec, label=f"MCPB site '{site_id}' metal"),
+        "coordinating_atoms": [
+            _normalize_mcpb_atom_spec(atom_spec, label=f"MCPB site '{site_id}' coordinating atom {atom_index + 1}")
+            for atom_index, atom_spec in enumerate(coordinating_atoms)
+        ],
+        "cut_off": cut_off,
+    }
+    if "notes" in site_spec and site_spec["notes"] is not None:
+        normalized_site["notes"] = str(site_spec["notes"])
+    return normalized_site
+
+
+def _normalize_mcpb_config(mcpb_config):
+    """Normalize the public MCPB configuration into a stable internal structure."""
+    if not mcpb_config:
+        return None
+
+    if isinstance(mcpb_config, Mapping) and "sites" in mcpb_config:
+        sites = mcpb_config["sites"]
+        top_level_notes = mcpb_config.get("notes")
+    elif isinstance(mcpb_config, Mapping):
+        sites = [mcpb_config]
+        top_level_notes = None
+    elif isinstance(mcpb_config, (list, tuple)):
+        sites = list(mcpb_config)
+        top_level_notes = None
+    else:
+        raise TypeError(
+            "mcpb_config must be a site mapping, a list of site mappings, or a mapping with a 'sites' entry."
+        )
+
+    if not sites:
+        raise ValueError("mcpb_config must contain at least one site.")
+
+    normalized = {
+        "sites": [_normalize_mcpb_site(site_spec, index + 1) for index, site_spec in enumerate(sites)]
+    }
+    if top_level_notes is not None:
+        normalized["notes"] = str(top_level_notes)
+    return normalized
+
+
+def _iter_topology_atoms(topology):
+    for chain in topology.chains():
+        for residue in chain.residues():
+            residue_atoms = list(residue.atoms())
+            normalized_residue_id = _normalize_residue_id(residue.id)
+            for atom in residue_atoms:
+                yield {
+                    "chain_id": chain.id,
+                    "residue_id": normalized_residue_id,
+                    "residue_name": residue.name.upper(),
+                    "atom_name": atom.name.strip().upper(),
+                    "atom_index": atom.index,
+                    "element": (
+                        getattr(getattr(atom, "element", None), "symbol", None)
+                        or getattr(getattr(atom, "element", None), "name", None)
+                        or atom.name[:1]
+                    ).upper(),
+                    "residue_atom_count": len(residue_atoms),
+                }
+
+
+def _position_to_angstrom(position):
+    if hasattr(position, "value_in_unit"):
+        values = position.value_in_unit(nanometer)
+    else:
+        values = position
+    arr = np.asarray(values, dtype=float)
+    if arr.shape != (3,):
+        raise ValueError(f"Expected 3D position, got shape {arr.shape}.")
+    return arr * 10.0
+
+
+def _resolve_mcpb_config(topology, positions, mcpb_config):
+    """Validate and enrich MCPB site definitions against a topology."""
+    normalized = _normalize_mcpb_config(mcpb_config)
+    if normalized is None:
+        return None
+
+    atom_lookup = {}
+    residue_lookup = defaultdict(list)
+    for atom_record in _iter_topology_atoms(topology):
+        key = (
+            atom_record["chain_id"],
+            atom_record["residue_id"],
+            atom_record["residue_name"],
+            atom_record["atom_name"],
+        )
+        atom_lookup[key] = atom_record
+        residue_key = (
+            atom_record["chain_id"],
+            atom_record["residue_id"],
+            atom_record["residue_name"],
+        )
+        residue_lookup[residue_key].append(atom_record)
+
+    positions_angstrom = None
+    if positions is not None:
+        try:
+            positions_angstrom = [_position_to_angstrom(position) for position in positions]
+        except Exception:
+            positions_angstrom = None
+
+    resolved_sites = []
+    for site in normalized["sites"]:
+        resolved_site = dict(site)
+        metal_record = _resolve_mcpb_atom_record(
+            atom_lookup,
+            dict(site["metal"]),
+            site["site_id"],
+            "metal atom",
+        )
+        metal_record["is_embedded_metal"] = metal_record["residue_atom_count"] > 1
+        if positions_angstrom is not None:
+            metal_record["position_angstrom"] = positions_angstrom[metal_record["atom_index"]].tolist()
+        resolved_site["metal"] = metal_record
+
+        resolved_coordinating_atoms = []
+        site_residues = {
+            (
+                metal_record["chain_id"],
+                metal_record["residue_id"],
+                metal_record["residue_name"],
+            )
+        }
+        for atom_spec in site["coordinating_atoms"]:
+            atom_record = _resolve_mcpb_atom_record(
+                atom_lookup,
+                dict(atom_spec),
+                site["site_id"],
+                "coordinating atom",
+            )
+            if positions_angstrom is not None:
+                atom_record["position_angstrom"] = positions_angstrom[atom_record["atom_index"]].tolist()
+                metal_pos = positions_angstrom[metal_record["atom_index"]]
+                atom_pos = positions_angstrom[atom_record["atom_index"]]
+                atom_record["distance_to_metal_angstrom"] = float(np.linalg.norm(atom_pos - metal_pos))
+            resolved_coordinating_atoms.append(atom_record)
+            site_residues.add(
+                (
+                    atom_record["chain_id"],
+                    atom_record["residue_id"],
+                    atom_record["residue_name"],
+                )
+            )
+
+        resolved_site["coordinating_atoms"] = resolved_coordinating_atoms
+        resolved_site["embedded_metal"] = bool(metal_record["is_embedded_metal"])
+        resolved_site["legacy_compatible"] = not resolved_site["embedded_metal"]
+        resolved_site["residues"] = [
+            {
+                "chain_id": residue_key[0],
+                "residue_id": residue_key[1],
+                "residue_name": residue_key[2],
+                "atom_count": len(residue_lookup[residue_key]),
+            }
+            for residue_key in sorted(site_residues, key=lambda item: (item[0], str(item[1]), item[2]))
+        ]
+        resolved_sites.append(resolved_site)
+
+    normalized["sites"] = resolved_sites
+    normalized["contains_embedded_metal"] = any(site["embedded_metal"] for site in resolved_sites)
+    normalized["legacy_compatible"] = all(site["legacy_compatible"] for site in resolved_sites)
+    return normalized
+
+
+def _legacy_metal_ligand_from_mcpb_config(resolved_mcpb_config):
+    """Best-effort conversion of validated MCPB sites to the legacy metal_ligand API."""
+    if not resolved_mcpb_config or not resolved_mcpb_config.get("legacy_compatible", False):
+        return None
+
+    legacy = defaultdict(list)
+    for site in resolved_mcpb_config["sites"]:
+        metal_residue_name = site["metal"]["residue_name"]
+        for atom_record in site["coordinating_atoms"]:
+            residue_name = atom_record["residue_name"]
+            if atom_record.get("is_protein_residue", residue_name in aa3):
+                continue
+            if residue_name == metal_residue_name:
+                continue
+            if metal_residue_name not in legacy[residue_name]:
+                legacy[residue_name].append(metal_residue_name)
+    return dict(legacy)
+
+
+def _ordered_unique(values):
+    ordered = []
+    seen = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def _resolve_residue_parameter_file(residue_name, registered_files, par_folder, parameters_folder, extension):
+    """Return the primary parameter file for `residue_name` if it exists."""
+    residue_name = str(residue_name).upper()
+    for path in registered_files.get(residue_name, []):
+        if path and os.path.exists(path):
+            return path
+
+    if residue_name in par_folder:
+        candidate = os.path.join(par_folder[residue_name], f"{residue_name}{extension}")
+        if os.path.exists(candidate):
+            return candidate
+
+    candidate = os.path.join(parameters_folder, f"{residue_name}{extension}")
+    if os.path.exists(candidate):
+        return candidate
+    return None
+
+
+def _build_site_driven_mcpb_inputs(
+    resolved_mcpb_config,
+    par_folder,
+    residue_mol2_files,
+    residue_frcmod_files,
+    parameters_folder,
+    pdb_name,
+):
+    """Build MCPB input metadata from validated atom-level MCPB site definitions."""
+    if not resolved_mcpb_config:
+        return None
+
+    sites = resolved_mcpb_config.get("sites", [])
+    if not sites:
+        raise ValueError("resolved_mcpb_config does not contain any sites.")
+
+    ion_ids = []
+    bonded_pairs = []
+    bonded_pair_seen = set()
+    selected_residue_names = []
+    non_protein_site_residues = []
+    staged_residue_names = []
+    ion_mol2_files = []
+
+    cutoffs = []
+    for site in sites:
+        cutoffs.append(float(site.get("cut_off", 2.8)))
+
+        metal_record = site["metal"]
+        metal_residue_name = metal_record["residue_name"].upper()
+        ion_ids.append(metal_record["atom_index"] + 1)
+        if metal_residue_name not in aa3:
+            staged_residue_names.append(metal_residue_name)
+
+        if metal_residue_name not in aa3 and metal_record.get("is_embedded_metal", False):
+            selected_residue_names.append(metal_residue_name)
+            non_protein_site_residues.append(metal_residue_name)
+        elif metal_residue_name not in aa3:
+            metal_mol2 = _resolve_residue_parameter_file(
+                metal_residue_name,
+                residue_mol2_files,
+                par_folder,
+                parameters_folder,
+                ".mol2",
+            )
+            if metal_mol2 is not None:
+                ion_mol2_files.append(f"{metal_residue_name}.mol2")
+
+        for atom_record in site["coordinating_atoms"]:
+            residue_name = atom_record["residue_name"].upper()
+            pair = (metal_record["atom_index"] + 1, atom_record["atom_index"] + 1)
+            if pair not in bonded_pair_seen:
+                bonded_pair_seen.add(pair)
+                bonded_pairs.append(pair)
+            if atom_record.get("is_protein_residue", residue_name in aa3):
+                continue
+            selected_residue_names.append(residue_name)
+            non_protein_site_residues.append(residue_name)
+            staged_residue_names.append(residue_name)
+
+    selected_residue_names = _ordered_unique(selected_residue_names)
+    non_protein_site_residues = _ordered_unique(non_protein_site_residues)
+    staged_residue_names = _ordered_unique(staged_residue_names)
+    ion_ids = _ordered_unique(ion_ids)
+    ion_mol2_files = _ordered_unique(ion_mol2_files)
+
+    missing_mol2 = []
+    naa_mol2_files = []
+    for residue_name in non_protein_site_residues:
+        mol2_path = _resolve_residue_parameter_file(
+            residue_name,
+            residue_mol2_files,
+            par_folder,
+            parameters_folder,
+            ".mol2",
+        )
+        if mol2_path is None:
+            missing_mol2.append(residue_name)
+            continue
+        naa_mol2_files.append(f"{residue_name}.mol2")
+
+    if missing_mol2:
+        raise ValueError(
+            "MCPB site-driven setup requires MOL2 files for the selected non-protein site residues. "
+            f"Missing mol2 files for: {', '.join(sorted(missing_mol2))}."
+        )
+
+    missing_frcmod = []
+    frcmod_files = []
+    for residue_name in non_protein_site_residues:
+        frcmod_path = _resolve_residue_parameter_file(
+            residue_name,
+            residue_frcmod_files,
+            par_folder,
+            parameters_folder,
+            ".frcmod",
+        )
+        if frcmod_path is None:
+            missing_frcmod.append(residue_name)
+            continue
+        frcmod_files.append(f"{residue_name}.frcmod")
+
+    if missing_frcmod:
+        raise ValueError(
+            "MCPB site-driven setup requires frcmod files for the selected non-protein site residues. "
+            f"Missing frcmod files for: {', '.join(sorted(missing_frcmod))}."
+        )
+
+    unique_cutoffs = sorted({round(cutoff, 6) for cutoff in cutoffs})
+    if len(unique_cutoffs) > 1:
+        warnings.warn(
+            "Multiple MCPB site cutoffs were provided. Using the largest value for the combined MCPB input file.",
+            RuntimeWarning,
+        )
+
+    return {
+        "group_name": pdb_name,
+        "cut_off": max(cutoffs) if cutoffs else 2.8,
+        "ion_ids": ion_ids,
+        "ion_mol2files": ion_mol2_files,
+        "naa_mol2files": naa_mol2_files,
+        "frcmod_files": frcmod_files,
+        "add_bonded_pairs": bonded_pairs,
+        "site_residue_names": non_protein_site_residues,
+        "staged_residue_names": staged_residue_names,
+        "selected_residue_names": selected_residue_names,
+    }
+
+
+def _collect_mcpb_nonprotein_residue_selection(resolved_mcpb_config):
+    """Collect exact non-protein residue instances selected by mcpb_config."""
+    selection = {
+        "keys": [],
+        "names": [],
+        "entries": [],
+        "embedded_residue_names": [],
+        "duplicate_names": {},
+    }
+    if not resolved_mcpb_config:
+        return selection
+
+    entry_by_key = {}
+    ordered_keys = []
+    for site in resolved_mcpb_config.get("sites", []):
+        for atom_record in [site["metal"], *site["coordinating_atoms"]]:
+            residue_name = atom_record["residue_name"].upper()
+            if atom_record.get("is_protein_residue", residue_name in aa3):
+                continue
+            residue_key = (
+                atom_record["chain_id"],
+                atom_record["residue_id"],
+                residue_name,
+            )
+            entry = entry_by_key.get(residue_key)
+            if entry is None:
+                entry = {
+                    "chain_id": atom_record["chain_id"],
+                    "residue_id": atom_record["residue_id"],
+                    "residue_name": residue_name,
+                    "contains_embedded_metal": False,
+                }
+                entry_by_key[residue_key] = entry
+                ordered_keys.append(residue_key)
+            if atom_record.get("is_embedded_metal", False):
+                entry["contains_embedded_metal"] = True
+
+    ordered_entries = [entry_by_key[key] for key in ordered_keys]
+    duplicate_names = defaultdict(list)
+    embedded_residue_names = []
+    for entry in ordered_entries:
+        duplicate_names[entry["residue_name"]].append(entry)
+        if entry["contains_embedded_metal"] and entry["residue_name"] not in embedded_residue_names:
+            embedded_residue_names.append(entry["residue_name"])
+
+    selection["keys"] = ordered_keys
+    selection["names"] = _ordered_unique([entry["residue_name"] for entry in ordered_entries])
+    selection["entries"] = ordered_entries
+    selection["embedded_residue_names"] = embedded_residue_names
+    selection["duplicate_names"] = {
+        residue_name: entries
+        for residue_name, entries in duplicate_names.items()
+        if len(entries) > 1
+    }
+    return selection
+
+
+def _normalize_required_int(value, label):
+    if value is None:
+        raise ValueError(f"{label} is required.")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be an integer.") from exc
+
+
+def _normalize_mcpb_qm_settings(site_spec, site_id):
+    qm_spec = site_spec.get("qm")
+    if not isinstance(qm_spec, Mapping):
+        raise ValueError(f"MCPB site '{site_id}' must define a 'qm' mapping.")
+
+    software_version = str(qm_spec.get("software_version", "g09")).strip()
+    if not software_version:
+        software_version = "g09"
+
+    small_model_charge = _normalize_required_int(
+        qm_spec.get("small_model_charge", qm_spec.get("smmodel_chg")),
+        f"MCPB site '{site_id}' qm.small_model_charge",
+    )
+    small_model_spin = _normalize_required_int(
+        qm_spec.get("small_model_spin", qm_spec.get("smmodel_spin")),
+        f"MCPB site '{site_id}' qm.small_model_spin",
+    )
+    large_model_charge = _normalize_required_int(
+        qm_spec.get("large_model_charge", qm_spec.get("lgmodel_chg")),
+        f"MCPB site '{site_id}' qm.large_model_charge",
+    )
+    large_model_spin = _normalize_required_int(
+        qm_spec.get("large_model_spin", qm_spec.get("lgmodel_spin")),
+        f"MCPB site '{site_id}' qm.large_model_spin",
+    )
+
+    if small_model_spin <= 0:
+        raise ValueError(f"MCPB site '{site_id}' qm.small_model_spin must be >= 1.")
+    if large_model_spin <= 0:
+        raise ValueError(f"MCPB site '{site_id}' qm.large_model_spin must be >= 1.")
+
+    return {
+        "software_version": software_version,
+        "small_model_charge": small_model_charge,
+        "small_model_spin": small_model_spin,
+        "large_model_charge": large_model_charge,
+        "large_model_spin": large_model_spin,
+    }
+
+
+def _normalize_mcpb_fragment_specs(site_spec, site_id):
+    fragment_specs = (
+        site_spec.get("fragments")
+        or site_spec.get("nonstandard_fragments")
+        or site_spec.get("ligand_fragments")
+        or []
+    )
+    if isinstance(fragment_specs, Mapping):
+        fragment_specs = [fragment_specs]
+    if not isinstance(fragment_specs, (list, tuple)):
+        raise TypeError(f"MCPB site '{site_id}' fragments must be a list of mappings.")
+
+    normalized_fragments = []
+    for index, fragment_spec in enumerate(fragment_specs, start=1):
+        if not isinstance(fragment_spec, Mapping):
+            raise TypeError(f"MCPB site '{site_id}' fragment {index} must be a mapping.")
+        chain_id = fragment_spec.get("chain_id", fragment_spec.get("chain"))
+        residue_id = fragment_spec.get("residue_id", fragment_spec.get("resid", fragment_spec.get("residue")))
+        residue_name = fragment_spec.get("residue_name", fragment_spec.get("resname"))
+        structure_residue_name = _normalize_optional_residue_name(
+            fragment_spec.get(
+                "structure_residue_name",
+                fragment_spec.get(
+                    "structure_resname",
+                    fragment_spec.get("input_residue_name", fragment_spec.get("input_resname")),
+                ),
+            )
+        )
+        if chain_id is None:
+            raise ValueError(f"MCPB site '{site_id}' fragment {index} is missing 'chain_id'.")
+        if residue_name is None:
+            raise ValueError(f"MCPB site '{site_id}' fragment {index} is missing 'residue_name'.")
+        chain_id = str(chain_id).strip()
+        residue_name = str(residue_name).strip().upper()
+        if not chain_id:
+            raise ValueError(f"MCPB site '{site_id}' fragment {index} chain_id cannot be empty.")
+        if not residue_name:
+            raise ValueError(f"MCPB site '{site_id}' fragment {index} residue_name cannot be empty.")
+        net_charge = _normalize_required_int(
+            fragment_spec.get("net_charge", fragment_spec.get("charge")),
+            f"MCPB site '{site_id}' fragment {index} net_charge",
+        )
+        exclude_atoms = fragment_spec.get("exclude_atoms", fragment_spec.get("omit_atoms", []))
+        if isinstance(exclude_atoms, str):
+            exclude_atoms = [exclude_atoms]
+        elif exclude_atoms is None:
+            exclude_atoms = []
+        elif not isinstance(exclude_atoms, (list, tuple, set)):
+            raise TypeError(
+                f"MCPB site '{site_id}' fragment {index} exclude_atoms must be a string or a list of strings."
+            )
+        exclude_atoms = [str(atom_name).strip().upper() for atom_name in exclude_atoms if str(atom_name).strip()]
+
+        output_name = str(
+            fragment_spec.get("output_name", fragment_spec.get("name", residue_name))
+        ).strip().upper()
+        if not output_name:
+            raise ValueError(f"MCPB site '{site_id}' fragment {index} output_name cannot be empty.")
+
+        normalized = {
+            "chain_id": chain_id,
+            "residue_id": _normalize_residue_id(residue_id),
+            "residue_name": residue_name,
+        }
+        if structure_residue_name is not None:
+            normalized["structure_residue_name"] = structure_residue_name
+        normalized["net_charge"] = net_charge
+        normalized["exclude_atoms"] = exclude_atoms
+        normalized["output_name"] = output_name
+        normalized_fragments.append(normalized)
+
+    return normalized_fragments
+
+
+def _normalize_preparable_mcpb_site(mcpb_site):
+    if not mcpb_site:
+        raise ValueError("mcpb_site is required.")
+
+    if isinstance(mcpb_site, Mapping) and "sites" in mcpb_site:
+        sites = mcpb_site.get("sites") or []
+        if len(sites) != 1:
+            raise ValueError("prepareMCPBSite currently supports exactly one MCPB site definition.")
+        site_spec = sites[0]
+    elif isinstance(mcpb_site, Mapping):
+        site_spec = mcpb_site
+    else:
+        raise TypeError("mcpb_site must be a site mapping or a mapping containing exactly one site.")
+
+    normalized_site = _normalize_mcpb_site(site_spec, 1)
+    site_id = normalized_site["site_id"]
+
+    metal_spec = dict(normalized_site["metal"])
+    metal_spec["formal_charge"] = _normalize_required_int(
+        site_spec.get("metal", {}).get("formal_charge")
+        if isinstance(site_spec.get("metal"), Mapping)
+        else None,
+        f"MCPB site '{site_id}' metal formal_charge",
+    )
+    metal_output_residue_name = str(
+        site_spec.get("metal", {}).get("output_residue_name", site_spec.get("metal", {}).get("output_resname", metal_spec["atom_name"]))
+        if isinstance(site_spec.get("metal"), Mapping)
+        else metal_spec["atom_name"]
+    ).strip().upper()
+    metal_output_atom_name = str(
+        site_spec.get("metal", {}).get("output_atom_name", metal_spec["atom_name"])
+        if isinstance(site_spec.get("metal"), Mapping)
+        else metal_spec["atom_name"]
+    ).strip().upper()
+    if not metal_output_residue_name:
+        metal_output_residue_name = metal_spec["atom_name"]
+    if not metal_output_atom_name:
+        metal_output_atom_name = metal_spec["atom_name"]
+    metal_spec["output_residue_name"] = metal_output_residue_name
+    metal_spec["output_atom_name"] = metal_output_atom_name
+
+    normalized_site["metal"] = metal_spec
+    normalized_site["qm"] = _normalize_mcpb_qm_settings(site_spec, site_id)
+    normalized_site["fragments"] = _normalize_mcpb_fragment_specs(site_spec, site_id)
+    return normalized_site
+
+
+def _find_residue_in_topology(topology, chain_id, residue_id, residue_name, structure_residue_name=None):
+    matches = []
+    normalized_residue_id = _normalize_residue_id(residue_id)
+    lookup_residue_names = set(
+        _mcpb_structure_residue_candidates(residue_name, structure_residue_name=structure_residue_name)
+    )
+    for chain in topology.chains():
+        if chain.id != chain_id:
+            continue
+        for residue in chain.residues():
+            if _normalize_residue_id(residue.id) != normalized_residue_id:
+                continue
+            if residue.name.upper() not in lookup_residue_names:
+                continue
+            matches.append(residue)
+    if len(matches) != 1:
+        raise ValueError(
+            "Expected exactly one residue "
+            f"{residue_name} {chain_id} {normalized_residue_id} "
+            f"(lookup names: {sorted(lookup_residue_names)}), found {len(matches)}."
+        )
+    return matches[0]
+
+
+def _find_atom_in_topology(topology, atom_spec):
+    residue = _find_residue_in_topology(
+        topology,
+        atom_spec["chain_id"],
+        atom_spec["residue_id"],
+        atom_spec["residue_name"],
+        structure_residue_name=atom_spec.get("structure_residue_name"),
+    )
+    matches = [atom for atom in residue.atoms() if atom.name.strip().upper() == atom_spec["atom_name"]]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected exactly one atom {atom_spec['atom_name']} in "
+            f"{atom_spec['residue_name']} {atom_spec['chain_id']} {atom_spec['residue_id']}, found {len(matches)}."
+        )
+    return matches[0]
+
+
+def _resolve_mcpb_atom_record(atom_lookup, atom_spec, site_id, atom_label):
+    matches = {}
+    for residue_name in atom_spec.get("lookup_residue_names", [atom_spec["residue_name"]]):
+        key = (
+            atom_spec["chain_id"],
+            atom_spec["residue_id"],
+            residue_name,
+            atom_spec["atom_name"],
+        )
+        atom_record = atom_lookup.get(key)
+        if atom_record is not None:
+            matches[atom_record["atom_index"]] = atom_record
+
+    if len(matches) != 1:
+        raise ValueError(
+            f"MCPB site '{site_id}' {atom_label} {atom_spec} was not found in the structure. "
+            f"Lookup residue names: {atom_spec.get('lookup_residue_names', [atom_spec['residue_name']])}."
+        )
+
+    matched_record = dict(next(iter(matches.values())))
+    matched_record.update(atom_spec)
+    matched_record["structure_residue_name"] = next(iter(matches.values()))["residue_name"]
+    matched_record["requested_residue_name"] = atom_spec["residue_name"]
+    matched_record["is_protein_residue"] = matched_record["structure_residue_name"].upper() in aa3
+    return matched_record
+
+
+def _extract_residue_subsystem_filtered(
+    modeller,
+    residue,
+    exclude_atoms=None,
+    residue_name=None,
+    chain_id=None,
+    residue_id=None,
+):
+    _ensure_openmm("filtered residue extraction")
+    exclude_set = {str(atom_name).strip().upper() for atom_name in (exclude_atoms or []) if str(atom_name).strip()}
+
+    top = Topology()
+    chain = top.addChain(chain_id if chain_id is not None else residue.chain.id)
+    new_residue = top.addResidue(
+        residue_name if residue_name is not None else residue.name,
+        chain,
+        id=str(residue_id if residue_id is not None else residue.id),
+    )
+
+    atom_map = {}
+    positions = []
+    modeller_positions = modeller.getPositions()
+    for atom in modeller.topology.atoms():
+        if atom.residue != residue:
+            continue
+        if atom.name.strip().upper() in exclude_set:
+            continue
+        new_atom = top.addAtom(atom.name, atom.element, new_residue)
+        atom_map[atom.index] = new_atom
+        pos = modeller_positions[atom.index]
+        if hasattr(pos, "value_in_unit"):
+            xyz = pos.value_in_unit(nanometer)
+            pos = Vec3(xyz[0], xyz[1], xyz[2])
+        positions.append(pos)
+
+    if not positions:
+        raise ValueError(f"Residue '{residue.name}' has no atoms left after filtering.")
+
+    for atom1, atom2 in modeller.topology.bonds():
+        if atom1.index in atom_map and atom2.index in atom_map:
+            top.addBond(atom_map[atom1.index], atom_map[atom2.index])
+
+    return top, Quantity(positions, nanometer)
+
+
+def _write_filtered_residue_pdb(
+    modeller,
+    residue,
+    output_path,
+    exclude_atoms=None,
+    residue_name=None,
+    chain_id=None,
+    residue_id=None,
+):
+    top, positions = _extract_residue_subsystem_filtered(
+        modeller,
+        residue,
+        exclude_atoms=exclude_atoms,
+        residue_name=residue_name,
+        chain_id=chain_id,
+        residue_id=residue_id,
+    )
+    with open(output_path, "w") as handle:
+        PDBFile.writeFile(top, positions, handle)
+    return top, positions
+
+
+def _write_single_atom_pdb(
+    atom_record,
+    output_path,
+    residue_name,
+    atom_name,
+    residue_id=1,
+    chain_id="A",
+):
+    _ensure_openmm("single-atom MCPB fragment writing")
+    top = Topology()
+    chain = top.addChain(str(chain_id))
+    residue = top.addResidue(str(residue_name), chain, id=str(residue_id))
+    element_symbol = atom_record.get("element", atom_name).upper()
+    element_obj = Element.getBySymbol(element_symbol)
+    top.addAtom(str(atom_name), element_obj, residue)
+    position_angstrom = atom_record.get("position_angstrom")
+    if position_angstrom is None:
+        raise ValueError("Atom position is required to write a single-atom PDB fragment.")
+    positions = Quantity([Vec3(*(np.asarray(position_angstrom, dtype=float) / 10.0))], nanometer)
+    with open(output_path, "w") as handle:
+        PDBFile.writeFile(top, positions, handle)
+
+
+def _build_split_mcpb_modeller(modeller, resolved_site, metal_output_residue_name, metal_output_atom_name):
+    _ensure_openmm("MCPB site splitting")
+    split_modeller = Modeller(modeller.topology, modeller.positions)
+    metal_atom = _find_atom_in_topology(split_modeller.topology, resolved_site["metal"])
+    metal_position = split_modeller.positions[metal_atom.index]
+    metal_chain_id = metal_atom.residue.chain.id
+    metal_element = metal_atom.element
+
+    split_modeller.delete([metal_atom])
+
+    max_residue_id = 0
+    existing_chain_ids = set()
+    for chain in split_modeller.topology.chains():
+        existing_chain_ids.add(chain.id)
+        for residue in chain.residues():
+            try:
+                max_residue_id = max(max_residue_id, int(str(residue.id).strip()))
+            except ValueError:
+                continue
+
+    chain_candidates = [metal_chain_id]
+    chain_candidates.extend(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"))
+    chain_candidates.extend(list("0123456789"))
+    chain_candidates.extend(
+        [f"M{index}" for index in range(1, len(existing_chain_ids) + 10)]
+    )
+
+    new_chain_id = None
+    for candidate in chain_candidates:
+        if candidate not in existing_chain_ids:
+            new_chain_id = candidate
+            break
+    if new_chain_id is None:
+        raise ValueError("Could not assign a unique chain identifier for the split MCPB metal residue.")
+
+    chain_obj = split_modeller.topology.addChain(new_chain_id)
+
+    new_residue_id = str(max_residue_id + 1 if max_residue_id > 0 else 1)
+    metal_residue = split_modeller.topology.addResidue(metal_output_residue_name, chain_obj, id=new_residue_id)
+    split_modeller.topology.addAtom(metal_output_atom_name, metal_element, metal_residue)
+    split_modeller.positions.append(metal_position)
+
+    metal_spec = {
+        "chain_id": new_chain_id,
+        "residue_id": _normalize_residue_id(new_residue_id),
+        "residue_name": metal_output_residue_name.upper(),
+        "atom_name": metal_output_atom_name.upper(),
+    }
+    return split_modeller, metal_spec
+
+
+def _pdb_atom_serials_by_topology_index(pdb_path, expected_atom_count=None):
+    """Return the written PDB atom serial number for each 0-based topology atom index."""
+    atom_serials = []
+    with open(pdb_path) as handle:
+        for line in handle:
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            serial_text = line[6:11].strip()
+            if not serial_text:
+                raise ValueError(f"Missing atom serial number in PDB record: {line.rstrip()}")
+            atom_serials.append(int(serial_text))
+
+    if expected_atom_count is not None and len(atom_serials) != expected_atom_count:
+        raise ValueError(
+            f"PDB file {pdb_path} contains {len(atom_serials)} atom records, "
+            f"but {expected_atom_count} topology atoms were expected."
+        )
+
+    return {atom_index: serial for atom_index, serial in enumerate(atom_serials)}
+
+
+def _renumber_pdb_residues_globally(pdb_path):
+    """Rewrite a PDB so residue sequence numbers are unique across all chains."""
+    residue_serial_by_key = {}
+    next_residue_serial = 1
+    current_residue_key = None
+    rewritten_lines = []
+
+    with open(pdb_path) as handle:
+        for line in handle:
+            if line.startswith(("ATOM", "HETATM")):
+                residue_key = (line[21], line[22:26], line[26], line[17:20])
+                if residue_key not in residue_serial_by_key:
+                    residue_serial_by_key[residue_key] = next_residue_serial
+                    next_residue_serial += 1
+                current_residue_key = residue_key
+                new_residue_serial = residue_serial_by_key[residue_key]
+                line = line[:22] + f"{new_residue_serial:4d}" + line[26:]
+            elif line.startswith("TER") and current_residue_key is not None:
+                new_residue_serial = residue_serial_by_key[current_residue_key]
+                line = line[:22] + f"{new_residue_serial:4d}" + line[26:]
+            rewritten_lines.append(line)
+
+    with open(pdb_path, "w") as handle:
+        handle.writelines(rewritten_lines)
+
+
 class openmm_md:
 
     def __init__(self, input_pdb):
@@ -86,8 +1137,15 @@ class openmm_md:
         self.modeller = Modeller(pdb.topology, pdb.positions)
         self.positions = np.array([c.value_in_unit(nanometer) for c in self.modeller.positions])
         self.command_log = []
+        self.membrane_system = None
+        self._membrane_built = False
 
-    def setUpFF(self, ff_name):
+    def _refresh_positions_cache(self):
+        self.positions = np.array([c.value_in_unit(nanometer) for c in self.modeller.positions])
+
+    def setUpFF(self, ff_name, membrane_system=None):
+
+        membrane_config = _normalize_membrane_system(membrane_system)
 
         preset_ffs = {
             'amber14': ['amber14-all.xml', 'amber14/tip3pfb.xml'],
@@ -104,8 +1162,12 @@ class openmm_md:
                 available_ffs = sorted(preset_ffs)
                 raise ValueError(f'{ff_name} not found in available forcefields: {available_ffs}')
             self.ff_name = ff_name
-            self.ff_files = preset_ffs[self.ff_name]
+            if self.ff_name == 'amber14' and membrane_config:
+                self.ff_files = ['amber14/protein.ff14SB.xml', 'amber14/tip3pfb.xml', 'amber14/lipid17.xml']
+            else:
+                self.ff_files = preset_ffs[self.ff_name]
         self.forcefield = ForceField(*self.ff_files)
+        self.membrane_system = membrane_config
 
     def setPeriodicBoundaryConditions(self, radius=1.5):
         min_xyz = np.min(self.positions, axis=0)
@@ -120,16 +1182,21 @@ class openmm_md:
         if keep_ligands:
             hydrogens = [a for a in hydrogens if a.residue.name in aa3]
         self.modeller.delete(hydrogens)
+        self._refresh_positions_cache()
 
-    def addHydrogens(self, variants=None):
-        # Create protein-only state and cache non-protein residues completely
-        # (chain id, residue id, atom names/elements, positions) so we can
-        # reinsert them verbatim after adding hydrogens to the protein.
+    def _extract_non_protein_residues(self, preserved_residue_names=None):
+        """Temporarily remove non-protein residues and return cached residue data."""
         saved_residues = []
         non_protein = []
         protein_set = set(aa3) - set(ions)
+        preserved_residue_names = {
+            str(residue_name).strip().upper()
+            for residue_name in (preserved_residue_names or [])
+            if str(residue_name).strip()
+        }
+
         # Precompute per-residue internal bonds for non-protein residues so we
-        # can restore them after the protein-only hydrogen placement.
+        # can restore them after the temporary operation.
         internal_bonds = {}
         for bond in self.modeller.topology.bonds():
             if bond[0].residue == bond[1].residue:
@@ -137,45 +1204,82 @@ class openmm_md:
                 internal_bonds.setdefault(res, []).append((bond[0].name, bond[1].name))
 
         for residue in self.modeller.topology.residues():
-            if residue.name not in protein_set:
-                atom_names = []
-                atom_elements = []
-                atom_positions = []
+            residue_name = residue.name.upper()
+            if residue_name in protein_set or residue_name in preserved_residue_names:
+                continue
+            atom_names = []
+            atom_elements = []
+            atom_positions = []
+            for atom in residue.atoms():
+                atom_names.append(atom.name)
+                atom_elements.append(atom.element)
+                atom_positions.append(self.modeller.positions[atom.index])
+            saved_residues.append({
+                "chain_id": residue.chain.id,
+                "residue_id": str(residue.id),
+                "residue_name": residue.name,
+                "atom_names": atom_names,
+                "atom_elements": atom_elements,
+                "positions": atom_positions,
+                "bonds": internal_bonds.get(residue, []),
+            })
+            non_protein.append(residue)
+
+        return saved_residues, non_protein
+
+    def _extract_chain_subsystem(self, excluded_chain_ids=None):
+        """Temporarily remove complete chains and return a cached subsystem plus residues to delete."""
+        excluded_chain_ids = {
+            str(chain_id).strip()
+            for chain_id in (excluded_chain_ids or [])
+            if str(chain_id).strip()
+        }
+        if not excluded_chain_ids:
+            return None, []
+
+        topology = Topology()
+        if self.modeller.topology.getPeriodicBoxVectors() is not None:
+            topology.setPeriodicBoxVectors(self.modeller.topology.getPeriodicBoxVectors())
+
+        atom_map = {}
+        positions = []
+        residues_to_delete = []
+
+        for chain in self.modeller.topology.chains():
+            if chain.id not in excluded_chain_ids:
+                continue
+            new_chain = topology.addChain(chain.id)
+            for residue in chain.residues():
+                residues_to_delete.append(residue)
+                new_residue = topology.addResidue(residue.name, new_chain, id=str(residue.id))
                 for atom in residue.atoms():
-                    atom_names.append(atom.name)
-                    atom_elements.append(atom.element)
-                    atom_positions.append(self.modeller.positions[atom.index])
-                saved_residues.append({
-                    "chain_id": residue.chain.id,
-                    "residue_id": str(residue.id),
-                    "residue_name": residue.name,
-                    "atom_names": atom_names,
-                    "atom_elements": atom_elements,
-                    "positions": atom_positions,
-                    "bonds": internal_bonds.get(residue, []),
-                })
-                non_protein.append(residue)
+                    atom_map[atom] = topology.addAtom(atom.name, atom.element, new_residue)
+                    positions.append(self.modeller.positions[atom.index])
 
-        # Remove non-protein residues so hydrogens are added only to the protein
-        if non_protein:
-            self.modeller.delete(non_protein)
+        if not atom_map:
+            return None, []
 
-        # Add hydrogens to the remaining (protein) part
-        self.modeller.addHydrogens(self.forcefield, variants=variants)
+        for atom1, atom2 in self.modeller.topology.bonds():
+            if atom1 in atom_map and atom2 in atom_map:
+                topology.addBond(atom_map[atom1], atom_map[atom2])
 
-        # Reinsert the cached non-protein residues, preserving chain names and
-        # atom identity/count exactly as in the input PDB. Add residues in
-        # chain order to satisfy OpenMM's contiguity requirement.
+        return (topology, positions), residues_to_delete
+
+    def _reinsert_cached_residues(self, saved_residues):
+        """Reinsert cached residues, preserving chain ids and internal bonds."""
+        if not saved_residues:
+            return
+
         # Group by chain id
         by_chain = {}
         for entry in saved_residues:
             by_chain.setdefault(entry["chain_id"], []).append(entry)
 
-        # Existing chains in declared order
+        # Existing chains in declared order.
         chain_objs = {c.id: c for c in self.modeller.topology.chains()}
         chain_order = [c.id for c in self.modeller.topology.chains()]
 
-        # First, add residues to chains that already exist, in order
+        # First, add residues to chains that already exist, in order.
         for cid in chain_order:
             if cid not in by_chain:
                 continue
@@ -191,7 +1295,7 @@ class openmm_md:
                     if a1 in atom_objs and a2 in atom_objs:
                         self.modeller.topology.addBond(atom_objs[a1], atom_objs[a2])
 
-        # Then, create any missing chains and add their residues
+        # Then, create any missing chains and add their residues.
         for cid, entries in by_chain.items():
             chain = self.modeller.topology.addChain(cid)
             for entry in entries:
@@ -204,6 +1308,85 @@ class openmm_md:
                 for a1, a2 in entry.get("bonds", []):
                     if a1 in atom_objs and a2 in atom_objs:
                         self.modeller.topology.addBond(atom_objs[a1], atom_objs[a2])
+
+    def addHydrogens(self, variants=None):
+        # Create protein-only state and cache non-protein residues completely
+        # (chain id, residue id, atom names/elements, positions) so we can
+        # reinsert them verbatim after adding hydrogens to the protein.
+        saved_residues, non_protein = self._extract_non_protein_residues()
+
+        # Remove non-protein residues so hydrogens are added only to the protein
+        if non_protein:
+            self.modeller.delete(non_protein)
+
+        # Add hydrogens to the remaining (protein) part
+        self.modeller.addHydrogens(self.forcefield, variants=variants)
+
+        # Reinsert the cached non-protein residues.
+        self._reinsert_cached_residues(saved_residues)
+        self._refresh_positions_cache()
+
+    def addMembrane(self, membrane_system=None, platform=None):
+        membrane_config = _normalize_membrane_system(
+            membrane_system if membrane_system is not None else self.membrane_system
+        )
+        if membrane_config is None:
+            raise ValueError("A membrane_system configuration is required to build a membrane.")
+
+        if self._membrane_built:
+            if membrane_config != self.membrane_system:
+                raise ValueError(
+                    "A membrane has already been added to this modeller with a different membrane_system."
+                )
+            return
+
+        if not hasattr(self, "forcefield"):
+            self.setUpFF("amber14", membrane_system=membrane_config)
+        elif 'amber14/lipid17.xml' not in getattr(self, "ff_files", []):
+            self.setUpFF(self.ff_name, membrane_system=membrane_config)
+        else:
+            self.membrane_system = membrane_config
+
+        saved_chain_subsystem, excluded_chain_residues = self._extract_chain_subsystem(
+            membrane_config.get("exclude_chain_ids", ())
+        )
+        if excluded_chain_residues:
+            self.modeller.delete(excluded_chain_residues)
+
+        saved_residues, non_protein = self._extract_non_protein_residues()
+        if non_protein:
+            self.modeller.delete(non_protein)
+
+        pre_membrane_modeller = Modeller(self.modeller.topology, self.modeller.positions)
+        last_exception = None
+        for attempt in range(membrane_config["build_retries"]):
+            if attempt > 0:
+                self.modeller = Modeller(pre_membrane_modeller.topology, pre_membrane_modeller.positions)
+            try:
+                self.modeller.addMembrane(
+                    self.forcefield,
+                    lipidType=membrane_config["openmm_lipid_type"],
+                    membraneCenterZ=membrane_config["membrane_center_z_nm"] * nanometer,
+                    minimumPadding=membrane_config["minimum_padding_nm"] * nanometer,
+                    positiveIon=membrane_config["positive_ion"],
+                    negativeIon=membrane_config["negative_ion"],
+                    ionicStrength=membrane_config["ionic_strength_molar"] * molar,
+                    neutralize=membrane_config["neutralize"],
+                    platform=platform,
+                )
+                last_exception = None
+                break
+            except Exception as exc:
+                last_exception = exc
+                if "nan" not in str(exc).lower() or attempt + 1 >= membrane_config["build_retries"]:
+                    raise
+        if last_exception is not None:
+            raise last_exception
+        if saved_chain_subsystem is not None:
+            self.modeller.add(*saved_chain_subsystem)
+        self._reinsert_cached_residues(saved_residues)
+        self._membrane_built = True
+        self._refresh_positions_cache()
 
     def getProtonationStates(self, keep_ligands=False):
         """
@@ -224,7 +1407,7 @@ class openmm_md:
                 elif 'HE2' in atoms:
                     his_name = 'HIE'
                 else:
-                    his_name = 'HIS'
+                    his_name = None
                 residue_names.append(his_name)
 
             elif residue.name == 'ASP':
@@ -260,8 +1443,254 @@ class openmm_md:
 
         return residue_names
 
+    def prepareMCPBSite(self, output_folder, mcpb_site, overwrite=False, force_field="ff14SB"):
+        """Prepare MCPB site artifacts without running the QM/MCPB pipeline."""
+        normalized_site = _normalize_preparable_mcpb_site(mcpb_site)
+        resolved_site_config = _resolve_mcpb_config(self.modeller.topology, self.modeller.positions, normalized_site)
+        resolved_site = resolved_site_config["sites"][0]
+        selection = _collect_mcpb_nonprotein_residue_selection(resolved_site_config)
+
+        fragment_by_key = {}
+        for fragment in normalized_site["fragments"]:
+            key = (
+                fragment["chain_id"],
+                fragment["residue_id"],
+                fragment["residue_name"],
+            )
+            if key in fragment_by_key:
+                raise ValueError(
+                    f"MCPB site '{normalized_site['site_id']}' defines the same fragment more than once: {key}."
+                )
+            fragment_by_key[key] = fragment
+
+        missing_fragments = []
+        for residue_key in selection["keys"]:
+            if residue_key not in fragment_by_key:
+                missing_fragments.append(f"{residue_key[2]} {residue_key[0]} {residue_key[1]}")
+        if missing_fragments:
+            raise ValueError(
+                "prepareMCPBSite requires fragment definitions with net charges for every non-protein residue in the site. "
+                "Missing fragments for: " + ", ".join(missing_fragments)
+            )
+
+        extra_fragments = []
+        for residue_key in fragment_by_key:
+            if residue_key not in selection["keys"]:
+                extra_fragments.append(f"{residue_key[2]} {residue_key[0]} {residue_key[1]}")
+        if extra_fragments:
+            raise ValueError(
+                "prepareMCPBSite received fragment definitions that are not part of the selected site: "
+                + ", ".join(extra_fragments)
+            )
+
+        metal_residue_key = (
+            resolved_site["metal"]["chain_id"],
+            resolved_site["metal"]["residue_id"],
+            resolved_site["metal"]["residue_name"],
+        )
+        metal_fragment = fragment_by_key.get(metal_residue_key)
+        if resolved_site["metal"].get("is_embedded_metal", False):
+            if metal_fragment is None:
+                raise ValueError(
+                    "Embedded-metal sites require a fragment definition for the metal-containing residue "
+                    f"{metal_residue_key[2]} {metal_residue_key[0]} {metal_residue_key[1]}."
+                )
+            metal_atom_name = resolved_site["metal"]["atom_name"]
+            if metal_atom_name not in metal_fragment["exclude_atoms"]:
+                raise ValueError(
+                    "Embedded-metal fragment definitions must exclude the metal atom so it can be written as a separate "
+                    f"residue for MCPB. Add '{metal_atom_name}' to exclude_atoms for {metal_fragment['residue_name']}."
+                )
+
+        site_directory = os.path.join(output_folder, normalized_site["site_id"])
+        fragments_directory = os.path.join(site_directory, "fragments")
+        if os.path.exists(site_directory):
+            if not overwrite:
+                raise FileExistsError(
+                    f"MCPB site directory {site_directory} already exists. Use overwrite=True to replace it."
+                )
+            shutil.rmtree(site_directory)
+        os.makedirs(fragments_directory, exist_ok=True)
+
+        fragment_manifest = []
+        for residue_key in selection["keys"]:
+            fragment = fragment_by_key[residue_key]
+            residue = _find_residue_in_topology(
+                self.modeller.topology,
+                fragment["chain_id"],
+                fragment["residue_id"],
+                fragment["residue_name"],
+                structure_residue_name=fragment.get("structure_residue_name"),
+            )
+            fragment_pdb_path = os.path.join(fragments_directory, f"{fragment['output_name']}.pdb")
+            _write_filtered_residue_pdb(
+                self.modeller,
+                residue,
+                fragment_pdb_path,
+                exclude_atoms=fragment["exclude_atoms"],
+                residue_name=fragment["output_name"],
+            )
+            fragment_manifest.append(
+                {
+                    "chain_id": fragment["chain_id"],
+                    "residue_id": fragment["residue_id"],
+                    "residue_name": fragment["residue_name"],
+                    "structure_residue_name": fragment.get("structure_residue_name", fragment["residue_name"]),
+                    "output_name": fragment["output_name"],
+                    "net_charge": fragment["net_charge"],
+                    "exclude_atoms": list(fragment["exclude_atoms"]),
+                    "pdb_file": os.path.basename(fragment_pdb_path),
+                }
+            )
+
+        metal_fragment_pdb = os.path.join(
+            fragments_directory,
+            f"{normalized_site['metal']['output_residue_name']}.pdb",
+        )
+        _write_single_atom_pdb(
+            resolved_site["metal"],
+            metal_fragment_pdb,
+            residue_name=normalized_site["metal"]["output_residue_name"],
+            atom_name=normalized_site["metal"]["output_atom_name"],
+        )
+
+        split_modeller, split_metal_spec = _build_split_mcpb_modeller(
+            self.modeller,
+            resolved_site,
+            normalized_site["metal"]["output_residue_name"],
+            normalized_site["metal"]["output_atom_name"],
+        )
+
+        split_site_core = {
+            "site_id": normalized_site["site_id"],
+            "group_name": normalized_site["group_name"],
+            "metal": split_metal_spec,
+            "coordinating_atoms": normalized_site["coordinating_atoms"],
+            "cut_off": normalized_site["cut_off"],
+        }
+        split_resolved_site_config = _resolve_mcpb_config(
+            split_modeller.topology,
+            split_modeller.positions,
+            split_site_core,
+        )
+        split_resolved_site = split_resolved_site_config["sites"][0]
+
+        full_structure_pdb = os.path.join(site_directory, f"{normalized_site['site_id']}_mcpb_model.pdb")
+        with open(full_structure_pdb, "w") as handle:
+            PDBFile.writeFile(split_modeller.topology, split_modeller.positions, handle)
+        _renumber_pdb_residues_globally(full_structure_pdb)
+
+        topology_atom_count = 0
+        for _ in split_modeller.topology.atoms():
+            topology_atom_count += 1
+        serial_by_atom_index = _pdb_atom_serials_by_topology_index(
+            full_structure_pdb,
+            expected_atom_count=topology_atom_count,
+        )
+        input_file = os.path.join(site_directory, f"{normalized_site['site_id']}.in")
+        ion_ids = [serial_by_atom_index[split_resolved_site["metal"]["atom_index"]]]
+        bonded_pairs = [
+            (
+                serial_by_atom_index[split_resolved_site["metal"]["atom_index"]],
+                serial_by_atom_index[atom_record["atom_index"]],
+            )
+            for atom_record in split_resolved_site["coordinating_atoms"]
+        ]
+        naa_mol2files = [f"{fragment['output_name']}.mol2" for fragment in normalized_site["fragments"]]
+        frcmod_files = [f"{fragment['output_name']}.frcmod" for fragment in normalized_site["fragments"]]
+        ion_mol2files = [f"{normalized_site['metal']['output_residue_name']}.mol2"]
+
+        with open(input_file, "w") as handle:
+            handle.write(f"original_pdb {os.path.basename(full_structure_pdb)}\n")
+            handle.write(f"group_name {normalized_site['group_name']}\n")
+            handle.write(f"software_version {normalized_site['qm']['software_version']}\n")
+            handle.write(f"force_field {force_field}\n")
+            handle.write(f"cut_off {normalized_site['cut_off']}\n")
+            handle.write("ion_ids " + " ".join(str(atom_id) for atom_id in ion_ids) + "\n")
+            handle.write("ion_mol2files " + " ".join(ion_mol2files) + "\n")
+            if naa_mol2files:
+                handle.write("naa_mol2files " + " ".join(naa_mol2files) + "\n")
+            if frcmod_files:
+                handle.write("frcmod_files " + " ".join(frcmod_files) + "\n")
+            if bonded_pairs:
+                handle.write(
+                    "add_bonded_pairs "
+                    + " ".join(f"{atom_1}-{atom_2}" for atom_1, atom_2 in bonded_pairs)
+                    + "\n"
+                )
+            handle.write(f"smmodel_chg {normalized_site['qm']['small_model_charge']}\n")
+            handle.write(f"smmodel_spin {normalized_site['qm']['small_model_spin']}\n")
+            handle.write(f"lgmodel_chg {normalized_site['qm']['large_model_charge']}\n")
+            handle.write(f"lgmodel_spin {normalized_site['qm']['large_model_spin']}\n")
+
+        commands_file = os.path.join(site_directory, "prepare_fragments.sh")
+        command_lines = [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            "cd \"$(dirname \"$0\")\"",
+            f"metalpdb2mol2.py -i fragments/{normalized_site['metal']['output_residue_name']}.pdb "
+            f"-o {normalized_site['metal']['output_residue_name']}.mol2 -c {normalized_site['metal']['formal_charge']}",
+        ]
+        for fragment in normalized_site["fragments"]:
+            command_lines.append(
+                f"antechamber -i fragments/{fragment['output_name']}.pdb -fi pdb "
+                f"-o {fragment['output_name']}.mol2 -fo mol2 -c bcc -nc {fragment['net_charge']} "
+                f"-rn {fragment['output_name']} -pf y"
+            )
+            command_lines.append(
+                f"parmchk2 -i {fragment['output_name']}.mol2 -o {fragment['output_name']}.frcmod -f mol2"
+            )
+        command_lines.extend(
+            [
+                f"MCPB.py -i {os.path.basename(input_file)} -s 1",
+                "# Run the generated QM jobs, then continue with:",
+                f"# MCPB.py -i {os.path.basename(input_file)} -s 2",
+                f"# MCPB.py -i {os.path.basename(input_file)} -s 3",
+                f"# MCPB.py -i {os.path.basename(input_file)} -s 4",
+            ]
+        )
+        with open(commands_file, "w") as handle:
+            handle.write("\n".join(command_lines) + "\n")
+        try:
+            os.chmod(commands_file, 0o755)
+        except OSError:
+            pass
+
+        manifest = {
+            "site_id": normalized_site["site_id"],
+            "group_name": normalized_site["group_name"],
+            "site_directory": site_directory,
+            "full_structure_pdb": os.path.basename(full_structure_pdb),
+            "input_file": os.path.basename(input_file),
+            "commands_file": os.path.basename(commands_file),
+            "metal": {
+                "original_residue_name": resolved_site["metal"]["residue_name"],
+                "original_chain_id": resolved_site["metal"]["chain_id"],
+                "original_residue_id": resolved_site["metal"]["residue_id"],
+                "atom_name": resolved_site["metal"]["atom_name"],
+                "formal_charge": normalized_site["metal"]["formal_charge"],
+                "output_residue_name": normalized_site["metal"]["output_residue_name"],
+                "output_atom_name": normalized_site["metal"]["output_atom_name"],
+                "split_chain_id": split_metal_spec["chain_id"],
+                "split_residue_id": split_metal_spec["residue_id"],
+            },
+            "qm": dict(normalized_site["qm"]),
+            "fragments": fragment_manifest,
+            "ion_ids": ion_ids,
+            "add_bonded_pairs": bonded_pairs,
+            "naa_mol2files": naa_mol2files,
+            "frcmod_files": frcmod_files,
+        }
+        manifest_path = os.path.join(site_directory, "site_manifest.json")
+        with open(manifest_path, "w") as handle:
+            json.dump(manifest, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        manifest["manifest_file"] = os.path.basename(manifest_path)
+        return manifest
+
     def addSolvent(self):
         self.modeller.addSolvent(self.forcefield)
+        self._refresh_positions_cache()
 
     def parameterizePDBLigands(self, parameters_folder, charges=None, skip_ligands=None, overwrite=False,
                                metal_ligand=None, add_bonds=None, cpus=None, return_qm_jobs=False,
@@ -272,7 +1701,8 @@ class openmm_md:
                                only_residues=None, build_full_system=True, skip_ligand_charge_computation=False,
                                ligand_sdf_files=None, export_per_residue_ffxml=False,
                                run_acdoctor=True,
-                               ligand_xml_files=None, solvatebox_buffer=12.0, solvatebox_iso=False):
+                               ligand_xml_files=None, solvatebox_buffer=12.0, solvatebox_iso=False,
+                               mcpb_config=None, mcpb_site=None, membrane_system=None):
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -484,9 +1914,66 @@ class openmm_md:
 
         if not skip_ligands:
             skip_ligands = []
+        else:
+            skip_ligands = [str(residue).strip().upper() for residue in skip_ligands if str(residue).strip()]
+
+        membrane_system = _normalize_membrane_system(
+            membrane_system if membrane_system is not None else self.membrane_system
+        )
+        if membrane_system is not None:
+            if not self._membrane_built:
+                self.addMembrane(membrane_system)
+            for residue_name in membrane_system["skip_residue_names"]:
+                skip_ligands.append(residue_name)
+            skip_ligands = _ordered_unique(skip_ligands)
+            solvate = False
+            add_counterions = False
+            add_counterionsRand = False
 
         if not metal_ligand:
             metal_ligand = {}
+
+        if mcpb_site is not None and mcpb_config is not None:
+            raise ValueError("Use only one of mcpb_site or mcpb_config. mcpb_config is kept only as a compatibility alias.")
+        if mcpb_config is not None:
+            warnings.warn(
+                "mcpb_config is deprecated; use mcpb_site instead. extra_mol2/extra_frcmod remain the path for "
+                "reusing generated MCPB parameter files.",
+                UserWarning,
+            )
+        normalized_mcpb_site = mcpb_site if mcpb_site is not None else mcpb_config
+        if metal_ligand and normalized_mcpb_site is None:
+            raise ValueError(
+                "MCPB parameterization now requires an explicit mcpb_site definition when metal_ligand is used. "
+                "Keep extra_mol2/extra_frcmod for reusing pre-generated mol2/frcmod files."
+            )
+
+        resolved_mcpb_config = _resolve_mcpb_config(self.modeller.topology, self.modeller.positions, normalized_mcpb_site)
+        self.mcpb_site = resolved_mcpb_config
+        self.mcpb_config = resolved_mcpb_config
+        self.mcpb_site_definitions = resolved_mcpb_config["sites"] if resolved_mcpb_config else []
+        mcpb_site_residue_selection = _collect_mcpb_nonprotein_residue_selection(resolved_mcpb_config)
+        self.mcpb_nonprotein_residue_selection = mcpb_site_residue_selection
+        if mcpb_site_residue_selection["duplicate_names"]:
+            duplicate_summary = []
+            for residue_name, entries in sorted(mcpb_site_residue_selection["duplicate_names"].items()):
+                locations = ", ".join(
+                    f"{entry['residue_name']} {entry['chain_id']} {entry['residue_id']}"
+                    for entry in entries
+                )
+                duplicate_summary.append(f"{residue_name}: {locations}")
+            raise ValueError(
+                "mcpb_config currently selects multiple instances of the same non-protein residue name. "
+                "This workflow still stages non-protein parameter files by residue name, so ambiguous multi-instance "
+                "sites must be split into separate runs. Conflicts: "
+                + "; ".join(duplicate_summary)
+            )
+        use_site_driven_mcpb = bool(resolved_mcpb_config)
+        if resolved_mcpb_config and not metal_ligand:
+            legacy_metal_ligand = _legacy_metal_ligand_from_mcpb_config(resolved_mcpb_config)
+            if legacy_metal_ligand:
+                metal_ligand = legacy_metal_ligand
+        use_mcpb = bool(metal_ligand) or use_site_driven_mcpb
 
         # Generate set of metal ligand values
         metal_ligand_values = []
@@ -605,6 +2092,13 @@ class openmm_md:
             residue = r.name.upper()
             if only_residue_set and residue not in only_residue_set:
                 continue
+            if mcpb_site_residue_selection["keys"]:
+                residue_key = (r.chain.id, _normalize_residue_id(r.id), residue)
+                if (
+                    residue in mcpb_site_residue_selection["names"]
+                    and residue_key not in mcpb_site_residue_selection["keys"]
+                ):
+                    continue
 
             # Create PDB for each ligand molecule
             lig_top, lig_pos = extract_residue_subsystem(self.modeller, r)
@@ -1014,6 +2508,37 @@ class openmm_md:
         if ffxml_converted:
             skip_parameterization_residues |= ffxml_converted
 
+        if mcpb_site_residue_selection["embedded_residue_names"]:
+            missing_embedded_assets = []
+            for residue_name in mcpb_site_residue_selection["embedded_residue_names"]:
+                mol2_path = _resolve_residue_parameter_file(
+                    residue_name,
+                    residue_mol2_files,
+                    par_folder,
+                    parameters_folder,
+                    ".mol2",
+                )
+                frcmod_path = _resolve_residue_parameter_file(
+                    residue_name,
+                    residue_frcmod_files,
+                    par_folder,
+                    parameters_folder,
+                    ".frcmod",
+                )
+                if mol2_path is None or frcmod_path is None:
+                    missing_bits = []
+                    if mol2_path is None:
+                        missing_bits.append("mol2")
+                    if frcmod_path is None:
+                        missing_bits.append("frcmod")
+                    missing_embedded_assets.append(f"{residue_name} ({'/'.join(missing_bits)})")
+            if missing_embedded_assets:
+                raise ValueError(
+                    "Embedded-metal residues selected by mcpb_config cannot be parameterized with the generic ligand "
+                    "workflow. Provide base parameter files via extra_mol2/extra_frcmod or metal_parameters for: "
+                    + ", ".join(missing_embedded_assets)
+                )
+
         # Normalize export_per_residue_ffxml target set
         export_ffxml_all = False
         export_ffxml_targets = set()
@@ -1315,31 +2840,50 @@ class openmm_md:
             _run_command(command, self.command_log)
 
         # Parameterize metal complex with MCPB.py
-        if metal_ligand:
+        mcpb_input_spec = None
+        if use_mcpb:
 
             # Copy frcmmod file from previous optimization
             if metal_parameters:
                 _copyfile_if_needed(parameters_folders['mcpbpy.frcmod'],
                                     parameters_folder+'/'+self.pdb_name+'_mcpbpy.frcmod')
 
-            # Get ion ID
-            metal_pdb = PDBFile(renum_pdb)
-            ion_ids = {}
-            for residue in metal_pdb.topology.residues():
-                for r in metal_ligand:
-                    if residue.name in metal_ligand[r]:
-                        atoms = list(residue.atoms())
-                        if len(atoms) > 1:
-                            raise ValueError('Ion residue should contain only one atom!')
-                        ion_ids[residue.name] = atoms[0].index+1
+            if use_site_driven_mcpb:
+                mcpb_input_spec = _build_site_driven_mcpb_inputs(
+                    resolved_mcpb_config,
+                    par_folder,
+                    residue_mol2_files,
+                    residue_frcmod_files,
+                    parameters_folder,
+                    self.pdb_name,
+                )
+            else:
+                # Get ion ID
+                metal_pdb = PDBFile(renum_pdb)
+                ion_ids = {}
+                for residue in metal_pdb.topology.residues():
+                    for r in metal_ligand:
+                        if residue.name in metal_ligand[r]:
+                            atoms = list(residue.atoms())
+                            if len(atoms) > 1:
+                                raise ValueError('Ion residue should contain only one atom!')
+                            ion_ids[residue.name] = atoms[0].index+1
 
             # Copy input files
-            for residue in par_folder:
+            residues_to_stage = list(par_folder.keys())
+            if mcpb_input_spec:
+                residues_to_stage = list(mcpb_input_spec["staged_residue_names"])
+
+            for residue in residues_to_stage:
+                residue = residue.upper()
 
                 if residue in metal_ligand_values:
                     continue
 
                 if metal_parameters and residue in parameters_folders:
+                    continue
+
+                if residue not in par_folder:
                     continue
 
                 # Copy metal ions files
@@ -1348,19 +2892,27 @@ class openmm_md:
                         _copyfile_if_needed(par_folder[residue]+'/'+m+'.mol2',
                                             parameters_folder+'/'+m+'.mol2')
 
-                _copyfile_if_needed(par_folder[residue]+'/'+residue+'.mol2',
-                                    parameters_folder+'/'+residue+'.mol2')
-                existing_frcmods = residue_frcmod_files.get(residue)
-                if existing_frcmods:
-                    primary = existing_frcmods[0]
+                mol2_source = _resolve_residue_parameter_file(
+                    residue,
+                    residue_mol2_files,
+                    par_folder,
+                    parameters_folder,
+                    '.mol2',
+                )
+                if mol2_source is not None:
+                    _copyfile_if_needed(mol2_source, os.path.join(parameters_folder, f'{residue}.mol2'))
+
+                frcmod_source = _resolve_residue_parameter_file(
+                    residue,
+                    residue_frcmod_files,
+                    par_folder,
+                    parameters_folder,
+                    '.frcmod',
+                )
+                if frcmod_source is not None:
                     canonical_path = os.path.join(parameters_folder, f'{residue}.frcmod')
-                    if os.path.exists(primary):
-                        _copyfile_if_needed(primary, canonical_path)
-                else:
-                    frcmod_source = os.path.join(par_folder[residue], f'{residue}.frcmod')
-                    if os.path.exists(frcmod_source):
-                        canonical_path = os.path.join(parameters_folder, f'{residue}.frcmod')
-                        _copyfile_if_needed(frcmod_source, canonical_path)
+                    _copyfile_if_needed(frcmod_source, canonical_path)
+                    if canonical_path not in residue_frcmod_files.get(residue, []):
                         _register_frcmod_file(residue, canonical_path)
 
             if not metal_parameters:
@@ -1368,39 +2920,66 @@ class openmm_md:
                 input_file = pdb_file.replace('.pdb', '.in')
                 with open(input_file, 'w') as f:
                     f.write('original_pdb '+self.pdb_name+'_renum.pdb'+'\n')
-                    f.write('group_name '+self.pdb_name+'\n')
+                    group_name = self.pdb_name
+                    cut_off = 2.8
+                    ion_ids_list = []
+                    ion_mol2_files = []
+                    naa_mol2_files = []
+                    frcmod_files = []
+                    add_bonded_pairs = []
+                    if mcpb_input_spec:
+                        group_name = mcpb_input_spec["group_name"]
+                        cut_off = mcpb_input_spec["cut_off"]
+                        ion_ids_list = list(mcpb_input_spec["ion_ids"])
+                        ion_mol2_files = list(mcpb_input_spec["ion_mol2files"])
+                        naa_mol2_files = list(mcpb_input_spec["naa_mol2files"])
+                        frcmod_files = list(mcpb_input_spec["frcmod_files"])
+                        add_bonded_pairs = list(mcpb_input_spec["add_bonded_pairs"])
+                    else:
+                        ion_ids_list = []
+                        for residue in par_folder:
+                            if residue in metal_ligand:
+                                for m in metal_ligand[residue]:
+                                    ion_ids_list.append(ion_ids[m])
+                                    ion_mol2_files.append(f'{m}.mol2')
+                            if residue in metal_ligand_values:
+                                continue
+                            naa_mol2_files.append(f'{residue}.mol2')
+                            entries = residue_frcmod_files.get(residue, [])
+                            if entries:
+                                frcmod_file = os.path.basename(entries[0])
+                            else:
+                                frcmod_file = f'{residue}.frcmod'
+                            frcmod_files.append(frcmod_file)
+
+                    f.write('group_name '+group_name+'\n')
                     f.write('software_version g09\n')
                     f.write('force_field '+force_field+'\n')
-                    f.write('cut_off 2.8\n')
+                    f.write(f'cut_off {cut_off}\n')
                     ion_ids_line = 'ion_ids'
-                    for residue in par_folder:
-                        if residue in metal_ligand:
-                            for m in metal_ligand[residue]:
-                                ion_ids_line += ' '+str(ion_ids[m])
+                    for ion_id in ion_ids_list:
+                        ion_ids_line += ' '+str(ion_id)
                     f.write(ion_ids_line+'\n')
-                    ion_mol2 = 'ion_mol2files'
-                    for residue in par_folder:
-                        if residue in metal_ligand:
-                            for m in metal_ligand[residue]:
-                                 ion_mol2 += ' '+m+'.mol2'
-                    f.write(ion_mol2+'\n')
-                    naa_mol2 = 'naa_mol2files'
-                    for residue in par_folder:
-                        if residue in metal_ligand_values:
-                            continue
-                        naa_mol2 += ' '+residue+'.mol2'
-                    f.write(naa_mol2+'\n')
-                    frcmod = 'frcmod_files'
-                    for residue in par_folder:
-                        if residue in metal_ligand_values:
-                            continue
-                        entries = residue_frcmod_files.get(residue, [])
-                        if entries:
-                            frcmod_file = os.path.basename(entries[0])
-                        else:
-                            frcmod_file = f'{residue}.frcmod'
-                        frcmod += ' '+frcmod_file
-                    f.write(frcmod+'\n')
+                    if ion_mol2_files:
+                        ion_mol2 = 'ion_mol2files'
+                        for ion_mol2_file in ion_mol2_files:
+                            ion_mol2 += ' '+ion_mol2_file
+                        f.write(ion_mol2+'\n')
+                    if naa_mol2_files:
+                        naa_mol2 = 'naa_mol2files'
+                        for naa_mol2_file in naa_mol2_files:
+                            naa_mol2 += ' '+naa_mol2_file
+                        f.write(naa_mol2+'\n')
+                    if frcmod_files:
+                        frcmod = 'frcmod_files'
+                        for frcmod_file in frcmod_files:
+                            frcmod += ' '+frcmod_file
+                        f.write(frcmod+'\n')
+                    if add_bonded_pairs:
+                        add_bonded_pairs_line = 'add_bonded_pairs'
+                        for atom_1, atom_2 in add_bonded_pairs:
+                            add_bonded_pairs_line += f' {atom_1}-{atom_2}'
+                        f.write(add_bonded_pairs_line+'\n')
 
                 os.chdir(parameters_folder)
                 command  = 'MCPB.py '
@@ -1491,17 +3070,23 @@ class openmm_md:
             tlf.write('source leaprc.protein.ff14SB\n')
             tlf.write('source leaprc.gaff\n')
             tlf.write('source leaprc.water.tip3p\n')
+            if membrane_system:
+                for tleap_source in membrane_system["tleap_sources"]:
+                    tlf.write(f'source {tleap_source}\n')
             if extra_force_field:
                 tlf.write('source '+extra_force_field_source+'\n')
 
-            if metal_ligand:
+            if use_mcpb:
 
-                # Get residues not parameterized as metal
-                not_metal = []
-                for residue in par_folder:
-                    if residue in metal_ligand_values:
-                        continue
-                    not_metal.append(residue)
+                mcpb_site_residue_names = []
+                if mcpb_input_spec:
+                    mcpb_site_residue_names = [residue.upper() for residue in mcpb_input_spec["site_residue_names"]]
+                else:
+                    for residue in par_folder:
+                        if residue in metal_ligand_values:
+                            continue
+                        mcpb_site_residue_names.append(residue.upper())
+                mcpb_site_residue_names = _ordered_unique(mcpb_site_residue_names)
 
                 # Generate frcmod files
                 if metal_parameters:
@@ -1512,10 +3097,13 @@ class openmm_md:
 
                 # Get mapping as tuples for residues
                 missing_atoms = []
-                for residue in getNonProteinResidues(pdb.topology):
-                    if residue in not_metal:
+                for residue in getNonProteinResidues(pdb.topology, skip_residues=skip_ligands):
+                    residue_name = residue.name.upper()
+                    if residue_name not in mcpb_site_residue_names:
                         continue
-                    missing_atoms += getMissingAtomTypes(parameters_folder+'/'+residue.name+'.mol2')
+                    mol2_path = os.path.join(parameters_folder, residue_name+'.mol2')
+                    if os.path.exists(mol2_path):
+                        missing_atoms += getMissingAtomTypes(mol2_path)
 
                 mcpb_frcmod = parameters_folder+'/'+self.pdb_name+'_mcpbpy.frcmod'
                 atom_types = getAtomTypes(mcpb_frcmod, missing_atoms)
@@ -1524,7 +3112,7 @@ class openmm_md:
                     tlf.write('\t{ "'+atom+'"  "'+atom_types[atom]+'" "sp3" }\n')
                 tlf.write('}\n')
 
-                for residue in getNonProteinResidues(pdb.topology):
+                for residue in getNonProteinResidues(pdb.topology, skip_residues=skip_ligands):
                     tlf.write(residue.name+' = loadmol2 '+parameters_folder+'/'+residue.name+'.mol2\n')
 
             for res_upper, mol2_paths in residue_mol2_files.items():
@@ -1557,7 +3145,7 @@ class openmm_md:
                 ffxml_marker = os.path.join(par_folder[residue], f".ffxml_generated_{residue.lower()}")
                 ffxml_marker_root = os.path.join(parameters_folder, f".ffxml_generated_{residue.lower()}")
                 ffxml_generated = os.path.exists(ffxml_marker) or os.path.exists(ffxml_marker_root)
-                if not metal_ligand:
+                if not use_mcpb:
                     if os.path.exists(prepi_path) and not ffxml_generated:
                         tlf.write(f'loadamberprep {prepi_path}\n')
                     else:
@@ -1581,7 +3169,7 @@ class openmm_md:
                         if os.path.exists(fallback_root):
                             tlf.write(f'loadamberparams {fallback_root}\n')
 
-            if metal_ligand:
+            if use_mcpb:
                 tlf.write('loadamberparams '+mcpb_frcmod+'\n')
                 tlf.write('mol = loadpdb '+mcpb_pdb+'\n')
             else:
@@ -1718,6 +3306,7 @@ class openmm_md:
 
         self.modeller.topology = prmtop.topology
         self.modeller.positions = inpcrd.positions
+        self._refresh_positions_cache()
 
     def savePDB(self, output_file):
         with open(output_file, 'w') as of:

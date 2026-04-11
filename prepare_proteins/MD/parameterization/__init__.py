@@ -10,6 +10,7 @@ from .base import (
 
 # Always import other backends that don’t need optional deps
 from . import ambertools  # noqa: F401
+from . import charmm_gui  # noqa: F401
 
 # Try to import the OpenFF backend (which has optional deps)
 try:

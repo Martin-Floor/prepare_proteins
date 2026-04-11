@@ -7,8 +7,8 @@ import importlib
 import itertools
 import json
 import os
-import shutil
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -130,6 +130,19 @@ def _wrap_pyrosetta_command(command: str, pyrosetta_env: Optional[str]) -> str:
     )
 
     return f"bash -lc \"{conda_prefix} {command.strip()}\""
+
+
+def _launcher_relative_path(path_value: Union[str, os.PathLike]) -> str:
+    """
+    Normalize a path for use inside generated launcher scripts.
+
+    Absolute paths are converted to paths relative to the current working
+    directory so setup trees remain portable when moved.
+    """
+    normalized_path = os.path.normpath(os.fspath(path_value))
+    if os.path.isabs(normalized_path):
+        return os.path.relpath(normalized_path, start=os.getcwd())
+    return normalized_path
 
 
 def _sync_ligand_params_to_shared_folder(docking_folder: str):
@@ -8316,6 +8329,10 @@ has been carried out. Please run compareSequences() function before setting muta
         Set up FlexPepDock Rosetta jobs for protein-peptide complexes already present
         in the input PDB models.
 
+        The generated XML, flags, and returned shell commands use relative paths for
+        references internal to ``flexpepdock_folder`` so the setup tree can be moved
+        without rewriting launcher scripts.
+
         Parameters
         ==========
         flexpepdock_folder : str
@@ -8515,6 +8532,12 @@ has been carried out. Please run compareSequences() function before setting muta
                     f"Peptide chain(s) {missing_peptide} not found in model {model}."
                 )
 
+            if len(peptide_chain_ids) != 1:
+                raise ValueError(
+                    f"FlexPepDock supports exactly one peptide chain per model; "
+                    f"got {peptide_chain_ids} for model {model}."
+                )
+
             if receptor_chain_ids is None:
                 receptor_chain_ids = [
                     chain_id
@@ -8576,10 +8599,7 @@ has been carried out. Please run compareSequences() function before setting muta
                 min_only=min_only,
                 pep_refine=pep_refine,
                 lowres_abinitio=lowres_abinitio,
-                peptide_chain=",".join(peptide_chain_ids),
-                receptor_chain=",".join(receptor_chain_ids),
                 ppk_only=ppk_only,
-                scorefxn=sfxn,
                 extra_scoring=extra_scoring,
             )
             xml.addMover(flexpep)
@@ -8601,10 +8621,25 @@ has been carried out. Please run compareSequences() function before setting muta
                 output_score_file=expected_score_file,
             )
 
+            receptor_chain_flag = "".join(receptor_chain_ids)
+            peptide_chain_flag = peptide_chain_ids[0]
+            flags.addOption("flexPepDocking:receptor_chain", receptor_chain_flag)
+            flags.addOption("flexPepDocking:peptide_chain", peptide_chain_flag)
+
             # FlexPepDock benefits from aggressive rotamer sampling of nearby sidechains.
             flags.add_relax_options()
             flags.addOption("ex1aro")
             flags.addOption("ex2aro")
+
+            score_weights = getattr(sfxn, "weights_file", None)
+            score_reweights = getattr(sfxn, "reweights", {})
+            if score_reweights:
+                raise ValueError(
+                    "FlexPepDock setup does not support custom scorefunction reweights; "
+                    "pass a weights file name instead."
+                )
+            if score_weights is not None:
+                flags.score_weights = score_weights
 
             if extra_flags is not None:
                 for option in extra_flags:
@@ -8613,11 +8648,15 @@ has been carried out. Please run compareSequences() function before setting muta
                     else:
                         flags.addOption(option)
 
+            needs_nma_params = any(
+                residue.resname == "NMA"
+                for residue in self.structures[model].get_residues()
+            )
+            if needs_nma_params and params_output_dir is None:
+                params_output_dir = Path(flexpepdock_folder) / "params"
+                params_output_dir.mkdir(exist_ok=True)
+
             if params_output_dir is not None:
-                needs_nma_params = any(
-                    residue.resname == "NMA"
-                    for residue in self.structures[model].get_residues()
-                )
                 if needs_nma_params:
                     _copyScriptFile(
                         str(params_output_dir),
@@ -8636,7 +8675,7 @@ has been carried out. Please run compareSequences() function before setting muta
             )
             flags.write_flags(flags_output)
 
-            command = f"cd {shlex.quote(str(model_output_folder))}\n"
+            command = "cd " + shlex.quote(_launcher_relative_path(model_output_folder)) + "\n"
             if parallelisation == "mpirun":
                 if cpus == 1:
                     command += (
@@ -14171,9 +14210,12 @@ make sure of reading the target sequences with the function readTargetSequences(
                                collision_rate=1.0, time_step=0.002, cuda=False, fixed_seed=None, script_file=None,
                                extra_script_options=None, add_counterionsRand=False, skip_preparation=False,
                                solvate=True, solvatebox_buffer=12.0, solvatebox_iso=False,
+                               membrane_system=None,
                                verbose=False,
                                strict_ligand_atom_check=True,
                                run_acdoctor=True,
+                               mcpb_site=None,
+                               mcpb_config=None,
                                ligand_parameters_source=None,
                                parameterization_method='ambertools',
                                parameterization_options=None,
@@ -14202,12 +14244,22 @@ make sure of reading the target sequences with the function readTargetSequences(
           buffers. You can also pass a dict `{model_name: value}` for per-model buffers.
         - solvatebox_iso (bool, optional): AmberTools-specific flag to append `iso` to `solvatebox` when
           `solvatebox_buffer` is scalar. Ignored for 3-element buffers.
+        - membrane_system (dict or dict[str, dict], optional): Phase-1 membrane builder options for automatic
+          POPC bilayer construction via OpenMM `Modeller.addMembrane()`. Accepts either a single configuration
+          applied to every model or a dict keyed by model name. This is currently supported only with
+          `parameterization_method='ambertools'` and `ff='amber14'`. Inputs are assumed to already be roughly
+          membrane-oriented. With `orientation_mode='use_oriented_pdb'`, provide either `oriented_pdb`
+          or `membrane_positioning_folder` inside the per-model membrane configuration.
         - verbose (bool, optional): When True, emit detailed progress information from the parameterization backends.
         - strict_ligand_atom_check (bool, optional): If True (default), ensure parameter packs or extra MOL2 inputs use the
           same atom-name set as the ligand extracted from the PDB; mismatches raise an error. Disable to downgrade to warnings.
         - run_acdoctor (bool, optional): If True (default), run AmberTools/acdoctor validation on reused ligand MOL2 files
           before `parmchk2`. Set to False to skip that validation when acdoctor rejects otherwise usable ligands. Ignored
           by non-AmberTools backends.
+        - mcpb_site (dict or list, optional): Atom-level MCPB site definition(s). This is the preferred public API for
+          metal/cofactor sites that need explicit atom selection, for example heme-bound metals where the metal atom
+          is embedded inside a larger cofactor residue. You can also pass a dict keyed by model name.
+        - mcpb_config (dict or list, optional): Deprecated compatibility alias for `mcpb_site`.
         - ligand_only (bool or str or list of str, optional): If set, skip protein + ligand simulations and instead
           prepare solvated ligand-only systems. Use True to process every ligand detected in each model, a single
           residue name to limit the run to that ligand, or a list of residue names for multiple ligands.
@@ -14217,9 +14269,16 @@ make sure of reading the target sequences with the function readTargetSequences(
           system are considered; for those found, the full pack is copied into the job `parameters/` and
           parameterization for that ligand is skipped via `metal_parameters`.
         - parameterization_method (str, optional): Name of the parameterization backend to use. Defaults to
-          ``'ambertools'`` which preserves the existing workflow.
+          ``'ambertools'`` which preserves the existing workflow. The new ``'charmm_gui'`` backend
+          builds membrane systems remotely through CHARMM-GUI Quick Bilayer and can either reuse
+          a pre-existing PDB Reader job id or create one automatically from a local model PDB.
         - parameterization_options (dict, optional): Backend-specific options forwarded to the selected
-          parameterization backend.
+          parameterization backend. For ``parameterization_method='charmm_gui'``, pass
+          either ``token``/``token_env`` or ``email``/``password`` credentials, plus
+          a ``quick_bilayer`` mapping containing at least ``margin`` plus either
+          ``membtype`` or ``upper``/``lower``. You may also pass ``pdb_reader_jobid``
+          explicitly, or a ``pdb_reader`` mapping to automate PDB Reader creation
+          (defaults to selecting protein chains only from the current model PDB).
         - ligand_smiles (dict, optional): Mapping from ligand residue name to SMILES strings. Required by the
           OpenFF backend to build ligand templates; ignored by AmberTools.
         - ligand_sdf_files (dict, optional): Mapping from residue name to SDF file paths or option dictionaries
@@ -14367,10 +14426,19 @@ make sure of reading the target sequences with the function readTargetSequences(
             input_dir = os.path.join(replica_folder, 'input_files')
             if not os.path.isdir(input_dir):
                 return False
-            files = os.listdir(input_dir)
-            has_prmtop = any(f.endswith('.prmtop') for f in files)
-            has_inpcrd = any(f.endswith('.inpcrd') or f.endswith('.rst7') for f in files)
-            return has_prmtop and has_inpcrd
+            discovered_files = []
+            for root, _, files in os.walk(input_dir):
+                for filename in files:
+                    discovered_files.append(os.path.join(root, filename))
+            has_prmtop = any(path.endswith('.prmtop') or path.endswith('.parm7') for path in discovered_files)
+            has_inpcrd = any(path.endswith('.inpcrd') or path.endswith('.rst7') for path in discovered_files)
+            if has_prmtop and has_inpcrd:
+                return True
+            has_psf = any(path.endswith('.psf') for path in discovered_files)
+            has_crd = any(path.endswith('.crd') for path in discovered_files)
+            has_toppar = any(path.endswith('toppar.str') for path in discovered_files)
+            has_sysinfo = any(path.endswith('sysinfo.dat') for path in discovered_files)
+            return has_psf and has_crd and has_toppar and has_sysinfo
 
         def _replicas_needed(model_folder: str, replicas: int, skip_replicas):
             zfill = max(len(str(replicas)), 2)
@@ -14423,34 +14491,13 @@ make sure of reading the target sequences with the function readTargetSequences(
             input_format = None
             if resolved_parameterization is not None:
                 input_format = resolved_parameterization.input_format
-                prmtop_src = resolved_parameterization.prmtop_path or getattr(openmm_md, 'prmtop_file', None)
-                inpcrd_src = resolved_parameterization.coordinates_path or getattr(openmm_md, 'inpcrd_file', None)
+                prmtop_src = getattr(resolved_parameterization, 'prmtop_path', None) or getattr(openmm_md, 'prmtop_file', None)
+                inpcrd_src = getattr(resolved_parameterization, 'coordinates_path', None) or getattr(openmm_md, 'inpcrd_file', None)
                 openmm_md.parameterization_result = resolved_parameterization
             else:
                 prmtop_src = getattr(openmm_md, 'prmtop_file', None)
                 inpcrd_src = getattr(openmm_md, 'inpcrd_file', None)
 
-            if input_format and input_format != 'amber':
-                raise NotImplementedError(
-                    f"Parameterization format '{input_format}' is not supported by the default OpenMM runner."
-                )
-
-            prmtop_ext = os.path.splitext(prmtop_src)[1] if prmtop_src else '.prmtop'
-            inpcrd_ext = os.path.splitext(inpcrd_src)[1] if inpcrd_src else '.inpcrd'
-
-            prmtop_name = f"{base_name}{prmtop_ext}"
-            inpcrd_name = f"{base_name}{inpcrd_ext}"
-
-            prmtop_path = os.path.join(input_dir, prmtop_name)
-            inpcrd_path = os.path.join(input_dir, inpcrd_name)
-
-            # Copy source files into input directory using the model's basename
-            if prmtop_src and os.path.exists(prmtop_src) and not os.path.exists(prmtop_path):
-                shutil.copyfile(prmtop_src, prmtop_path)
-            if inpcrd_src and os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_path):
-                shutil.copyfile(inpcrd_src, inpcrd_path)
-
-            # Build the command regardless; execution-time checks will fail fast if inputs are missing
             cmd = []
             cmd.append(f"cd {job_folder}")
 
@@ -14459,13 +14506,86 @@ make sure of reading the target sequences with the function readTargetSequences(
             # working directory.
             rel_script = os.path.relpath(script_file, job_folder)
 
-            cmd.append(
-                "python "
-                + f"{rel_script} "
-                + f"{os.path.join('input_files', prmtop_name)} "
-                + f"{os.path.join('input_files', inpcrd_name)} "
-                + f"{simulation_time} "
-                + f"--chunk_size {chunk_size} "
+            if input_format in (None, 'amber'):
+                prmtop_ext = os.path.splitext(prmtop_src)[1] if prmtop_src else '.prmtop'
+                inpcrd_ext = os.path.splitext(inpcrd_src)[1] if inpcrd_src else '.inpcrd'
+
+                prmtop_name = f"{base_name}{prmtop_ext}"
+                inpcrd_name = f"{base_name}{inpcrd_ext}"
+
+                prmtop_path = os.path.join(input_dir, prmtop_name)
+                inpcrd_path = os.path.join(input_dir, inpcrd_name)
+
+                if prmtop_src and os.path.exists(prmtop_src) and not os.path.exists(prmtop_path):
+                    shutil.copyfile(prmtop_src, prmtop_path)
+                if inpcrd_src and os.path.exists(inpcrd_src) and not os.path.exists(inpcrd_path):
+                    shutil.copyfile(inpcrd_src, inpcrd_path)
+
+                cmd.append(
+                    "python "
+                    + f"{rel_script} "
+                    + f"{os.path.join('input_files', prmtop_name)} "
+                    + f"{os.path.join('input_files', inpcrd_name)} "
+                    + f"{simulation_time} "
+                )
+            elif input_format == 'charmm':
+                parameterization_files = getattr(resolved_parameterization, 'files', {}) if resolved_parameterization else {}
+                psf_src = parameterization_files.get('psf') or getattr(openmm_md, 'psf_file', None)
+                crd_src = (
+                    parameterization_files.get('crd')
+                    or parameterization_files.get('coordinates')
+                    or getattr(openmm_md, 'crd_file', None)
+                )
+                toppar_src = parameterization_files.get('toppar_str') or getattr(openmm_md, 'toppar_str', None)
+                sysinfo_src = parameterization_files.get('sysinfo') or getattr(openmm_md, 'sysinfo_file', None)
+                toppar_dir_src = parameterization_files.get('toppar_dir')
+                pdb_src = parameterization_files.get('pdb') or getattr(openmm_md, 'pdb_file', None)
+
+                if not all([psf_src, crd_src, toppar_src, sysinfo_src, toppar_dir_src]):
+                    raise ValueError(
+                        "CHARMM parameterization results require psf, crd, toppar_str, sysinfo, and toppar_dir files."
+                    )
+
+                openmm_input_dir = os.path.join(input_dir, 'openmm')
+                toppar_input_dir = os.path.join(input_dir, 'toppar')
+                os.makedirs(openmm_input_dir, exist_ok=True)
+                os.makedirs(toppar_input_dir, exist_ok=True)
+
+                psf_name = os.path.basename(psf_src)
+                crd_name = os.path.basename(crd_src)
+                toppar_name = os.path.basename(toppar_src)
+                sysinfo_name = os.path.basename(sysinfo_src)
+                if not os.path.exists(os.path.join(openmm_input_dir, psf_name)):
+                    shutil.copyfile(psf_src, os.path.join(openmm_input_dir, psf_name))
+                if not os.path.exists(os.path.join(openmm_input_dir, crd_name)):
+                    shutil.copyfile(crd_src, os.path.join(openmm_input_dir, crd_name))
+                if not os.path.exists(os.path.join(openmm_input_dir, toppar_name)):
+                    shutil.copyfile(toppar_src, os.path.join(openmm_input_dir, toppar_name))
+                if not os.path.exists(os.path.join(openmm_input_dir, sysinfo_name)):
+                    shutil.copyfile(sysinfo_src, os.path.join(openmm_input_dir, sysinfo_name))
+                if pdb_src and os.path.exists(pdb_src):
+                    pdb_name = os.path.basename(pdb_src)
+                    if not os.path.exists(os.path.join(openmm_input_dir, pdb_name)):
+                        shutil.copyfile(pdb_src, os.path.join(openmm_input_dir, pdb_name))
+                shutil.copytree(toppar_dir_src, toppar_input_dir, dirs_exist_ok=True)
+
+                cmd.append(
+                    "python "
+                    + f"{rel_script} "
+                    + f"{os.path.join('input_files', 'openmm', psf_name)} "
+                    + f"{os.path.join('input_files', 'openmm', crd_name)} "
+                    + f"{simulation_time} "
+                    + "--input_format charmm "
+                    + f"--charmm-toppar {os.path.join('input_files', 'openmm', toppar_name)} "
+                    + f"--charmm-sysinfo {os.path.join('input_files', 'openmm', sysinfo_name)} "
+                )
+            else:
+                raise NotImplementedError(
+                    f"Parameterization format '{input_format}' is not supported by the default OpenMM runner."
+                )
+
+            cmd[-1] += (
+                f"--chunk_size {chunk_size} "
                 + f"--temperature {temperature} "
                 + f"--collision_rate {collision_rate} "
                 + f"--time_step {time_step} "
@@ -14568,6 +14688,15 @@ make sure of reading the target sequences with the function readTargetSequences(
         if "verbose" not in backend_options:
             backend_options["verbose"] = bool(verbose)
         backend_name_lower = str(parameterization_method).lower()
+        if backend_name_lower == "openff" and membrane_system is not None:
+            backend_options.setdefault(
+                "forcefield_files",
+                (
+                    "amber14/protein.ff14SB.xml",
+                    "amber14/tip3pfb.xml",
+                    "amber14/lipid17.xml",
+                ),
+            )
         if backend_name_lower == "openff":
             if ligand_xml_files:
                 backend_options.setdefault("ligand_xml_files", ligand_xml_files)
@@ -14587,6 +14716,125 @@ make sure of reading the target sequences with the function readTargetSequences(
             if option is None:
                 return default
             return option
+
+        def _looks_like_membrane_system_option(option):
+            if not isinstance(option, Mapping):
+                return False
+            keys = {str(key).strip().lower() for key in option.keys()}
+            membrane_keys = {
+                "lipid_type",
+                "orientation_mode",
+                "minimum_padding_nm",
+                "membrane_center_z_nm",
+                "ionic_strength_molar",
+                "positive_ion",
+                "negative_ion",
+                "neutralize",
+            }
+            return bool(keys & membrane_keys)
+
+        def _resolve_membrane_system_option(option, model_name):
+            if isinstance(option, Mapping) and not _looks_like_membrane_system_option(option):
+                return option.get(model_name)
+            return option
+
+        def _resolve_oriented_model_source(model_name, resolved_membrane_system):
+            if not resolved_membrane_system:
+                return None
+            if str(resolved_membrane_system.get("orientation_mode", "as_is")).strip().lower() != "use_oriented_pdb":
+                return None
+
+            oriented_pdb = resolved_membrane_system.get("oriented_pdb")
+            if oriented_pdb:
+                oriented_path = os.fspath(oriented_pdb)
+                if not os.path.exists(oriented_path):
+                    raise FileNotFoundError(
+                        f"oriented_pdb for model {model_name!r} was not found: {oriented_path}"
+                    )
+                return oriented_path
+
+            membrane_positioning_folder = resolved_membrane_system.get("membrane_positioning_folder")
+            if membrane_positioning_folder:
+                oriented_path = os.path.join(
+                    os.fspath(membrane_positioning_folder),
+                    "output_models",
+                    model_name,
+                    f"{model_name}.pdb",
+                )
+                if not os.path.exists(oriented_path):
+                    raise FileNotFoundError(
+                        f"Membrane-positioned PDB for model {model_name!r} was not found at {oriented_path}"
+                    )
+                return oriented_path
+
+            raise ValueError(
+                "orientation_mode='use_oriented_pdb' requires either 'oriented_pdb' or "
+                "'membrane_positioning_folder' in membrane_system."
+            )
+
+        def _looks_like_mcpb_site_config(option):
+            if isinstance(option, Mapping):
+                keys = {str(key).strip().lower() for key in option.keys()}
+                site_keys = {
+                    "sites",
+                    "site_id",
+                    "id",
+                    "metal",
+                    "metal_atom",
+                    "coordinating_atoms",
+                    "ligating_atoms",
+                    "coordinators",
+                    "atoms",
+                }
+                return bool(keys & site_keys)
+            if isinstance(option, (list, tuple)):
+                return True
+            return False
+
+        def _resolve_mcpb_config_option(option, model_name):
+            if isinstance(option, Mapping) and not _looks_like_mcpb_site_config(option):
+                return option.get(model_name)
+            return option
+
+        if mcpb_site is not None and mcpb_config is not None:
+            raise ValueError("Use only one of mcpb_site or mcpb_config. mcpb_config is retained only as a compatibility alias.")
+
+        if backend_label == "charmm_gui":
+            if membrane_system is not None:
+                raise ValueError(
+                    "parameterization_method='charmm_gui' does not support membrane_system. "
+                    "Use parameterization_options['quick_bilayer'] instead."
+                )
+            unsupported_options = []
+            if mcpb_site is not None or mcpb_config is not None:
+                unsupported_options.append("mcpb_site/mcpb_config")
+            if metal_ligand:
+                unsupported_options.append("metal_ligand")
+            if metal_parameters is not None:
+                unsupported_options.append("metal_parameters")
+            if extra_frcmod is not None:
+                unsupported_options.append("extra_frcmod")
+            if extra_mol2 is not None:
+                unsupported_options.append("extra_mol2")
+            if ligand_smiles:
+                unsupported_options.append("ligand_smiles")
+            if ligand_sdf_files:
+                unsupported_options.append("ligand_sdf_files")
+            if ligand_xml_files:
+                unsupported_options.append("ligand_xml_files")
+            if unsupported_options:
+                raise ValueError(
+                    "parameterization_method='charmm_gui' does not support the following options yet: "
+                    + ", ".join(unsupported_options)
+                )
+        elif membrane_system is not None:
+            if backend_name_lower not in {"ambertools", "openff"}:
+                raise ValueError(
+                    "membrane_system is currently supported only with parameterization_method='ambertools' or "
+                    "'openff'."
+                )
+            if ff != "amber14":
+                raise ValueError("membrane_system is currently supported only with ff='amber14'.")
 
         def _sync_ligand_packs(source_root, dest_root):
             if not source_root or not os.path.isdir(source_root):
@@ -14640,6 +14888,13 @@ make sure of reading the target sequences with the function readTargetSequences(
         current_model_paths = {}
         if selected_models_for_setup:
             self.saveModels(current_models_folder, models=selected_models_for_setup)
+            for model_name in selected_models_for_setup:
+                resolved_membrane_system = _resolve_membrane_system_option(membrane_system, model_name)
+                oriented_source = _resolve_oriented_model_source(model_name, resolved_membrane_system)
+                if oriented_source is None:
+                    continue
+                destination = os.path.join(current_models_folder, f"{model_name}.pdb")
+                shutil.copyfile(oriented_source, destination)
             current_model_paths = {
                 model_name: os.path.join(current_models_folder, f"{model_name}.pdb")
                 for model_name in selected_models_for_setup
@@ -14671,6 +14926,8 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         ligand_only_selector = _normalize_ligand_only_option(ligand_only)
         ligand_only_active = ligand_only_selector is not None
+        if ligand_only_active and backend_label == "charmm_gui":
+            raise ValueError("parameterization_method='charmm_gui' does not support ligand_only jobs.")
 
         skip_ligands_upper = set(DEFAULT_PARAMETERIZATION_SKIP_RESIDUES)
         if skip_ligands:
@@ -14721,6 +14978,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             if entry is not None:
                 entry["returncode"] = ret
             return ret
+
+        def _is_remote_pending_result(result):
+            if result is None:
+                return False
+            input_format = str(getattr(result, "input_format", "")).strip().lower()
+            if input_format == "remote_pending":
+                return True
+            metadata = getattr(result, "metadata", None)
+            if isinstance(metadata, Mapping):
+                return str(metadata.get("state", "")).strip().lower() == "submitted"
+            return False
 
         def _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate):
             ligand_key = ligand_name.upper()
@@ -14877,6 +15145,7 @@ make sure of reading the target sequences with the function readTargetSequences(
         simulation_jobs = []
         ligand_simulation_jobs = []
         ligand_setup_completed = False
+        backend_requires_local_openmm_prep = backend_label != "charmm_gui"
 
         for model in self:
             if only_models and model not in only_models:
@@ -14888,15 +15157,21 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             model_ligands = _detect_model_ligands(model)
             model_residue_names = residue_names.get(model) if residue_names else None
+            resolved_membrane_system = _resolve_membrane_system_option(membrane_system, model)
 
             model_input_pdb = current_model_paths.get(model, self.models_paths[model])
             self.openmm_md[model] = openmm_md_cls(model_input_pdb)
-            if not skip_preparation:
-                self.openmm_md[model].setUpFF(ff)
+            if not skip_preparation and backend_requires_local_openmm_prep:
+                if resolved_membrane_system is not None:
+                    self.openmm_md[model].setUpFF(ff, membrane_system=resolved_membrane_system)
+                else:
+                    self.openmm_md[model].setUpFF(ff)
                 if add_hydrogens:
                     variants = self.openmm_md[model].getProtonationStates()
                     self.openmm_md[model].removeHydrogens()
                     self.openmm_md[model].addHydrogens(variants=variants)
+                if resolved_membrane_system is not None:
+                    self.openmm_md[model].addMembrane(resolved_membrane_system)
 
             if ligand_only_active:
                 if ligand_only_selector == ALL_LIGANDS:
@@ -14934,10 +15209,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                         )
                     skip_argument = list(skip_for_param) if skip_for_param else None
                 resolved_solvatebox_buffer = _resolve_model_option(solvatebox_buffer, model, default=12.0)
+                resolved_mcpb_site = _resolve_mcpb_config_option(mcpb_site, model)
+                resolved_mcpb_config = _resolve_mcpb_config_option(mcpb_config, model)
+                resolved_mcpb_definition = resolved_mcpb_site if resolved_mcpb_site is not None else resolved_mcpb_config
 
                 prepare_kwargs = dict(
                     charges=ligand_charges,
                     metal_ligand=metal_ligand,
+                    mcpb_site=resolved_mcpb_definition,
                     add_bonds=add_bonds.get(model) if add_bonds else None,
                     skip_ligands=sorted(skip_argument) if skip_argument else effective_skip_ligands,
                     overwrite=False,
@@ -14949,10 +15228,10 @@ make sure of reading the target sequences with the function readTargetSequences(
                     extra_force_field=extra_force_field,
                     force_field='ff14SB',
                     residue_names=model_residue_names,
-                    add_counterions=True,
-                    add_counterionsRand=add_counterionsRand,
+                    add_counterions=resolved_membrane_system is None,
+                    add_counterionsRand=bool(add_counterionsRand) if resolved_membrane_system is None else False,
                     save_amber_pdb=True,
-                    solvate=bool(solvate),
+                    solvate=bool(solvate) if resolved_membrane_system is None else False,
                     regenerate_amber_files=True,
                     non_standard_residues=non_standard_residues,
                     strict_atom_name_check=strict_ligand_atom_check,
@@ -14960,6 +15239,7 @@ make sure of reading the target sequences with the function readTargetSequences(
                     build_full_system=False,
                     ligand_sdf_files=ligand_sdf_files,
                     run_acdoctor=run_acdoctor,
+                    membrane_system=resolved_membrane_system,
                 )
                 if getattr(backend, "name", "").lower() == "openff":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
@@ -14971,12 +15251,14 @@ make sure of reading the target sequences with the function readTargetSequences(
                 if "verbose" not in prepare_kwargs:
                     prepare_kwargs["verbose"] = bool(verbose)
 
-                backend.prepare_model(
+                parameterization_result = backend.prepare_model(
                     self.openmm_md[model],
                     ligand_parameters_folder,
                     **prepare_kwargs,
                 )
-                self.openmm_md[model].parameterization_result = backend.describe_model(self.openmm_md[model])
+                if parameterization_result is None:
+                    parameterization_result = backend.describe_model(self.openmm_md[model])
+                self.openmm_md[model].parameterization_result = parameterization_result
                 packs = _collect_ligand_packs(ligand_parameters_folder)
 
                 ligand_simulation_jobs.extend(_prepare_ligand_only_jobs(model, selected_ligands, packs))
@@ -14991,14 +15273,19 @@ make sure of reading the target sequences with the function readTargetSequences(
             needed_replicas, prepared_replicas = _replicas_needed(model_folder, replicas, skip_replicas)
 
             base_name = getattr(self.openmm_md[model], 'pdb_name', 'input')
-            job_prmtop = os.path.join(ligand_parameters_folder, f"{base_name}.prmtop")
+            job_prmtop = None
+            for ext in ('.prmtop', '.parm7'):
+                candidate = os.path.join(ligand_parameters_folder, f"{base_name}{ext}")
+                if os.path.exists(candidate):
+                    job_prmtop = candidate
+                    break
             job_inpcrd = None
             for ext in ('.inpcrd', '.rst7'):
                 candidate = os.path.join(ligand_parameters_folder, f"{base_name}{ext}")
                 if os.path.exists(candidate):
                     job_inpcrd = candidate
                     break
-            if os.path.exists(job_prmtop) and job_inpcrd:
+            if job_prmtop and job_inpcrd:
                 self.openmm_md[model].prmtop_file = job_prmtop
                 self.openmm_md[model].inpcrd_file = job_inpcrd
 
@@ -15017,12 +15304,21 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             has_prmtop = bool(getattr(self.openmm_md[model], 'prmtop_file', None))
             has_inpcrd = bool(getattr(self.openmm_md[model], 'inpcrd_file', None))
-            if (not skip_preparation) and (len(needed_replicas) > 0) and not (has_prmtop and has_inpcrd):
+            should_prepare_inputs = (
+                len(needed_replicas) > 0
+                and not (has_prmtop and has_inpcrd)
+                and ((not skip_preparation) or backend_label == "charmm_gui")
+            )
+            if should_prepare_inputs:
                 external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
                 resolved_solvatebox_buffer = _resolve_model_option(solvatebox_buffer, model, default=12.0)
+                resolved_mcpb_site = _resolve_mcpb_config_option(mcpb_site, model)
+                resolved_mcpb_config = _resolve_mcpb_config_option(mcpb_config, model)
+                resolved_mcpb_definition = resolved_mcpb_site if resolved_mcpb_site is not None else resolved_mcpb_config
                 prepare_kwargs = dict(
                     charges=ligand_charges,
                     metal_ligand=metal_ligand,
+                    mcpb_site=resolved_mcpb_definition,
                     add_bonds=add_bonds.get(model) if add_bonds else None,
                     skip_ligands=effective_skip_ligands,
                     overwrite=False,
@@ -15034,15 +15330,16 @@ make sure of reading the target sequences with the function readTargetSequences(
                     extra_force_field=extra_force_field,
                     force_field='ff14SB',
                     residue_names=model_residue_names,
-                    add_counterions=True,
-                    add_counterionsRand=add_counterionsRand,
+                    add_counterions=resolved_membrane_system is None,
+                    add_counterionsRand=bool(add_counterionsRand) if resolved_membrane_system is None else False,
                     save_amber_pdb=True,
-                    solvate=bool(solvate),
+                    solvate=bool(solvate) if resolved_membrane_system is None else False,
                     regenerate_amber_files=True,
                     non_standard_residues=non_standard_residues,
                     strict_atom_name_check=strict_ligand_atom_check,
                     ligand_sdf_files=ligand_sdf_files,
                     run_acdoctor=run_acdoctor,
+                    membrane_system=resolved_membrane_system,
                 )
                 if getattr(backend, "name", "").lower() == "openff":
                     prepare_kwargs["ligand_xml_files"] = ligand_xml_files
@@ -15053,15 +15350,41 @@ make sure of reading the target sequences with the function readTargetSequences(
                 prepare_kwargs["export_per_residue_ffxml"] = export_per_residue_ffxml
                 if "verbose" not in prepare_kwargs:
                     prepare_kwargs["verbose"] = bool(verbose)
+                if backend_label == "charmm_gui":
+                    prepare_kwargs["allow_remote"] = not skip_preparation
 
-                backend.prepare_model(
+                parameterization_result = backend.prepare_model(
                     self.openmm_md[model],
                     ligand_parameters_folder,
                     **prepare_kwargs,
                 )
+                if parameterization_result is not None:
+                    self.openmm_md[model].parameterization_result = parameterization_result
 
-            parameterization_result = backend.describe_model(self.openmm_md[model])
+            parameterization_result = getattr(self.openmm_md[model], 'parameterization_result', None)
+            if parameterization_result is None:
+                parameterization_result = backend.describe_model(self.openmm_md[model])
             self.openmm_md[model].parameterization_result = parameterization_result
+
+            if _is_remote_pending_result(parameterization_result):
+                if verbose:
+                    pending_state = str(getattr(parameterization_result, "metadata", {}).get("state", "")).strip().lower()
+                    if pending_state == "download_incomplete":
+                        pending_message = (
+                            f"[prepare_proteins] CHARMM-GUI job for model {model} finished remotely, "
+                            "but the downloaded archive does not yet contain simulation inputs; "
+                            "skipping replica input generation for this run."
+                        )
+                    else:
+                        pending_message = (
+                            f"[prepare_proteins] CHARMM-GUI job for model {model} is queued remotely; "
+                            "skipping replica input generation for this run."
+                        )
+                    print(
+                        pending_message
+                    )
+                _release_model_memory(model)
+                continue
 
             zfill = max(len(str(replicas)), 2)
             for replica in range(1, replicas + 1):
@@ -15398,6 +15721,8 @@ make sure of reading the target sequences with the function readTargetSequences(
                                    verbose=False,
                                    strict_ligand_atom_check=True,
                                    run_acdoctor=True,
+                                   mcpb_site=None,
+                                   mcpb_config=None,
                                    ligand_parameters_source=None,
                                    parameterization_method='ambertools',
                                    parameterization_options=None,
@@ -15517,6 +15842,8 @@ make sure of reading the target sequences with the function readTargetSequences(
             verbose=verbose,
             strict_ligand_atom_check=strict_ligand_atom_check,
             run_acdoctor=run_acdoctor,
+            mcpb_site=mcpb_site,
+            mcpb_config=mcpb_config,
             ligand_parameters_source=ligand_parameters_source,
             parameterization_method=parameterization_method,
             parameterization_options=parameterization_options,
