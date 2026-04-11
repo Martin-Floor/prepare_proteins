@@ -453,6 +453,9 @@ class sequenceModels:
         runner_name='runner',
         ligands=None,
         ligand_smiles: list | None = None,
+        bonded_atom_pairs=None,
+        user_ccd=None,
+        user_ccd_path=None,
         skip_finished=False,
         benchmark=False,
     ):
@@ -505,6 +508,23 @@ class sequenceModels:
             ``count`` key duplicates the entry (e.g. ``{'smiles': 'CC(=O)O',
             'id': 'FMD', 'count': 3}`` -> ``FMDA``, ``FMDB``, ``FMDC``). Backslashes
             are auto-escaped for JSON.
+        bonded_atom_pairs : list | dict, optional
+            Optional AlphaFold 3 ``bondedAtomPairs`` payload. Accepts either a
+            single list applied to every model or a dict mapping model names
+            (or ``"default"``/``"*"``) to such lists. Each entry must follow
+            the AF3 schema ``[[entity_id, residue_id, atom_name], [entity_id,
+            residue_id, atom_name]]``. This is required for covalent ligands
+            such as glycans and is not supported for SMILES ligands.
+        user_ccd : str | dict, optional
+            Optional inline AlphaFold 3 ``userCCD`` definition. Accepts either
+            a single string applied to every model or a dict mapping model
+            names (or ``"default"``/``"*"``) to strings. Mutually exclusive
+            with ``user_ccd_path`` for the same model.
+        user_ccd_path : path-like | dict, optional
+            Optional path to a user-provided CCD file written into the AF3
+            ``userCCDPath`` field. Accepts either a single path applied to
+            every model or a dict mapping model names (or ``"default"``/``"*"``)
+            to paths. Mutually exclusive with ``user_ccd`` for the same model.
         skip_finished : bool, optional
             When ``True`` jobs that already contain completed AF3 outputs
             (detected via an existing ``ranking_scores.csv`` under the
@@ -694,6 +714,81 @@ class sequenceModels:
                 return []
             return _coerce_ligands(ligands, occupied_ids)
 
+        def _resolve_model_option(option, model_name):
+            if isinstance(option, dict):
+                if model_name in option:
+                    return option[model_name]
+                for alias in ('default', '*'):
+                    if alias in option:
+                        return option[alias]
+                return None
+            return option
+
+        def _normalize_atom_address(atom, option_name):
+            if not isinstance(atom, (list, tuple)) or len(atom) != 3:
+                raise TypeError(
+                    f'{option_name} atom addresses must be [entity_id, residue_id, atom_name].'
+                )
+
+            entity_id, residue_id, atom_name = atom
+            entity_id = str(entity_id).strip()
+            atom_name = str(atom_name).strip()
+            if not entity_id:
+                raise ValueError(f'{option_name} entity ids must not be empty.')
+            if not atom_name:
+                raise ValueError(f'{option_name} atom names must not be empty.')
+
+            try:
+                residue_id = int(residue_id)
+            except (TypeError, ValueError):
+                raise TypeError(f'{option_name} residue ids must be integers.') from None
+
+            return [entity_id, residue_id, atom_name]
+
+        def _normalize_bonded_atom_pairs(bonds):
+            if bonds is None:
+                return None
+            if not isinstance(bonds, (list, tuple)):
+                raise TypeError(
+                    'bonded_atom_pairs must be a list of AF3 bond pairs or a dictionary mapping models to such lists.'
+                )
+
+            normalized = []
+            for bond in bonds:
+                if not isinstance(bond, (list, tuple)) or len(bond) != 2:
+                    raise TypeError(
+                        'Each bonded_atom_pairs entry must contain exactly two atom addresses.'
+                    )
+                normalized.append([
+                    _normalize_atom_address(bond[0], 'bonded_atom_pairs'),
+                    _normalize_atom_address(bond[1], 'bonded_atom_pairs'),
+                ])
+            return normalized
+
+        def _normalize_user_ccd(ccd_text):
+            if ccd_text is None:
+                return None
+            if not isinstance(ccd_text, str):
+                raise TypeError(
+                    'user_ccd must be a string or a dictionary mapping models to strings.'
+                )
+            if not ccd_text.strip():
+                raise ValueError('user_ccd must not be empty.')
+            return ccd_text
+
+        def _normalize_user_ccd_path(path_value):
+            if path_value is None:
+                return None
+            try:
+                normalized_path = os.fspath(path_value)
+            except TypeError:
+                raise TypeError(
+                    'user_ccd_path must be a path-like value or a dictionary mapping models to path-like values.'
+                ) from None
+            if not normalized_path:
+                raise ValueError('user_ccd_path must not be empty.')
+            return normalized_path
+
         if isinstance(only_models, str):
             only_models = [only_models]
         if exclude_models:
@@ -774,6 +869,18 @@ class sequenceModels:
                 for ligand in lig_spec:
                     entries.append({"ligand": ligand})
 
+            model_bonded_atom_pairs = _normalize_bonded_atom_pairs(
+                _resolve_model_option(bonded_atom_pairs, model_name)
+            )
+            model_user_ccd = _normalize_user_ccd(_resolve_model_option(user_ccd, model_name))
+            model_user_ccd_path = _normalize_user_ccd_path(
+                _resolve_model_option(user_ccd_path, model_name)
+            )
+            if model_user_ccd is not None and model_user_ccd_path is not None:
+                raise ValueError(
+                    f'Model {model_name!r} cannot define both user_ccd and user_ccd_path.'
+                )
+
             model_seed_values = _seeds_for_model(model_name)
             job_specs = []
 
@@ -829,6 +936,12 @@ class sequenceModels:
                 payload = dict(base_payload)
                 payload["modelSeeds"] = job_spec["model_seeds"]
                 payload["sequences"] = entries
+                if model_bonded_atom_pairs is not None:
+                    payload["bondedAtomPairs"] = model_bonded_atom_pairs
+                if model_user_ccd is not None:
+                    payload["userCCD"] = model_user_ccd
+                if model_user_ccd_path is not None:
+                    payload["userCCDPath"] = model_user_ccd_path
 
                 if seed_label:
                     payload["name"] = f"{model_name}_{seed_label}"

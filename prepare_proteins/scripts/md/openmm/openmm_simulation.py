@@ -7,14 +7,15 @@ except Exception:  # pragma: no cover - fallback for older installs
     from simtk import unit as u
     from simtk.openmm.app import *
 import argparse
+import json
 import time
 import re
 import os
 
 # Argument parsing
 parser = argparse.ArgumentParser()
-parser.add_argument('input_prmtop', help='Path to the input prmtop file.')
-parser.add_argument('input_inpcrd', help='Path to the input inpcrd file.')
+parser.add_argument('input_prmtop', help='Path to the input topology file.')
+parser.add_argument('input_inpcrd', help='Path to the input coordinates file.')
 parser.add_argument('simulation_time', help='Total simulation time in ns.')
 parser.add_argument('--chunk_size', default=100, help='Chunk size in simulation time (ns) for output report files (data and dcd).')
 parser.add_argument('--temperature', default=300.0, help='Temperature in K.')
@@ -30,6 +31,14 @@ parser.add_argument('--restraint_constant', type=float, default=100.0, help='For
 parser.add_argument('--equilibration_data_report_time', type=float, default=1.0, help='Data report interval during equilibration in ps.')
 parser.add_argument('--equilibration_dcd_report_time', type=float, default=0.0, help='DCD report interval during equilibration in ps (0 disables reporting).')
 parser.add_argument('--seed', type=int, help='Seed for initial velocities (int)')
+parser.add_argument('--platform-name', default=os.environ.get('OPENMM_PLATFORM'), help='Optional OpenMM platform name (for example CUDA or OpenCL).')
+parser.add_argument('--device-index', default=os.environ.get('OPENMM_DEVICE_INDEX'), help='Optional GPU device index or comma-separated list of device indices.')
+parser.add_argument('--precision', default=os.environ.get('OPENMM_PRECISION'), help='Optional OpenMM precision mode (single, mixed, or double).')
+parser.add_argument('--use-cpu-pme', default=os.environ.get('OPENMM_USE_CPU_PME'), help='Optional OpenMM UseCpuPme flag (true/false).')
+parser.add_argument('--platform-property', action='append', default=[], help='Extra OpenMM platform property in key=value form. Can be supplied multiple times.')
+parser.add_argument('--input_format', default='amber', choices=('amber', 'charmm'), help='Topology format for the supplied input files.')
+parser.add_argument('--charmm-toppar', default=None, help='CHARMM toppar stream file required when --input_format charmm is used.')
+parser.add_argument('--charmm-sysinfo', default=None, help='Optional CHARMM-GUI sysinfo.dat file used to set the periodic box for CHARMM inputs.')
 args = parser.parse_args()
 
 def _ns_to_steps(duration_ns, time_step_ps, label):
@@ -72,10 +81,93 @@ def _to_production_steps(step, equilibration_steps):
         return step - equilibration_steps
     return step
 
+def _normalize_platform_boolean(value, label):
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return "true"
+    if normalized in {"0", "false", "no", "off"}:
+        return "false"
+    raise ValueError(f"{label} must be one of true/false/yes/no/on/off/1/0.")
+
+def _parse_platform_properties(platform_name, device_index, precision, use_cpu_pme, extra_properties):
+    properties = {}
+    resolved_platform = platform_name.strip() if platform_name else None
+
+    if device_index:
+        properties["DeviceIndex"] = str(device_index).strip()
+    if precision:
+        properties["Precision"] = str(precision).strip()
+    if use_cpu_pme is not None and str(use_cpu_pme).strip() != "":
+        properties["UseCpuPme"] = _normalize_platform_boolean(use_cpu_pme, "use_cpu_pme")
+
+    for item in extra_properties or []:
+        if "=" not in item:
+            raise ValueError(
+                f"Platform property '{item}' is invalid. Use key=value syntax."
+            )
+        key, value = item.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            raise ValueError(
+                f"Platform property '{item}' is invalid. Property names cannot be empty."
+            )
+        properties[key] = value
+
+    if resolved_platform is None and properties:
+        resolved_platform = "CUDA"
+
+    return resolved_platform, properties
+
+
+def _load_charmm_parameter_set(toppar_path):
+    parameter_files = []
+    toppar_root = os.path.dirname(os.path.abspath(toppar_path))
+    with open(toppar_path, 'r', encoding='utf-8', errors='replace') as handle:
+        for line in handle:
+            if '!' in line:
+                line = line.split('!', 1)[0]
+            parameter_path = line.strip()
+            if not parameter_path:
+                continue
+            parameter_files.append(os.path.normpath(os.path.join(toppar_root, parameter_path)))
+    if not parameter_files:
+        raise ValueError(f"No CHARMM parameter files were found in {toppar_path}.")
+    return CharmmParameterSet(*parameter_files)
+
+
+def _apply_charmm_box(psf, sysinfo_path):
+    boxlx = boxly = boxlz = None
+    try:
+        with open(sysinfo_path, 'r', encoding='utf-8', errors='replace') as handle:
+            sysinfo = json.load(handle)
+        dimensions = sysinfo.get('dimensions', [])
+        if len(dimensions) >= 3:
+            boxlx, boxly, boxlz = map(float, dimensions[:3])
+    except Exception:
+        with open(sysinfo_path, 'r', encoding='utf-8', errors='replace') as handle:
+            for line in handle:
+                segments = line.split('=', 1)
+                if len(segments) != 2:
+                    continue
+                key = segments[0].strip().upper()
+                value = segments[1].strip()
+                if key == 'BOXLX':
+                    boxlx = float(value)
+                elif key == 'BOXLY':
+                    boxly = float(value)
+                elif key == 'BOXLZ':
+                    boxlz = float(value)
+    if None in (boxlx, boxly, boxlz):
+        raise ValueError(f"Could not read periodic box dimensions from {sysinfo_path}.")
+    psf.setBox(boxlx * u.angstroms, boxly * u.angstroms, boxlz * u.angstroms)
+
 # Validate and parse input parameters
 try:
-    input_prmtop = args.input_prmtop
-    input_inpcrd = args.input_inpcrd
+    input_topology_path = args.input_prmtop
+    input_coordinate_path = args.input_inpcrd
     simulation_time = float(args.simulation_time)
     chunk_size = float(args.chunk_size)
     temperature = float(args.temperature)
@@ -91,6 +183,14 @@ try:
     equilibration_data_report_time = float(args.equilibration_data_report_time)
     equilibration_dcd_report_time = float(args.equilibration_dcd_report_time)
     seed = args.seed
+    platform_name = args.platform_name
+    device_index = args.device_index
+    precision = args.precision
+    use_cpu_pme = args.use_cpu_pme
+    platform_properties = args.platform_property
+    input_format = str(args.input_format).strip().lower()
+    charmm_toppar = args.charmm_toppar
+    charmm_sysinfo = args.charmm_sysinfo
 
     if (simulation_time <= 0 or chunk_size <= 0 or temperature <= 0 or time_step <= 0 or
             collision_rate <= 0 or nvt_time <= 0 or npt_time <= 0 or restraint_constant < 0 or
@@ -98,6 +198,17 @@ try:
         raise ValueError("Simulation time, chunk size, temperature, time step, collision rate, equilibration times, scaling steps, and restraint constant must be positive values.")
     if dcd_report_time <= 0 or data_report_time <= 0 or equilibration_data_report_time <= 0 or equilibration_dcd_report_time < 0:
         raise ValueError("Report intervals must be positive values (set equilibration DCD to 0 to disable).")
+    if input_format == 'charmm' and not charmm_toppar:
+        raise ValueError("CHARMM inputs require --charmm-toppar.")
+    if input_format == 'amber' and (charmm_toppar or charmm_sysinfo):
+        raise ValueError("--charmm-toppar/--charmm-sysinfo can only be used with --input_format charmm.")
+    platform_name, platform_properties = _parse_platform_properties(
+        platform_name,
+        device_index,
+        precision,
+        use_cpu_pme,
+        platform_properties,
+    )
 except ValueError as e:
     print(f"Parameter error: {e}")
     exit(1)
@@ -363,17 +474,41 @@ def compute_ns_per_day(simulation_time_ns, elapsed_seconds):
 # Main simulation script
 try:
     # Load the input files
-    prmtop = AmberPrmtopFile(input_prmtop)
-    inpcrd = AmberInpcrdFile(input_inpcrd)
+    if input_format == 'amber':
+        topology_source = AmberPrmtopFile(input_topology_path)
+        coordinate_source = AmberInpcrdFile(input_coordinate_path)
+        system_topology = topology_source.topology
+        initial_positions = coordinate_source.positions
+        initial_box_vectors = coordinate_source.boxVectors
+        topology_label = 'prmtop file'
+        coordinate_label = 'inpcrd file'
+    elif input_format == 'charmm':
+        topology_source = CharmmPsfFile(input_topology_path)
+        coordinate_source = CharmmCrdFile(input_coordinate_path)
+        if charmm_sysinfo:
+            _apply_charmm_box(topology_source, charmm_sysinfo)
+        charmm_params = _load_charmm_parameter_set(charmm_toppar)
+        system_topology = topology_source.topology
+        initial_positions = coordinate_source.positions
+        initial_box_vectors = system_topology.getPeriodicBoxVectors()
+        topology_label = 'psf file'
+        coordinate_label = 'crd file'
+    else:
+        raise ValueError(f"Unsupported input format: {input_format}")
 
-    # Create system from the given AMBER prmtop and inpcrd files
+    # Create system from the given input files
     print('Initializing system from input files:')
-    print(f'\tprmtop file: {input_prmtop}')
-    print(f'\tinpcrd file: {input_inpcrd}')
+    print(f'\tinput format: {input_format}')
+    print(f'\t{topology_label}: {input_topology_path}')
+    print(f'\t{coordinate_label}: {input_coordinate_path}')
+    if input_format == 'charmm':
+        print(f'\ttoppar file: {charmm_toppar}')
+        if charmm_sysinfo:
+            print(f'\tsysinfo file: {charmm_sysinfo}')
 
     # --- detect periodicity and atom count
-    has_box = (inpcrd.boxVectors is not None) or (prmtop.topology.getUnitCellDimensions() is not None)
-    n_atoms = prmtop.topology.getNumAtoms()
+    has_box = (initial_box_vectors is not None) or (system_topology.getUnitCellDimensions() is not None)
+    n_atoms = system_topology.getNumAtoms()
     print(f"System atoms: {n_atoms}")
     print(f"Periodic box present?: {has_box}")
 
@@ -386,7 +521,10 @@ try:
         system_kwargs["nonbondedCutoff"] = nb_cutoff
     if has_box:
         system_kwargs["ewaldErrorTolerance"] = 1e-4
-    system = prmtop.createSystem(**system_kwargs)
+    if input_format == 'amber':
+        system = topology_source.createSystem(**system_kwargs)
+    else:
+        system = topology_source.createSystem(charmm_params, **system_kwargs)
     # Remove center-of-mass drift every 100 steps
     system.addForce(omm.CMMotionRemover(100))
 
@@ -401,13 +539,25 @@ try:
     with open('integrator.xml', 'w') as f:
         f.write(omm.XmlSerializer.serialize(integrator))
 
-    simulation = Simulation(prmtop.topology, system, integrator)
+    if platform_name:
+        platform = omm.Platform.getPlatformByName(platform_name)
+        if platform_properties:
+            simulation = Simulation(system_topology, system, integrator, platform, platform_properties)
+        else:
+            simulation = Simulation(system_topology, system, integrator, platform)
+        print(f"Using OpenMM platform: {platform_name}")
+        if platform_properties:
+            print(f"Platform properties: {platform_properties}")
+    else:
+        simulation = Simulation(system_topology, system, integrator)
 
     # Initialize simulation
-    simulation.context.setPositions(inpcrd.positions)
+    simulation.context.setPositions(initial_positions)
     # Ensure periodic box vectors are present when using PME
-    if inpcrd.boxVectors is not None:
-        simulation.context.setPeriodicBoxVectors(*inpcrd.boxVectors)
+    if initial_box_vectors is not None:
+        simulation.context.setPeriodicBoxVectors(*initial_box_vectors)
+    if not platform_name:
+        print(f"Using OpenMM platform: {simulation.context.getPlatform().getName()}")
 
     checkpoint_file = 'production.chk'
 
@@ -511,7 +661,7 @@ try:
     else:
         print('\tAdding positional restraint force')
         # Add a restraint force to the system
-        posres_force = addHeavyAtomsPositionalRestraintForce(system, inpcrd.positions, prmtop.topology, restraint_constant, has_box)
+        posres_force = addHeavyAtomsPositionalRestraintForce(system, initial_positions, system_topology, restraint_constant, has_box)
 
         # Set up equilibration reporters
         equilibration_reporter = CustomDataReporter(system, 'equilibration.data', equilibration_data_report_steps, step=True,
@@ -534,7 +684,7 @@ try:
         with open('minimized.pdb', 'w') as of:
             state = simulation.context.getState(getPositions=True)
             positions = state.getPositions()
-            PDBFile.writeFile(prmtop.topology, positions, of)
+            PDBFile.writeFile(system_topology, positions, of)
 
         # Store energy of the minimized state (step 0)
         state = simulation.context.getState(getEnergy=True)

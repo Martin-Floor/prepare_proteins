@@ -949,15 +949,11 @@ class movers:
             self.xml = ElementTree
             self.root = self.xml.Element('FlexPepDock')
             self.root.set('name', self.name)
-            if self.peptide_chain != None:
-                self.root.set('peptide_chain', self.peptide_chain)
-            if self.receptor_chain != None:
-                self.root.set('receptor_chain', self.receptor_chain)
-            if self.scorefxn != None:
-                if isinstance(self.scorefxn, str):
-                    self.root.set('scorefxn', self.scorefxn)
-                else:
-                    self.root.set('scorefxn', self.scorefxn.name)
+            # Rosetta 2021 parses peptide/receptor chain selection and the full-atom
+            # scorefunction from command-line options, while the published XML schema
+            # does not accept these attributes on the FlexPepDock mover tag.
+            # Keep the XML schema-compatible and inject these settings via flags in the
+            # high-level setup layer instead.
             if self.min_only:
                 self.root.set('min_only', 'true')
             if self.pep_refine:
