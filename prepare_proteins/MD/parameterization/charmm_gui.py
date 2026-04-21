@@ -65,6 +65,7 @@ _PDB_READER_OPTION_KEYS = {
     "include_rna",
     "system_pH",
     "preserve_hydrogens",
+    "mutations",
 }
 
 _DONE_STATUSES = {"done", "finished", "complete", "completed"}
@@ -239,6 +240,56 @@ def _normalize_bool(value: Any, *, default: Optional[bool] = None) -> Optional[b
     if text in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Could not interpret boolean value {value!r}.")
+
+
+def _build_mutation_entries(mutations: Any) -> list[Dict[str, str]]:
+    """Validate a pdb_reader['mutations'] list and return normalised form-field triples.
+
+    Each returned entry is a dict with keys 'chain' (CHARMM segid), 'rid' (resid as
+    string), and 'patch' (3-letter target residue name). Input specs must be mappings
+    with keys 'chain', 'resid', 'target'.
+    """
+    if mutations is None:
+        return []
+    if isinstance(mutations, (str, bytes, Mapping)) or not isinstance(mutations, Sequence):
+        raise ValueError(
+            "CHARMM-GUI pdb_reader['mutations'] must be a list of mapping entries."
+        )
+    entries: list[Dict[str, str]] = []
+    for i, spec in enumerate(mutations):
+        if not isinstance(spec, Mapping):
+            raise ValueError(
+                f"CHARMM-GUI pdb_reader['mutations'][{i}] must be a mapping with keys "
+                "'chain', 'resid', 'target'."
+            )
+        missing = [k for k in ("chain", "resid", "target") if k not in spec]
+        if missing:
+            raise ValueError(
+                f"CHARMM-GUI pdb_reader['mutations'][{i}] missing keys: {missing}."
+            )
+        chain = str(spec["chain"]).strip()
+        if not chain:
+            raise ValueError(
+                f"CHARMM-GUI pdb_reader['mutations'][{i}]: 'chain' must be a non-empty string."
+            )
+        try:
+            resid = int(spec["resid"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"CHARMM-GUI pdb_reader['mutations'][{i}]: 'resid' must be an integer."
+            ) from exc
+        target = str(spec["target"]).strip().upper()
+        if not target:
+            raise ValueError(
+                f"CHARMM-GUI pdb_reader['mutations'][{i}]: 'target' must be a non-empty string."
+            )
+        if target not in _PROTEIN_RESIDUES:
+            raise ValueError(
+                f"CHARMM-GUI pdb_reader['mutations'][{i}]: 'target'={target!r} is not a "
+                f"recognised CHARMM patch. Expected one of {sorted(_PROTEIN_RESIDUES)}."
+            )
+        entries.append({"chain": chain, "rid": str(resid), "patch": target})
+    return entries
 
 
 def _normalize_workflow_mode(value: Any) -> str:
@@ -1451,6 +1502,20 @@ class CHARMMGUIBackend(ParameterizationBackend):
         elif "hbuild_checked" in field_map:
             del field_map["hbuild_checked"]
             order = [name for name in order if name != "hbuild_checked"]
+
+        mutation_entries = _build_mutation_entries(pdb_reader_config.get("mutations"))
+        if mutation_entries:
+            field_map["mutation_checked"] = ["1"]
+            if "mutation_checked" not in order:
+                order.append("mutation_checked")
+            for field_name, entry_key in (
+                ("mutation[chain][]", "chain"),
+                ("mutation[rid][]", "rid"),
+                ("mutation[patch][]", "patch"),
+            ):
+                field_map[field_name] = [entry[entry_key] for entry in mutation_entries]
+                if field_name not in order:
+                    order.append(field_name)
 
         glycan_entries: list[Dict[str, str]] = []
         if html_text and _normalize_bool(pdb_reader_config.get("include_hetero"), default=False):
