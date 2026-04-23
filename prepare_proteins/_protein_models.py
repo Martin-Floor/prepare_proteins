@@ -7809,6 +7809,7 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         hoh_to_wat=True,
         pdb_output=False,
         interaction_ligand_chains=None,
+        interface_specs=None,
     ):
         """
         Set up minimizations using Rosetta FastRelax protocol.
@@ -7824,6 +7825,9 @@ are given. See the calculateMSA() method for selecting which chains will be algi
         interaction_ligand_chains : list or str, optional
             Chain IDs to report interface scores against (InterfaceAnalyzerMover).
             Not supported with symmetry or membrane.
+        interface_specs : list or str, optional
+            Interface specifications (e.g. 'AB_C') to report interface scores against.
+            Takes precedence over interaction_ligand_chains if both specify the same interface.
         """
 
         # Create minimization job folders
@@ -7891,6 +7895,14 @@ are given. See the calculateMSA() method for selecting which chains will be algi
                 raise ValueError("interaction_ligand_chains cannot be empty.")
         else:
             interaction_chain_list = []
+
+        if interface_specs is not None:
+            if isinstance(interface_specs, str):
+                interface_spec_list = [interface_specs]
+            else:
+                interface_spec_list = list(interface_specs)
+        else:
+            interface_spec_list = []
 
         # Save all models
         self.saveModels(relax_folder + "/input_models", models=models)
@@ -8184,6 +8196,20 @@ has been carried out. Please run compareSequences() function before setting muta
                         scorefxn=sfxn.name,
                         ligandchain=chain_id,
                         scorefile_reporting_prefix=f"interface_score_{chain_id}",
+                    )
+                    xml.addMover(iam)
+                    protocol.append(iam)
+
+            # Add interface analysis movers for requested interface specs
+            if interface_spec_list:
+                for spec in interface_spec_list:
+                    # Clean spec for name (replace _ with x)
+                    clean_name = spec.replace("_", "x")
+                    iam = rosettaScripts.movers.interfaceAnalyzerMover(
+                        name=f"interface_anl_{clean_name}",
+                        scorefxn=sfxn.name,
+                        interface=spec,
+                        scorefile_reporting_prefix=f"interface_score_{clean_name}",
                     )
                     xml.addMover(iam)
                     protocol.append(iam)
