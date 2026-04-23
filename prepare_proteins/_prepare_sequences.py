@@ -1342,9 +1342,11 @@ class sequenceModels:
         filter_kwargs=None,
         return_filter=False,
         append_model_index=False,
+        reference_folder=None,
+        rmsd_subset=False,
         overwrite=False,
     ):
-        """Collect AlphaFold 3 scores and copy top-ranking predictions as PDBs.
+        """Collect AlphaFold 3 scores and optionally compute RMSD against a reference.
 
         Parameters
         ----------
@@ -1676,6 +1678,17 @@ class sequenceModels:
                         )
                         for key, value in summary_values.items():
                             clean_row[f"summary_{key}"] = value
+                        
+                        # Add RMSD if requested and not restricted to subset
+                        if reference_folder and not rmsd_subset:
+                            rmsd_metrics = _calculate_rmsd(
+                                model_name, job_dir, 
+                                clean_row.get("seed"), 
+                                clean_row.get("sample"),
+                                clean_row["prediction_name"]
+                            )
+                            clean_row.update(rmsd_metrics)
+                            
                         rows.append(clean_row)
             except FileNotFoundError:
                 return [], [f"ranking_scores.csv not found in {job_dir}"]
@@ -1720,6 +1733,124 @@ class sequenceModels:
                         f"Failed to copy CIF fallback from {cif_path} ({fallback_exc})."
                     )
                     return model_name, None, warnings_local
+
+        def _calculate_rmsd(model_name, job_dir, seed, sample, prediction_name=None):
+            """Calculate RMSD for a single prediction against the native structure."""
+            if not reference_folder:
+                return {}
+
+            ref_root = os.path.join(reference_folder, model_name)
+            if not os.path.isdir(ref_root):
+                return {}
+
+            # Load job info for chain mapping
+            info_path = os.path.join(ref_root, "job_info.json")
+            if not os.path.exists(info_path):
+                return {}
+
+            try:
+                with open(info_path, "r") as f:
+                    job_info = json.load(f)
+                pdb_id = job_info.get("pdb_id")
+                peptide_chains = job_info.get("peptide_chains", "").split(":")
+                protein_chains = job_info.get("protein_chains", "").split(":")
+            except Exception:
+                return {}
+
+            # Locate native structure
+            native_path = None
+            for ext in [".cif", ".pdb"]:
+                p = os.path.join(ref_root, f"{pdb_id}{ext}")
+                if os.path.exists(p):
+                    native_path = p
+                    break
+            if not native_path:
+                return {}
+
+            # Locate predicted structure
+            cif_path = _prediction_to_cif(job_dir, prediction_name, seed, sample)
+            if not cif_path or not os.path.exists(cif_path):
+                return {}
+
+            try:
+                parser = MMCIFParser(QUIET=True) if native_path.endswith(".cif") else Bio.PDB.PDBParser(QUIET=True)
+                native_struct = parser.get_structure("native", native_path)
+                
+                pred_parser = MMCIFParser(QUIET=True) if cif_path.endswith(".cif") else Bio.PDB.PDBParser(QUIET=True)
+                pred_struct = pred_parser.get_structure("pred", cif_path)
+
+                def _get_coords(structure, chain_ids):
+                    coords = {}
+                    for model in structure:
+                        for chain in model:
+                            if chain.id in chain_ids:
+                                chain_coords = []
+                                for residue in chain:
+                                    if 'CA' in residue:
+                                        chain_coords.append((residue.get_id()[1], residue['CA'].get_coord()))
+                                coords[chain.id] = chain_coords
+                    return coords
+
+                ref_all_coords = _get_coords(native_struct, protein_chains + peptide_chains)
+                mov_all_coords = _get_coords(pred_struct, protein_chains + peptide_chains)
+
+                # Match protein CA atoms for alignment
+                ref_prot_ca, mov_prot_ca = [], []
+                for cid in protein_chains:
+                    if cid in ref_all_coords and cid in mov_all_coords:
+                        mov_dict = dict(mov_all_coords[cid])
+                        for res_id, coord in ref_all_coords[cid]:
+                            if res_id in mov_dict:
+                                ref_prot_ca.append(coord)
+                                mov_prot_ca.append(mov_dict[res_id])
+
+                if not ref_prot_ca:
+                    return {}
+
+                P = np.array(ref_prot_ca)
+                Q = np.array(mov_prot_ca)
+                
+                # Centering
+                P_center = P.mean(axis=0)
+                Q_center = Q.mean(axis=0)
+                P_c = P - P_center
+                Q_c = Q - Q_center
+                # SVD (Kabsch)
+                C_svd = np.dot(Q_c.T, P_c)
+                V_svd, S_svd, Wt_svd = np.linalg.svd(C_svd)
+                R_svd = np.dot(V_svd, Wt_svd)
+                if np.linalg.det(R_svd) < 0:
+                    Wt_svd[-1, :] *= -1
+                    R_svd = np.dot(V_svd, Wt_svd)
+
+                # Protein RMSD
+                mov_prot_aligned = np.dot(Q_c, R_svd) + P_center
+                prot_rmsd = np.sqrt(np.mean(np.sum((P - mov_prot_aligned)**2, axis=1)))
+
+                # Peptide RMSD
+                ref_pep_ca, mov_pep_ca = [], []
+                for cid in peptide_chains:
+                    if cid in ref_all_coords and cid in mov_all_coords:
+                        mov_dict = dict(mov_all_coords[cid])
+                        for res_id, coord in ref_all_coords[cid]:
+                            if res_id in mov_dict:
+                                ref_pep_ca.append(coord)
+                                mov_pep_ca.append(mov_dict[res_id])
+                
+                if not ref_pep_ca:
+                    return {"protein_rmsd": prot_rmsd}
+
+                P_pep = np.array(ref_pep_ca)
+                Q_pep = np.array(mov_pep_ca)
+                Q_pep_aligned = np.dot(Q_pep - Q_center, R_svd) + P_center
+                pep_rmsd = np.sqrt(np.mean(np.sum((P_pep - Q_pep_aligned)**2, axis=1)))
+
+                return {
+                    "peptide_rmsd": float(pep_rmsd),
+                    "protein_rmsd": float(prot_rmsd)
+                }
+            except Exception:
+                return {}
 
         def _derive_prediction_index(row_data, default_idx):
             candidate_keys = ("sample", "model_sample", "prediction_index")
@@ -1902,6 +2033,30 @@ class sequenceModels:
 
         if best_only:
             scores_df = best_df
+
+        if reference_folder and rmsd_subset and not selected_df.empty:
+            # We calculate RMSD for the selected models only
+            # The selected_df at this point still has the index (if set) 
+            # and columns like model, job_dir etc.
+            rmsd_records = []
+            for _, row in selected_df.iterrows():
+                m_name = row.get("model")
+                j_dir = row.get("job_dir")
+                s_val = row.get("seed")
+                sm_val = row.get("sample")
+                p_name = row.get("prediction_name")
+                
+                # If these were in index, row.get() might return None or they might be in row.name
+                if pd.isna(m_name) and isinstance(row.name, tuple):
+                    m_name = row.name[0]
+                
+                rmsd_data = _calculate_rmsd(m_name, j_dir, s_val, sm_val, p_name)
+                rmsd_records.append(rmsd_data)
+            
+            rmsd_df = pd.DataFrame(rmsd_records, index=selected_df.index)
+            # Combine with selected_df
+            for col in rmsd_df.columns:
+                selected_df[col] = rmsd_df[col]
 
         drop_columns = ["job_dir", "job_name", "prediction_name"]
         return_columns = [col for col in drop_columns if col in scores_df.columns]
