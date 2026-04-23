@@ -128,7 +128,7 @@ class movers:
 
             types = ['linmin', 'dfpmin', 'dfpmin_armijo', 'lbfgs_armijo_nonmonotone']
             if min_type not in types:
-                raise ValuError('Incorrect minimizer. Accepted types: '+' '.join((types)))
+                raise ValueError('Incorrect minimizer. Accepted types: '+' '.join((types)))
 
             self.type = 'mover'
             self.name = name
@@ -165,7 +165,7 @@ class movers:
             if self.bondangle:
                 self.root.set('bondangle', str(int(self.bondangle)))
             if self.bondlength:
-                self.root.set('bondlength', str(int(bself.ondlength)))
+                self.root.set('bondlength', str(int(self.bondlength)))
             if self.chi:
                 self.root.set('chi', str(int(self.chi)))
             if self.jump != None:
@@ -213,15 +213,15 @@ class movers:
                         elif isinstance(self.movers[i][0], type(None)):
                             self.xml.movers[i] = self.xml.SubElement(self.root, 'Add')
                         else:
-                            raise ValuError('When given as pairs the order is (mover, filter)!')
+                            raise ValueError('When given as pairs the order is (mover, filter)!')
                         if self.movers[i][1].type == 'filter':
                             self.xml.movers[i].set('filter_name', self.movers[i][1].name)
                             if not self.report_filter_at_end:
                                 self.xml.movers[i].set('report_at_end', str(int(self.report_filter_at_end)))
                         else:
-                            raise ValuError('When given as pairs the order is (mover, filter)!')
+                            raise ValueError('When given as pairs the order is (mover, filter)!')
                     else:
-                        raise ValuError('More than two elements were given!')
+                        raise ValueError('More than two elements were given!')
                 else:
                     self.xml.movers[i] = self.xml.SubElement(self.root, 'Add')
                     self.xml.movers[i].set('mover', self.movers[i].name)
@@ -300,7 +300,7 @@ class movers:
                 if self.ref_pose != None:
                     self.root.set('ref_pose', self.ref_pose)
                 else:
-                    raise ValuError('ref_pose must be given as argument.')
+                    raise ValueError('ref_pose must be given as argument.')
 
                 self.root.set('ref_start', self.ref_start)
                 self.root.set('ref_end', self.ref_end)
@@ -665,8 +665,8 @@ class movers:
 
             self.type = 'mover'
             self.name = name
-            self.start = start
-            self.end = end
+            self.start = start_res_num
+            self.end = end_res_num
             self.copy_pdbinfo = copy_pdbinfo
             self.spm_reference_name = spm_reference_name
 
@@ -1072,7 +1072,8 @@ class movers:
         def __init__(self, name="interfaceAnalyzerMover", scorefxn=None, pack_separated=False,
                      pack_input=False, resfile=False, packstat=False, interface_sc=False,
                      tracer=False, use_jobname=False, fixedchains=None, interface=None,
-                     ligandchain=None, jump=None, scorefile_reporting_prefix=None):
+                     ligandchain=None, jump=None, scorefile_reporting_prefix=None,
+                     score_diff=False, compute_packstat=False):
 
             self.type = 'mover'
             self.name = name
@@ -1089,6 +1090,8 @@ class movers:
             self.ligandchain = ligandchain
             self.jump = jump
             self.scorefile_reporting_prefix = scorefile_reporting_prefix
+            self.score_diff = score_diff
+            self.compute_packstat = compute_packstat
 
         def generateXml(self):
             self.xml = ElementTree
@@ -1096,10 +1099,35 @@ class movers:
             self.root.set('name', self.name)
 
             if self.scorefxn != None:
-                self.root.set('scorefxn', self.scorefxn)
+                if isinstance(self.scorefxn, str):
+                    self.root.set('scorefxn', self.scorefxn)
+                else:
+                    self.root.set('scorefxn', self.scorefxn.name)
 
+            if self.pack_separated:
+                self.root.set('pack_separated', str(int(self.pack_separated)))
+            if self.pack_input:
+                self.root.set('pack_input', str(int(self.pack_input)))
+            if self.resfile:
+                self.root.set('resfile', str(int(self.resfile)))
+            if self.packstat:
+                self.root.set('packstat', str(int(self.packstat)))
+            if self.interface_sc:
+                self.root.set('interface_sc', str(int(self.interface_sc)))
+            if self.tracer:
+                self.root.set('tracer', str(int(self.tracer)))
+            if self.use_jobname:
+                self.root.set('use_jobname', str(int(self.use_jobname)))
+
+            if self.fixedchains != None:
+                self.root.set('fixedchains', self.fixedchains)
+
+            if self.interface != None:
+                self.root.set('interface', self.interface)
             if self.ligandchain != None:
                 self.root.set('ligandchain', self.ligandchain)
+            if self.jump != None:
+                self.root.set('jump', str(self.jump))
 
             if self.scorefile_reporting_prefix is not None:
                 self.root.set('scorefile_reporting_prefix', self.scorefile_reporting_prefix)
@@ -1214,12 +1242,12 @@ class movers:
 
             possible_matrices = ['MATCH','IDENTITY','BLOSUM62']
             if not matrix in possible_matrices:
-                raise ValuError('Matrix must be one of the following '+','.join(possible_matrices))
+                raise ValueError('Matrix must be one of the following '+','.join(possible_matrices))
             self.matrix = matrix
 
             possible_scalings = ['prob','global','none']
             if not scaling in possible_scalings:
-                raise ValuError('Scaling must be one of the following '+','.join(possible_scalings))
+                raise ValueError('Scaling must be one of the following '+','.join(possible_scalings))
             self.scaling = scaling
 
 
