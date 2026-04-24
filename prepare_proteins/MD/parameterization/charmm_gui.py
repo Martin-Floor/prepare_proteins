@@ -1162,7 +1162,10 @@ class CHARMMGUIBackend(ParameterizationBackend):
                 download_path,
                 site_base_url=(
                     site_base_url
-                    if email and password and (prefer_site_download or site_status_source == "jobids_page")
+                    if email and password and (
+                        prefer_site_download
+                        or site_status_source in ("jobids_page", "site_archive_ready")
+                    )
                     else None
                 ),
                 email=email,
@@ -2689,9 +2692,15 @@ class CHARMMGUIBackend(ParameterizationBackend):
             except Exception:
                 site_session = None
         while True:
-            status = self._check_status(api_base_url, token, jobid)
-            with status_history_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(status, sort_keys=True) + "\n")
+            api_status_error: Optional[Exception] = None
+            try:
+                status = self._check_status(api_base_url, token, jobid)
+            except Exception as _api_exc:
+                api_status_error = _api_exc
+                status = {}
+            if status:
+                with status_history_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(status, sort_keys=True) + "\n")
 
             status_text = str(status.get("status", "")).strip().lower()
             if status_text in _DONE_STATUSES:
@@ -2713,6 +2722,40 @@ class CHARMMGUIBackend(ParameterizationBackend):
                         with status_history_path.open("a", encoding="utf-8") as handle:
                             handle.write(json.dumps(site_status, sort_keys=True) + "\n")
                         return site_status
+            # Fallback for site-submitted jobs (e.g. Quick Bilayer) where the API
+            # returns 401 and the jobids page does not list the child job: check the
+            # job's own page for 'var downloading = true', which CHARMM-GUI sets only
+            # once ALL steps (including any FF-Converter) have completed.
+            if not status_text and site_session is not None and site_base_url:
+                try:
+                    _page_downloading = self._get_site_job_page_downloading_flag(
+                        site_session, site_base_url, jobid
+                    )
+                    if _page_downloading is True:
+                        # Job is fully done.  Trigger/wait for archive compression
+                        # so _download_archive_via_site can proceed.
+                        try:
+                            self._site_request(
+                                site_session,
+                                f"{site_base_url}/?doc=input/download&jobid={jobid}&compress_only=1",
+                                method="GET",
+                            )
+                        except Exception:
+                            pass
+                        _dl_progress = self._get_site_archive_compression_progress(
+                            site_session, site_base_url, jobid
+                        )
+                        _archive_ready_status: Dict[str, Any] = {
+                            "status": "done",
+                            "source": "site_archive_ready",
+                            "jobid": jobid,
+                            "compression_progress": _dl_progress,
+                        }
+                        with status_history_path.open("a", encoding="utf-8") as handle:
+                            handle.write(json.dumps(_archive_ready_status, sort_keys=True) + "\n")
+                        return _archive_ready_status
+                except Exception:
+                    pass
             if status_text == "compressing" and site_session is not None and site_base_url:
                 try:
                     compression_progress = self._get_site_archive_compression_progress(
@@ -2831,6 +2874,37 @@ class CHARMMGUIBackend(ParameterizationBackend):
         finally:
             if temporary_destination.exists():
                 temporary_destination.unlink()
+
+    def _get_site_job_page_downloading_flag(
+        self,
+        session,
+        site_base_url: str,
+        jobid: str,
+    ) -> Optional[bool]:
+        """Return True if the CHARMM-GUI job page shows 'var downloading = true'.
+
+        Tries both membrane.quick and membrane.bilayer doc URLs.  Returns None
+        if the page can't be fetched or does not contain a recognisable flag.
+        """
+        for doc in ("input/membrane.quick", "input/membrane.bilayer"):
+            try:
+                page_html = self._site_request(
+                    session,
+                    f"{site_base_url}/?doc={doc}&jobid={jobid}",
+                    method="GET",
+                ).decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            if "Login</button>" in page_html:
+                continue
+            match = re.search(
+                r"var\s+downloading\s*=\s*(?P<flag>true|false)\s*;",
+                page_html,
+                re.IGNORECASE,
+            )
+            if match:
+                return match.group("flag").lower() == "true"
+        return None
 
     def _wait_for_site_archive_compression(
         self,
