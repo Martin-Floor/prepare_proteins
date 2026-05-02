@@ -8,6 +8,11 @@ from typing import Iterator
 try:
     from importlib import resources as _resources
 except ImportError:  # pragma: no cover - Python < 3.7 fallback
+    _resources = None
+
+# importlib.resources only gained `.files()` in Python 3.9. On 3.7/3.8 the
+# stdlib module exists but lacks the API we use, so fall back to the backport.
+if _resources is None or not hasattr(_resources, "files"):
     try:
         import importlib_resources as _resources  # type: ignore
     except ImportError:  # pragma: no cover - legacy fallback

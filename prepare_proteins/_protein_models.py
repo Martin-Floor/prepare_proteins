@@ -15441,6 +15441,369 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return simulation_jobs
 
+    def setUpMMGBSA(self, job_folder,
+                    ligand_resname='LIG',
+                    parameterization_method='openff',
+                    parameterization_options=None,
+                    ligand_smiles=None,
+                    ligand_sdf_files=None,
+                    ligand_charges=None,
+                    model_ligand_smiles=None,
+                    model_ligand_sdf_files=None,
+                    model_ligand_charges=None,
+                    auto_charge_from_smiles=True,
+                    gb_model='OBC2',
+                    minimize='all',
+                    minimize_steps=500,
+                    minimize_tolerance=10.0,
+                    platform=None,
+                    only_models=None,
+                    skip_models=None,
+                    overwrite=False,
+                    skip_ligand_charge_computation=False,
+                    verbose=False):
+        """Set up single-point MM-GBSA jobs for each model containing a ligand.
+
+        Each model's complex (protein + ligand, vacuum — no waters/ions) is
+        parameterised locally via the requested backend (default: OpenFF
+        SMIRNOFF for the ligand + Amber14 for the protein). The resulting
+        prmtop/inpcrd pair is staged in ``job_folder/<model>/input_files/``,
+        a self-contained runner script (``openmm_mmgbsa.py``) is copied into
+        ``job_folder/scripts/``, and one shell command per model is returned —
+        suitable for passing to ``bsc_calculations.local.parallel`` or any of
+        the ``*.jobArrays`` SLURM helpers.
+
+        The runner script computes::
+
+            dG_bind = E_complex - E_receptor - E_ligand
+
+        with OpenMM implicit solvent (default OBC2). Receptor and ligand
+        sub-systems are obtained by ParmEd ``strip`` masks based on the ligand
+        residue name; this is a single-trajectory MM-GBSA approximation
+        (sub-system geometries inherited from the complex pose).
+
+        Parameters
+        ----------
+        job_folder : str
+            Output folder. Created if missing.
+        ligand_resname : str, optional
+            Residue name used to identify the ligand at parameterisation time
+            and inside the runner. Default ``"LIG"``.
+        parameterization_method : str, optional
+            Backend name. ``"openff"`` (default) uses SMIRNOFF + AmberTools;
+            ``"ambertools"`` uses antechamber/parmchk2/tleap.
+        parameterization_options : dict, optional
+            Backend-specific options forwarded to ``get_backend``.
+        ligand_smiles : dict, optional
+            ``{resname: smiles}`` shared across all models.
+        ligand_sdf_files : dict, optional
+            ``{resname: sdf_path}`` shared across all models.
+        model_ligand_smiles : dict, optional
+            ``{model_name: smiles}`` per-model SMILES for the ligand. Takes
+            precedence over ``ligand_smiles`` for the matching model.
+        model_ligand_sdf_files : dict, optional
+            ``{model_name: sdf_path}`` per-model SDF file. Takes precedence
+            over ``ligand_sdf_files`` for the matching model.
+        gb_model : str, optional
+            OpenMM implicit-solvent model. One of ``"HCT"``, ``"OBC1"``,
+            ``"OBC2"`` (default), ``"GBn"``, ``"GBn2"``. Note: GBn/GBn2 want
+            ``mbondi3`` PB radii in the prmtop — the standard backends use
+            the default radii so OBC2 is the safe choice for cross-backend use.
+        minimize : str, optional
+            Forwarded to the runner. One of ``"none"``, ``"complex"``,
+            ``"subsystems"`` (default), or ``"all"``.
+        minimize_steps : int, optional
+            Maximum minimisation steps per sub-system. Default 200.
+        minimize_tolerance : float, optional
+            ``LocalEnergyMinimizer`` tolerance in kJ/mol/nm. Default 10.0.
+        platform : str, optional
+            OpenMM platform name (``"CPU"``, ``"CUDA"``, ``"OpenCL"``,
+            ``"Reference"``). Default: auto-pick.
+        only_models : str or list, optional
+            Restrict setup to these model names.
+        skip_models : list, optional
+            Skip these model names.
+        overwrite : bool, optional
+            Re-parameterise even if a prmtop already exists for the model.
+        skip_ligand_charge_computation : bool, optional
+            Forwarded to the parameterisation backend (re-use cached charges).
+        verbose : bool, optional
+            Forwarded to the parameterisation backend.
+
+        Returns
+        -------
+        list[str]
+            One shell command per model. Pass to
+            ``bsc_calculations.local.parallel``,
+            ``bsc_calculations.nord4.jobArrays``, etc.
+
+        Notes
+        -----
+        - The complex must already carry hydrogens (the method does NOT call
+          ``Modeller.addHydrogens``). For PELE-derived poses this is fine since
+          PELE keeps explicit hydrogens. If your input PDB is heavy-atom-only,
+          run prepwizard / capping first.
+        - One PDB per model is parameterised; each model's PELE-cluster
+          representative pose is the right input. Multi-frame averaging would
+          require parameterising once and running the runner per frame —
+          straightforward but not done here.
+        """
+        from .MD.parameterization import get_backend
+
+        openmm_setup = _require_openmm_support("proteinModels.setUpMMGBSA")
+        openmm_md_cls = getattr(openmm_setup, "openmm_md", None)
+        if openmm_md_cls is None:
+            raise ImportError(
+                "OpenMM support is enabled but the 'openmm_md' class could not "
+                "be located. Reinstall prepare_proteins with its OpenMM extras."
+            )
+
+        # Normalise inputs
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        only_models_set = set(only_models) if only_models else None
+        skip_models_set = set(skip_models) if skip_models else set()
+
+        ligand_resname = str(ligand_resname).strip().upper()
+
+        if ligand_smiles is not None:
+            ligand_smiles = {k.strip().upper(): str(v).strip()
+                             for k, v in ligand_smiles.items()}
+        if ligand_sdf_files is not None:
+            normalized_sdf = {}
+            for k, v in ligand_sdf_files.items():
+                resn = k.strip().upper()
+                if isinstance(v, dict):
+                    if "path" not in v:
+                        raise ValueError(
+                            f"ligand_sdf_files[{k!r}] dict must include 'path'.")
+                    normalized_sdf[resn] = dict(v)
+                else:
+                    normalized_sdf[resn] = {"path": str(v)}
+            ligand_sdf_files = normalized_sdf
+        model_ligand_smiles = dict(model_ligand_smiles or {})
+        model_ligand_sdf_files = dict(model_ligand_sdf_files or {})
+        ligand_charges = dict(ligand_charges or {})
+        ligand_charges = {k.strip().upper(): int(v) for k, v in ligand_charges.items()}
+        model_ligand_charges = dict(model_ligand_charges or {})
+
+        # Auto-compute formal charge per model from SMILES if requested.
+        if auto_charge_from_smiles:
+            try:
+                from rdkit import Chem
+                _has_rdkit = True
+            except ImportError:
+                _has_rdkit = False
+            if _has_rdkit:
+                for model_name, smi in model_ligand_smiles.items():
+                    if model_name in model_ligand_charges:
+                        continue
+                    mol = Chem.MolFromSmiles(smi)
+                    if mol is not None:
+                        model_ligand_charges[model_name] = int(
+                            Chem.GetFormalCharge(mol))
+
+        backend_options = dict(parameterization_options or {})
+        backend_options.setdefault("skip_ligand_charge_computation",
+                                   bool(skip_ligand_charge_computation))
+        backend = get_backend(parameterization_method, **backend_options)
+        backend_label = getattr(backend, "name", parameterization_method)
+
+        # Layout
+        os.makedirs(job_folder, exist_ok=True)
+        scripts_folder = os.path.join(job_folder, "scripts")
+        os.makedirs(scripts_folder, exist_ok=True)
+        params_root = os.path.join(job_folder, "parameters")
+        os.makedirs(params_root, exist_ok=True)
+        input_models_folder = os.path.join(job_folder, "input_models")
+        os.makedirs(input_models_folder, exist_ok=True)
+        self.saveModels(input_models_folder)
+
+        # Ship the runner script
+        _copyScriptFile(scripts_folder, "openmm_mmgbsa.py",
+                        subfolder="md/openmm", hidden=False)
+        runner_script = os.path.join(scripts_folder, "openmm_mmgbsa.py")
+
+        jobs = []
+        prepared = []
+        skipped = []
+
+        selected_models = [
+            model for model in self
+            if (only_models_set is None or model in only_models_set)
+            and model not in skip_models_set
+        ]
+
+        for model in selected_models:
+            model_pdb = os.path.join(input_models_folder, f"{model}.pdb")
+            if not os.path.exists(model_pdb):
+                self[model].saveStructureToPDB(model_pdb)
+
+            model_folder = os.path.join(job_folder, model)
+            input_files = os.path.join(model_folder, "input_files")
+            os.makedirs(input_files, exist_ok=True)
+            params_folder = os.path.join(params_root, model)
+            os.makedirs(params_folder, exist_ok=True)
+
+            base_name = model
+            prmtop_dst = os.path.join(input_files, f"{base_name}.prmtop")
+            inpcrd_dst = os.path.join(input_files, f"{base_name}.inpcrd")
+
+            already_done = (os.path.exists(prmtop_dst)
+                            and os.path.exists(inpcrd_dst)
+                            and not overwrite)
+
+            if not already_done:
+                if verbose:
+                    print(f"[setUpMMGBSA] parameterising {model}", flush=True)
+                md_obj = openmm_md_cls(model_pdb)
+
+                per_model_smiles = dict(ligand_smiles or {})
+                if model in model_ligand_smiles:
+                    per_model_smiles[ligand_resname] = model_ligand_smiles[model]
+                per_model_sdf = dict(ligand_sdf_files or {})
+                if model in model_ligand_sdf_files:
+                    per_model_sdf[ligand_resname] = {
+                        "path": model_ligand_sdf_files[model]
+                    }
+
+                prepare_kwargs = dict(
+                    solvate=False,
+                    regenerate_amber_files=True,
+                    only_residues={ligand_resname},
+                    verbose=bool(verbose),
+                )
+                # Per-model formal charge for the ligand
+                per_model_charges = dict(ligand_charges or {})
+                if model in model_ligand_charges:
+                    per_model_charges[ligand_resname] = int(
+                        model_ligand_charges[model])
+                if per_model_charges:
+                    prepare_kwargs["charges"] = per_model_charges
+
+                if backend_label.lower() == "openff":
+                    if per_model_smiles:
+                        prepare_kwargs["ligand_smiles"] = per_model_smiles
+                    if per_model_sdf:
+                        prepare_kwargs["ligand_sdf_files"] = per_model_sdf
+
+                try:
+                    parameterization_result = backend.prepare_model(
+                        md_obj, params_folder, **prepare_kwargs,
+                    )
+                except Exception as exc:
+                    print(f"[setUpMMGBSA] {model}: parameterisation FAILED: {exc}",
+                          flush=True)
+                    skipped.append((model, str(exc)))
+                    continue
+
+                if parameterization_result is None:
+                    parameterization_result = backend.describe_model(md_obj)
+
+                prmtop_src = (parameterization_result.prmtop_path
+                              if parameterization_result is not None else None)
+                inpcrd_src = (parameterization_result.coordinates_path
+                              if parameterization_result is not None else None)
+                if not prmtop_src or not os.path.exists(prmtop_src):
+                    pdb_name = getattr(md_obj, "pdb_name", model)
+                    for ext in (".prmtop", ".parm7"):
+                        cand = os.path.join(params_folder, f"{pdb_name}{ext}")
+                        if os.path.exists(cand):
+                            prmtop_src = cand
+                            break
+                    for ext in (".inpcrd", ".rst7"):
+                        cand = os.path.join(params_folder, f"{pdb_name}{ext}")
+                        if os.path.exists(cand):
+                            inpcrd_src = cand
+                            break
+
+                if (not prmtop_src or not os.path.exists(prmtop_src)
+                        or not inpcrd_src or not os.path.exists(inpcrd_src)):
+                    print(f"[setUpMMGBSA] {model}: parameterisation produced no "
+                          f"prmtop/inpcrd; skipping.", flush=True)
+                    skipped.append((model, "no prmtop/inpcrd produced"))
+                    continue
+
+                shutil.copyfile(prmtop_src, prmtop_dst)
+                shutil.copyfile(inpcrd_src, inpcrd_dst)
+                del md_obj
+                gc.collect()
+
+            rel_runner = os.path.relpath(runner_script, model_folder)
+            rel_prmtop = os.path.join("input_files", f"{base_name}.prmtop")
+            rel_inpcrd = os.path.join("input_files", f"{base_name}.inpcrd")
+            output_csv = os.path.join("results", "mmgbsa.csv")
+            cmd_lines = [
+                f"cd {model_folder}",
+                "mkdir -p results",
+                (
+                    f"python {rel_runner} "
+                    f"{rel_prmtop} {rel_inpcrd} "
+                    f"--ligand_resname {ligand_resname} "
+                    f"--gb_model {gb_model} "
+                    f"--minimize {minimize} "
+                    f"--minimize_steps {minimize_steps} "
+                    f"--minimize_tolerance {minimize_tolerance} "
+                    f"--label {model} "
+                    f"--output {output_csv}"
+                    + (f" --platform {platform}" if platform else "")
+                ),
+            ]
+            jobs.append("\n".join(cmd_lines) + "\n")
+            prepared.append(model)
+
+        if verbose or skipped:
+            print(f"[setUpMMGBSA] prepared {len(prepared)} models, "
+                  f"skipped {len(skipped)}.", flush=True)
+            for model, reason in skipped:
+                print(f"  skipped {model}: {reason}", flush=True)
+        return jobs
+
+    def analyseMMGBSA(self, job_folder, results_filename="mmgbsa.csv"):
+        """Aggregate MM-GBSA per-model CSV outputs from a setUpMMGBSA folder.
+
+        Parameters
+        ----------
+        job_folder : str
+            Folder previously populated by ``setUpMMGBSA``.
+        results_filename : str, optional
+            Per-model output filename written by the runner. Default
+            ``"mmgbsa.csv"``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per model with columns including ``model``,
+            ``E_complex_kcal``, ``E_receptor_kcal``, ``E_ligand_kcal``,
+            ``dG_bind_kcal``, ``gb_model``, ``minimize``.
+        """
+        import csv as _csv
+        rows = []
+        if not os.path.isdir(job_folder):
+            raise FileNotFoundError(f"{job_folder} does not exist")
+        for entry in sorted(os.listdir(job_folder)):
+            model_dir = os.path.join(job_folder, entry)
+            if not os.path.isdir(model_dir):
+                continue
+            csv_path = os.path.join(model_dir, "results", results_filename)
+            if not os.path.exists(csv_path):
+                continue
+            with open(csv_path) as fh:
+                rdr = _csv.DictReader(fh)
+                for row in rdr:
+                    row = dict(row)
+                    row["model"] = entry
+                    rows.append(row)
+        if not rows:
+            return pd.DataFrame(columns=["model", "dG_bind_kcal"])
+        df = pd.DataFrame(rows)
+        for col in ("E_complex_kcal", "E_receptor_kcal", "E_ligand_kcal",
+                    "dG_bind_kcal", "elapsed_s"):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        cols = ["model"] + [c for c in df.columns if c != "model"]
+        return df[cols].sort_values("model").reset_index(drop=True)
+
     def setUpOpenMMInteractionEnergyCalculations(
         self,
         job_folder,
