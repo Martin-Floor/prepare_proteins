@@ -12255,7 +12255,19 @@ make sure of reading the target sequences with the function readTargetSequences(
         pele_folder : str
             Path to the folder where PELE calculations will be located.
         models_folder : str
-            Path to the folder containing input docking poses.
+            Path to the folder containing input docking poses. The expected
+            layout is **two-level**:
+
+                models_folder/<protein>/<protein><sep><ligand><sep><pose>.pdb
+
+            where ``<protein>`` matches a key loaded by ``proteinModels`` and
+            ``<sep>`` is the ``separator`` argument (default ``"-"``).
+            ``<pose>`` is typically the Glide / docking rank, e.g. ``1``.
+            Example: ``models_folder/CDK2_3bhv/CDK2_3bhv-val_0001-1.pdb``.
+
+            **A flat ``models_folder/*.pdb`` layout silently produces zero
+            jobs** because the outer loop iterates over directories — be
+            explicit about the subdirectory level.
         input_yaml : str
             Path to the input YAML file used as a template for all runs.
         box_centers : dict, optional
@@ -12509,6 +12521,28 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         # Read docking poses information from models_folder and create pele input
         # folders.
+        #
+        # Defensive guard: the loop below iterates over SUBDIRECTORIES of
+        # `models_folder` (one per protein receptor) and skips any direct
+        # files. A flat `models_folder/*.pdb` layout therefore matches
+        # nothing and silently returns zero jobs. Raise early with a clear
+        # message instead.
+        if os.path.isdir(models_folder):
+            _entries = os.listdir(models_folder)
+            _subdirs = [d for d in _entries
+                         if os.path.isdir(os.path.join(models_folder, d))]
+            if _entries and not _subdirs:
+                raise ValueError(
+                    f"models_folder {models_folder!r} contains only files, "
+                    f"no subdirectories. Expected layout:\n"
+                    f"    {models_folder}/<protein>/<protein>{separator}<ligand>{separator}<pose>.pdb\n"
+                    f"e.g. {models_folder}/CDK2_3bhv/CDK2_3bhv-val_0001-1.pdb. "
+                    f"Place each docked complex inside a subdirectory named "
+                    f"after its loaded protein-model key."
+                )
+        else:
+            raise FileNotFoundError(f"models_folder does not exist: {models_folder!r}")
+
         jobs = []
         models = {}
         ligand_pdb_name = {}
