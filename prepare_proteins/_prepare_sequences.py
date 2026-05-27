@@ -988,6 +988,302 @@ class sequenceModels:
 
         return commands
 
+    def setUpESMFold2(
+        self,
+        job_folder,
+        only_models=None,
+        exclude_models=None,
+        ligands=None,
+        ligand_smiles=None,
+        msa_dir=None,
+        msa_paths=None,
+        num_loops=3,
+        num_sampling_steps=200,
+        num_diffusion_samples=1,
+        seed=None,
+        esmfold2_env='/gpfs/projects/bsc72/conda_envs/esmfold2',
+        hf_cache='/gpfs/projects/bsc72/mfloor/envs/huggingface_cache',
+        model_name='biohub/ESMFold2',
+        skip_finished=False,
+    ):
+        """Create ESMFold2 job folders, per-model Python scripts, and shell commands.
+
+        ESMFold2 (Biohub, 2026, MIT-licensed) is a structure predictor that
+        supports CCD-coded cofactors and SMILES ligands, with optional MSA
+        input. Single-sequence mode (no MSA) gives ~10x speedup over
+        MSA-using methods at modest accuracy cost. This helper mirrors
+        :meth:`setUpAlphaFold3` — per-model dirs are created under
+        ``job_folder``, a per-model Python script is written, and the
+        returned commands ``cd`` into each model dir and run the script.
+
+        Parameters
+        ----------
+        job_folder : str
+            Root folder that will contain the per-model dirs.
+        only_models : str or iterable, optional
+            Restrict to the given model name(s).
+        exclude_models : str or iterable, optional
+            Skip the given model name(s).
+        ligands : optional
+            CCD-coded ligand specification applied to every model. Accepts:
+
+            * list/tuple of CCD codes (strings), e.g. ``["HEM", "MG"]``;
+            * dict mapping CCD code to a count, e.g. ``{"HEM": 1, "MG": 1}``;
+            * dict mapping model name (or ``"default"`` / ``"*"``) to any of
+              the above to override the default per model.
+        ligand_smiles : optional
+            SMILES ligand specification, same forms as ``ligands`` but with
+            SMILES strings instead of CCD codes.
+        msa_dir : str, optional
+            Directory containing ``<model>.a3m`` files. When provided and
+            the per-model MSA file exists, the model is folded in MSA mode.
+            Otherwise ESMFold2 runs in single-sequence mode (faster, lower
+            accuracy on hard targets).
+        msa_paths : dict, optional
+            Per-model overrides: ``{model_name: path_or_None}``. ``None``
+            forces single-sequence mode for that model even if ``msa_dir``
+            has a file. Takes precedence over ``msa_dir``.
+        num_loops : int, optional
+            Number of recycling loops (default 3).
+        num_sampling_steps : int, optional
+            Diffusion sampling steps (default 200).
+        num_diffusion_samples : int, optional
+            Number of diffusion samples per model (default 1).
+        seed : int, optional
+            Diffusion RNG seed. Default None (random per run).
+        esmfold2_env : str, optional
+            Path to the conda env containing ``esm``. Default points at the
+            shared MN5 deployment.
+        hf_cache : str, optional
+            HuggingFace cache directory. Pre-populated for offline use on
+            compute nodes.
+        model_name : str, optional
+            HuggingFace model identifier (default ``"biohub/ESMFold2"``).
+        skip_finished : bool, optional
+            When ``True``, models with an existing ``output/<model>.cif`` are
+            skipped.
+
+        Returns
+        -------
+        list[str]
+            One multi-line command per prepared ESMFold2 job, ready for
+            ``bsc_calculations.mn5.jobArrays`` or direct execution.
+        """
+        import textwrap
+
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        elif only_models:
+            only_models = list(only_models)
+        else:
+            only_models = []
+
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+        elif exclude_models:
+            exclude_models = list(exclude_models)
+        else:
+            exclude_models = []
+
+        os.makedirs(job_folder, exist_ok=True)
+
+        def _launcher_cd_path(path_value):
+            normalized_path = os.path.normpath(path_value)
+            if os.path.isabs(normalized_path):
+                return os.path.relpath(normalized_path, start=os.getcwd())
+            return normalized_path
+
+        def _ccd_ligands_for_model(name):
+            """Return list of {'id': str, 'ccd': str} dicts for this model."""
+            if not ligands:
+                return []
+            spec = ligands
+            if isinstance(ligands, dict):
+                # Check for per-model dict (keys look like model names, not CCD codes)
+                # Heuristic: if any key matches a known model, treat as per-model
+                model_keyed = any(
+                    k in self.sequences_names or k in ('default', '*')
+                    for k in ligands.keys()
+                )
+                if model_keyed:
+                    spec = ligands.get(name)
+                    if spec is None:
+                        spec = ligands.get('default') or ligands.get('*')
+                    if not spec:
+                        return []
+            return _expand_ccd_spec(spec)
+
+        def _expand_ccd_spec(spec):
+            if isinstance(spec, (list, tuple)):
+                # list of CCD code strings
+                out = []
+                counts = defaultdict(int)
+                for code in spec:
+                    code_str = str(code).upper()
+                    counts[code_str] += 1
+                    suffix = chr(ord('A') + counts[code_str] - 1)
+                    out.append({"id": f"{code_str}{suffix}", "ccd": code_str})
+                return out
+            if isinstance(spec, dict):
+                # {code: count}
+                out = []
+                for code, count in spec.items():
+                    code_str = str(code).upper()
+                    for i in range(int(count)):
+                        suffix = chr(ord('A') + i)
+                        out.append({"id": f"{code_str}{suffix}", "ccd": code_str})
+                return out
+            raise ValueError(f"Unsupported ligand spec: {spec!r}")
+
+        def _smiles_ligands_for_model(name):
+            if not ligand_smiles:
+                return []
+            spec = ligand_smiles
+            if isinstance(ligand_smiles, dict):
+                model_keyed = any(
+                    k in self.sequences_names or k in ('default', '*')
+                    for k in ligand_smiles.keys()
+                )
+                if model_keyed:
+                    spec = ligand_smiles.get(name)
+                    if spec is None:
+                        spec = ligand_smiles.get('default') or ligand_smiles.get('*')
+                    if not spec:
+                        return []
+            if isinstance(spec, (list, tuple)):
+                out = []
+                for i, smi in enumerate(spec):
+                    out.append({"id": f"L{i+1}", "smiles": str(smi)})
+                return out
+            raise ValueError(f"Unsupported SMILES spec: {spec!r}")
+
+        def _msa_for_model(name):
+            if msa_paths and name in msa_paths:
+                return msa_paths[name]
+            if msa_dir:
+                cand = os.path.join(msa_dir, f"{name}.a3m")
+                if os.path.exists(cand):
+                    return cand
+            return None
+
+        commands = []
+        for model_name_iter in self.sequences_names:
+            if only_models and model_name_iter not in only_models:
+                continue
+            if model_name_iter in exclude_models:
+                continue
+
+            model_dir = os.path.join(job_folder, model_name_iter)
+            os.makedirs(model_dir, exist_ok=True)
+            output_dir = os.path.join(model_dir, 'output')
+            os.makedirs(output_dir, exist_ok=True)
+
+            cif_target = os.path.join(output_dir, f"{model_name_iter}.cif")
+            if skip_finished and os.path.exists(cif_target):
+                continue
+
+            ccd_ligs = _ccd_ligands_for_model(model_name_iter)
+            smiles_ligs = _smiles_ligands_for_model(model_name_iter)
+            all_ligs = ccd_ligs + smiles_ligs
+            msa_path = _msa_for_model(model_name_iter)
+
+            sequence = self.sequences[model_name_iter]
+            if isinstance(sequence, dict):
+                first_chain = next(iter(sequence.values()))
+                sequence = first_chain if isinstance(first_chain, str) else str(first_chain)
+
+            script_path = os.path.join(model_dir, 'fold.py')
+            script_body = textwrap.dedent(f'''\
+                """Auto-generated ESMFold2 fold script for {model_name_iter}."""
+                import json
+                import os
+                import time
+
+                import torch
+
+                from esm.utils.structure.input_builder import (
+                    ProteinInput, LigandInput, StructurePredictionInput,
+                )
+                from esm.models.esmfold2 import ESMFold2InputBuilder
+                from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
+                {"from esm.utils.msa import MSA" if msa_path else ""}
+
+                MODEL_ID = {model_name_iter!r}
+                SEQUENCE = {sequence!r}
+                LIGANDS = {all_ligs!r}
+                MSA_PATH = {msa_path!r}
+                OUTPUT_DIR = 'output'
+                NUM_LOOPS = {num_loops}
+                NUM_SAMPLING_STEPS = {num_sampling_steps}
+                NUM_DIFFUSION_SAMPLES = {num_diffusion_samples}
+                SEED = {seed!r}
+
+                os.makedirs(OUTPUT_DIR, exist_ok=True)
+                t0 = time.time()
+                model = ESMFold2Model.from_pretrained({model_name!r}).cuda().eval()
+                print(f"[esmfold2] model loaded in {{time.time()-t0:.1f}}s", flush=True)
+
+                msa = None
+                if MSA_PATH:
+                    msa = MSA.from_a3m(path=MSA_PATH, remove_insertions=True, max_sequences=1000)
+                    print(f"[esmfold2] MSA depth={{msa.depth}}, length={{msa.seqlen}}", flush=True)
+
+                seqs = [ProteinInput(id="A", sequence=SEQUENCE, msa=msa)]
+                for lig in LIGANDS:
+                    if "ccd" in lig:
+                        seqs.append(LigandInput(id=lig["id"], ccd=[lig["ccd"]]))
+                    elif "smiles" in lig:
+                        seqs.append(LigandInput(id=lig["id"], smiles=lig["smiles"]))
+
+                spi = StructurePredictionInput(sequences=seqs)
+
+                t1 = time.time()
+                result = ESMFold2InputBuilder().fold(
+                    model, spi,
+                    num_loops=NUM_LOOPS,
+                    num_sampling_steps=NUM_SAMPLING_STEPS,
+                    num_diffusion_samples=NUM_DIFFUSION_SAMPLES,
+                    seed=SEED,
+                    complex_id=MODEL_ID,
+                )
+                fold_t = time.time() - t1
+                print(f"[esmfold2] folded in {{fold_t:.1f}}s", flush=True)
+
+                with open(os.path.join(OUTPUT_DIR, MODEL_ID + ".cif"), "w") as fh:
+                    fh.write(result.complex.to_mmcif())
+
+                stats = {{
+                    "model_id": MODEL_ID,
+                    "n_residues": len(SEQUENCE),
+                    "n_ligands": len(LIGANDS),
+                    "msa_used": bool(MSA_PATH),
+                    "num_loops": NUM_LOOPS,
+                    "num_sampling_steps": NUM_SAMPLING_STEPS,
+                    "num_diffusion_samples": NUM_DIFFUSION_SAMPLES,
+                    "fold_wall_time_s": fold_t,
+                    "ptm": float(result.ptm) if hasattr(result, "ptm") else None,
+                    "plddt_mean": float(result.plddt.mean()) if hasattr(result, "plddt") else None,
+                }}
+                with open(os.path.join(OUTPUT_DIR, MODEL_ID + "_stats.json"), "w") as fh:
+                    json.dump(stats, fh, indent=2)
+                print(f"[esmfold2] DONE total={{time.time()-t0:.1f}}s", flush=True)
+                ''')
+            with open(script_path, 'w') as fh:
+                fh.write(script_body)
+
+            launcher_model_dir = _launcher_cd_path(model_dir)
+            command_lines = [
+                'ESMFOLD2_START_DIR="$(pwd)"',
+                f"cd {shlex.quote(launcher_model_dir)}",
+                f"export HF_HOME={shlex.quote(hf_cache)}",
+                f"source activate {shlex.quote(esmfold2_env)}",
+                "python fold.py",
+                'cd "$ESMFOLD2_START_DIR"',
+            ]
+            commands.append("\n".join(command_lines) + "\n")
+
+        return commands
+
     def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='',
                                            return_missing=False, copy_all=False):
         """

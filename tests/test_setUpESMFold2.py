@@ -1,0 +1,133 @@
+"""Tests for sequenceModels.setUpESMFold2."""
+import json
+import os
+import shlex
+
+import prepare_proteins
+import pytest
+
+
+def test_setup_esmfold2_creates_per_model_dirs_and_script(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    job_folder = tmp_path / "esm_jobs"
+
+    jobs = models.setUpESMFold2(str(job_folder))
+
+    assert len(jobs) == 1
+    assert (job_folder / "modelA").is_dir()
+    assert (job_folder / "modelA" / "output").is_dir()
+    assert (job_folder / "modelA" / "fold.py").is_file()
+
+
+def test_setup_esmfold2_command_uses_relative_cd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    job_folder = tmp_path / "esm jobs"
+
+    jobs = models.setUpESMFold2(str(job_folder), esmfold2_env="/path/to/env",
+                                hf_cache="/path/to/cache")
+
+    expected_model_dir = os.path.relpath(job_folder / "modelA", start=tmp_path)
+    expected_lines = [
+        'ESMFOLD2_START_DIR="$(pwd)"',
+        f"cd {shlex.quote(expected_model_dir)}",
+        f"export HF_HOME={shlex.quote('/path/to/cache')}",
+        f"source activate {shlex.quote('/path/to/env')}",
+        "python fold.py",
+        'cd "$ESMFOLD2_START_DIR"',
+    ]
+    assert jobs[0].splitlines() == expected_lines
+
+
+def test_setup_esmfold2_ccd_ligands_in_script(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    job_folder = tmp_path / "esm"
+    models.setUpESMFold2(str(job_folder), ligands=["HEM", "MG"])
+
+    script = (job_folder / "modelA" / "fold.py").read_text()
+    assert "'ccd': 'HEM'" in script or '"ccd": "HEM"' in script
+    assert "'ccd': 'MG'" in script or '"ccd": "MG"' in script
+
+
+def test_setup_esmfold2_ccd_ligands_dict_with_counts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    job_folder = tmp_path / "esm"
+    models.setUpESMFold2(str(job_folder), ligands={"HEM": 2, "MG": 1})
+
+    script = (job_folder / "modelA" / "fold.py").read_text()
+    # 2 HEMs + 1 MG → 3 ligand entries
+    assert script.count("'ccd': 'HEM'") + script.count('"ccd": "HEM"') == 2
+    assert script.count("'ccd': 'MG'") + script.count('"ccd": "MG"') == 1
+
+
+def test_setup_esmfold2_smiles_ligands(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    job_folder = tmp_path / "esm"
+    models.setUpESMFold2(str(job_folder), ligand_smiles=["CCO"])
+
+    script = (job_folder / "modelA" / "fold.py").read_text()
+    assert "'smiles': 'CCO'" in script or '"smiles": "CCO"' in script
+
+
+def test_setup_esmfold2_msa_dir_autodetected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    msa_dir = tmp_path / "msas"
+    msa_dir.mkdir()
+    (msa_dir / "modelA.a3m").write_text(">q\nACDEFGHIK\n")
+
+    job_folder = tmp_path / "esm"
+    models.setUpESMFold2(str(job_folder), msa_dir=str(msa_dir))
+
+    script = (job_folder / "modelA" / "fold.py").read_text()
+    assert "MSA_PATH = " in script
+    assert "modelA.a3m" in script
+
+
+def test_setup_esmfold2_msa_disabled_without_dir(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    job_folder = tmp_path / "esm"
+    models.setUpESMFold2(str(job_folder))
+
+    script = (job_folder / "modelA" / "fold.py").read_text()
+    assert "MSA_PATH = None" in script
+
+
+def test_setup_esmfold2_skip_finished(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    job_folder = tmp_path / "esm"
+    # Simulate prior completion
+    (job_folder / "modelA" / "output").mkdir(parents=True)
+    (job_folder / "modelA" / "output" / "modelA.cif").write_text("# already done\n")
+
+    jobs = models.setUpESMFold2(str(job_folder), skip_finished=True)
+    assert jobs == []
+
+
+def test_setup_esmfold2_only_models_and_exclude(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"a": "ACDEFG", "b": "GHIKLM", "c": "NPQRST"})
+    job_folder = tmp_path / "esm"
+
+    jobs_only = models.setUpESMFold2(str(job_folder / "only"), only_models="b")
+    assert len(jobs_only) == 1
+    assert (job_folder / "only" / "b").is_dir()
+    assert not (job_folder / "only" / "a").is_dir()
+
+    jobs_excl = models.setUpESMFold2(str(job_folder / "excl"), exclude_models=["b"])
+    assert len(jobs_excl) == 2
