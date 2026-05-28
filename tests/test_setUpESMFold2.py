@@ -35,8 +35,7 @@ def test_setup_esmfold2_command_uses_relative_cd(tmp_path, monkeypatch):
         'ESMFOLD2_START_DIR="$(pwd)"',
         f"cd {shlex.quote(expected_model_dir)}",
         f"export HF_HOME={shlex.quote('/path/to/cache')}",
-        f"source activate {shlex.quote('/path/to/env')}",
-        "python fold.py",
+        f"{shlex.quote('/path/to/env/bin/python')} fold.py",
         'cd "$ESMFOLD2_START_DIR"',
     ]
     assert jobs[0].splitlines() == expected_lines

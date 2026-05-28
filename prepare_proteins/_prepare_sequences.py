@@ -1272,12 +1272,17 @@ class sequenceModels:
                 fh.write(script_body)
 
             launcher_model_dir = _launcher_cd_path(model_dir)
+            # Use the env's interpreter explicitly rather than `source
+            # activate`: in non-interactive SLURM batch shells `source
+            # activate <env>` silently fails to switch, leaving the base
+            # miniforge python (which may shadow `esm` with a different
+            # package) on PATH.
+            env_python = shlex.quote(os.path.join(esmfold2_env, "bin", "python"))
             command_lines = [
                 'ESMFOLD2_START_DIR="$(pwd)"',
                 f"cd {shlex.quote(launcher_model_dir)}",
                 f"export HF_HOME={shlex.quote(hf_cache)}",
-                f"source activate {shlex.quote(esmfold2_env)}",
-                "python fold.py",
+                f"{env_python} fold.py",
                 'cd "$ESMFOLD2_START_DIR"',
             ]
             commands.append("\n".join(command_lines) + "\n")
