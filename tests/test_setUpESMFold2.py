@@ -89,7 +89,8 @@ def test_setup_esmfold2_msa_dir_autodetected(tmp_path, monkeypatch):
     models.setUpESMFold2(str(job_folder), msa_dir=str(msa_dir))
 
     script = (job_folder / "modelA" / "fold.py").read_text()
-    assert "MSA_PATH = " in script
+    # MSA wired as the 3rd element of the (chain_id, seq, msa) tuple in CHAINS
+    assert "CHAINS = " in script
     assert "modelA.a3m" in script
 
 
@@ -101,7 +102,66 @@ def test_setup_esmfold2_msa_disabled_without_dir(tmp_path, monkeypatch):
     models.setUpESMFold2(str(job_folder))
 
     script = (job_folder / "modelA" / "fold.py").read_text()
-    assert "MSA_PATH = None" in script
+    # single chain, no MSA -> msa element is None
+    assert "('A', 'ACDEFGHIK', None)" in script
+
+
+def test_setup_esmfold2_receptor_peptide_two_chains(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels(
+        {"cx": {"A": "ACDEFGHIKLMN", "B": "GRGDS"}}
+    )
+    job_folder = tmp_path / "esm"
+    models.setUpESMFold2(str(job_folder))
+
+    script = (job_folder / "cx" / "fold.py").read_text()
+    # two protein chains in CHAINS, folded as separate ProteinInputs
+    assert "('A', 'ACDEFGHIKLMN'" in script
+    assert "('B', 'GRGDS'" in script
+    assert "ProteinInput(id=cid, sequence=seq, msa=_load_msa(mp))" in script
+
+
+def test_setup_esmfold2_peptide_chain_single_seq_when_msa_on(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels(
+        {"cx": {"A": "ACDEFGHIKLMN", "B": "GRGDS"}}
+    )
+    msa_dir = tmp_path / "msas"
+    msa_dir.mkdir()
+    (msa_dir / "cx.a3m").write_text(">q\nACDEFGHIKLMN\n")
+
+    models.setUpESMFold2(str(tmp_path / "esm"), msa_dir=str(msa_dir))
+    script = (tmp_path / "esm" / "cx" / "fold.py").read_text()
+    # receptor (first chain) gets the MSA; peptide stays single-sequence (None)
+    assert "cx.a3m" in script
+    assert "('B', 'GRGDS', None)" in script
+
+
+def test_setup_esmfold2_pose_ensemble(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"cx": {"A": "ACDEFGHIKLMN", "B": "GRGDS"}})
+    models.setUpESMFold2(
+        str(tmp_path / "esm"), num_diffusion_samples=100, samples_per_call=10,
+    )
+    script = (tmp_path / "esm" / "cx" / "fold.py").read_text()
+    assert "NUM_DIFFUSION_SAMPLES = 100" in script
+    assert "SAMPLES_PER_CALL = 10" in script
+    assert "num_diffusion_samples=k" in script
+    assert 'pose_{i:03d}.cif' in script
+
+
+def test_setup_esmfold2_ensemble_skip_finished_checks_last_pose(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    models = prepare_proteins.sequenceModels({"cx": "ACDEFGHIK"})
+    jf = tmp_path / "esm"
+    (jf / "cx" / "output").mkdir(parents=True)
+    (jf / "cx" / "output" / "pose_009.cif").write_text("# done\n")
+    jobs = models.setUpESMFold2(str(jf), num_diffusion_samples=10, skip_finished=True)
+    assert jobs == []
 
 
 def test_setup_esmfold2_skip_finished(tmp_path, monkeypatch):

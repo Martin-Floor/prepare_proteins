@@ -1000,7 +1000,8 @@ class sequenceModels:
         num_loops=3,
         num_sampling_steps=200,
         num_diffusion_samples=1,
-        seed=None,
+        samples_per_call=5,
+        seed=0,
         esmfold2_env='/gpfs/projects/bsc72/conda_envs/esmfold2',
         hf_cache='/gpfs/projects/bsc72/mfloor/envs/huggingface_cache',
         model_name='biohub/ESMFold2',
@@ -1048,9 +1049,27 @@ class sequenceModels:
         num_sampling_steps : int, optional
             Diffusion sampling steps (default 200).
         num_diffusion_samples : int, optional
-            Number of diffusion samples per model (default 1).
+            Number of diffusion poses per model (default 1). When > 1, poses
+            are written as ``output/pose_000.cif`` ... ``pose_<N-1>.cif``;
+            a single pose is written as ``output/<model>.cif`` (back-compat).
+        samples_per_call : int, optional
+            ``num_diffusion_samples`` per ESMFold2 ``fold`` call (default 5).
+            The ensemble is drawn in chunks of this size so batching a large
+            pose count at once cannot OOM the GPU; the trunk is re-run per
+            chunk but each chunk reuses one trunk pass for its samples.
         seed : int, optional
-            Diffusion RNG seed. Default None (random per run).
+            Base diffusion RNG seed (default 0); chunk ``c`` uses ``seed + c``
+            for reproducible, non-overlapping pose draws. Pass ``None`` for a
+            random seed per call.
+
+        Multi-chain input
+        -----------------
+        When a model's sequence is a ``dict`` (``{chain_id: seq}``) or a
+        ``list`` of sequences, every chain is folded as its own
+        ``ProteinInput`` (e.g. receptor + peptide for a binding complex).
+        Only the first chain consumes the per-model MSA (``msa_dir``);
+        additional chains are folded single-sequence, matching the usual
+        peptide-protein cofolder convention.
         esmfold2_env : str, optional
             Path to the conda env containing ``esm``. Default points at the
             shared MN5 deployment.
@@ -1178,7 +1197,10 @@ class sequenceModels:
             output_dir = os.path.join(model_dir, 'output')
             os.makedirs(output_dir, exist_ok=True)
 
-            cif_target = os.path.join(output_dir, f"{model_name_iter}.cif")
+            if num_diffusion_samples == 1:
+                cif_target = os.path.join(output_dir, f"{model_name_iter}.cif")
+            else:
+                cif_target = os.path.join(output_dir, f"pose_{num_diffusion_samples - 1:03d}.cif")
             if skip_finished and os.path.exists(cif_target):
                 continue
 
@@ -1187,12 +1209,26 @@ class sequenceModels:
             all_ligs = ccd_ligs + smiles_ligs
             msa_path = _msa_for_model(model_name_iter)
 
-            sequence = self.sequences[model_name_iter]
-            if isinstance(sequence, dict):
-                first_chain = next(iter(sequence.values()))
-                sequence = first_chain if isinstance(first_chain, str) else str(first_chain)
+            # Build the protein chain list (receptor + optional peptide / extra
+            # chains). Only the first chain consumes the MSA; the rest are
+            # single-sequence.
+            raw_sequence = self.sequences[model_name_iter]
+            if isinstance(raw_sequence, dict):
+                chain_seqs = [(str(cid), str(seq).strip().upper())
+                              for cid, seq in raw_sequence.items() if seq]
+            elif isinstance(raw_sequence, (list, tuple)):
+                chain_seqs = [(chr(ord('A') + i), str(seq).strip().upper())
+                              for i, seq in enumerate(raw_sequence) if seq]
+            else:
+                chain_seqs = [('A', str(raw_sequence).strip().upper())]
+            # chains: list of (chain_id, sequence, msa_path_or_None)
+            chains = [
+                (cid, seq, msa_path if i == 0 else None)
+                for i, (cid, seq) in enumerate(chain_seqs)
+            ]
 
             script_path = os.path.join(model_dir, 'fold.py')
+            any_msa = any(c[2] for c in chains)
             script_body = textwrap.dedent(f'''\
                 """Auto-generated ESMFold2 fold script for {model_name_iter}."""
                 import json
@@ -1205,30 +1241,38 @@ class sequenceModels:
                     ProteinInput, LigandInput, StructurePredictionInput,
                 )
                 from esm.models.esmfold2 import ESMFold2InputBuilder
+                {"from esm.utils.msa import MSA" if any_msa else ""}
                 from transformers.models.esmfold2.modeling_esmfold2 import ESMFold2Model
-                {"from esm.utils.msa import MSA" if msa_path else ""}
 
                 MODEL_ID = {model_name_iter!r}
-                SEQUENCE = {sequence!r}
+                CHAINS = {chains!r}          # list of (chain_id, sequence, msa_path_or_None)
                 LIGANDS = {all_ligs!r}
-                MSA_PATH = {msa_path!r}
                 OUTPUT_DIR = 'output'
                 NUM_LOOPS = {num_loops}
                 NUM_SAMPLING_STEPS = {num_sampling_steps}
                 NUM_DIFFUSION_SAMPLES = {num_diffusion_samples}
+                SAMPLES_PER_CALL = {samples_per_call}
                 SEED = {seed!r}
 
                 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+                def _load_msa(path):
+                    if not path:
+                        return None
+                    m = MSA.from_a3m(path=path, remove_insertions=True, max_sequences=1000)
+                    print(f"[esmfold2]   MSA {{path}}: depth={{m.depth}}, length={{m.seqlen}}", flush=True)
+                    return m
+
+
                 t0 = time.time()
                 model = ESMFold2Model.from_pretrained({model_name!r}).cuda().eval()
                 print(f"[esmfold2] model loaded in {{time.time()-t0:.1f}}s", flush=True)
 
-                msa = None
-                if MSA_PATH:
-                    msa = MSA.from_a3m(path=MSA_PATH, remove_insertions=True, max_sequences=1000)
-                    print(f"[esmfold2] MSA depth={{msa.depth}}, length={{msa.seqlen}}", flush=True)
-
-                seqs = [ProteinInput(id="A", sequence=SEQUENCE, msa=msa)]
+                seqs = [
+                    ProteinInput(id=cid, sequence=seq, msa=_load_msa(mp))
+                    for (cid, seq, mp) in CHAINS
+                ]
                 for lig in LIGANDS:
                     if "ccd" in lig:
                         seqs.append(LigandInput(id=lig["id"], ccd=[lig["ccd"]]))
@@ -1236,33 +1280,56 @@ class sequenceModels:
                         seqs.append(LigandInput(id=lig["id"], smiles=lig["smiles"]))
 
                 spi = StructurePredictionInput(sequences=seqs)
+                print(f"[esmfold2] folding {{MODEL_ID}}: "
+                      + ", ".join(f"{{cid}}={{len(seq)}}aa" for cid, seq, _ in CHAINS)
+                      + f", {{len(LIGANDS)}} ligands, {{NUM_DIFFUSION_SAMPLES}} poses", flush=True)
 
+                builder = ESMFold2InputBuilder()
+                poses = []
+                chunk = 0
                 t1 = time.time()
-                result = ESMFold2InputBuilder().fold(
-                    model, spi,
-                    num_loops=NUM_LOOPS,
-                    num_sampling_steps=NUM_SAMPLING_STEPS,
-                    num_diffusion_samples=NUM_DIFFUSION_SAMPLES,
-                    seed=SEED,
-                    complex_id=MODEL_ID,
-                )
+                while len(poses) < NUM_DIFFUSION_SAMPLES:
+                    k = min(SAMPLES_PER_CALL, NUM_DIFFUSION_SAMPLES - len(poses))
+                    seed = (SEED + chunk) if SEED is not None else None
+                    res = builder.fold(
+                        model, spi,
+                        num_loops=NUM_LOOPS,
+                        num_sampling_steps=NUM_SAMPLING_STEPS,
+                        num_diffusion_samples=k,
+                        seed=seed,
+                        complex_id=MODEL_ID,
+                    )
+                    poses.extend(res if isinstance(res, list) else [res])
+                    chunk += 1
+                    print(f"[esmfold2]   {{len(poses)}}/{{NUM_DIFFUSION_SAMPLES}} poses", flush=True)
+                poses = poses[:NUM_DIFFUSION_SAMPLES]
                 fold_t = time.time() - t1
-                print(f"[esmfold2] folded in {{fold_t:.1f}}s", flush=True)
+                print(f"[esmfold2] folded {{len(poses)}} poses in {{fold_t:.1f}}s", flush=True)
 
-                with open(os.path.join(OUTPUT_DIR, MODEL_ID + ".cif"), "w") as fh:
-                    fh.write(result.complex.to_mmcif())
+                # Single pose -> <model>.cif (back-compat); ensemble -> pose_NNN.cif.
+                stats_poses = []
+                for i, r in enumerate(poses):
+                    fname = (MODEL_ID + ".cif") if NUM_DIFFUSION_SAMPLES == 1 else f"pose_{{i:03d}}.cif"
+                    with open(os.path.join(OUTPUT_DIR, fname), "w") as fh:
+                        fh.write(r.complex.to_mmcif())
+                    stats_poses.append({{
+                        "pose": i,
+                        "ptm": float(r.ptm) if getattr(r, "ptm", None) is not None else None,
+                        "iptm": float(r.iptm) if getattr(r, "iptm", None) is not None else None,
+                        "plddt_mean": float(r.plddt.mean()) if getattr(r, "plddt", None) is not None else None,
+                    }})
 
                 stats = {{
                     "model_id": MODEL_ID,
-                    "n_residues": len(SEQUENCE),
+                    "n_chains": len(CHAINS),
+                    "chain_lengths": {{cid: len(seq) for cid, seq, _ in CHAINS}},
                     "n_ligands": len(LIGANDS),
-                    "msa_used": bool(MSA_PATH),
+                    "msa_used": any(mp for _, _, mp in CHAINS),
                     "num_loops": NUM_LOOPS,
                     "num_sampling_steps": NUM_SAMPLING_STEPS,
                     "num_diffusion_samples": NUM_DIFFUSION_SAMPLES,
                     "fold_wall_time_s": fold_t,
-                    "ptm": float(result.ptm) if hasattr(result, "ptm") else None,
-                    "plddt_mean": float(result.plddt.mean()) if hasattr(result, "plddt") else None,
+                    "poses": stats_poses,
                 }}
                 with open(os.path.join(OUTPUT_DIR, MODEL_ID + "_stats.json"), "w") as fh:
                     json.dump(stats, fh, indent=2)
