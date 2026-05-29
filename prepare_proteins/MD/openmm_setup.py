@@ -3489,3 +3489,270 @@ def _copyFFFiles(output_folder, ff):
             ) as source_file:
                 with open(destination_file, 'wb') as dest_handle:
                     shutil.copyfileobj(source_file, dest_handle)
+
+
+# ---------------------------------------------------------------------------
+# General-purpose Schrödinger-independent protein-prep helper
+# ---------------------------------------------------------------------------
+
+def _filter_pdb_residues(in_pdb, out_pdb, *, drop_waters=False, drop_resnames=()):
+    """Strip waters and residues listed in ``drop_resnames`` from a PDB.
+
+    Returns a list of ``(chain, resnum, resname)`` tuples that were dropped
+    (deduplicated, in encounter order).
+    """
+    drop = {str(r).strip().upper() for r in drop_resnames}
+    if drop_waters:
+        drop |= {"HOH", "WAT", "H2O", "DOD"}
+    dropped = []
+    seen = set()
+    with open(in_pdb) as src, open(out_pdb, "w") as dst:
+        for line in src:
+            if line[:6] in ("ATOM  ", "HETATM"):
+                rn = line[17:20].strip().upper()
+                if rn in drop:
+                    key = (line[21], line[22:27].strip(), rn)
+                    if key not in seen:
+                        seen.add(key)
+                        dropped.append(key)
+                    continue
+            dst.write(line)
+    return dropped
+
+
+def _propka_variants_for_single_pdb(
+    pdb_path, *, pH=7.0, propka_executable=None, workdir=None,
+    propka_kwargs=None,
+):
+    """Run PROPKA on one PDB and return the residue-variant dict.
+
+    Composition wrapper around ``proteinModels.getModelsPropkaProtonationStates``:
+    stages the single PDB into a temp ``proteinModels`` folder, calls the
+    existing method, and returns the inner ``{(chain, resnum): variant}`` map
+    for that model. To be replaced by a direct call to extracted PROPKA helpers
+    in a follow-up refactor.
+    """
+    import os
+    import shutil
+    import tempfile
+
+    from .. import proteinModels  # local import to break circular dep
+
+    cleanup = workdir is None
+    stage = tempfile.mkdtemp(prefix="propka_stage_") if cleanup \
+        else os.path.join(workdir, "_propka_stage")
+    os.makedirs(stage, exist_ok=True)
+    try:
+        model_name = os.path.splitext(os.path.basename(pdb_path))[0]
+        staged = os.path.join(stage, f"{model_name}.pdb")
+        shutil.copyfile(pdb_path, staged)
+        pm = proteinModels(stage, conect_update=False)
+        kwargs = dict(propka_kwargs or {})
+        kwargs.setdefault("return_mode", "residue_names")
+        kwargs.setdefault("keep_files", False)
+        kwargs["pH"] = pH
+        kwargs["propka_executable"] = propka_executable
+        residue_names = pm.getModelsPropkaProtonationStates(**kwargs)
+        model_map = residue_names.get(model_name, {}) or {}
+        return {(str(k[0]), int(k[1])): str(v) for k, v in model_map.items()}
+    finally:
+        if cleanup:
+            shutil.rmtree(stage, ignore_errors=True)
+
+
+def _add_missing_heavy_atoms_with_pdbfixer(in_pdb, out_pdb, *,
+                                            fill_missing_residues=False):
+    """Add missing heavy atoms (e.g. OXT on C-terminal residues, missing
+    sidechain atoms) via PDBFixer. Writes ``out_pdb``.
+
+    Internal gap residues are NOT filled by default (model uncertainty).
+    """
+    try:
+        from pdbfixer import PDBFixer
+    except ImportError as exc:
+        raise RuntimeError(
+            "add_missing_atoms=True requires pdbfixer "
+            "(`conda install -c conda-forge pdbfixer`)."
+        ) from exc
+    from openmm.app import PDBFile
+
+    fixer = PDBFixer(filename=in_pdb)
+    fixer.findMissingResidues()
+    if not fill_missing_residues:
+        fixer.missingResidues = {}
+    fixer.findMissingAtoms()
+    fixer.addMissingAtoms()
+    with open(out_pdb, "w") as fh:
+        PDBFile.writeFile(fixer.topology, fixer.positions, fh)
+
+
+def _variants_dict_to_modeller_list(variants_dict, modeller):
+    """Build a ``Modeller.addHydrogens`` ``variants`` list aligned with the
+    protein residues that ``openmm_md.addHydrogens`` will see (non-protein
+    residues are deleted before that call)."""
+    protein_set = set(aa3) - set(ions)
+    out = []
+    for residue in modeller.topology.residues():
+        if residue.name.upper() not in protein_set:
+            continue
+        try:
+            key = (residue.chain.id, int(residue.id))
+        except (TypeError, ValueError):
+            out.append(None); continue
+        out.append(variants_dict.get(key))
+    return out
+
+
+def prepareProteinPDB(
+    input_pdb,
+    output_pdb,
+    *,
+    ff='amber14',
+    pH=7.0,
+    protonate='propka',
+    drop_waters=False,
+    drop_resnames=None,
+    add_missing_atoms=True,
+    fill_missing_residues=False,
+    propka_executable=None,
+    propka_kwargs=None,
+    workdir=None,
+    overwrite=False,
+):
+    """Schrödinger-independent protein-prep: write a PDB with hydrogens.
+
+    Pipeline:
+      1. Cleanup the input PDB: drop waters (optional) and any residues in
+         ``drop_resnames``; alternative locations are left to OpenMM's
+         PDBFile parser (keeps the first/highest-occupancy entry).
+      2. Decide protonation:
+          * ``protonate='propka'`` (default) -- runs PROPKA at ``pH`` and
+            converts the predicted pKa values into AMBER residue variants
+            (HIP/HID/HIE/ASH/GLH/CYX). Requires PROPKA installed (the
+            ``propka3`` command or ``python -m propka``).
+          * ``protonate='default'`` (or ``None``) -- skip PROPKA and use the
+            force field's default protonation states.
+          * ``protonate={(chain, resnum): variant_name, ...}`` -- explicit
+            user-provided variants (overrides PROPKA).
+      3. Run ``openmm_md(pdb).setUpFF(ff).addHydrogens(variants).savePDB``.
+
+    Parameters
+    ----------
+    input_pdb : str
+        Path to the input PDB.
+    output_pdb : str
+        Destination PDB path. Parent directory is created if needed.
+    ff : str | list[str]
+        OpenMM force-field name (``'amber14'`` or ``'charmm36'``) or a list of
+        XML files for a custom force field. Passed straight to
+        ``openmm_md.setUpFF``.
+    pH : float
+        Target pH for PROPKA when ``protonate='propka'``.
+    protonate : str | dict | None
+        See pipeline step 2.
+    drop_waters : bool
+        Strip water residues (HOH/WAT/H2O/DOD) before prep.
+    drop_resnames : iterable[str] | None
+        Additional residue names to strip from the input PDB.
+    add_missing_atoms : bool
+        If True (default), run PDBFixer's ``addMissingAtoms`` after the
+        drop step. This adds heavy atoms missing from terminal residues
+        (e.g. ``OXT`` for C-terminal residues — ESMFold2 output is heavy-
+        atom only and typically omits these) and any missing sidechain
+        atoms. Requires the ``pdbfixer`` package.
+    fill_missing_residues : bool
+        If True, also let PDBFixer fill internal gap residues. Off by
+        default because model uncertainty in filled loops is hard to
+        bound.
+    propka_executable : str | list[str] | None
+        Optional override for the PROPKA command.
+    propka_kwargs : dict | None
+        Extra keyword arguments forwarded to
+        ``proteinModels.getModelsPropkaProtonationStates``
+        (e.g. ``ambiguity_margin``, ``his_neutral_name``, ``cys_mode``).
+    workdir : str | None
+        Where to stage temporary files. ``None`` -> use ``tempfile.mkdtemp``.
+    overwrite : bool
+        If False and ``output_pdb`` exists, skip the prep and return early.
+
+    Returns
+    -------
+    dict with keys:
+        * ``output_pdb``       -- absolute path of the written PDB.
+        * ``variants_applied`` -- ``{(chain, resnum): variant}`` actually used.
+        * ``residues_dropped`` -- ``[(chain, resnum, resname), ...]``.
+        * ``ff``               -- force-field name (or ``'custom'``).
+        * ``skipped``          -- True iff existing output was reused.
+    """
+    _ensure_openmm("prepareProteinPDB")
+    import os
+    import shutil
+    import tempfile
+
+    if not os.path.isfile(input_pdb):
+        raise FileNotFoundError(f"input PDB not found: {input_pdb}")
+
+    out_abs = os.path.abspath(output_pdb)
+    if os.path.isfile(out_abs) and not overwrite:
+        return {"output_pdb": out_abs, "variants_applied": {},
+                "residues_dropped": [], "ff": ff, "skipped": True}
+
+    cleanup = workdir is None
+    work = tempfile.mkdtemp(prefix="prepprot_") if cleanup \
+        else os.path.abspath(workdir)
+    os.makedirs(work, exist_ok=True)
+
+    try:
+        cleaned = os.path.join(work, "cleaned.pdb")
+        residues_dropped = _filter_pdb_residues(
+            input_pdb, cleaned,
+            drop_waters=drop_waters,
+            drop_resnames=drop_resnames or (),
+        )
+
+        # Add missing heavy atoms (e.g. C-terminal OXT often absent from
+        # ESMFold2-style heavy-atom-only PDBs) before Modeller tries to
+        # match force-field templates.
+        if add_missing_atoms:
+            fixed = os.path.join(work, "fixed.pdb")
+            _add_missing_heavy_atoms_with_pdbfixer(
+                cleaned, fixed,
+                fill_missing_residues=fill_missing_residues,
+            )
+            cleaned = fixed
+
+        # resolve variants_dict
+        if isinstance(protonate, Mapping):
+            variants_dict = {(str(k[0]), int(k[1])): str(v)
+                             for k, v in protonate.items()}
+        elif protonate == 'propka':
+            variants_dict = _propka_variants_for_single_pdb(
+                cleaned, pH=pH,
+                propka_executable=propka_executable,
+                propka_kwargs=propka_kwargs,
+                workdir=work,
+            )
+        elif protonate in (None, 'default'):
+            variants_dict = {}
+        else:
+            raise ValueError(
+                f"Invalid `protonate`={protonate!r}: expected 'propka', "
+                "'default', None, or a dict {(chain, resnum): variant}.")
+
+        m = openmm_md(cleaned)
+        m.setUpFF(ff)
+        variants_list = _variants_dict_to_modeller_list(variants_dict, m.modeller)
+        m.addHydrogens(variants=variants_list if variants_dict else None)
+        os.makedirs(os.path.dirname(out_abs) or ".", exist_ok=True)
+        m.savePDB(out_abs)
+
+        return {
+            "output_pdb": out_abs,
+            "variants_applied": variants_dict,
+            "residues_dropped": residues_dropped,
+            "ff": getattr(m, "ff_name", ff),
+            "skipped": False,
+        }
+    finally:
+        if cleanup:
+            shutil.rmtree(work, ignore_errors=True)

@@ -1,0 +1,211 @@
+"""Tests for prepareProteinPDB -- the Schrödinger-independent protein-prep helper.
+
+Coverage:
+  - Default protonation: reads a heavy-atom-only PDB, adds H via OpenMM
+    Modeller, writes a PDB that round-trips.
+  - Water dropping.
+  - Custom residue dropping.
+  - Explicit user-provided variants dict.
+  - skip-if-exists when ``overwrite=False``.
+  - PROPKA path is covered indirectly by the existing
+    ``test_propka_protonation_states.py``; this file does not re-mock the
+    PROPKA subprocess to avoid duplicating that test scaffolding.
+"""
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+
+HEME_THIOLATE = Path(__file__).parent / "data" / "heme_thiolate.pdb"
+
+
+def _has_openmm():
+    try:
+        import openmm  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _has_openmm() or not HEME_THIOLATE.is_file(),
+    reason="OpenMM or test fixture missing",
+)
+
+
+def _residue_names(pdb_path):
+    out = []
+    seen = set()
+    for ln in open(pdb_path):
+        if ln[:6] not in ("ATOM  ", "HETATM"):
+            continue
+        key = (ln[21], ln[22:27])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(ln[17:20].strip())
+    return out
+
+
+def _count_hydrogens(pdb_path):
+    return sum(1 for ln in open(pdb_path)
+               if ln[:6] in ("ATOM  ", "HETATM") and ln[76:78].strip() == "H")
+
+
+# ---------------------------------------------------------------------------
+# Default protonation: just add H's and write a PDB
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_default_adds_hydrogens(tmp_path):
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    out = tmp_path / "prepped.pdb"
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="default",
+    )
+    assert info["output_pdb"] == str(out.resolve())
+    assert info["variants_applied"] == {}
+    assert not info["skipped"]
+    assert out.is_file()
+
+    # the fixture has no hydrogens; the prepped PDB must
+    assert _count_hydrogens(HEME_THIOLATE) == 0
+    assert _count_hydrogens(out) > 1000  # ~2500 for this ~330-residue protein
+
+
+# ---------------------------------------------------------------------------
+# Water dropping
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_drops_waters(tmp_path):
+    """Drop_waters strips any HOH/WAT residues. We synthesise a PDB with a
+    couple of dummy HOH atoms appended to confirm the filter runs."""
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    src = tmp_path / "with_waters.pdb"
+    base = HEME_THIOLATE.read_text()
+    # inject two HOH atoms before END
+    waters = (
+        "HETATM 9991  O   HOH X 901      10.000  10.000  10.000  1.00 30.00           O\n"
+        "HETATM 9992  O   HOH X 902      12.000  12.000  12.000  1.00 30.00           O\n"
+    )
+    if "END" in base:
+        base = base.replace("END", waters + "END", 1)
+    else:
+        base += waters
+    src.write_text(base)
+
+    out = tmp_path / "no_waters.pdb"
+    info = prepareProteinPDB(
+        str(src), str(out),
+        protonate="default",
+        drop_waters=True,
+    )
+    # we asked for waters dropped; both should appear in the dropped list
+    assert any(rn == "HOH" for _, _, rn in info["residues_dropped"])
+    # and the output should contain no HOH atoms
+    assert all(ln[17:20].strip() != "HOH"
+               for ln in open(out) if ln[:6] in ("ATOM  ", "HETATM"))
+
+
+# ---------------------------------------------------------------------------
+# drop_resnames: e.g. dropping the structural Mg
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_drops_arbitrary_resname(tmp_path):
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    out = tmp_path / "no_mg.pdb"
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="default",
+        drop_resnames=("MG",),
+    )
+    # heme_thiolate fixture has a Mg substructure (chain C)
+    assert any(rn == "MG" for _, _, rn in info["residues_dropped"])
+    assert all(ln[17:20].strip() != "MG"
+               for ln in open(out) if ln[:6] in ("ATOM  ", "HETATM"))
+
+
+# ---------------------------------------------------------------------------
+# Explicit user variants
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_accepts_explicit_variants(tmp_path):
+    """When a variants dict is passed explicitly the helper must apply it
+    without invoking PROPKA. We use a trivial subset of histidines."""
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    # find a histidine in the input (chain A) to retype as HIP
+    target = None
+    for ln in open(HEME_THIOLATE):
+        if ln[:6] == "ATOM  " and ln[17:20].strip() == "HIS":
+            target = (ln[21], int(ln[22:26]))
+            break
+    if target is None:
+        pytest.skip("no histidine in fixture")
+
+    out = tmp_path / "with_hip.pdb"
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate={target: "HIP"},
+    )
+    assert info["variants_applied"] == {target: "HIP"}
+    # Modeller leaves the residue name as HIS in the written topology even
+    # when the HIP template was used; the signature of HIP is that BOTH
+    # imidazole protons (HD1 and HE2) are present.
+    target_atoms = {
+        ln[12:16].strip()
+        for ln in open(out)
+        if ln[:6] == "ATOM  "
+        and ln[21] == target[0]
+        and ln[22:26].strip() == str(target[1])
+    }
+    assert {"HD1", "HE2"}.issubset(target_atoms), (
+        f"explicit HIP variant not applied — target residue atoms: "
+        f"{sorted(target_atoms)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Skip behaviour
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_skips_when_output_exists(tmp_path):
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    out = tmp_path / "exists.pdb"
+    out.write_text("placeholder\n")  # pre-existing file
+
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="default",
+        overwrite=False,
+    )
+    assert info["skipped"] is True
+    assert out.read_text() == "placeholder\n"  # untouched
+
+    # with overwrite=True the file is regenerated
+    info2 = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="default",
+        overwrite=True,
+    )
+    assert info2["skipped"] is False
+    assert out.read_text() != "placeholder\n"
+
+
+# ---------------------------------------------------------------------------
+# Invalid protonate argument
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_rejects_invalid_protonate(tmp_path):
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    with pytest.raises(ValueError, match="protonate"):
+        prepareProteinPDB(
+            str(HEME_THIOLATE), str(tmp_path / "x.pdb"),
+            protonate="not_a_valid_mode",
+        )
