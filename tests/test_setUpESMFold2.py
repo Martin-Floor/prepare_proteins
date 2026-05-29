@@ -89,9 +89,12 @@ def test_setup_esmfold2_msa_dir_autodetected(tmp_path, monkeypatch):
     models.setUpESMFold2(str(job_folder), msa_dir=str(msa_dir))
 
     script = (job_folder / "modelA" / "fold.py").read_text()
-    # MSA wired as the 3rd element of the (chain_id, seq, msa) tuple in CHAINS
+    # MSA is bundled into the model dir and referenced relatively, so the
+    # workspace stays portable across hosts.
     assert "CHAINS = " in script
-    assert "modelA.a3m" in script
+    assert "'msa.a3m'" in script
+    assert (job_folder / "modelA" / "msa.a3m").is_file()
+    assert (job_folder / "modelA" / "msa.a3m").read_text() == ">q\nACDEFGHIK\n"
 
 
 def test_setup_esmfold2_msa_disabled_without_dir(tmp_path, monkeypatch):
@@ -132,11 +135,14 @@ def test_setup_esmfold2_peptide_chain_single_seq_when_msa_on(tmp_path, monkeypat
     msa_dir.mkdir()
     (msa_dir / "cx.a3m").write_text(">q\nACDEFGHIKLMN\n")
 
-    models.setUpESMFold2(str(tmp_path / "esm"), msa_dir=str(msa_dir))
-    script = (tmp_path / "esm" / "cx" / "fold.py").read_text()
-    # receptor (first chain) gets the MSA; peptide stays single-sequence (None)
-    assert "cx.a3m" in script
+    jf = tmp_path / "esm"
+    models.setUpESMFold2(str(jf), msa_dir=str(msa_dir))
+    script = (jf / "cx" / "fold.py").read_text()
+    # Receptor (first chain) gets a bundled relative MSA; peptide stays
+    # single-sequence (None). The actual a3m is copied into the model dir.
+    assert "'msa.a3m'" in script
     assert "('B', 'GRGDS', None)" in script
+    assert (jf / "cx" / "msa.a3m").is_file()
 
 
 def test_setup_esmfold2_pose_ensemble(tmp_path, monkeypatch):

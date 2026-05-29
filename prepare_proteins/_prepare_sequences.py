@@ -1209,6 +1209,17 @@ class sequenceModels:
             all_ligs = ccd_ligs + smiles_ligs
             msa_path = _msa_for_model(model_name_iter)
 
+            # Bundle MSA into the model dir as 'msa.a3m' so the generated
+            # fold.py references a relative path. The workspace is then
+            # portable: stage it locally, rsync to a cluster, and the
+            # launcher's `cd <model_dir>` makes the relative path resolve.
+            if msa_path and os.path.exists(msa_path):
+                import shutil
+                bundled = os.path.join(model_dir, 'msa.a3m')
+                if os.path.abspath(msa_path) != os.path.abspath(bundled):
+                    shutil.copyfile(msa_path, bundled)
+                msa_path = 'msa.a3m'
+
             # Build the protein chain list (receptor + optional peptide / extra
             # chains). Only the first chain consumes the MSA; the rest are
             # single-sequence.
