@@ -24129,15 +24129,17 @@ if __name__ == "__main__":
         output_format="pdb",
         use_potentials=False,
         ligands=None,
+        ccd_ligands=None,
         binder=None,
         chains=None
     ):
         """
         Run Boltz2 structure prediction and afinity.
 
-        It can be use to predict ligand binding with multiple ligands.
-        Additionally, it can be used to predict ligand binding affinity, but for just 1 ligand
-        Ligand/s should be given in SMILEs format.
+        It can be used to predict ligand binding with multiple ligands
+        (either as SMILES via ``ligands`` or as CCD codes via
+        ``ccd_ligands``). Additionally, it can be used to predict ligand
+        binding affinity, but for just 1 binder.
 
         To run in MN5 you need to precompute the MSA with AF3 or some other method!!!
 
@@ -24152,7 +24154,12 @@ if __name__ == "__main__":
         - recycling_steps: int. The number of recycling steps to use for prediction.
             AF3 uses by default 25 diffusion_samples and 10 recycling_steps.
         - use_potentials: bool. Whether to use the potentials for prediction. Set to True should improve performance, but uses more memmory.
-        - ligands (list[str]): list of ligands SMILEs
+        - ligands (list[str]): list of ligands SMILEs.
+        - ccd_ligands (list[str]): list of ligand CCD codes (e.g. ``["HEM",
+          "MG"]``). Useful for heme cofactors and metal ions where the
+          ligand structure is unambiguous from the CCD entry.
+          ``ccd_ligands`` and ``ligands`` can be combined; CCD ligands are
+          emitted first (conventional for cofactors), then SMILES ligands.
         - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed
 
         chains : None, str, iterable or dict, optional
@@ -24199,12 +24206,22 @@ if __name__ == "__main__":
                 if use_msa_server == False:
                     iyf.write(f'      msa: {msa_path}+{model}.a3m\n')
 
+                # CCD-coded ligands first (cofactors / metals), then SMILES.
+                lig_chain_idx = 0
+                if ccd_ligands:
+                    for ccd in ccd_ligands:
+                        ligand_chain = chr(ord('B') + lig_chain_idx)
+                        iyf.write('  - ligand:\n')
+                        iyf.write(f'      id: [{ligand_chain}]\n')
+                        iyf.write(f"      ccd: {ccd}\n")
+                        lig_chain_idx += 1
                 if ligands != None:
-                    for i, ligand in enumerate(ligands):
-                        ligand_chain = chr(ord('B') + i)  # Assign chains starting from 'B'
+                    for ligand in ligands:
+                        ligand_chain = chr(ord('B') + lig_chain_idx)
                         iyf.write('  - ligand:\n')
                         iyf.write(f'      id: [{ligand_chain}]\n')
                         iyf.write(f"      smiles: '{ligand}'\n")
+                        lig_chain_idx += 1
 
                 if binder != None:
                     iyf.write('properties:\n')
