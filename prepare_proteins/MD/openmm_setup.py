@@ -3550,6 +3550,13 @@ def _propka_variants_for_single_pdb(
         kwargs = dict(propka_kwargs or {})
         kwargs.setdefault("return_mode", "residue_names")
         kwargs.setdefault("keep_files", False)
+        # include_identity_states=True (the proteinModels default) forces the
+        # variants dict to contain identity assignments like CYS->CYS that
+        # then make Modeller pick the CYS template strictly -- which collides
+        # with Modeller's automatic disulfide handling (it would otherwise
+        # pick CYX for SS-bonded Cys when the variant is None). For the
+        # single-PDB helper we want explicit renames only.
+        kwargs.setdefault("include_identity_states", False)
         kwargs["pH"] = pH
         kwargs["propka_executable"] = propka_executable
         residue_names = pm.getModelsPropkaProtonationStates(**kwargs)

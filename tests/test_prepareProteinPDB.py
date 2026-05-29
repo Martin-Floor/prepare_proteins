@@ -198,6 +198,44 @@ def test_prepareProteinPDB_skips_when_output_exists(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# PROPKA path: skipped if propka isn't installed. Confirms the helper sets
+# include_identity_states=False so Modeller can keep its automatic disulfide
+# handling (forcing identity CYS would collide with SS-bonded cysteines).
+# ---------------------------------------------------------------------------
+
+def _has_propka():
+    if shutil.which("propka3") or shutil.which("propka"):
+        return True
+    try:
+        import propka  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _has_propka(), reason="PROPKA not installed")
+def test_prepareProteinPDB_propka_path(tmp_path):
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    out = tmp_path / "with_propka.pdb"
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="propka", pH=7.0,
+        drop_resnames=("MG",),
+    )
+    assert out.is_file()
+    # PROPKA on this fixture predicts a handful of explicit renames
+    # (histidine tautomers, occasional GLH/ASH) but NO identity assignments
+    # like CYS/CYX -- those are filtered by include_identity_states=False.
+    variants = info["variants_applied"]
+    assert variants, "expected at least one PROPKA-driven rename"
+    explicit = {"HIP", "HID", "HIE", "ASH", "GLH", "CYX"}
+    assert all(v in explicit for v in variants.values()), (
+        f"expected only explicit renames (got {set(variants.values())})"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Invalid protonate argument
 # ---------------------------------------------------------------------------
 
