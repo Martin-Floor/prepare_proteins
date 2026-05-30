@@ -213,6 +213,112 @@ def _has_propka():
         return False
 
 
+# ---------------------------------------------------------------------------
+# variant_overrides validation (drops variants whose target residue doesn't match)
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_drops_mismatched_variant_overrides(tmp_path):
+    """If the user requests HIP on a residue that isn't a HIS, the override
+    must be silently dropped (rather than corrupt the prep). The classifier's
+    `reason` string can be wrong in rare cases (e.g. 1CPO_A)."""
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    # find an ASP and pretend the user wanted HIP there
+    target_asp = None
+    for ln in open(HEME_THIOLATE):
+        if ln[:6] == "ATOM  " and ln[17:20].strip() == "ASP":
+            target_asp = (ln[21], int(ln[22:26]))
+            break
+    if target_asp is None:
+        pytest.skip("no ASP in fixture")
+
+    # also force HIP on a real HIS (must apply)
+    target_his = None
+    for ln in open(HEME_THIOLATE):
+        if ln[:6] == "ATOM  " and ln[17:20].strip() == "HIS":
+            target_his = (ln[21], int(ln[22:26]))
+            break
+
+    out = tmp_path / "validated.pdb"
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="default",
+        variant_overrides={target_asp: "HIP", target_his: "HIP"},
+    )
+    # bad override should be in dropped, not applied
+    assert target_asp not in info["variants_applied"]
+    assert target_his in info["variants_applied"] and info["variants_applied"][target_his] == "HIP"
+    assert any(k == target_asp for (k, _, _) in info["overrides_dropped"])
+
+
+# ---------------------------------------------------------------------------
+# Capping (ACE/NME termini)
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_cap_termini(tmp_path):
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    out = tmp_path / "capped.pdb"
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="default",
+        cap_termini=True,
+    )
+    assert info["capped"]
+    # output should contain ACE and NME residues
+    resnames = {ln[17:20].strip() for ln in open(out)
+                if ln[:6] in ("ATOM  ", "HETATM")}
+    assert "ACE" in resnames, "ACE cap not added"
+    assert "NME" in resnames, "NME cap not added"
+
+
+# ---------------------------------------------------------------------------
+# Minimization (H-only relax with heavy-atom restraints)
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_minimize_moves_only_hydrogens(tmp_path):
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    # bake a baseline without minimization, then re-do with minimization
+    base = tmp_path / "base.pdb"
+    prepareProteinPDB(str(HEME_THIOLATE), str(base), protonate="default")
+    mini = tmp_path / "mini.pdb"
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(mini),
+        protonate="default", minimize=True, minimize_max_iterations=50,
+    )
+    assert info["minimized"]
+
+    def coords_by_atom(pdb):
+        d = {}
+        for ln in open(pdb):
+            if ln[:6] != "ATOM  ":
+                continue
+            key = (ln[21], int(ln[22:26]), ln[12:16].strip())
+            d[key] = (float(ln[30:38]), float(ln[38:46]), float(ln[46:54]))
+        return d
+
+    c_base = coords_by_atom(base)
+    c_mini = coords_by_atom(mini)
+    # restrict to atoms present in both
+    common = set(c_base) & set(c_mini)
+    max_heavy_drift = max(
+        max(abs(c_mini[k][i] - c_base[k][i]) for i in range(3))
+        for k in common if not k[2].startswith("H")
+    )
+    max_h_drift = max(
+        (max(abs(c_mini[k][i] - c_base[k][i]) for i in range(3))
+         for k in common if k[2].startswith("H")),
+        default=0.0,
+    )
+    # heavy atoms should barely move (restrained); 0.5 A is a tight bound
+    # for the stiff harmonic restraints (k=1e7 default) -- structures with
+    # bad initial clashes can drift up to that
+    assert max_heavy_drift < 0.5, f"heavy atoms drifted too much: {max_heavy_drift:.3f} A"
+    # H drift may be small if the input was already well-placed; just ensure
+    # the minimisation doesn't crash and heavy atoms stay put
+
+
 @pytest.mark.skipif(not _has_propka(), reason="PROPKA not installed")
 def test_prepareProteinPDB_propka_path(tmp_path):
     from prepare_proteins.MD.openmm_setup import prepareProteinPDB

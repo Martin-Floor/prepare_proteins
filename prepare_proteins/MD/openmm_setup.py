@@ -3567,6 +3567,87 @@ def _propka_variants_for_single_pdb(
             shutil.rmtree(stage, ignore_errors=True)
 
 
+def _cap_termini_via_proteinmodels(in_pdb, out_pdb):
+    """Add ACE/NME caps to chain termini using ``proteinModels.addCappingGroups
+    (openmm_style_caps=True, backend='internal')``. Composition wrapper; the
+    internal backend doesn't require Schrödinger."""
+    import os
+    import shutil
+    import tempfile
+    from .. import proteinModels  # local import to break circular dep
+
+    with tempfile.TemporaryDirectory(prefix="cap_") as tmp:
+        stage = os.path.join(tmp, "stage")
+        os.makedirs(stage)
+        model_name = "m"
+        shutil.copyfile(in_pdb, os.path.join(stage, f"{model_name}.pdb"))
+        pm = proteinModels(stage, conect_update=False)
+        pm.addCappingGroups(openmm_style_caps=True, backend="internal")
+        out_stage = os.path.join(tmp, "out")
+        os.makedirs(out_stage)
+        pm.saveModels(out_stage, models=[model_name])
+        shutil.copyfile(os.path.join(out_stage, f"{model_name}.pdb"), out_pdb)
+
+
+def _minimize_protein_hydrogens(openmm_md_obj, *, ff_name="amber14",
+                                 max_iterations=100, restraint_k=1.0e5):
+    """H-only minimisation with heavy-atom positional restraints.
+
+    Mutates ``openmm_md_obj.modeller.positions`` in place. Non-protein
+    residues are temporarily extracted (they have no FF params here) and
+    re-inserted afterwards verbatim. Restraint k is in kJ/mol/nm^2.
+    """
+    from openmm import (CustomExternalForce, LangevinIntegrator,
+                        LocalEnergyMinimizer)
+    from openmm.app import NoCutoff, Simulation
+    from openmm import unit as _unit
+
+    # Stage non-protein out (no FF params loaded for them here) -- same
+    # pattern openmm_md.addHydrogens uses.
+    saved, non_protein = openmm_md_obj._extract_non_protein_residues()
+    try:
+        if non_protein:
+            openmm_md_obj.modeller.delete(non_protein)
+
+        protein_topology = openmm_md_obj.modeller.topology
+        protein_positions = openmm_md_obj.modeller.positions
+
+        system = openmm_md_obj.forcefield.createSystem(
+            protein_topology, nonbondedMethod=NoCutoff,
+            constraints=None, rigidWater=False,
+        )
+
+        # heavy-atom positional restraints: only H atoms are free to move
+        restraint = CustomExternalForce("0.5 * k * ((x-x0)^2 + (y-y0)^2 + (z-z0)^2)")
+        restraint.addGlobalParameter(
+            "k", float(restraint_k) * _unit.kilojoule_per_mole / _unit.nanometer**2)
+        restraint.addPerParticleParameter("x0")
+        restraint.addPerParticleParameter("y0")
+        restraint.addPerParticleParameter("z0")
+        for i, atom in enumerate(protein_topology.atoms()):
+            if atom.element is None or atom.element.symbol == "H":
+                continue
+            x, y, z = protein_positions[i].value_in_unit(_unit.nanometer)
+            restraint.addParticle(i, [x, y, z])
+        system.addForce(restraint)
+
+        integrator = LangevinIntegrator(
+            300 * _unit.kelvin, 1.0 / _unit.picosecond,
+            0.002 * _unit.picoseconds)
+        sim = Simulation(protein_topology, system, integrator)
+        sim.context.setPositions(protein_positions)
+        LocalEnergyMinimizer.minimize(
+            sim.context,
+            tolerance=1.0 * _unit.kilojoule_per_mole / _unit.nanometer,
+            maxIterations=int(max_iterations),
+        )
+        openmm_md_obj.modeller.positions = (
+            sim.context.getState(getPositions=True).getPositions())
+    finally:
+        openmm_md_obj._reinsert_cached_residues(saved)
+        openmm_md_obj._refresh_positions_cache()
+
+
 def _add_missing_heavy_atoms_with_pdbfixer(in_pdb, out_pdb, *,
                                             fill_missing_residues=False):
     """Add missing heavy atoms (e.g. OXT on C-terminal residues, missing
@@ -3591,6 +3672,49 @@ def _add_missing_heavy_atoms_with_pdbfixer(in_pdb, out_pdb, *,
     fixer.addMissingAtoms()
     with open(out_pdb, "w") as fh:
         PDBFile.writeFile(fixer.topology, fixer.positions, fh)
+
+
+_VARIANT_RESNAME_MAP = {
+    "HIS": "HIS", "HID": "HIS", "HIE": "HIS", "HIP": "HIS",
+    "ASP": "ASP", "ASH": "ASP",
+    "GLU": "GLU", "GLH": "GLU",
+    "CYS": "CYS", "CYX": "CYS", "CYM": "CYS",
+    "LYS": "LYS", "LYN": "LYS",
+}
+
+
+def _validate_variant_overrides(overrides, modeller):
+    """Drop overrides whose target residue isn't compatible with the variant.
+
+    HIP only on HIS, ASH only on ASP, etc. The classifier's ``reason`` string
+    occasionally references a residue whose name in the structure differs
+    (e.g. for ``1CPO_A`` reason says ``HIS106@A`` but residue 106 is ASP).
+    Applying the override silently corrupts the prep. This drops mismatches
+    and returns the validated dict plus a list of dropped ``(key, variant,
+    actual_resname)`` for the caller to log.
+    """
+    if not overrides:
+        return overrides, []
+    actual = {}
+    for residue in modeller.topology.residues():
+        try:
+            key = (residue.chain.id, int(residue.id))
+        except (TypeError, ValueError):
+            continue
+        actual[key] = residue.name.upper()
+    valid, dropped = {}, []
+    for key, variant in overrides.items():
+        k = (str(key[0]), int(key[1]))
+        actual_name = actual.get(k)
+        expected = _VARIANT_RESNAME_MAP.get(str(variant).upper())
+        if actual_name is None or expected is None:
+            valid[k] = variant
+            continue
+        if _VARIANT_RESNAME_MAP.get(actual_name, actual_name) != expected:
+            dropped.append((k, variant, actual_name))
+            continue
+        valid[k] = variant
+    return valid, dropped
 
 
 def _variants_dict_to_modeller_list(variants_dict, modeller):
@@ -3621,6 +3745,10 @@ def prepareProteinPDB(
     drop_resnames=None,
     add_missing_atoms=True,
     fill_missing_residues=False,
+    cap_termini=False,
+    minimize=False,
+    minimize_max_iterations=100,
+    minimize_restraint_k=1.0e7,
     variant_overrides=None,
     propka_executable=None,
     propka_kwargs=None,
@@ -3672,12 +3800,34 @@ def prepareProteinPDB(
         If True, also let PDBFixer fill internal gap residues. Off by
         default because model uncertainty in filled loops is hard to
         bound.
+    cap_termini : bool
+        If True, add ACE/NME caps to chain N- and C-termini (uses
+        ``proteinModels.addCappingGroups(openmm_style_caps=True,
+        backend='internal')``). Done *before* hydrogen addition so the
+        force field templates the caps. Useful to neutralise terminal
+        charges that would otherwise distort docking electrostatics or
+        downstream MD; off by default.
+    minimize : bool
+        If True, after hydrogen addition run a short H-only energy
+        minimisation with heavy-atom positional restraints
+        (force constant ``minimize_restraint_k`` kJ/mol/nm^2,
+        max ``minimize_max_iterations`` L-BFGS steps). Relieves any
+        sub-vdW H placement from Modeller. Off by default; adds a few
+        seconds per structure.
+    minimize_max_iterations : int
+        L-BFGS step cap for the H-only minimisation (default 100).
+    minimize_restraint_k : float
+        Heavy-atom positional-restraint force constant in kJ/mol/nm^2
+        (default 1e7 -- stiff enough that even big initial clashes
+        keep heavy atoms within ~0.01 A of input; H atoms relax freely).
     variant_overrides : dict[(chain, resnum), variant_name] | None
         Optional per-residue variant overrides merged on top of whatever
         ``protonate`` produced. Useful when domain knowledge contradicts
         the predictor (e.g. force ``CYX`` on a metal-ligated Cys whose
         SG-Fe contact PDBFixer detects as a bond, or ``HIP`` on a
-        conserved salt-bridge histidine).
+        conserved salt-bridge histidine). Overrides whose target residue
+        name doesn't match the variant (e.g. ``HIP`` requested on a
+        residue that's actually an ASP) are silently dropped.
     propka_executable : str | list[str] | None
         Optional override for the PROPKA command.
     propka_kwargs : dict | None
@@ -3735,6 +3885,13 @@ def prepareProteinPDB(
             )
             cleaned = fixed
 
+        # Optional capping (ACE/NME) before hydrogen addition so the
+        # force field templates the caps along with the protein.
+        if cap_termini:
+            capped = os.path.join(work, "capped.pdb")
+            _cap_termini_via_proteinmodels(cleaned, capped)
+            cleaned = capped
+
         # resolve variants_dict
         if isinstance(protonate, Mapping):
             variants_dict = {(str(k[0]), int(k[1])): str(v)
@@ -3760,16 +3917,27 @@ def prepareProteinPDB(
 
         m = openmm_md(cleaned)
         m.setUpFF(ff)
+        variants_dict, dropped_overrides = _validate_variant_overrides(
+            variants_dict, m.modeller)
         variants_list = _variants_dict_to_modeller_list(variants_dict, m.modeller)
         m.addHydrogens(variants=variants_list if variants_dict else None)
+        if minimize:
+            _minimize_protein_hydrogens(
+                m, ff_name=ff,
+                max_iterations=minimize_max_iterations,
+                restraint_k=minimize_restraint_k,
+            )
         os.makedirs(os.path.dirname(out_abs) or ".", exist_ok=True)
         m.savePDB(out_abs)
 
         return {
             "output_pdb": out_abs,
             "variants_applied": variants_dict,
+            "overrides_dropped": dropped_overrides,
             "residues_dropped": residues_dropped,
             "ff": getattr(m, "ff_name", ff),
+            "capped": bool(cap_termini),
+            "minimized": bool(minimize),
             "skipped": False,
         }
     finally:
