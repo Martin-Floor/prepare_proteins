@@ -3621,6 +3621,7 @@ def prepareProteinPDB(
     drop_resnames=None,
     add_missing_atoms=True,
     fill_missing_residues=False,
+    variant_overrides=None,
     propka_executable=None,
     propka_kwargs=None,
     workdir=None,
@@ -3671,6 +3672,12 @@ def prepareProteinPDB(
         If True, also let PDBFixer fill internal gap residues. Off by
         default because model uncertainty in filled loops is hard to
         bound.
+    variant_overrides : dict[(chain, resnum), variant_name] | None
+        Optional per-residue variant overrides merged on top of whatever
+        ``protonate`` produced. Useful when domain knowledge contradicts
+        the predictor (e.g. force ``CYX`` on a metal-ligated Cys whose
+        SG-Fe contact PDBFixer detects as a bond, or ``HIP`` on a
+        conserved salt-bridge histidine).
     propka_executable : str | list[str] | None
         Optional override for the PROPKA command.
     propka_kwargs : dict | None
@@ -3745,6 +3752,11 @@ def prepareProteinPDB(
             raise ValueError(
                 f"Invalid `protonate`={protonate!r}: expected 'propka', "
                 "'default', None, or a dict {(chain, resnum): variant}.")
+
+        # merge user-supplied overrides on top of the resolved variants
+        if variant_overrides:
+            for k, v in variant_overrides.items():
+                variants_dict[(str(k[0]), int(k[1]))] = str(v)
 
         m = openmm_md(cleaned)
         m.setUpFF(ff)

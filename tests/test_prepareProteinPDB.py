@@ -236,6 +236,45 @@ def test_prepareProteinPDB_propka_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# variant_overrides
+# ---------------------------------------------------------------------------
+
+def test_prepareProteinPDB_variant_overrides_force_HIP(tmp_path):
+    """`variant_overrides` must override whatever `protonate` produced and
+    apply the user's variant verbatim."""
+    from prepare_proteins.MD.openmm_setup import prepareProteinPDB
+
+    # pick a His in the fixture
+    target = None
+    for ln in open(HEME_THIOLATE):
+        if ln[:6] == "ATOM  " and ln[17:20].strip() == "HIS":
+            target = (ln[21], int(ln[22:26]))
+            break
+    if target is None:
+        pytest.skip("no histidine in fixture")
+
+    out = tmp_path / "with_overrides.pdb"
+    # asks for 'default' (which would leave the variant as None) but the
+    # override forces HIP -> Modeller should add both HD1 and HE2
+    info = prepareProteinPDB(
+        str(HEME_THIOLATE), str(out),
+        protonate="default",
+        variant_overrides={target: "HIP"},
+    )
+    assert info["variants_applied"] == {target: "HIP"}
+    target_atoms = {
+        ln[12:16].strip()
+        for ln in open(out)
+        if ln[:6] == "ATOM  "
+        and ln[21] == target[0]
+        and ln[22:26].strip() == str(target[1])
+    }
+    assert {"HD1", "HE2"}.issubset(target_atoms), (
+        f"variant_override HIP not applied (got {sorted(target_atoms)})"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Invalid protonate argument
 # ---------------------------------------------------------------------------
 
