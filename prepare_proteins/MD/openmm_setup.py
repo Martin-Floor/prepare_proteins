@@ -47,7 +47,17 @@ def _ensure_openmm(feature: str = "OpenMM functionality") -> None:
             "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
         ) from OPENMM_IMPORT_ERROR
 
-aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYM', 'CYX', 'ACE', 'NME']
+# Treat force-field protonation/coordination aliases (HID/HIE/HIP, HSD/HSE/HSP,
+# ASH, GLH, CYM, CYX, CYP, LYN, ...) and capping groups as protein residues, so
+# the many `name in aa3` protein/ligand classification checks below do not
+# silently misclassify (and strip) e.g. a heme-coordinated CYP cysteine.
+# Single source of truth: prepare_proteins._residue_names.
+from .._residue_names import PROTEIN_RESNAME_ALIASES as _FF_RESNAME_ALIASES
+from .._residue_names import CAPPING_GROUPS as _CAPPING_GROUPS
+
+aa3 = list(dict.fromkeys(
+    list(aa3) + list(_FF_RESNAME_ALIASES) + list(_CAPPING_GROUPS)
+))
 ions = ['MG', 'NA', 'CL', 'CU']
 aa3 += ions
 

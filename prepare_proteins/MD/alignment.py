@@ -1,5 +1,6 @@
 from prepare_proteins.alignment import mafft
 import mdtraj as md
+import warnings
 
 def alignTrajectoryBySequenceAlignment(trajectory, reference, reference_frame=0,
                                        chain_indexes=None, trajectory_chain_indexes=None,
@@ -176,9 +177,16 @@ def getCommonPositions(sequence1, sequence2, mode='exact', sequence1_residues=No
     return positions
 
 def getTopologySequence(topology, chain_index, non_protein='X',
-                        only_protein=True):
+                        only_protein=True, warn_unknown=True):
     """
     Get the sequence of a specfic chain in a topology object.
+
+    Force-field protonation/coordination aliases (``CYP``, ``CYX``, ``HID``,
+    ``ASH`` ...) are resolved to their canonical amino acid, so they are not
+    dropped from the sequence. If ``only_protein`` and a residue that carries a
+    protein backbone (N, CA, C) is *not* a recognised amino-acid name, a warning
+    is emitted rather than silently skipping it -- add the alias to
+    ``prepare_proteins._residue_names.PROTEIN_RESNAME_ALIASES``.
 
     Parameters
     ----------
@@ -186,26 +194,41 @@ def getTopologySequence(topology, chain_index, non_protein='X',
         Input topology
     chain_indexes : int
         Index of the chain to extract its sequence
+    non_protein : str
+        Placeholder used for non-protein residues when ``only_protein=False``.
+    only_protein : bool
+        Keep only amino-acid residues (default True).
+    warn_unknown : bool
+        Warn when a backbone-bearing residue is not recognised (default True).
 
     Returns
     -------
     sequence : str
         Sequence of the topology object
     """
-    three_to_one = {
-        'ALA': 'A', 'CYS': 'C', 'ASP': 'D', 'GLU': 'E', 'PHE': 'F',
-        'GLY': 'G', 'HIS': 'H', 'ILE': 'I', 'LYS': 'K', 'LEU': 'L',
-        'MET': 'M', 'ASN': 'N', 'PRO': 'P', 'GLN': 'Q', 'ARG': 'R',
-        'SER': 'S', 'THR': 'T', 'VAL': 'V', 'TRP': 'W', 'TYR': 'Y'}
+    from .._residue_names import resname_to_one
 
     sequence = ''
     for r in topology.chain(chain_index).residues:
-        if only_protein:
-            if r.name in three_to_one:
-                sequence += three_to_one[r.name]
-            else:
-                if not only_protein:
-                    sequence += non_protein
+        code = resname_to_one(r.name, unknown=None)
+        if code is not None:
+            sequence += code
+            continue
+        if not only_protein:
+            sequence += non_protein
+            continue
+        # only_protein and unrecognised: flag it loudly if it looks like a
+        # polymer residue (has a backbone) so it is not silently dropped.
+        if warn_unknown:
+            atom_names = {a.name for a in r.atoms}
+            if {'N', 'CA', 'C'}.issubset(atom_names):
+                warnings.warn(
+                    f"getTopologySequence: residue '{r.name}' (chain "
+                    f"{chain_index}) has a protein backbone but is not a "
+                    f"recognised amino-acid name; it was dropped from the "
+                    f"sequence. If it is a force-field alias, add it to "
+                    f"prepare_proteins._residue_names.PROTEIN_RESNAME_ALIASES."
+                )
 
     return sequence
 

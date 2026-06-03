@@ -1032,14 +1032,12 @@ _UNIQUE_LIGAND_NAME_COFATORS = frozenset(
         "SAH",
     }
 )
-_UNIQUE_LIGAND_NAME_PROTEIN_ALIASES = {
-    "HIE": "HIS",
-    "HID": "HIS",
-    "HIP": "HIS",
-    "ASH": "ASP",
-    "GLH": "GLU",
-    "CYX": "CYS",
-}
+# Force-field / protonation residue-name aliases (CYP, CYM, HID/HIE/HIP,
+# HSD/HSE/HSP, ASH, GLH, LYN, ...) -> canonical amino acid. Sourced from the
+# single shared map so a new alias is added in exactly one place and is not
+# silently dropped here (this set previously lacked CYP/CYM, which dropped a
+# heme-coordinated catalytic cysteine).
+from ._residue_names import PROTEIN_RESNAME_ALIASES as _UNIQUE_LIGAND_NAME_PROTEIN_ALIASES
 _UNIQUE_LIGAND_NAME_SUFFIX_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
