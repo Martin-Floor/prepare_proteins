@@ -9837,6 +9837,196 @@ make sure of reading the target sequences with the function readTargetSequences(
             wild_type_pdb=wild_type_pdb,
         )
 
+    def prepareModelsAmber(
+        self,
+        output_folder,
+        ph=7.0,
+        protonation="propka",
+        forcefield="ff14SB",
+        write_mol2=True,
+        rdock_mol2=True,
+        strip_hydrogens=True,
+        models=None,
+        exclude_models=None,
+        tleap_executable="tleap",
+        overwrite=False,
+        **propka_kwargs,
+    ):
+        """
+        Fully prepare protein models without Schrodinger.
+
+        Integrates this package's Schrodinger-free building blocks - PROPKA
+        protonation-state assignment (:meth:`getModelsPropkaProtonationStates`)
+        and AMBER ``tleap`` (hydrogen and missing heavy-atom rebuilding, terminal
+        capping and atom typing) - to write, per model, a prepared PDB and,
+        optionally, an rDock-ready MOL2.
+
+        This is the Schrodinger-independent counterpart of the Schrodinger-based
+        ``saveModels(convert_to_mol2=True)`` path: it needs only AmberTools
+        (``tleap``) and ``propka``, and the MOL2 it writes is patched to the
+        ``PROTEIN``/``NO_CHARGES`` header that rDock 2013.1 parses (obabel's
+        ``SMALL``/``GASTEIGER`` MOL2 segfaults rDock).
+
+        Parameters
+        ==========
+        output_folder : str
+            Folder where prepared structures are written.
+        ph : float
+            pH used for PROPKA protonation-state assignment.
+        protonation : {"propka", None}
+            Source of protonation-state residue names. ``None`` keeps the input
+            residue names (tleap defaults then apply).
+        forcefield : str
+            Protein ``leaprc`` suffix loaded by tleap (e.g. ``"ff14SB"``).
+        write_mol2 : bool
+            Also write an AMBER-typed MOL2 (required for rDock).
+        rdock_mol2 : bool
+            Patch the MOL2 header to ``PROTEIN``/``NO_CHARGES`` for rDock.
+        strip_hydrogens : bool
+            Drop input hydrogens so tleap rebuilds them consistently with the
+            assigned protonation states.
+        models, exclude_models : str or list, optional
+            Restrict to / exclude specific models.
+        tleap_executable : str
+            tleap binary name or path.
+        overwrite : bool
+            Re-run even when outputs already exist.
+        **propka_kwargs
+            Forwarded to :meth:`getModelsPropkaProtonationStates`.
+
+        Returns
+        =======
+        dict
+            ``{model: {"pdb": prepared_pdb, "mol2": mol2_path_or_None}}``. Also
+            stored on ``self.amber_prepared_models``.
+
+        Notes
+        =====
+        Disulfide bonds are not auto-detected; pass ``cys_mode`` via
+        ``propka_kwargs`` and add explicit ``bond`` records if needed.
+        """
+        import shutil
+        import subprocess
+
+        if shutil.which(tleap_executable) is None:
+            raise RuntimeError(
+                "tleap executable '%s' not found on PATH; activate an "
+                "AmberTools-enabled environment." % tleap_executable
+            )
+        if protonation not in ("propka", None):
+            raise ValueError("protonation must be 'propka' or None")
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
+        if isinstance(models, str):
+            models = [models]
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+        selected = [
+            m for m in self.models_names
+            if (models is None or m in models)
+            and (exclude_models is None or m not in exclude_models)
+        ]
+        if not selected:
+            raise ValueError("No models selected for preparation.")
+
+        renames = {}
+        if protonation == "propka":
+            renames = self.getModelsPropkaProtonationStates(
+                pH=ph, models=selected, return_mode="residue_names",
+                **propka_kwargs,
+            ) or {}
+
+        def _write_amber_input(struct, out_pdb, residue_renames):
+            # PROPKA keys are (chain_str, residue_int) -> state residue name
+            norm = {}
+            for key, name in (residue_renames or {}).items():
+                try:
+                    ch, rid = key
+                    norm[(str(ch).strip(), int(rid))] = str(name)
+                except (TypeError, ValueError):
+                    continue
+            tmp = out_pdb + ".raw"
+            _saveStructureToPDB(struct, tmp)
+            kept = []
+            with open(tmp) as fh:
+                for line in fh:
+                    if line.startswith(("ATOM", "HETATM")):
+                        if strip_hydrogens:
+                            element = line[76:78].strip()
+                            aname = line[12:16].strip().lstrip("0123456789")
+                            symbol = element or aname[:1]
+                            if symbol.upper() == "H":
+                                continue
+                        ch = line[21].strip()
+                        try:
+                            rid = int(line[22:26])
+                        except ValueError:
+                            rid = None
+                        new = norm.get((ch, rid))
+                        if new:
+                            line = line[:17] + ("%3s" % new) + line[20:]
+                        kept.append(line)
+                    elif line.startswith("TER"):
+                        kept.append(line)
+            kept.append("TER\nEND\n")
+            with open(out_pdb, "w") as fh:
+                fh.writelines(kept)
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+        def _patch_mol2_rdock(path):
+            # latin-1: tleap savemol2 writes non-ASCII bytes in the atom
+            # comment/status field; preserve them byte-for-byte (rDock ignores
+            # them under NO_CHARGES) instead of failing on UTF-8 decoding.
+            with open(path, encoding="latin-1") as fh:
+                text = fh.read()
+            with open(path, "w", encoding="latin-1") as fh:
+                fh.write(_mol2_text_to_rdock(text))
+
+        results = {}
+        for model in selected:
+            prepared_pdb = os.path.join(output_folder, model + ".pdb")
+            mol2_path = (
+                os.path.join(output_folder, model + ".mol2")
+                if write_mol2 else None
+            )
+            if (not overwrite and os.path.exists(prepared_pdb)
+                    and (mol2_path is None or os.path.exists(mol2_path))):
+                results[model] = {"pdb": prepared_pdb, "mol2": mol2_path}
+                continue
+
+            input_pdb = os.path.join(output_folder, "_%s_input.pdb" % model)
+            _write_amber_input(self.structures[model], input_pdb,
+                               renames.get(model, {}))
+
+            leap_script = os.path.join(output_folder, "_%s.leap" % model)
+            with open(leap_script, "w") as lf:
+                lf.write("source leaprc.protein.%s\n" % forcefield)
+                lf.write('mol = loadpdb "%s"\n' % os.path.abspath(input_pdb))
+                lf.write('savepdb mol "%s"\n' % os.path.abspath(prepared_pdb))
+                if write_mol2:
+                    lf.write('savemol2 mol "%s" 1\n'
+                             % os.path.abspath(mol2_path))
+                lf.write("quit\n")
+            log_path = os.path.join(output_folder, "_%s_tleap.log" % model)
+            with open(log_path, "w") as lg:
+                proc = subprocess.run(
+                    [tleap_executable, "-s", "-f",
+                     os.path.abspath(leap_script)],
+                    stdout=lg, stderr=subprocess.STDOUT, cwd=output_folder,
+                )
+            if proc.returncode != 0 or not os.path.exists(prepared_pdb):
+                raise RuntimeError(
+                    "tleap failed for model '%s'; see %s" % (model, log_path)
+                )
+            if write_mol2 and rdock_mol2 and os.path.exists(mol2_path):
+                _patch_mol2_rdock(mol2_path)
+            results[model] = {"pdb": prepared_pdb, "mol2": mol2_path}
+
+        self.amber_prepared_models = results
+        return results
+
     def setUprDockGrid(
         self,
         grid_folder,
@@ -25028,6 +25218,26 @@ def readSilentScores(silent_file):
     scores = scores.sort_index()
 
     return scores
+
+
+def _mol2_text_to_rdock(text):
+    """Return MOL2 text with the @<TRIPOS>MOLECULE block set to PROTEIN /
+    NO_CHARGES.
+
+    rDock 2013.1 only parses a receptor MOL2 when the molecule type is
+    ``PROTEIN`` and the charge type is ``NO_CHARGES``; obabel's
+    ``SMALL``/``GASTEIGER`` output makes it segfault. The molecule type and
+    charge type are the third and fourth lines of the @<TRIPOS>MOLECULE record.
+    """
+    lines = text.splitlines()
+    for i, l in enumerate(lines):
+        if l.strip() == "@<TRIPOS>MOLECULE":
+            if i + 3 < len(lines):
+                lines[i + 3] = "PROTEIN"
+            if i + 4 < len(lines):
+                lines[i + 4] = "NO_CHARGES"
+            break
+    return "\n".join(lines) + "\n"
 
 
 def _readPDB(name, pdb_file):
