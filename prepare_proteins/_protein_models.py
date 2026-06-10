@@ -10129,6 +10129,150 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
+    def prepareLigands(
+        self,
+        ligands,
+        output_folder,
+        n_conformers=1,
+        optimize=True,
+        add_hydrogens=True,
+        properties=None,
+        embed_seed=0,
+        combined_sdf=None,
+        overwrite=False,
+    ):
+        """
+        Generate 3D ligand conformers from SMILES for rDock/rxDock docking,
+        without Schrodinger.
+
+        Uses RDKit ETKDG embedding + MMFF optimization to write one ``<name>.sd``
+        per ligand into ``output_folder`` (the format consumed by
+        :meth:`setUprDockDocking`), and optionally a single combined SD. Pairs
+        with :meth:`prepareModelsAmber` to give a fully Schrodinger-free rxDock
+        pipeline (receptor + ligands + dock).
+
+        Parameters
+        ==========
+        ligands : dict | iterable | str
+            Either ``{name: smiles}``, an iterable of ``(name, smiles)`` pairs,
+            or a path to a CSV with name (``name``/``id``) and SMILES
+            (``smiles``/``SMILES``) columns.
+        output_folder : str
+            Folder where per-ligand ``<name>.sd`` files are written.
+        n_conformers : int
+            Conformers to embed per ligand (1 is typical; the docker samples poses).
+        optimize : bool
+            MMFF-optimize the embedded conformers.
+        add_hydrogens : bool
+            Add explicit hydrogens before embedding (recommended for docking).
+        properties : dict, optional
+            ``{name: {prop: value}}`` SD properties to embed (e.g. a reference
+            docking score) so they survive into the docked poses.
+        embed_seed : int
+            ETKDG random seed (reproducible coordinates).
+        combined_sdf : str, optional
+            If given, also write all ligands to this single SD file.
+        overwrite : bool
+            Re-embed even when a ligand's SD already exists.
+
+        Returns
+        =======
+        dict
+            ``{name: sd_path}`` for successfully prepared ligands. Failures
+            (unparseable SMILES, embedding failure) are skipped and reported.
+            Also stored on ``self.prepared_ligands``.
+        """
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        from rdkit import RDLogger
+
+        RDLogger.DisableLog("rdApp.*")
+
+        # ---- normalise the ligand input to {name: smiles} ----
+        if isinstance(ligands, str):
+            import csv as _csv
+            lig = {}
+            with open(ligands) as fh:
+                reader = _csv.DictReader(fh)
+                ncol = next((c for c in ("name", "id", "Name", "ID")
+                             if c in reader.fieldnames), None)
+                scol = next((c for c in ("smiles", "SMILES", "Smiles")
+                             if c in reader.fieldnames), None)
+                if ncol is None or scol is None:
+                    raise ValueError(
+                        "CSV must contain name/id and smiles/SMILES columns")
+                for row in reader:
+                    lig[str(row[ncol])] = row[scol]
+        elif isinstance(ligands, dict):
+            lig = {str(k): v for k, v in ligands.items()}
+        else:
+            lig = {str(n): s for n, s in ligands}
+
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        properties = properties or {}
+
+        def _embed(name, smiles):
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return None
+            if add_hydrogens:
+                mol = Chem.AddHs(mol)
+            params = AllChem.ETKDGv3()
+            params.randomSeed = embed_seed
+            if n_conformers == 1:
+                if AllChem.EmbedMolecule(mol, params) != 0:
+                    return None
+                if optimize:
+                    try:
+                        AllChem.MMFFOptimizeMolecule(mol, maxIters=400)
+                    except Exception:
+                        pass
+            else:
+                cids = AllChem.EmbedMultipleConfs(mol, numConfs=n_conformers,
+                                                  params=params)
+                if len(cids) == 0:
+                    return None
+                if optimize:
+                    try:
+                        AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=400)
+                    except Exception:
+                        pass
+            mol.SetProp("_Name", name)
+            for key, val in properties.get(name, {}).items():
+                mol.SetProp(str(key), str(val))
+            return mol
+
+        written = {}
+        failed = []
+        combined = (Chem.SDWriter(combined_sdf) if combined_sdf else None)
+        for name, smiles in lig.items():
+            sd_path = os.path.join(output_folder, name + ".sd")
+            if not overwrite and os.path.exists(sd_path):
+                written[name] = sd_path
+                continue
+            mol = _embed(name, smiles)
+            if mol is None:
+                failed.append(name)
+                continue
+            w = Chem.SDWriter(sd_path)
+            for cid in range(mol.GetNumConformers()):
+                w.write(mol, confId=cid)
+            w.close()
+            if combined is not None:
+                for cid in range(mol.GetNumConformers()):
+                    combined.write(mol, confId=cid)
+            written[name] = sd_path
+        if combined is not None:
+            combined.close()
+
+        if failed:
+            print("prepareLigands: %d/%d ligands failed (embedding/SMILES): %s"
+                  % (len(failed), len(lig),
+                     ", ".join(failed[:10]) + (" ..." if len(failed) > 10 else "")))
+        self.prepared_ligands = written
+        return written
+
     def setUprDockDocking(
         self,
         grid_folder,
