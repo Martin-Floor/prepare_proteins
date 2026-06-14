@@ -1309,22 +1309,282 @@ class openmm_md:
                     if a1 in atom_objs and a2 in atom_objs:
                         self.modeller.topology.addBond(atom_objs[a1], atom_objs[a2])
 
-    def addHydrogens(self, variants=None):
-        # Create protein-only state and cache non-protein residues completely
-        # (chain id, residue id, atom names/elements, positions) so we can
-        # reinsert them verbatim after adding hydrogens to the protein.
-        saved_residues, non_protein = self._extract_non_protein_residues()
+    def addHydrogens(self, variants=None, pH=None, fixed_protonations=None,
+                     his_neutral_name="HIE"):
+        """Add hydrogens to the protein (non-protein residues reinserted verbatim).
 
-        # Remove non-protein residues so hydrogens are added only to the protein
+        Parameters
+        ----------
+        variants : list or None
+            Explicit per-residue Modeller variant list (legacy). Ignored when ``pH``
+            is given.
+        pH : float or None
+            If set, titratable states are predicted with PROPKA at this pH and turned
+            into the Modeller ``variants`` list: ASP->ASH / GLU->GLH if pKa>pH,
+            LYS->LYN if pKa<pH, HIS->HIP if pKa>pH else ``his_neutral_name``. Without
+            ``pH`` the force field defaults are used.
+        fixed_protonations : dict or None
+            Manual overrides ``{(chain_id, residue_id): variant_name}`` applied AFTER
+            the PROPKA prediction, so explicit choices always win.
+        his_neutral_name : {"HIE","HID"}
+            Tautomer used for neutral histidines (PROPKA pKa does not disambiguate).
+        """
+        saved_residues, non_protein = self._extract_non_protein_residues()
         if non_protein:
             self.modeller.delete(non_protein)
 
-        # Add hydrogens to the remaining (protein) part
-        self.modeller.addHydrogens(self.forcefield, variants=variants)
+        if pH is not None:
+            variants = self._propka_variants(
+                pH, fixed_protonations=fixed_protonations,
+                his_neutral_name=his_neutral_name)
+        elif fixed_protonations:
+            variants = self._merge_fixed_protonations(
+                [None] * self.modeller.topology.getNumResidues(), fixed_protonations)
 
-        # Reinsert the cached non-protein residues.
+        self.modeller.addHydrogens(self.forcefield, variants=variants)
         self._reinsert_cached_residues(saved_residues)
         self._refresh_positions_cache()
+        return variants
+
+    def _residue_key(self, residue):
+        """(chain_id, residue_id) key with int residue id when possible."""
+        try:
+            rid = int(residue.id)
+        except (TypeError, ValueError):
+            rid = residue.id
+        return (str(residue.chain.id), rid)
+
+    def _merge_fixed_protonations(self, variants, fixed_protonations):
+        """Overlay manual {(chain, resid): variant} onto a variants list (manual wins)."""
+        if not fixed_protonations:
+            return variants
+        norm = {}
+        for key, name in fixed_protonations.items():
+            try:
+                ch, rid = key
+            except (TypeError, ValueError):
+                raise ValueError("fixed_protonations keys must be (chain_id, residue_id) "
+                                 "tuples; got %r" % (key,))
+            try:
+                rid = int(rid)
+            except (TypeError, ValueError):
+                pass
+            norm[(str(ch), rid)] = name
+        for i, residue in enumerate(self.modeller.topology.residues()):
+            k = self._residue_key(residue)
+            if k in norm:
+                variants[i] = norm[k]
+        return variants
+
+    def _propka_variants(self, pH, fixed_protonations=None, his_neutral_name="HIE"):
+        """Predict titratable states with PROPKA -> Modeller ``variants`` list.
+
+        The list is positional over the CURRENT topology residues (call after any
+        non-protein residues have been removed). CYS/TYR/ARG are left at the force
+        field default (deprotonated thiolate/phenolate variants are not auto-added;
+        use :meth:`detectDisulfides` for CYX). ``fixed_protonations`` override.
+        """
+        try:
+            import propka.run
+        except ImportError as exc:
+            raise ImportError("pH-based protonation needs the 'propka' package "
+                              "(pip install propka).") from exc
+        import os
+        import tempfile
+
+        pH = float(pH)
+        his_neutral_name = str(his_neutral_name).strip().upper()
+        if his_neutral_name not in ("HID", "HIE", "HIS"):
+            raise ValueError("his_neutral_name must be 'HID', 'HIE' or 'HIS'.")
+
+        with tempfile.TemporaryDirectory() as td:
+            ppath = os.path.join(td, "for_propka.pdb")
+            with open(ppath, "w") as fh:
+                PDBFile.writeFile(self.modeller.topology, self.modeller.positions,
+                                  fh, keepIds=True)
+            mol = propka.run.single(ppath, optargs=("--pH", str(pH)), write_pka=False)
+        conf = mol.conformations[mol.conformation_names[0]]
+
+        pred = {}
+        for g in conf.groups:
+            gtype = getattr(g, "type", None)
+            pka = getattr(g, "pka_value", None)
+            atom = getattr(g, "atom", None)
+            if pka is None or atom is None:
+                continue
+            try:
+                key = (str(atom.chain_id), int(atom.res_num))
+            except (TypeError, ValueError):
+                continue
+            if gtype == "ASP":
+                pred[key] = "ASH" if pka > pH else None
+            elif gtype == "GLU":
+                pred[key] = "GLH" if pka > pH else None
+            elif gtype == "LYS":
+                pred[key] = None if pka > pH else "LYN"
+            elif gtype == "HIS":
+                pred[key] = "HIP" if pka > pH else his_neutral_name
+
+        variants = [pred.get(self._residue_key(res), None)
+                    for res in self.modeller.topology.residues()]
+        return self._merge_fixed_protonations(variants, fixed_protonations)
+
+    @staticmethod
+    def _unit(v):
+        n = np.linalg.norm(v)
+        return v / n if n > 1e-9 else v
+
+    def capTermini(self, chains="all", n_cap=None, c_cap="NME"):
+        """Cap chain termini with ACE (N-terminus) and/or NME (C-terminus).
+
+        Intended for chains whose crystallographic terminus is NOT the true protein
+        terminus (e.g. a disordered tail absent from the model): a neutral ACE/NME cap
+        avoids the spurious charge a default NH3+/COO- terminus would inject. Cap heavy
+        atoms are placed geometrically (sp2 amide direction); the following
+        :meth:`addHydrogens` completes them and minimization relaxes them. Run BEFORE
+        adding hydrogens and BEFORE inserting ligands.
+
+        Parameters
+        ----------
+        chains : "all" or list[str]
+        n_cap : {"ACE", None}    N-terminal cap (default None -> charged N-terminus)
+        c_cap : {"NME", None}    C-terminal cap (default "NME")
+        """
+        from openmm.app import element as _el
+        from openmm.unit import angstrom
+        if n_cap not in ("ACE", None):
+            raise ValueError("n_cap must be 'ACE' or None.")
+        if c_cap not in ("NME", None):
+            raise ValueError("c_cap must be 'NME' or None.")
+        if n_cap is None and c_cap is None:
+            return self
+        protein_set = set(aa3) - set(ions)
+        sel = None if chains == "all" else {str(c) for c in chains}
+
+        top = self.modeller.topology
+        pos = np.array([self.modeller.positions[a.index].value_in_unit(nanometer)
+                        for a in top.atoms()]) * 10.0  # Angstrom
+
+        newtop = Topology()
+        if top.getPeriodicBoxVectors() is not None:
+            newtop.setPeriodicBoxVectors(top.getPeriodicBoxVectors())
+        newpos = []
+
+        def add(res, name, elem, xyz):
+            newtop.addAtom(name, elem, res)
+            newpos.append(np.asarray(xyz, float))
+
+        for chain in top.chains():
+            nc = newtop.addChain(chain.id)
+            residues = list(chain.residues())
+            prot = [r for r in residues if r.name.upper() in protein_set]
+            do = (sel is None or chain.id in sel) and bool(prot)
+            if do and n_cap == "ACE":
+                a = {at.name: pos[at.index] for at in prot[0].atoms()}
+                if {"N", "CA"} <= set(a):
+                    d = self._unit(a["N"] - a["CA"])
+                    Cc = a["N"] + 1.33 * d
+                    ref = np.array([0.0, 0.0, 1.0])
+                    if abs(np.dot(d, ref)) > 0.9:
+                        ref = np.array([1.0, 0.0, 0.0])
+                    p = self._unit(np.cross(d, ref))
+                    cap = newtop.addResidue("ACE", nc, str(int(prot[0].id) - 1))
+                    add(cap, "CH3", _el.carbon, Cc + 1.50 * self._unit(-0.5 * d - 0.866 * p))
+                    add(cap, "C", _el.carbon, Cc)
+                    add(cap, "O", _el.oxygen, Cc + 1.23 * self._unit(-0.5 * d + 0.866 * p))
+            cterm = prot[-1] if (do and c_cap == "NME") else None
+            for res in residues:
+                nr = newtop.addResidue(res.name, nc, res.id)
+                for at in res.atoms():
+                    # a capped residue is now mid-chain: drop its terminal-only oxygens
+                    if res is cterm and at.name in ("OXT", "OT1", "OT2"):
+                        continue
+                    add(nr, at.name, at.element, pos[at.index])
+            if do and c_cap == "NME":
+                a = {at.name: pos[at.index] for at in prot[-1].atoms()}
+                if {"C", "O", "CA"} <= set(a):
+                    nN = -self._unit(self._unit(a["CA"] - a["C"]) + self._unit(a["O"] - a["C"]))
+                    Npos = a["C"] + 1.335 * nN
+                    cap = newtop.addResidue("NME", nc, str(int(prot[-1].id) + 1))
+                    add(cap, "N", _el.nitrogen, Npos)
+                    add(cap, "CH3", _el.carbon, Npos + 1.45 * self._unit(Npos - a["C"]))
+
+        # round-trip through PDB so app rebuilds all bonds (cap internal + peptide)
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            cp = os.path.join(td, "capped.pdb")
+            with open(cp, "w") as fh:
+                PDBFile.writeFile(newtop, np.array(newpos) * angstrom, fh, keepIds=True)
+            reread = PDBFile(cp)
+        self.modeller = Modeller(reread.topology, reread.positions)
+        self._refresh_positions_cache()
+        return self
+
+    def fixStructure(self, add_missing_residues=False):
+        """Fill missing heavy atoms and terminal oxygens with PDBFixer (no protonation).
+
+        Missing loop residues are NOT rebuilt unless ``add_missing_residues=True`` (an
+        arbitrary loop conformation can distort the model). Run on the protein before
+        capping/protonation.
+        """
+        from pdbfixer import PDBFixer
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "in.pdb")
+            with open(p, "w") as fh:
+                PDBFile.writeFile(self.modeller.topology, self.modeller.positions, fh, keepIds=True)
+            fixer = PDBFixer(filename=p)
+            fixer.findMissingResidues()
+            if not add_missing_residues:
+                fixer.missingResidues = {}
+            fixer.findNonstandardResidues()
+            fixer.findMissingAtoms()
+            fixer.addMissingAtoms()
+            self.modeller = Modeller(fixer.topology, fixer.positions)
+        self._refresh_positions_cache()
+        return self
+
+    def detectDisulfides(self, distance=2.5):
+        """Rename CYS pairs whose SG-SG distance < ``distance`` (A) to CYX + add S-S bond.
+
+        Returns the list of ((chain,resid),(chain,resid)) disulfide pairs found.
+        """
+        top = self.modeller.topology
+        pos = np.array([self.modeller.positions[a.index].value_in_unit(nanometer)
+                        for a in top.atoms()]) * 10.0
+        sg = [(r, a) for r in top.residues() if r.name in ("CYS", "CYX")
+              for a in r.atoms() if a.name == "SG"]
+        pairs = []
+        for i in range(len(sg)):
+            for j in range(i + 1, len(sg)):
+                if np.linalg.norm(pos[sg[i][1].index] - pos[sg[j][1].index]) < distance:
+                    pairs.append((sg[i], sg[j]))
+        for (r1, a1), (r2, a2) in pairs:
+            r1.name = "CYX"
+            r2.name = "CYX"
+            top.addBond(a1, a2)
+        self._refresh_positions_cache()
+        return [((p[0][0].chain.id, p[0][0].id), (p[1][0].chain.id, p[1][0].id)) for p in pairs]
+
+    def validate(self, nonbondedMethod=None):
+        """Build a System to confirm every residue matches a template (raises on failure).
+
+        Returns ``{"n_particles": int, "net_charge": float}``.
+        """
+        from openmm.app import NoCutoff
+        from openmm import NonbondedForce
+        from openmm.unit import elementary_charge
+        system = self.forcefield.createSystem(
+            self.modeller.topology, nonbondedMethod=nonbondedMethod or NoCutoff)
+        nbf = [system.getForce(i) for i in range(system.getNumForces())
+               if isinstance(system.getForce(i), NonbondedForce)]
+        net = None
+        if nbf:
+            net = float(np.sum([nbf[0].getParticleParameters(i)[0].value_in_unit(elementary_charge)
+                                for i in range(system.getNumParticles())]))
+        return {"n_particles": system.getNumParticles(), "net_charge": net}
 
     def addMembrane(self, membrane_system=None, platform=None):
         membrane_config = _normalize_membrane_system(
