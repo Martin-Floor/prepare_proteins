@@ -17,7 +17,7 @@ from .polymer_builders import (
 )
 try:
     import openmm
-    from .openmm_setup import openmm_md
+    from .openmm_setup import openmm_md, mm_minimize
 except:
     None
 

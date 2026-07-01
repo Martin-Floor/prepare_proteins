@@ -3749,3 +3749,154 @@ def _copyFFFiles(output_folder, ff):
             ) as source_file:
                 with open(destination_file, 'wb') as dest_handle:
                     shutil.copyfileobj(source_file, dest_handle)
+
+
+def mm_minimize(
+    prmtop,
+    inpcrd=None,
+    *,
+    positions=None,
+    restrain_indices=None,
+    restraint_constant=10.0,
+    max_iterations=5000,
+    nonbonded_method=None,
+    temperature=250.0,
+    platform_name="CPU",
+    output_pdb=None,
+    report_pairs=None,
+):
+    """MM energy-minimise an Amber-parametrised system, optionally holding a chosen
+    atom set (e.g. a QM region / reactive core) positionally restrained while the
+    surrounding MM environment relaxes.
+
+    This is the importable form of the mandatory "cluster MM-min" step run before a
+    QM/MM optimisation: after a cluster is cut and parametrised, relax the MM strain
+    (added H, waters, cut-boundary clashes) *without* moving the reactive core, so the
+    QM/MM optimiser does not inherit that strain.
+
+    Parameters
+    ----------
+    prmtop : str | os.PathLike
+        Amber prmtop (topology + parameters).
+    inpcrd : str | os.PathLike, optional
+        Amber inpcrd/rst7 with the starting coordinates. Either ``inpcrd`` or
+        ``positions`` must be supplied.
+    positions : (N, 3) array-like or OpenMM Quantity, optional
+        Starting coordinates. A bare array is interpreted as **nanometres**; an OpenMM
+        Quantity carries its own unit. Overrides ``inpcrd`` when both are given.
+    restrain_indices : sequence[int], optional
+        0-based atom indices to harmonically restrain to their starting positions.
+        ``None`` or empty → unrestrained minimisation.
+    restraint_constant : float, default 10.0
+        Harmonic force constant in kcal/mol/Å².
+    max_iterations : int, default 5000
+        L-BFGS iteration cap (0 → minimise until convergence).
+    nonbonded_method : optional
+        OpenMM nonbonded method; defaults to ``NoCutoff`` (non-periodic cluster).
+    temperature : float, default 250.0
+        Integrator temperature in kelvin (does not affect the minimisation itself; only
+        needed to build the Context).
+    platform_name : str or None, default "CPU"
+        OpenMM platform to use; ``None`` lets OpenMM choose.
+    output_pdb : str | os.PathLike, optional
+        If given, write the minimised structure to this PDB.
+    report_pairs : mapping[str, (int, int)], optional
+        Atom-index pairs whose distances (Å) are measured before and after minimisation
+        (e.g. NAC distances) and returned, to verify the restrained geometry is preserved.
+
+    Returns
+    -------
+    dict
+        ``{"positions": (N,3) ndarray in Å, "potential_energy_kj_mol": float,
+        "output_pdb": str | None, "distances": {name: (before_A, after_A)}}``
+    """
+    _ensure_openmm("mm_minimize")
+
+    prmtop = os.fspath(prmtop)
+    if not os.path.isfile(prmtop):
+        raise FileNotFoundError(f"prmtop not found: {prmtop}")
+    if positions is None and inpcrd is None:
+        raise ValueError("mm_minimize requires either 'inpcrd' or 'positions'.")
+    if restraint_constant < 0:
+        raise ValueError("restraint_constant must be >= 0 (kcal/mol/Å²).")
+    if max_iterations < 0:
+        raise ValueError("max_iterations must be >= 0.")
+
+    prm = AmberPrmtopFile(prmtop)
+    n_atoms = prm.topology.getNumAtoms()
+
+    # starting coordinates as an (N, 3) array in nm, plus the object handed to setPositions
+    if positions is not None:
+        if hasattr(positions, "value_in_unit"):
+            ref_nm = np.asarray(positions.value_in_unit(nanometer), dtype=float)
+            start = positions
+        else:
+            ref_nm = np.asarray(positions, dtype=float)
+            start = ref_nm * nanometer
+    else:
+        crd = AmberInpcrdFile(os.fspath(inpcrd))
+        ref_nm = np.asarray(crd.positions.value_in_unit(nanometer), dtype=float)
+        start = crd.positions
+    if ref_nm.shape != (n_atoms, 3):
+        raise ValueError(
+            f"coordinate/topology mismatch: prmtop has {n_atoms} atoms, "
+            f"coordinates are {ref_nm.shape}."
+        )
+
+    _ri = restrain_indices if restrain_indices is not None else []
+    restrain = sorted({int(i) for i in _ri})
+    for i in restrain:
+        if not 0 <= i < n_atoms:
+            raise ValueError(f"restrain index {i} out of range [0, {n_atoms}).")
+
+    system = prm.createSystem(
+        nonbondedMethod=(nonbonded_method if nonbonded_method is not None else NoCutoff),
+        constraints=None,
+        rigidWater=False,
+    )
+
+    # harmonic positional restraint holding the chosen atoms at their starting positions
+    if restrain and restraint_constant > 0:
+        k_value = (
+            restraint_constant * kilocalories_per_mole / angstrom ** 2
+        ).value_in_unit(kilojoule_per_mole / nanometer ** 2)
+        force = CustomExternalForce("0.5*k*((x-x0)^2+(y-y0)^2+(z-z0)^2)")
+        force.addGlobalParameter("k", k_value)
+        for _p in ("x0", "y0", "z0"):
+            force.addPerParticleParameter(_p)
+        for i in restrain:
+            force.addParticle(int(i), [float(ref_nm[i][0]), float(ref_nm[i][1]), float(ref_nm[i][2])])
+        system.addForce(force)
+
+    integrator = LangevinMiddleIntegrator(
+        temperature * kelvin, 1.0 / picosecond, 0.001 * picoseconds
+    )
+    platform = Platform.getPlatformByName(platform_name) if platform_name else None
+    simulation = Simulation(prm.topology, system, integrator, platform)
+    simulation.context.setPositions(start)
+
+    def _dists(coords_nm):
+        return {
+            name: float(np.linalg.norm(coords_nm[int(i)] - coords_nm[int(j)]) * 10.0)
+            for name, (i, j) in (report_pairs or {}).items()
+        }
+
+    before = _dists(ref_nm)
+    simulation.minimizeEnergy(maxIterations=max_iterations)
+    state = simulation.context.getState(getPositions=True, getEnergy=True)
+    final_nm = np.asarray(state.getPositions(asNumpy=True).value_in_unit(nanometer), dtype=float)
+    pe = state.getPotentialEnergy().value_in_unit(kilojoule_per_mole)
+    after = _dists(final_nm)
+
+    out_path = None
+    if output_pdb is not None:
+        out_path = os.fspath(output_pdb)
+        with open(out_path, "w") as handle:
+            PDBFile.writeFile(prm.topology, state.getPositions(), handle, keepIds=True)
+
+    return {
+        "positions": final_nm * 10.0,
+        "potential_energy_kj_mol": float(pe),
+        "output_pdb": out_path,
+        "distances": {name: (before[name], after[name]) for name in before},
+    }
