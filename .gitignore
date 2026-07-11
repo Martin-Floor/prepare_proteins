@@ -146,3 +146,5 @@ settings.json
 example_input
 example_output
 example_code
+# Codex CLI marker
+.codex
