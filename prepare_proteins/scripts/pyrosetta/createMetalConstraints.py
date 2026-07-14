@@ -33,7 +33,7 @@ init(init_options)
 # Get all params files if fiven
 params_files = []
 if params_folder != None:
-    for f in os.listidir(params_folder):
+    for f in os.listdir(params_folder):
         if f.endswith('.params'):
             params_files.append(params_folder+'/'+f)
 
