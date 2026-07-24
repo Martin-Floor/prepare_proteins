@@ -90,6 +90,9 @@ class OpenFFBackend(ParameterizationBackend):
         options.update(kwargs)
         strict_atom_name_check = bool(options.get("strict_atom_name_check", True))
         solvate_enabled = bool(options.get("solvate", True))
+        preserve_existing_skip_residues = bool(options.get("preserve_existing_skip_residues", False))
+        if not preserve_existing_skip_residues and options.get("membrane_system") is not None:
+            preserve_existing_skip_residues = True
         verbose_flag = options.get("verbose")
         if verbose_flag is None:
             verbose_flag = self.options.get("verbose", False)
@@ -149,14 +152,6 @@ class OpenFFBackend(ParameterizationBackend):
         except ImportError as exc:
             raise RuntimeError("openmm is required for the OpenFF parameterization backend.") from exc
         try:
-            from openmmforcefields.generators import SMIRNOFFTemplateGenerator
-        except ImportError as exc:
-            raise RuntimeError("openmmforcefields is required to register SMIRNOFF templates.") from exc
-        try:
-            from openff.toolkit.utils.exceptions import InvalidConformerError
-        except ImportError as exc:
-            raise RuntimeError("openff-toolkit is required to build ligand templates.") from exc
-        try:
             import parmed as pmd
         except ImportError as exc:
             raise RuntimeError("parmed is required to export prmtop/inpcrd files.") from exc
@@ -206,46 +201,21 @@ class OpenFFBackend(ParameterizationBackend):
                         if new_name:
                             res.name = new_name
 
+        atom_name_overrides = options.get("atom_names") or {}
+        if atom_name_overrides:
+            self._apply_atom_name_overrides(modeller, atom_name_overrides)
+
         # Apply user-defined bonds (chain_id, res_id, atom_name) tuples
         add_bonds_opt = options.get("add_bonds")
         if add_bonds_opt:
-            # Build lookup: (chain, resid int, atom name) -> atom
-            atom_lookup = {}
-            for atom in modeller.topology.atoms():
-                try:
-                    resid_int = int(atom.residue.id)
-                except Exception:
-                    continue
-                key = (atom.residue.chain.id, resid_int, atom.name.strip())
-                atom_lookup[key] = atom
+            self._apply_add_bonds(modeller, add_bonds_opt)
 
-            def _locate(atom_spec):
-                if len(atom_spec) != 3:
-                    raise ValueError(f"add_bonds entries must be (chain, resid, atom), got {atom_spec}")
-                chain_id, resid, atom_name = atom_spec
-                try:
-                    resid_int = int(resid)
-                except Exception:
-                    resid_int = resid
-                key = (str(chain_id), resid_int, str(atom_name).strip())
-                atom = atom_lookup.get(key)
-                if atom is None:
-                    raise ValueError(f"Atom {atom_name} in residue {chain_id}:{resid} not found in topology.")
-                return atom
-
-            def _bond_exists(topology, a1, a2):
-                for b in topology.bonds():
-                    if (b[0] == a1 and b[1] == a2) or (b[0] == a2 and b[1] == a1):
-                        return True
-                return False
-
-            for bond in add_bonds_opt:
-                a1 = _locate(bond[0])
-                a2 = _locate(bond[1])
-                if not _bond_exists(modeller.topology, a1, a2):
-                    modeller.topology.addBond(a1, a2)
-
-        self._remove_skip_residues(modeller, DEFAULT_PARAMETERIZATION_SKIP_RESIDUES)
+        if preserve_existing_skip_residues:
+            _log(
+                "Preserving existing water/ion residues already present in the input topology."
+            )
+        else:
+            self._remove_skip_residues(modeller, DEFAULT_PARAMETERIZATION_SKIP_RESIDUES)
         ligand_residues = self._collect_ligand_residues(
             modeller.topology.residues(),
             protein_residues,
@@ -262,12 +232,39 @@ class OpenFFBackend(ParameterizationBackend):
                 RuntimeWarning,
             )
 
-        # ---- Toolkit registry (RDKit + AmberTools)
-        rdkit = RDKitToolkitWrapper()
-        ambertools = AmberToolsToolkitWrapper()
-        toolkit_registry = ToolkitRegistry()
-        toolkit_registry.register_toolkit(rdkit)
-        toolkit_registry.register_toolkit(ambertools)
+        needs_openff_processing = any(
+            not (resname in xml_residue_names and resname not in ligand_sdf_map and resname not in ligand_smiles_map)
+            for resname in ligand_residues
+        )
+        if needs_openff_processing:
+            if (
+                Molecule is None
+                or ToolkitRegistry is None
+                or RDKitToolkitWrapper is None
+                or AmberToolsToolkitWrapper is None
+            ):
+                raise RuntimeError("openff-toolkit is required to build ligand templates.")
+            try:
+                from openmmforcefields.generators import SMIRNOFFTemplateGenerator
+            except ImportError as exc:
+                raise RuntimeError("openmmforcefields is required to register SMIRNOFF templates.") from exc
+            try:
+                from openff.toolkit.utils.exceptions import InvalidConformerError
+            except ImportError as exc:
+                raise RuntimeError("openff-toolkit is required to build ligand templates.") from exc
+
+            # ---- Toolkit registry (RDKit + AmberTools)
+            rdkit = RDKitToolkitWrapper()
+            ambertools = AmberToolsToolkitWrapper()
+            toolkit_registry = ToolkitRegistry()
+            toolkit_registry.register_toolkit(rdkit)
+            toolkit_registry.register_toolkit(ambertools)
+        else:
+            SMIRNOFFTemplateGenerator = None  # type: ignore[assignment]
+            InvalidConformerError = RuntimeError
+            rdkit = None
+            ambertools = None
+            toolkit_registry = None
 
         def _extract_partial_charges(mol: Optional[Molecule]):
             if mol is None:
@@ -778,8 +775,30 @@ class OpenFFBackend(ParameterizationBackend):
                     "or supply mol2/frcmod instead."
                 )
 
+        template_cleanup_residues = {
+            str(residue_name).strip().upper()
+            for residue_name in (rename_map.values() if isinstance(rename_map, Mapping) else [])
+            if str(residue_name).strip()
+        }
+        if template_cleanup_residues:
+            self._reconcile_residue_templates(modeller, forcefield, template_cleanup_residues)
+            self._rebuild_template_only_chains(modeller, forcefield, template_cleanup_residues)
+            if add_bonds_opt:
+                self._apply_add_bonds(modeller, add_bonds_opt)
+            _log(
+                "Reconciling hydrogen/bond topology for template-backed renamed residues: "
+                f"{sorted(template_cleanup_residues)}"
+            )
+            self._add_missing_template_hydrogens(modeller, forcefield, template_cleanup_residues)
+
         # ---- Ensure topology bonds match provided templates to improve matching
         def _enforce_template_bonds(modeller_obj, ff_obj, residue_mapping):
+            def _bond_exists(atom1, atom2):
+                for bond_atom1, bond_atom2 in modeller_obj.topology.bonds():
+                    if (bond_atom1 == atom1 and bond_atom2 == atom2) or (bond_atom1 == atom2 and bond_atom2 == atom1):
+                        return True
+                return False
+
             template_map = getattr(ff_obj, "_templates", {})
             for residue in modeller_obj.topology.residues():
                 rname = residue.name.strip().upper()
@@ -807,7 +826,7 @@ class OpenFFBackend(ParameterizationBackend):
                         continue
                     for a1 in atom_by_name[a1_name]:
                         for a2 in atom_by_name[a2_name]:
-                            if modeller_obj.topology.getBond(a1, a2) is None:
+                            if not _bond_exists(a1, a2):
                                 modeller_obj.addBond(a1, a2)
 
         _enforce_template_bonds(modeller, forcefield, xml_residue_map)
@@ -817,6 +836,9 @@ class OpenFFBackend(ParameterizationBackend):
                 molecules=list(ligand_molecules.values()),
             )
             forcefield.registerTemplateGenerator(generator.generator)
+
+        periodic_box_vectors = modeller.topology.getPeriodicBoxVectors()
+        periodic_system = bool(solvate_enabled or periodic_box_vectors is not None)
 
         # ---- Solvate / ions
         if solvate_enabled:
@@ -845,6 +867,10 @@ class OpenFFBackend(ParameterizationBackend):
                 solvent_kwargs["padding"] = float(options.get("padding_nm", 1.2)) * u.nanometer
 
             modeller.addSolvent(forcefield, **solvent_kwargs)
+            periodic_box_vectors = modeller.topology.getPeriodicBoxVectors()
+            periodic_system = True
+        elif periodic_system:
+            _log("Keeping existing periodic solvent/ions already present in the input topology.")
         else:
             _log("Skipping solvent/ions (solvate=False).")
 
@@ -863,7 +889,7 @@ class OpenFFBackend(ParameterizationBackend):
 
         # ---- Build two systems: one "export" (no constraints) and one runtime (HBonds)
         cutoff_val = float(options.get("nonbonded_cutoff_nm", 1.0)) * u.nanometer
-        nonbonded_method = PME if solvate_enabled else NoCutoff
+        nonbonded_method = PME if periodic_system else NoCutoff
         system_kwargs = dict(
             topology=modeller.topology,
             nonbondedMethod=nonbonded_method,
@@ -872,7 +898,7 @@ class OpenFFBackend(ParameterizationBackend):
             removeCMMotion=False,
             residueTemplates=residue_templates,
         )
-        if solvate_enabled:
+        if periodic_system:
             system_kwargs["nonbondedCutoff"] = cutoff_val
         _log("Creating OpenMM System and exporting AMBER files.")
         export_system = forcefield.createSystem(**system_kwargs)
@@ -1043,6 +1069,293 @@ class OpenFFBackend(ParameterizationBackend):
             top.addBond(omm_atoms[b.atom1_index], omm_atoms[b.atom2_index])
 
         return top
+
+    @staticmethod
+    def _apply_atom_name_overrides(modeller, atom_name_overrides: Mapping[Any, Any]) -> None:
+        """Rename atoms in-place using ``(chain_id, residue_id, atom_name) -> new_atom_name`` keys."""
+        if not isinstance(atom_name_overrides, Mapping):
+            raise TypeError("atom_names must be a mapping of (chain_id, residue_id, atom_name) -> new_atom_name.")
+
+        normalized_map: Dict[tuple[str, int, str], str] = {}
+        for key, value in atom_name_overrides.items():
+            if not isinstance(key, tuple) or len(key) != 3:
+                raise ValueError(
+                    "atom_names keys must be 3-tuples of the form (chain_id, residue_id, atom_name)."
+                )
+            chain_id, residue_id, atom_name = key
+            try:
+                residue_id_int = int(residue_id)
+            except Exception as exc:
+                raise ValueError(
+                    f"atom_names residue id {residue_id!r} could not be converted to an integer."
+                ) from exc
+            new_atom_name = str(value).strip()
+            if not new_atom_name:
+                raise ValueError(f"atom_names override for {key!r} is empty.")
+            normalized_map[(str(chain_id), residue_id_int, str(atom_name).strip())] = new_atom_name
+
+        for atom in modeller.topology.atoms():
+            try:
+                residue_id_int = int(atom.residue.id)
+            except Exception:
+                continue
+            key = (str(atom.residue.chain.id), residue_id_int, atom.name.strip())
+            new_name = normalized_map.get(key)
+            if new_name:
+                atom.name = new_name
+
+    @staticmethod
+    def _apply_add_bonds(modeller, add_bonds_opt) -> None:
+        """Apply explicit inter- or intra-residue bonds defined as ``((chain, resid, atom), (chain, resid, atom))``."""
+        atom_lookup = {}
+        for atom in modeller.topology.atoms():
+            try:
+                resid_int = int(atom.residue.id)
+            except Exception:
+                continue
+            key = (atom.residue.chain.id, resid_int, atom.name.strip())
+            atom_lookup[key] = atom
+
+        def _locate(atom_spec):
+            if len(atom_spec) != 3:
+                raise ValueError(f"add_bonds entries must be (chain, resid, atom), got {atom_spec}")
+            chain_id, resid, atom_name = atom_spec
+            try:
+                resid_int = int(resid)
+            except Exception:
+                resid_int = resid
+            key = (str(chain_id), resid_int, str(atom_name).strip())
+            atom = atom_lookup.get(key)
+            if atom is None:
+                raise ValueError(f"Atom {atom_name} in residue {chain_id}:{resid} not found in topology.")
+            return atom
+
+        def _bond_exists(atom1, atom2):
+            for bond_atom1, bond_atom2 in modeller.topology.bonds():
+                if (bond_atom1 == atom1 and bond_atom2 == atom2) or (bond_atom1 == atom2 and bond_atom2 == atom1):
+                    return True
+            return False
+
+        for bond in add_bonds_opt:
+            atom1 = _locate(bond[0])
+            atom2 = _locate(bond[1])
+            if not _bond_exists(atom1, atom2):
+                modeller.topology.addBond(atom1, atom2)
+
+    @staticmethod
+    def _reconcile_residue_templates(modeller, forcefield, residue_names: Iterable[str]) -> None:
+        """Align selected residues to existing force-field templates by pruning extra H atoms and restoring template bonds."""
+        target_names = {
+            str(residue_name).strip().upper()
+            for residue_name in residue_names
+            if str(residue_name).strip()
+        }
+        if not target_names:
+            return
+
+        template_map = getattr(forcefield, "_templates", {})
+        atoms_to_delete = []
+        for residue in modeller.topology.residues():
+            rname = residue.name.strip().upper()
+            if rname not in target_names:
+                continue
+            tmpl = template_map.get(rname)
+            if tmpl is None:
+                continue
+            template_atom_names = {atom.name for atom in tmpl.atoms}
+            for atom in residue.atoms():
+                element = getattr(atom, "element", None)
+                atomic_number = getattr(element, "atomic_number", None)
+                if atomic_number == 1 and atom.name.strip() not in template_atom_names:
+                    atoms_to_delete.append(atom)
+        if atoms_to_delete:
+            modeller.delete(atoms_to_delete)
+
+        def _bond_exists(atom1, atom2):
+            for bond_atom1, bond_atom2 in modeller.topology.bonds():
+                if (bond_atom1 == atom1 and bond_atom2 == atom2) or (bond_atom1 == atom2 and bond_atom2 == atom1):
+                    return True
+            return False
+
+        for residue in modeller.topology.residues():
+            rname = residue.name.strip().upper()
+            if rname not in target_names:
+                continue
+            tmpl = template_map.get(rname)
+            if tmpl is None:
+                continue
+            atom_by_name = {}
+            for atom in residue.atoms():
+                atom_by_name.setdefault(atom.name.strip(), []).append(atom)
+            for atom1_index, atom2_index in tmpl.bonds:
+                atom1_name = tmpl.atoms[atom1_index].name
+                atom2_name = tmpl.atoms[atom2_index].name
+                if atom1_name not in atom_by_name or atom2_name not in atom_by_name:
+                    continue
+                for atom1 in atom_by_name[atom1_name]:
+                    for atom2 in atom_by_name[atom2_name]:
+                        if not _bond_exists(atom1, atom2):
+                            modeller.topology.addBond(atom1, atom2)
+
+    @staticmethod
+    def _rebuild_template_only_chains(modeller, forcefield, residue_names: Iterable[str]) -> None:
+        """Rebuild chains composed entirely of template-backed residues so missing hydrogens can be inserted contiguously."""
+        from openmm import Vec3, unit as u
+        from openmm.app import Element, Topology
+
+        target_names = {
+            str(residue_name).strip().upper()
+            for residue_name in residue_names
+            if str(residue_name).strip()
+        }
+        if not target_names:
+            return
+
+        template_map = getattr(forcefield, "_templates", {})
+        chains_to_rebuild = []
+        for chain in modeller.topology.chains():
+            residues = list(chain.residues())
+            if not residues:
+                continue
+            if any(residue.name.strip().upper() not in target_names for residue in residues):
+                continue
+            if not any(
+                len({atom.name for atom in template_map.get(residue.name.strip().upper(), []).atoms}) > len(list(residue.atoms()))
+                if template_map.get(residue.name.strip().upper(), None) is not None else False
+                for residue in residues
+            ):
+                continue
+            chains_to_rebuild.append((chain.id, residues))
+
+        for chain_id, residues in chains_to_rebuild:
+            rebuilt_topology = Topology()
+            rebuilt_chain = rebuilt_topology.addChain(chain_id)
+            rebuilt_positions = []
+            residues_to_delete = []
+
+            for residue in residues:
+                residues_to_delete.append(residue)
+                template = template_map.get(residue.name.strip().upper())
+                if template is None:
+                    continue
+                atom_by_name = {atom.name.strip(): atom for atom in residue.atoms()}
+                rebuilt_residue = rebuilt_topology.addResidue(residue.name, rebuilt_chain, id=str(residue.id))
+                rebuilt_atom_by_name = {}
+                added_index = 0
+                for template_atom_index, template_atom in enumerate(template.atoms):
+                    template_atom_name = template_atom.name
+                    existing_atom = atom_by_name.get(template_atom_name)
+                    if existing_atom is not None:
+                        new_atom = rebuilt_topology.addAtom(template_atom_name, existing_atom.element, rebuilt_residue)
+                        rebuilt_positions.append(modeller.positions[existing_atom.index])
+                        rebuilt_atom_by_name[template_atom_name] = new_atom
+                        continue
+
+                    element = getattr(template_atom, "element", None)
+                    atomic_number = getattr(element, "atomic_number", None)
+                    if atomic_number != 1 and not template_atom_name.startswith("H"):
+                        raise ValueError(
+                            f"Template-backed residue {residue.name} is missing non-hydrogen atom {template_atom_name}."
+                        )
+
+                    bonded_partner_name = None
+                    for atom1_index, atom2_index in template.bonds:
+                        if atom1_index == template_atom_index:
+                            bonded_partner_name = template.atoms[atom2_index].name
+                            break
+                        if atom2_index == template_atom_index:
+                            bonded_partner_name = template.atoms[atom1_index].name
+                            break
+                    if bonded_partner_name is None or bonded_partner_name not in rebuilt_atom_by_name:
+                        raise ValueError(
+                            f"Could not place hydrogen {template_atom_name} for residue {residue.name}:{residue.id}."
+                        )
+
+                    partner_atom = rebuilt_atom_by_name[bonded_partner_name]
+                    hydrogen_element = element if element is not None else Element.getByAtomicNumber(1)
+                    new_atom = rebuilt_topology.addAtom(template_atom_name, hydrogen_element, rebuilt_residue)
+                    base_position = rebuilt_positions[partner_atom.index]
+                    added_index += 1
+                    offset = Vec3(
+                        0.005 * ((added_index % 3) + 1),
+                        0.005 * (((added_index + 1) % 3) + 1),
+                        0.005 * (((added_index + 2) % 3) + 1),
+                    ) * u.nanometer
+                    rebuilt_positions.append(base_position + offset)
+                    rebuilt_atom_by_name[template_atom_name] = new_atom
+
+                for atom1_index, atom2_index in template.bonds:
+                    atom1_name = template.atoms[atom1_index].name
+                    atom2_name = template.atoms[atom2_index].name
+                    if atom1_name in rebuilt_atom_by_name and atom2_name in rebuilt_atom_by_name:
+                        rebuilt_topology.addBond(rebuilt_atom_by_name[atom1_name], rebuilt_atom_by_name[atom2_name])
+
+            modeller.delete(residues_to_delete)
+            modeller.add(rebuilt_topology, rebuilt_positions)
+
+    @staticmethod
+    def _add_missing_template_hydrogens(modeller, forcefield, residue_names: Iterable[str]) -> None:
+        """Add missing hydrogen atoms for selected template-backed residues using simple bonded placements."""
+        from openmm import Vec3, unit as u
+        from openmm.app import Element
+
+        target_names = {
+            str(residue_name).strip().upper()
+            for residue_name in residue_names
+            if str(residue_name).strip()
+        }
+        if not target_names:
+            return
+
+        template_map = getattr(forcefield, "_templates", {})
+        for residue in modeller.topology.residues():
+            rname = residue.name.strip().upper()
+            if rname not in target_names:
+                continue
+            tmpl = template_map.get(rname)
+            if tmpl is None:
+                continue
+
+            atom_by_name = {}
+            for atom in residue.atoms():
+                atom_by_name.setdefault(atom.name.strip(), []).append(atom)
+
+            added_index = 0
+            for template_atom_index, template_atom in enumerate(tmpl.atoms):
+                if template_atom.name in atom_by_name:
+                    continue
+                element = getattr(template_atom, "element", None)
+                atomic_number = getattr(element, "atomic_number", None)
+                if atomic_number != 1 and not str(template_atom.name).startswith("H"):
+                    continue
+
+                bonded_partner = None
+                for atom1_index, atom2_index in tmpl.bonds:
+                    if atom1_index == template_atom_index:
+                        partner_name = tmpl.atoms[atom2_index].name
+                    elif atom2_index == template_atom_index:
+                        partner_name = tmpl.atoms[atom1_index].name
+                    else:
+                        continue
+                    partner_atoms = atom_by_name.get(partner_name)
+                    if partner_atoms:
+                        bonded_partner = partner_atoms[0]
+                        break
+                if bonded_partner is None:
+                    continue
+
+                hydrogen_element = element if element is not None else Element.getByAtomicNumber(1)
+                new_atom = modeller.topology.addAtom(template_atom.name, hydrogen_element, residue)
+                base_position = modeller.positions[bonded_partner.index]
+                added_index += 1
+                offset = Vec3(
+                    0.005 * ((added_index % 3) + 1),
+                    0.005 * (((added_index + 1) % 3) + 1),
+                    0.005 * (((added_index + 2) % 3) + 1),
+                ) * u.nanometer
+                modeller.positions.append(base_position + offset)
+                modeller.topology.addBond(new_atom, bonded_partner)
+                atom_by_name.setdefault(template_atom.name, []).append(new_atom)
 
     @staticmethod
     def _remove_skip_residues(modeller: "Modeller", skip_names: Iterable[str]) -> None:

@@ -1,0 +1,24 @@
+name: prepare_proteins
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - python=3.10
+  - biopython
+  - blast
+  - dssp
+  - mafft
+  - mdtraj
+  - cd-hit
+  - entrez-direct
+  - pandas
+  - scipy
+  - numpy
+  - matplotlib
+  - seaborn
+  - tqdm
+  - beautifulsoup4
+  - requests
+  - setuptools
+  - pip
+  - wheel

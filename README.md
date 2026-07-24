@@ -12,6 +12,7 @@ A tutorial for basic usage is available in the docs folder:
  * [Basic protein set up for running PELE](https://github.com/Martin-Floor/prepare_proteins/blob/main/docs/tutorial/01-BasicProteinSetUpForPELE/01-BasicProteinSetUpForPELE.ipynb)
  * [AF3 tutorial for UPOs with heme and Mg](https://github.com/Martin-Floor/prepare_proteins/blob/main/docs/tutorial/02-AF3UPOWithHemeAndMg/02-AF3UPOWithHemeAndMg.ipynb)
  * [AF3 tutorial continuation: Compound-I waters + Rosetta relax](https://github.com/Martin-Floor/prepare_proteins/blob/main/docs/tutorial/03-AF3UPOCompoundIWatersRosetta/03-AF3UPOCompoundIWatersRosetta.ipynb)
+ * [CHARMM-GUI Quick Bilayer backend notes](https://github.com/Martin-Floor/prepare_proteins/blob/main/docs/charmm_gui_quick_bilayer.md)
 
 ## MLCG simulations (experimental)
 

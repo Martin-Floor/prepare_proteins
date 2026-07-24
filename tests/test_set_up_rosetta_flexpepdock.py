@@ -1,4 +1,7 @@
+import os
 import shlex
+import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -39,7 +42,9 @@ def _write_scorefile(score_path: Path, model_name: str, nstruct: int) -> None:
     score_path.write_text("\n".join(lines) + "\n")
 
 
-def test_set_up_rosetta_flexpepdock_writes_expected_xml_and_flags(tmp_path):
+def test_set_up_rosetta_flexpepdock_writes_expected_xml_and_flags(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
     models_dir = tmp_path / "models"
     _write_model(models_dir)
     models = prepare_proteins.proteinModels(str(models_dir))
@@ -53,16 +58,19 @@ def test_set_up_rosetta_flexpepdock_writes_expected_xml_and_flags(tmp_path):
     )
 
     assert len(jobs) == 1
-    assert "cd " + shlex.quote(str(job_folder / "output_models" / "modelA")) in jobs[0]
+    expected_model_dir = os.path.relpath(
+        job_folder / "output_models" / "modelA", start=tmp_path
+    )
+    assert f"cd {shlex.quote(expected_model_dir)}" in jobs[0]
+    assert str(job_folder / "output_models" / "modelA") not in jobs[0]
+    assert "PREPARE_PROTEINS_LAUNCH_DIR" not in jobs[0]
+    assert "cd ../../.." in jobs[0]
     assert "rosetta_scripts.mpi.linuxgccrelease @ ../../flags/modelA_flexpepdock.flags" in jobs[0]
 
     xml_path = job_folder / "xml" / "modelA_flexpepdock.xml"
     xml_text = xml_path.read_text()
     assert "<FlexPepDock" in xml_text
-    assert 'peptide_chain="B"' in xml_text
-    assert 'receptor_chain="A"' in xml_text
     assert 'pep_refine="true"' in xml_text
-    assert 'scorefxn="ref2015"' in xml_text
 
     flags_path = job_folder / "flags" / "modelA_flexpepdock.flags"
     flags_text = flags_path.read_text()
@@ -70,6 +78,9 @@ def test_set_up_rosetta_flexpepdock_writes_expected_xml_and_flags(tmp_path):
     assert "-s ../../input_models/modelA.pdb" in flags_text
     assert "-out:file:silent modelA_flexpepdock.out" in flags_text
     assert "-out:file:scorefile modelA_flexpepdock.sc" in flags_text
+    assert "-flexPepDocking:peptide_chain B" in flags_text
+    assert "-flexPepDocking:receptor_chain A" in flags_text
+    assert "-score:weights ref2015" in flags_text
     assert "-use_input_sc" in flags_text
     assert "-ex1aro" in flags_text
     assert "-ex2aro" in flags_text
@@ -112,8 +123,12 @@ def test_set_up_rosetta_flexpepdock_can_use_default_chain_assignment(tmp_path):
 
     xml_path = job_folder / "xml" / "modelA_flexpepdock.xml"
     xml_text = xml_path.read_text()
-    assert 'receptor_chain="A"' in xml_text
-    assert 'peptide_chain="B"' in xml_text
+    flags_path = job_folder / "flags" / "modelA_flexpepdock.flags"
+    flags_text = flags_path.read_text()
+    assert 'receptor_chain="' not in xml_text
+    assert 'peptide_chain="' not in xml_text
+    assert "-flexPepDocking:receptor_chain A" in flags_text
+    assert "-flexPepDocking:peptide_chain B" in flags_text
 
 
 def test_set_up_rosetta_flexpepdock_rejects_multiple_doc_modes(tmp_path):
@@ -150,3 +165,53 @@ def test_analyse_rosetta_calculation_detects_non_relax_silent_files_for_job_gene
 
     assert len(jobs) == 1
     assert "--models modelA" in jobs[0]
+
+
+def test_set_up_rosetta_flexpepdock_adds_nma_params_for_capped_peptides(tmp_path):
+    models_dir = tmp_path / "models"
+    _write_model(models_dir)
+    models = prepare_proteins.proteinModels(str(models_dir), conect_update=False)
+    models.addCappingGroups(style="rosetta", backend="internal", chains="B")
+
+    job_folder = tmp_path / "flexpepdock jobs"
+    models.setUpRosettaFlexPepDock(
+        str(job_folder),
+        peptide_chain="B",
+        parallelisation=None,
+        nstruct=1,
+    )
+
+    params_path = job_folder / "params" / "NMA.params"
+    assert params_path.exists()
+
+    flags_text = (job_folder / "flags" / "modelA_flexpepdock.flags").read_text()
+    assert "-in:file:extra_res_path ../../params" in flags_text
+
+
+def test_set_up_rosetta_flexpepdock_worker_script_runs_from_launcher_directory(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    models_dir = tmp_path / "models"
+    _write_model(models_dir)
+    models = prepare_proteins.proteinModels(str(models_dir))
+
+    job_folder = tmp_path / "flexpepdock jobs"
+    jobs = models.setUpRosettaFlexPepDock(
+        str(job_folder),
+        peptide_chain="B",
+        parallelisation=None,
+        nstruct=1,
+        executable='python3 -c "import os, pathlib; pathlib.Path(\'marker.txt\').write_text(os.getcwd())"',
+    )
+
+    script_path = tmp_path / "run_job.sh"
+    script_path.write_text("#!/bin/sh\n" + jobs[0])
+    script_path.chmod(script_path.stat().st_mode | stat.S_IXUSR)
+
+    subprocess.run(["bash", str(script_path)], cwd=tmp_path, check=True)
+
+    marker_path = job_folder / "output_models" / "modelA" / "marker.txt"
+    assert marker_path.exists()
+    assert marker_path.read_text() == str(job_folder / "output_models" / "modelA")
