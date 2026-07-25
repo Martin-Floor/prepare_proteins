@@ -32,6 +32,19 @@ parser.add_argument('--equilibration_data_report_time', type=float, default=1.0,
 parser.add_argument('--equilibration_dcd_report_time', type=float, default=0.0, help='DCD report interval during equilibration in ps (0 disables reporting).')
 parser.add_argument('--restraint_residue_pairs_json', help='Optional JSON file describing the heavy-atom restraint selection during equilibration. Accepted forms are [["A", 1], ["B", 2], ...], {"residue_pairs": [["A", 1], ...]}, or {"residue_ids": [1, 2, ...]} for topology-wide residue IDs. By default all heavy atoms are restrained.')
 parser.add_argument('--seed', type=int, help='Seed for initial velocities (int)')
+parser.add_argument('--protein_floor_axis', type=int, default=None, choices=(0, 1, 2),
+    help='Cartesian axis (0=x, 1=y, 2=z) for a flat-bottom floor restraint on the '
+         'protein centre of mass.  The floor coordinate is set automatically as the '
+         'midpoint between the initial protein COM and the partner (slab) centroid '
+         'along this axis.  Disabled by default.  Requires '
+         '--protein_floor_partner_residue_names.')
+parser.add_argument('--protein_floor_k', type=float, default=10.0,
+    help='Force constant for the protein COM floor restraint (kcal/mol/Å²). '
+         'Only active when --protein_floor_axis is set. Default: 10.0.')
+parser.add_argument('--protein_floor_partner_residue_names', default=None,
+    help='Comma-separated residue names that form the partner molecule (slab), '
+         'e.g. "ROH,4GB,0GB".  Used to distinguish slab atoms from protein atoms '
+         'when computing the floor coordinate.')
 parser.add_argument('--platform-name', default=os.environ.get('OPENMM_PLATFORM'), help='Optional OpenMM platform name (for example CUDA or OpenCL).')
 parser.add_argument('--device-index', default=os.environ.get('OPENMM_DEVICE_INDEX'), help='Optional GPU device index or comma-separated list of device indices.')
 parser.add_argument('--precision', default=os.environ.get('OPENMM_PRECISION'), help='Optional OpenMM precision mode (single, mixed, or double).')
@@ -193,6 +206,12 @@ try:
     input_format = str(args.input_format).strip().lower()
     charmm_toppar = args.charmm_toppar
     charmm_sysinfo = args.charmm_sysinfo
+    protein_floor_axis = args.protein_floor_axis
+    protein_floor_k = float(args.protein_floor_k)
+    protein_floor_partner_residue_names = (
+        [n.strip() for n in args.protein_floor_partner_residue_names.split(",") if n.strip()]
+        if args.protein_floor_partner_residue_names else []
+    )
 
     if (simulation_time <= 0 or chunk_size <= 0 or temperature <= 0 or time_step <= 0 or
             collision_rate <= 0 or nvt_time <= 0 or npt_time <= 0 or restraint_constant < 0 or
@@ -381,6 +400,94 @@ def removeHeavyAtomPositionalRestraintForce(system):
         if isinstance(force, omm.CustomExternalForce) and 'k' in [force.getGlobalParameterName(j) for j in range(force.getNumGlobalParameters())]:
             system.removeForce(i)
             break
+
+
+def addProteinCOMFloorRestraint(system, positions, topology, floor_axis, floor_k, partner_residue_names):
+    """
+    Add a flat-bottom restraint that prevents the protein COM from crossing the
+    midplane between its initial position and the partner (slab) along floor_axis.
+
+    The floor coordinate is determined automatically: it is set to the midpoint
+    between the initial protein COM and the partner-atom centroid along the
+    specified Cartesian axis.  The restraint fires only when the protein COM
+    moves past this midpoint toward the partner, blocking PBC-mediated face-
+    crossing artefacts without biasing the bound-state ensemble.
+
+    Parameters:
+    system (System): The OpenMM system.
+    positions: Initial atom positions (OpenMM Quantity with length units).
+    topology (Topology): The system topology.
+    floor_axis (int): Cartesian axis to restrain (0=x, 1=y, 2=z).
+    floor_k (float): Force constant in kcal/mol/Å².
+    partner_residue_names (list[str]): Residue names belonging to the partner
+        (slab) molecule, e.g. ["ROH", "4GB", "0GB"].
+    """
+    kcal_to_kj = 4.184
+    ang_to_nm = 0.1
+    ion_names = {"NA", "K", "CL", "MG", "CA", "ZN", "LI", "RB", "SR", "BA", "CU"}
+    partner_upper = {n.upper() for n in partner_residue_names}
+
+    partner_indices = []
+    protein_indices = []
+    for residue in topology.residues():
+        try:
+            is_water = Topology.isWater(residue)
+        except Exception:
+            is_water = residue.name.upper() in {"HOH", "WAT", "TIP3", "SOL"}
+        if is_water:
+            continue
+        if residue.name.upper() in ion_names:
+            continue
+        is_partner = residue.name.upper() in partner_upper
+        for atom in residue.atoms():
+            element = getattr(atom, "element", None)
+            symbol = getattr(element, "symbol", None)
+            if symbol == "H":
+                continue
+            if is_partner:
+                partner_indices.append(atom.index)
+            else:
+                protein_indices.append(atom.index)
+
+    if not protein_indices:
+        raise ValueError(
+            "Protein COM floor restraint: no protein heavy atoms found. "
+            "Check --protein_floor_partner_residue_names."
+        )
+    if not partner_indices:
+        raise ValueError(
+            "Protein COM floor restraint: no partner heavy atoms found. "
+            "Check --protein_floor_partner_residue_names."
+        )
+
+    pos_nm = positions.value_in_unit(u.nanometers)
+    protein_com = sum(pos_nm[i][floor_axis] for i in protein_indices) / len(protein_indices)
+    partner_com = sum(pos_nm[i][floor_axis] for i in partner_indices) / len(partner_indices)
+    floor_coord_nm = (protein_com + partner_com) / 2.0
+
+    axis_label = ("x1", "y1", "z1")[floor_axis]
+    if protein_com >= partner_com:
+        # Protein is on the positive side; penalise if it drops below the floor.
+        energy_expr = f"k_floor * max(0, floor_coord - {axis_label})^2"
+    else:
+        # Protein is on the negative side; penalise if it rises above the floor.
+        energy_expr = f"k_floor * max(0, {axis_label} - floor_coord)^2"
+
+    k_floor_kj = floor_k * kcal_to_kj / (ang_to_nm ** 2)
+    floor_force = omm.CustomCentroidBondForce(1, energy_expr)
+    floor_force.addPerBondParameter("k_floor")
+    floor_force.addPerBondParameter("floor_coord")
+    floor_force.addGroup(protein_indices)
+    floor_force.addBond([0], [k_floor_kj, floor_coord_nm])
+    system.addForce(floor_force)
+
+    print(
+        f"Protein COM floor restraint: axis={'xyz'[floor_axis]}, "
+        f"protein_com={protein_com * 10:.2f} Å, partner_com={partner_com * 10:.2f} Å, "
+        f"floor={floor_coord_nm * 10:.2f} Å, k={floor_k:.1f} kcal/mol/Å²"
+    )
+    return floor_force
+
 
 class CustomDataReporter(StateDataReporter):
     """
@@ -613,6 +720,19 @@ try:
         system = topology_source.createSystem(charmm_params, **system_kwargs)
     # Remove center-of-mass drift every 100 steps
     system.addForce(omm.CMMotionRemover(100))
+
+    # Persistent flat-bottom COM floor restraint (blocks PBC face-crossing artefacts)
+    if protein_floor_axis is not None:
+        if not protein_floor_partner_residue_names:
+            raise ValueError(
+                "--protein_floor_partner_residue_names is required when "
+                "--protein_floor_axis is set."
+            )
+        addProteinCOMFloorRestraint(
+            system, initial_positions, system_topology,
+            protein_floor_axis, protein_floor_k,
+            protein_floor_partner_residue_names,
+        )
 
     # Set up integrator
     integrator = omm.LangevinMiddleIntegrator(temperature * u.kelvin, collision_rate / u.picosecond, time_step * u.picoseconds)
