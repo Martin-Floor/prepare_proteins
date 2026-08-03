@@ -3149,7 +3149,13 @@ class sequenceModels:
                     )
 
             if msa_calculation:
-                command = f"colabfold_search --mmseqs {mseqs} {fastas_folder}/{model}.fasta {db} {msa_folder}/{model}"
+                model_msa_folder = msa_folder + "/" + model
+                command = f"mkdir -p {model_msa_folder}\n"
+                # Skip the search if an alignment is already there
+                command += f"if ! ls {model_msa_folder}/*.a3m > /dev/null 2>&1; then\n"
+                command += f"colabfold_search --mmseqs {mseqs} {fastas_folder}/{model}.fasta {db} {model_msa_folder}\n"
+                command += "fi\n"
+                command += f"MSA=$(ls {model_msa_folder}/*.a3m | head -n 1)\n"
                 command += "RUN_SAMPLES=" + str(num_samples) + "\n"
             else:
                 command = "RUN_SAMPLES=" + str(num_samples) + "\n"
@@ -3160,8 +3166,7 @@ class sequenceModels:
                 command += "CUDA_VISIBLE_DEVICES=GPUID "
             command += "python -m bioemu.sample "
             if msa_calculation:
-                msaf = msa_folder + "/" + model + ".a3m"
-                command += f"--sequence {msaf} "
+                command += '--sequence "$MSA" '
             else:
                 command += f"--sequence {self.sequences[model]} "
             command += f"--num_samples $RUN_SAMPLES "
