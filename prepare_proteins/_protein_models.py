@@ -8329,6 +8329,169 @@ has been carried out. Please run compareSequences() function before setting muta
 
         return jobs
 
+    def setUpRosettaStabilityScan(
+        self,
+        stability_folder,
+        nstruct=35,
+        models=None,
+        cartesian=True,
+        cst_optimization=False,
+        skip_finished=True,
+        executable="rosetta_scripts.mpi.linuxgccrelease",
+        parallelisation="srun",
+        cpus=None,
+        extra_flags=None,
+        rosetta_path=None,
+    ):
+        """
+        Set up a Rosetta stability scan using FastRelax.
+
+        Runs FastRelax on each model and returns job command strings suitable
+        for submission via bsc_calculations.  After the runs complete, call
+        :meth:`analyseRosettaStabilityScan` to compute ΔΔG relative to a
+        reference (wild-type) model.
+
+        Parameters
+        ==========
+        stability_folder : str
+            Folder where the stability scan will be written.
+        nstruct : int, optional
+            Number of relaxed structures per model (default: 35).
+        models : list, optional
+            Subset of model names to process.  None processes all models.
+        cartesian : bool, optional
+            Use Cartesian-space FastRelax, recommended for ddG (default: True).
+        cst_optimization : bool, optional
+            Add coordinate constraints during relax.  False (default) gives
+            better ΔΔG estimates for unconstrained monomers.
+        skip_finished : bool, optional
+            Skip models whose score file already has ``nstruct`` entries.
+        executable : str, optional
+            Rosetta executable name.
+        parallelisation : str or None, optional
+            One of ``'srun'``, ``'mpirun'``, or ``None``.
+        cpus : int, optional
+            Number of CPUs (required when ``parallelisation='mpirun'``).
+        extra_flags : list, optional
+            Additional Rosetta flags appended verbatim.
+        rosetta_path : str, optional
+            Absolute path to the Rosetta installation.
+
+        Returns
+        =======
+        list
+            Job command strings, one per model.
+        """
+        return self.setUpRosettaOptimization(
+            relax_folder=stability_folder,
+            nstruct=nstruct,
+            relax_cycles=5,
+            models=models,
+            cartesian=cartesian,
+            cst_optimization=cst_optimization,
+            skip_finished=skip_finished,
+            executable=executable,
+            parallelisation=parallelisation,
+            cpus=cpus,
+            extra_flags=extra_flags,
+            rosetta_path=rosetta_path,
+        )
+
+    def analyseRosettaStabilityScan(
+        self,
+        stability_folder,
+        wt_model,
+        top_fraction=0.333,
+        models=None,
+    ):
+        """
+        Analyse the output of :meth:`setUpRosettaStabilityScan`.
+
+        Reads FastRelax score files, averages the lowest-scoring
+        ``top_fraction`` of structures per model, and computes
+        ΔΔG = score(design) − score(wt_model).  A positive ΔΔG means the
+        design is less stable than the reference.
+
+        Results are stored in ``self.rosetta_stability`` and returned as a
+        DataFrame sorted by ΔΔG ascending (most stable first).
+
+        Parameters
+        ==========
+        stability_folder : str
+            Folder passed to :meth:`setUpRosettaStabilityScan`.
+        wt_model : str
+            Name of the wild-type / reference model.
+        top_fraction : float, optional
+            Fraction of lowest-energy models to average per variant
+            (default: 0.333 → lowest third).
+        models : list, optional
+            Subset of model names to analyse.  None analyses all models.
+
+        Returns
+        =======
+        pandas.DataFrame
+            Columns: model, n_models, mean_score, ddg_kcal_mol.
+            ΔΔG is in Rosetta Energy Units (REU); for monomeric proteins
+            1 REU ≈ 1 kcal/mol by convention.
+        """
+        if not 0 < top_fraction <= 1.0:
+            raise ValueError(
+                "top_fraction must be between 0 (exclusive) and 1 (inclusive)."
+            )
+
+        target_models = list(models) if models is not None else list(self.models_names)
+        if wt_model not in target_models:
+            raise ValueError(
+                f"wt_model '{wt_model}' not found in the model list."
+            )
+
+        records = []
+        for model in target_models:
+            score_file = os.path.join(
+                stability_folder, "output_models", model, f"{model}_relax.out"
+            )
+            if not os.path.exists(score_file):
+                print(f"WARNING: score file not found for model '{model}', skipping.")
+                continue
+
+            df = _readRosettaScoreFile(score_file, skip_empty=True)
+            if df is None or df.empty:
+                print(f"WARNING: empty score file for model '{model}', skipping.")
+                continue
+
+            if "total_score" not in df.columns:
+                print(
+                    f"WARNING: 'total_score' column missing for model '{model}', skipping."
+                )
+                continue
+
+            scores = df["total_score"].sort_values().values
+            n_top = max(1, int(len(scores) * top_fraction))
+            mean_score = float(scores[:n_top].mean())
+            records.append(
+                {"model": model, "n_models": len(scores), "mean_score": mean_score}
+            )
+
+        if not records:
+            raise ValueError(
+                f"No score files found under '{stability_folder}/output_models/'. "
+                "Has the stability scan been run?"
+            )
+
+        result = pd.DataFrame(records)
+
+        wt_rows = result[result["model"] == wt_model]
+        if wt_rows.empty:
+            raise ValueError(
+                f"WT model '{wt_model}' has no score data — cannot compute ΔΔG."
+            )
+        wt_score = float(wt_rows["mean_score"].iloc[0])
+        result["ddg_kcal_mol"] = result["mean_score"] - wt_score
+        result = result.sort_values("ddg_kcal_mol").reset_index(drop=True)
+
+        self.rosetta_stability = result
+        return result
+
     def setUpRosettaFlexPepDock(
         self,
         flexpepdock_folder,
