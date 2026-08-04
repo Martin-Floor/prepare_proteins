@@ -8459,13 +8459,14 @@ has been carried out. Please run compareSequences() function before setting muta
                 print(f"WARNING: empty score file for model '{model}', skipping.")
                 continue
 
-            if "total_score" not in df.columns:
+            score_col = "total_score" if "total_score" in df.columns else "score" if "score" in df.columns else None
+            if score_col is None:
                 print(
-                    f"WARNING: 'total_score' column missing for model '{model}', skipping."
+                    f"WARNING: no score column found for model '{model}', skipping."
                 )
                 continue
 
-            scores = df["total_score"].sort_values().values
+            scores = df[score_col].sort_values().values
             n_top = max(1, int(len(scores) * top_fraction))
             mean_score = float(scores[:n_top].mean())
             records.append(
