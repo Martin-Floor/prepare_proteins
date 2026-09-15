@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import ast
 import bz2
+import copy
+import hashlib
 import io
 import json
 import math
@@ -10,6 +12,7 @@ import pickle
 import re
 import shlex
 import shutil
+import string
 import subprocess
 from collections import defaultdict
 from datetime import date
@@ -268,6 +271,664 @@ def _resolve_bioemu_max_frames(
     return max_frames
 
 
+# ---------------------------------------------------------------------------
+# AlphaFold 3 JSON inputs
+#
+# One payload builder, one validator and one writer are shared by every AlphaFold 3 entry
+# point of this module. :meth:`sequenceModels.writeAlphaFold3Inputs` materializes the input
+# files on their own, for staged workflows that must build inputs without generating or
+# launching any scheduler command, and :meth:`sequenceModels.setUpAlphaFold3` reuses exactly
+# the same builder and writer before wrapping each written job in its launcher command.
+# ---------------------------------------------------------------------------
+
+AF3_JSON_DIALECT = "alphafold3"
+AF3_JSON_VERSION = 1
+AF3_TOP_LEVEL_KEYS = frozenset({"name", "modelSeeds", "sequences", "dialect", "version",
+                                "bondedAtomPairs", "userCCD", "userCCDPath"})
+AF3_REQUIRED_TOP_LEVEL_KEYS = frozenset({"name", "modelSeeds", "sequences", "dialect",
+                                         "version"})
+AF3_PROTEIN_KEYS = frozenset({"id", "sequence", "modifications", "unpairedMsa", "pairedMsa",
+                              "templates"})
+AF3_LIGAND_KEYS = frozenset({"id", "ccdCodes", "smiles"})
+AF3_TEMPLATE_KEYS = frozenset({"mmcif", "mmcifPath", "queryIndices", "templateIndices"})
+AF3_MODIFICATION_KEYS = frozenset({"ptmType", "ptmPosition"})
+AF3_NAME_CHARACTERS = frozenset(string.ascii_lowercase + string.digits + "_-.")
+AF3_CHAIN_FIELDS = ("modifications", "unpairedMsa", "pairedMsa", "templates")
+_AF3_GENERIC_KEYS = ("default", "*")
+
+
+def alphafold3_sanitised_name(name):
+    """Return the output-directory name AlphaFold 3 derives from a job name.
+
+    Mirrors ``folding_input.sanitised_name``: the name is lowercased, spaces become
+    underscores and every character outside ``[a-z0-9_.-]`` is dropped.
+    """
+    lowered = str(name).lower().replace(" ", "_")
+    return "".join(character for character in lowered if character in AF3_NAME_CHARACTERS)
+
+
+def _af3_seed_list(value):
+    if value is None:
+        return [1]
+    if isinstance(value, bool):
+        raise TypeError(
+            'model_seeds must be an int, iterable of ints or a dictionary mapping models to seeds'
+        )
+    if isinstance(value, int):
+        return [int(value)]
+    if isinstance(value, (list, tuple, set)):
+        if not value:
+            return [1]
+        return [int(v) for v in value]
+    raise TypeError(
+        'model_seeds must be an int, iterable of ints or a dictionary mapping models to seeds'
+    )
+
+
+def _af3_seeds_for_model(model_seeds, model_name):
+    if isinstance(model_seeds, dict):
+        if model_name in model_seeds:
+            return _af3_seed_list(model_seeds[model_name])
+        # Allow usage of generic entries such as "default" or "*"
+        for generic_key in _AF3_GENERIC_KEYS:
+            if generic_key in model_seeds:
+                return _af3_seed_list(model_seeds[generic_key])
+        return _af3_seed_list(None)
+    return _af3_seed_list(model_seeds)
+
+
+def _af3_ensure_id_list(chain_id, fallback_index):
+    if isinstance(chain_id, (list, tuple)):
+        return [str(i) for i in chain_id]
+    if chain_id is None:
+        return [chr(ord('A') + fallback_index)]
+    chain_str = str(chain_id)
+    if not chain_str:
+        return [chr(ord('A') + fallback_index)]
+    return [chain_str]
+
+
+def _af3_sequence_entries(seq_obj):
+    if isinstance(seq_obj, str):
+        return [{"protein": {"id": "A", "sequence": seq_obj}}]
+
+    if isinstance(seq_obj, dict):
+        entries = []
+        for idx, (chain_id, chain_seq) in enumerate(seq_obj.items()):
+            if chain_seq is None:
+                continue
+            ids = _af3_ensure_id_list(chain_id, idx)
+            protein_id = ids[0] if len(ids) == 1 else ids
+            entries.append({
+                "protein": {
+                    "id": protein_id,
+                    "sequence": str(chain_seq)
+                }
+            })
+        if entries:
+            return entries
+
+    if isinstance(seq_obj, (list, tuple)):
+        entries = []
+        for idx, chain_seq in enumerate(seq_obj):
+            if chain_seq is None:
+                continue
+            chain_id = chr(ord('A') + idx)
+            entries.append({
+                "protein": {
+                    "id": chain_id,
+                    "sequence": str(chain_seq)
+                }
+            })
+        if entries:
+            return entries
+
+    raise ValueError('Unsupported sequence format for AlphaFold3 JSON generation')
+
+
+def _af3_sanitize_ligand_code(code):
+    base = re.sub(r"[^0-9A-Za-z]+", "", str(code).upper())
+    if not base:
+        raise ValueError('Ligand CCD code must contain alphanumeric characters.')
+    return base
+
+
+def _af3_coerce_ligands(lig_spec, occupied_ids):
+    """Normalise a ligand specification into AlphaFold 3 ligand entries.
+
+    Dictionary entries may carry either ``ccdCodes`` (or ``ccdCode``) or ``smiles``, never
+    both, so a caller that already knows the exact chain layout can pass CCD and SMILES
+    ligands in one ordered list.
+    """
+    if not lig_spec:
+        return []
+
+    used_ids = set(occupied_ids)
+    counts_by_code = defaultdict(int)
+
+    def _generate_id(code):
+        base = _af3_sanitize_ligand_code(code)
+        idx = counts_by_code[base]
+        while True:
+            if idx < 26:
+                suffix = chr(ord('A') + idx)
+            else:
+                suffix = str(idx - 25)
+            candidate = f"{base}{suffix}"
+            idx += 1
+            if candidate not in used_ids:
+                counts_by_code[base] = idx
+                used_ids.add(candidate)
+                return candidate
+
+    def _entry(code):
+        return {
+            "id": _generate_id(code),
+            "ccdCodes": [_af3_sanitize_ligand_code(code)]
+        }
+
+    entries = []
+
+    if isinstance(lig_spec, dict) and all(isinstance(v, int) for v in lig_spec.values()):
+        for code, count in lig_spec.items():
+            if count < 1:
+                raise ValueError(f'Ligand count for {code} must be positive.')
+            for _ in range(count):
+                entries.append(_entry(code))
+        occupied_ids.update(entry["id"] for entry in entries)
+        return entries
+
+    if isinstance(lig_spec, (list, tuple)):
+        if all(isinstance(item, dict) for item in lig_spec):
+            for item in lig_spec:
+                if "ccdCodes" not in item and "ccdCode" in item:
+                    item = dict(item)
+                    item["ccdCodes"] = item.pop("ccdCode")
+                has_codes = item.get("ccdCodes") is not None
+                has_smiles = item.get("smiles") is not None
+                if has_codes and has_smiles:
+                    raise ValueError(
+                        f'Ligand entry {item} must set exactly one of ccdCodes or smiles.')
+                if not has_codes and not has_smiles:
+                    missing = {"id", "ccdCodes"} - set(item)
+                    raise ValueError(f'Ligand entry {item} missing keys: {missing}')
+                if "id" not in item:
+                    raise ValueError(f'Ligand entry {item} missing keys: {{\'id\'}}')
+                ligand_id = str(item["id"]).upper()
+                if ligand_id in used_ids:
+                    raise ValueError('Ligand IDs must be unique and distinct from protein chains.')
+                used_ids.add(ligand_id)
+                if has_smiles:
+                    smiles = item["smiles"]
+                    if not isinstance(smiles, str) or not smiles.strip():
+                        raise ValueError(f'Ligand {ligand_id} smiles must be a non-empty string.')
+                    entries.append({"id": ligand_id, "smiles": smiles})
+                    continue
+                codes = item["ccdCodes"]
+                if isinstance(codes, str):
+                    codes = [codes]
+                codes = [_af3_sanitize_ligand_code(code) for code in codes]
+                entries.append({
+                    "id": ligand_id,
+                    "ccdCodes": codes
+                })
+            occupied_ids.update(entry["id"] for entry in entries)
+            return entries
+        if all(isinstance(item, str) for item in lig_spec):
+            for code in lig_spec:
+                entries.append(_entry(code))
+            occupied_ids.update(entry["id"] for entry in entries)
+            return entries
+        raise TypeError('Ligands list must contain either CCD codes or dictionaries matching the AF3 schema.')
+
+    if isinstance(lig_spec, str):
+        entry = _entry(lig_spec)
+        occupied_ids.add(entry["id"])
+        return [entry]
+
+    raise TypeError('Unsupported ligand specification format.')
+
+
+def _af3_ligands_for_model(ligands, model_name, occupied_ids):
+    if isinstance(ligands, dict):
+        if model_name in ligands:
+            return _af3_coerce_ligands(ligands[model_name], occupied_ids)
+        for alias in _AF3_GENERIC_KEYS:
+            if alias in ligands:
+                return _af3_coerce_ligands(ligands[alias], occupied_ids)
+        if all(isinstance(v, int) for v in ligands.values()):
+            return _af3_coerce_ligands(ligands, occupied_ids)
+        return []
+    return _af3_coerce_ligands(ligands, occupied_ids)
+
+
+def _af3_resolve_model_option(option, model_name):
+    if isinstance(option, dict):
+        if model_name in option:
+            return option[model_name]
+        for alias in _AF3_GENERIC_KEYS:
+            if alias in option:
+                return option[alias]
+        return None
+    return option
+
+
+def _af3_resolve_model_field(option, option_name, model_name, model_names):
+    """Resolve a per-model value, refusing a mapping that names no known model.
+
+    A silent ``None`` for a mistyped model name would drop an MSA or a modification without
+    any signal, so an unknown key is an error here rather than a missing field later.
+    """
+    if not isinstance(option, dict):
+        return option
+    if model_name in option:
+        return option[model_name]
+    unknown = [key for key in option
+               if key not in model_names and key not in _AF3_GENERIC_KEYS]
+    if unknown:
+        raise ValueError(
+            f"{option_name} maps unknown model names {sorted(unknown)}; per-chain values must "
+            "be nested under a model name or under 'default'/'*'.")
+    for alias in _AF3_GENERIC_KEYS:
+        if alias in option:
+            return option[alias]
+    return None
+
+
+def _af3_resolve_chain_field(option, option_name, model_name, model_names, chain_ids,
+                             model_chain_ids):
+    """Resolve ``option`` for one protein entry, allowing a per-chain mapping.
+
+    ``chain_ids`` are the IDs of the entry being resolved; ``model_chain_ids`` are every
+    protein chain ID of the model, against which an unknown key is reported.
+    """
+    value = _af3_resolve_model_field(option, option_name, model_name, model_names)
+    if not isinstance(value, dict):
+        return value
+
+    unknown = [key for key in value
+               if key not in model_chain_ids and key not in _AF3_GENERIC_KEYS]
+    if unknown:
+        raise ValueError(
+            f"{option_name} for model {model_name!r} maps unknown chain ids {sorted(unknown)}; "
+            f"this model carries the protein chains {sorted(model_chain_ids)}.")
+
+    resolved = []
+    for chain_id in chain_ids:
+        if chain_id in value:
+            resolved.append(value[chain_id])
+            continue
+        for alias in _AF3_GENERIC_KEYS:
+            if alias in value:
+                resolved.append(value[alias])
+                break
+        else:
+            resolved.append(None)
+    if len(resolved) > 1 and any(item != resolved[0] for item in resolved[1:]):
+        raise ValueError(
+            f"{option_name} differs between the chains {list(chain_ids)} of one AlphaFold 3 "
+            f"protein entry in model {model_name!r}; give those chains separate entries.")
+    return resolved[0] if resolved else None
+
+
+def _af3_check_modifications(value, sequence, label):
+    if not isinstance(value, list):
+        raise TypeError(f'{label} modifications must be a list of AF3 modification entries.')
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise TypeError(f'{label} modifications entries must be dictionaries with '
+                            'ptmType and ptmPosition.')
+        extra = set(entry) - AF3_MODIFICATION_KEYS
+        if extra:
+            raise ValueError(f'{label} modification entry has unsupported keys '
+                             f'{sorted(extra)}.')
+        missing = AF3_MODIFICATION_KEYS - set(entry)
+        if missing:
+            raise ValueError(f'{label} modification entry is missing {sorted(missing)}.')
+        ptm_type = entry["ptmType"]
+        if not isinstance(ptm_type, str) or not ptm_type.strip():
+            raise ValueError(f'{label} modification ptmType must be a non-empty string.')
+        position = entry["ptmPosition"]
+        if isinstance(position, bool) or not isinstance(position, int):
+            raise TypeError(f'{label} modification ptmPosition must be an integer.')
+        if position < 1 or (sequence is not None and position > len(sequence)):
+            raise ValueError(
+                f'{label} modification ptmPosition {position} is outside the 1-based sequence '
+                f'range 1..{len(sequence) if sequence is not None else "?"}.')
+
+
+def _af3_check_templates(value, label):
+    if not isinstance(value, list):
+        raise TypeError(f'{label} templates must be a list; use [] to state that the chain '
+                        'carries no template.')
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise TypeError(f'{label} template entries must be dictionaries.')
+        extra = set(entry) - AF3_TEMPLATE_KEYS
+        if extra:
+            raise ValueError(f'{label} template entry has unsupported keys {sorted(extra)}.')
+        has_mmcif = entry.get("mmcif") is not None
+        has_path = entry.get("mmcifPath") is not None
+        if has_mmcif == has_path:
+            raise ValueError(f'{label} template entry must set exactly one of mmcif or '
+                             'mmcifPath.')
+        for key in ("queryIndices", "templateIndices"):
+            if key not in entry:
+                raise ValueError(f'{label} template entry is missing {key}.')
+            if not isinstance(entry[key], list):
+                raise TypeError(f'{label} template {key} must be a list.')
+
+
+def _af3_apply_chain_fields(entry, values, label):
+    """Attach the validated staged-workflow fields to one protein entry."""
+    protein = entry["protein"]
+    sequence = protein.get("sequence")
+    for field in AF3_CHAIN_FIELDS:
+        value = values.get(field)
+        if value is None:
+            continue
+        if field in ("unpairedMsa", "pairedMsa"):
+            if not isinstance(value, str):
+                raise TypeError(f'{label} {field} must be a string in A3M format; an empty '
+                                'string states that the chain carries no alignment.')
+        elif field == "templates":
+            _af3_check_templates(value, label)
+        else:
+            _af3_check_modifications(value, sequence, label)
+        protein[field] = value
+
+
+def _af3_normalize_atom_address(atom, option_name):
+    if not isinstance(atom, (list, tuple)) or len(atom) != 3:
+        raise TypeError(
+            f'{option_name} atom addresses must be [entity_id, residue_id, atom_name].'
+        )
+
+    entity_id, residue_id, atom_name = atom
+    entity_id = str(entity_id).strip()
+    atom_name = str(atom_name).strip()
+    if not entity_id:
+        raise ValueError(f'{option_name} entity ids must not be empty.')
+    if not atom_name:
+        raise ValueError(f'{option_name} atom names must not be empty.')
+
+    try:
+        residue_id = int(residue_id)
+    except (TypeError, ValueError):
+        raise TypeError(f'{option_name} residue ids must be integers.') from None
+
+    return [entity_id, residue_id, atom_name]
+
+
+def _af3_normalize_bonded_atom_pairs(bonds):
+    if bonds is None:
+        return None
+    if not isinstance(bonds, (list, tuple)):
+        raise TypeError(
+            'bonded_atom_pairs must be a list of AF3 bond pairs or a dictionary mapping models to such lists.'
+        )
+
+    normalized = []
+    for bond in bonds:
+        if not isinstance(bond, (list, tuple)) or len(bond) != 2:
+            raise TypeError(
+                'Each bonded_atom_pairs entry must contain exactly two atom addresses.'
+            )
+        normalized.append([
+            _af3_normalize_atom_address(bond[0], 'bonded_atom_pairs'),
+            _af3_normalize_atom_address(bond[1], 'bonded_atom_pairs'),
+        ])
+    return normalized
+
+
+def _af3_normalize_user_ccd(ccd_text):
+    if ccd_text is None:
+        return None
+    if not isinstance(ccd_text, str):
+        raise TypeError(
+            'user_ccd must be a string or a dictionary mapping models to strings.'
+        )
+    if not ccd_text.strip():
+        raise ValueError('user_ccd must not be empty.')
+    return ccd_text
+
+
+def _af3_normalize_user_ccd_path(path_value):
+    if path_value is None:
+        return None
+    try:
+        normalized_path = os.fspath(path_value)
+    except TypeError:
+        raise TypeError(
+            'user_ccd_path must be a path-like value or a dictionary mapping models to path-like values.'
+        ) from None
+    if not normalized_path:
+        raise ValueError('user_ccd_path must not be empty.')
+    return normalized_path
+
+
+def _af3_launcher_cd_path(path_value):
+    """Normalise a model directory for a launcher ``cd``, relative to the current directory."""
+    normalized_path = os.path.normpath(path_value)
+    if os.path.isabs(normalized_path):
+        return os.path.relpath(normalized_path, start=os.getcwd())
+    return normalized_path
+
+
+def _af3_output_is_finished(output_dir):
+    """True when an AlphaFold 3 output directory already holds a finished job."""
+    if not os.path.isdir(output_dir):
+        return False
+    for _, _, files in os.walk(output_dir):
+        if "ranking_scores.csv" in files:
+            return True
+    return False
+
+
+def build_alphafold3_payload(name, sequences, model_seeds=None, *, bonded_atom_pairs=None,
+                             user_ccd=None, user_ccd_path=None):
+    """Assemble one AlphaFold 3 job payload from ready sequence entries.
+
+    Parameters
+    ----------
+    name : str
+        AlphaFold 3 job name. Its sanitised form is the output directory name.
+    sequences : list
+        AlphaFold 3 ``sequences`` entries, each a one-key dict such as
+        ``{"protein": {...}}`` or ``{"ligand": {...}}``.
+    model_seeds : int or iterable of int, optional
+        RNG seed(s) written to ``modelSeeds``. Defaults to ``[1]``.
+    bonded_atom_pairs, user_ccd, user_ccd_path : optional
+        Optional AlphaFold 3 payload fields, validated as in
+        :meth:`sequenceModels.setUpAlphaFold3`.
+
+    Returns
+    -------
+    dict
+        The payload, with the key order AlphaFold 3 inputs conventionally use.
+    """
+    payload = {
+        "name": name,
+        "modelSeeds": _af3_seed_list(model_seeds),
+        "dialect": AF3_JSON_DIALECT,
+        "version": AF3_JSON_VERSION,
+        "sequences": sequences,
+    }
+    bonds = _af3_normalize_bonded_atom_pairs(bonded_atom_pairs)
+    if bonds is not None:
+        payload["bondedAtomPairs"] = bonds
+    ccd_text = _af3_normalize_user_ccd(user_ccd)
+    ccd_path = _af3_normalize_user_ccd_path(user_ccd_path)
+    if ccd_text is not None and ccd_path is not None:
+        raise ValueError('An AlphaFold 3 payload cannot define both user_ccd and user_ccd_path.')
+    if ccd_text is not None:
+        payload["userCCD"] = ccd_text
+    if ccd_path is not None:
+        payload["userCCDPath"] = ccd_path
+    return payload
+
+
+def validate_alphafold3_payload(payload, *, require_msa=False, require_sanitised_name=False,
+                                check_smiles=True):
+    """Check one payload against the AlphaFold 3 input schema, returning the failures.
+
+    The rules are the ones ``alphafold3.common.folding_input`` enforces: the accepted
+    top-level key set, the exact dialect and version, at least one RNG seed, a usable name, a
+    non-empty sequence list, unique chain IDs, alphabetic protein sequences, supported protein
+    and ligand keys, exactly one of ``ccdCodes`` or ``smiles`` per ligand, well-formed
+    ``templates`` and ``modifications`` entries, and a parsable SMILES where RDKit is
+    available.
+
+    Parameters
+    ----------
+    require_msa : bool, optional
+        Additionally require the combination that makes the AlphaFold 3 data pipeline skip
+        both the MSA and the template search on every protein chain: a non-empty
+        ``unpairedMsa``, a ``pairedMsa`` that is present and ``templates`` set to ``[]``.
+    require_sanitised_name : bool, optional
+        Additionally require ``name`` to equal its sanitised form, so the output directory
+        matches the planned collection path.
+    check_smiles : bool, optional
+        Parse every SMILES with RDKit. When RDKit is unavailable the check is reported as a
+        failure rather than silently skipped.
+
+    Returns
+    -------
+    list[str]
+        One human-readable message per failure; an empty list means the payload is valid.
+    """
+    failures = []
+    if not isinstance(payload, dict):
+        return ["payload must be a dictionary"]
+
+    keys = set(payload)
+    if not keys <= AF3_TOP_LEVEL_KEYS:
+        failures.append(f"unexpected top-level keys: {sorted(keys - AF3_TOP_LEVEL_KEYS)}")
+    missing = AF3_REQUIRED_TOP_LEVEL_KEYS - keys
+    if missing:
+        failures.append(f"missing required top-level keys: {sorted(missing)}")
+    if payload.get("dialect") != AF3_JSON_DIALECT:
+        failures.append(f"dialect must be {AF3_JSON_DIALECT!r}, got {payload.get('dialect')!r}")
+    if payload.get("version") != AF3_JSON_VERSION:
+        failures.append(f"version must be {AF3_JSON_VERSION}, got {payload.get('version')!r}")
+
+    seeds = payload.get("modelSeeds")
+    if not isinstance(seeds, list) or not seeds or not all(
+            isinstance(seed, int) and not isinstance(seed, bool) for seed in seeds):
+        failures.append("modelSeeds must be a non-empty list of integers")
+
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip() or not alphafold3_sanitised_name(name):
+        failures.append("name must be non-empty and contain usable characters")
+    elif require_sanitised_name and alphafold3_sanitised_name(name) != name:
+        failures.append(f"name {name!r} does not equal its sanitised form "
+                        f"{alphafold3_sanitised_name(name)!r}; the output directory would "
+                        "differ from the planned collection path")
+
+    sequences = payload.get("sequences")
+    if not isinstance(sequences, list) or not sequences:
+        failures.append("sequences must be a non-empty list")
+        return failures
+
+    parser_state = {}
+
+    def _smiles_is_parsable(smiles):
+        """Parse with RDKit, reporting an unavailable RDKit instead of skipping the check."""
+        if "parser" not in parser_state:
+            try:
+                from rdkit import Chem as _Chem
+            except ImportError:
+                parser_state["parser"] = None
+            else:
+                parser_state["parser"] = _Chem.MolFromSmiles
+        parser = parser_state["parser"]
+        if parser is None:
+            return None
+        return parser(smiles) is not None
+
+    seen_ids = []
+    protein_chains = 0
+    for entry in sequences:
+        if not isinstance(entry, dict) or len(entry) != 1:
+            failures.append(f"each sequence entry needs exactly one type key: {entry!r}")
+            continue
+        kind, body = next(iter(entry.items()))
+        if not isinstance(body, dict):
+            failures.append(f"{kind} entry must be a dictionary: {body!r}")
+            continue
+        entry_id = body.get("id")
+        if isinstance(entry_id, (list, tuple)):
+            seen_ids.extend(str(item) for item in entry_id)
+        else:
+            seen_ids.append(entry_id)
+
+        if kind == "protein":
+            protein_chains += 1
+            extra = set(body) - AF3_PROTEIN_KEYS
+            if extra:
+                failures.append(f"protein entry has unsupported keys {sorted(extra)}")
+            if not isinstance(body.get("sequence"), str) or not body["sequence"].isalpha():
+                failures.append(f"protein {entry_id!r} sequence must be alphabetic")
+            templates = body.get("templates")
+            if "templates" in body and not isinstance(templates, list):
+                failures.append(f"protein {entry_id!r} templates must be a list")
+            elif isinstance(templates, list):
+                try:
+                    _af3_check_templates(templates, f"protein {entry_id!r}")
+                except (TypeError, ValueError) as error:
+                    failures.append(str(error))
+            if "modifications" in body:
+                try:
+                    _af3_check_modifications(body["modifications"], body.get("sequence"),
+                                             f"protein {entry_id!r}")
+                except (TypeError, ValueError) as error:
+                    failures.append(str(error))
+            for field in ("unpairedMsa", "pairedMsa"):
+                if field in body and body[field] is not None \
+                        and not isinstance(body[field], str):
+                    failures.append(f"protein {entry_id!r} {field} must be a string")
+            if require_msa:
+                unpaired = body.get("unpairedMsa")
+                paired = body.get("pairedMsa")
+                if not isinstance(unpaired, str) or not unpaired.strip():
+                    failures.append(
+                        f"protein {entry_id!r} needs a non-empty unpairedMsa, or the data "
+                        "pipeline's truthiness guard will search MSAs and templates")
+                if paired is None:
+                    failures.append(f"protein {entry_id!r} needs a pairedMsa that is present, "
+                                    "even if it is an empty string")
+                if templates != []:
+                    failures.append(
+                        f"protein {entry_id!r} must set templates to an empty list; "
+                        f"got {templates!r}")
+        elif kind == "ligand":
+            extra = set(body) - AF3_LIGAND_KEYS
+            if extra:
+                failures.append(f"ligand entry has unsupported keys {sorted(extra)}")
+            has_ccd = body.get("ccdCodes") is not None
+            has_smiles = body.get("smiles") is not None
+            if has_ccd == has_smiles:
+                failures.append(f"ligand {entry_id!r} must set exactly one of ccdCodes "
+                                "or smiles")
+            if has_smiles and check_smiles:
+                parsable = _smiles_is_parsable(body["smiles"])
+                if parsable is None:
+                    failures.append(f"ligand {entry_id!r} SMILES could not be checked because "
+                                    "RDKit is unavailable")
+                elif not parsable:
+                    failures.append(f"ligand {entry_id!r} SMILES is not parsable")
+            if has_ccd and (not isinstance(body["ccdCodes"], list) or not body["ccdCodes"]):
+                failures.append(f"ligand {entry_id!r} ccdCodes must be a non-empty list")
+        else:
+            failures.append(f"unsupported sequence type {kind!r}")
+
+    if len(set(seen_ids)) != len(seen_ids):
+        failures.append(f"duplicate chain IDs: {seen_ids}")
+    if require_msa and not protein_chains:
+        failures.append("an input requiring MSAs needs at least one protein chain")
+    return failures
+
+
 class sequenceModels:
 
     def __init__(self, sequences_fasta):
@@ -443,6 +1104,373 @@ class sequenceModels:
 
         return jobs
 
+    def _alphaFold3JobSpecs(
+        self,
+        only_models=None,
+        exclude_models=None,
+        model_seeds=None,
+        unpack_model_seeds=False,
+        ligands=None,
+        ligand_smiles=None,
+        bonded_atom_pairs=None,
+        user_ccd=None,
+        user_ccd_path=None,
+        unpaired_msa=None,
+        paired_msa=None,
+        templates=None,
+        modifications=None,
+        payload_names=None,
+    ):
+        """Resolve one payload and its relative directory layout per AlphaFold 3 job.
+
+        This is the single place where AF3 payloads are assembled; both
+        :meth:`writeAlphaFold3Inputs` and :meth:`setUpAlphaFold3` go through it, so an input
+        written for a staged workflow and an input written for a launcher command are built
+        by the same code.
+        """
+        if isinstance(only_models, str):
+            only_models = [only_models]
+        if exclude_models:
+            if isinstance(exclude_models, str):
+                exclude_models = [exclude_models]
+            else:
+                exclude_models = list(exclude_models)
+        else:
+            exclude_models = []
+
+        model_names = set(self.sequences_names)
+        chain_options = {"unpairedMsa": unpaired_msa, "pairedMsa": paired_msa,
+                         "templates": templates, "modifications": modifications}
+
+        specs = []
+        for model_name in self.sequences_names:
+            if only_models and model_name not in only_models:
+                continue
+            if model_name in exclude_models:
+                continue
+
+            entries = _af3_sequence_entries(self.sequences[model_name])
+            occupied_chain_ids = set()
+            for entry in entries:
+                protein_id = entry["protein"]["id"]
+                if isinstance(protein_id, str):
+                    occupied_chain_ids.add(protein_id.upper())
+                else:
+                    for pid in protein_id:
+                        occupied_chain_ids.add(str(pid).upper())
+
+            smiles_blocks = _normalize_smiles_entries(ligand_smiles)
+            for lig in smiles_blocks:
+                if not lig["smiles"] or not lig["smiles"].strip():
+                    raise ValueError(f"Empty SMILES for ligand id '{lig['id']}'.")
+                ligand_id = str(lig["id"])
+                if not ligand_id:
+                    raise ValueError("SMILES ligands require a non-empty id.")
+                ligand_id_upper = ligand_id.upper()
+                if ligand_id_upper in occupied_chain_ids:
+                    raise ValueError(f"Ligand id '{ligand_id}' already present in the complex.")
+                occupied_chain_ids.add(ligand_id_upper)
+                entries.append({
+                    "ligand": {
+                        "id": ligand_id,
+                        "smiles": lig["smiles"],
+                    }
+                })
+
+            lig_spec = _af3_ligands_for_model(ligands, model_name, occupied_chain_ids)
+            for ligand in lig_spec:
+                entries.append({"ligand": ligand})
+
+            # The staged-workflow fields are resolved per protein entry, so one model may
+            # carry a different MSA or modification set on each of its chains.
+            model_chain_ids = []
+            for entry in entries:
+                if "protein" not in entry:
+                    continue
+                protein_id = entry["protein"]["id"]
+                model_chain_ids.extend([protein_id] if isinstance(protein_id, str)
+                                       else [str(pid) for pid in protein_id])
+            for entry in entries:
+                if "protein" not in entry:
+                    continue
+                protein_id = entry["protein"]["id"]
+                chain_ids = [protein_id] if isinstance(protein_id, str) \
+                    else [str(pid) for pid in protein_id]
+                values = {
+                    field: _af3_resolve_chain_field(option, field, model_name, model_names,
+                                                    chain_ids, model_chain_ids)
+                    for field, option in chain_options.items()
+                }
+                _af3_apply_chain_fields(entry, values,
+                                        f"model {model_name!r} chain {protein_id!r}")
+
+            model_bonded_atom_pairs = _af3_normalize_bonded_atom_pairs(
+                _af3_resolve_model_option(bonded_atom_pairs, model_name)
+            )
+            model_user_ccd = _af3_normalize_user_ccd(
+                _af3_resolve_model_option(user_ccd, model_name))
+            model_user_ccd_path = _af3_normalize_user_ccd_path(
+                _af3_resolve_model_option(user_ccd_path, model_name)
+            )
+            if model_user_ccd is not None and model_user_ccd_path is not None:
+                raise ValueError(
+                    f'Model {model_name!r} cannot define both user_ccd and user_ccd_path.'
+                )
+
+            payload_name = _af3_resolve_model_field(payload_names, "payload_names", model_name,
+                                                    model_names)
+            if payload_name is not None and not isinstance(payload_name, str):
+                raise TypeError("payload_names values must be strings.")
+
+            model_seed_values = _af3_seeds_for_model(model_seeds, model_name)
+            job_specs = []
+
+            if unpack_model_seeds:
+                use_seed_subdirs = len(model_seed_values) > 1
+                seed_instance_counts = defaultdict(int)
+
+                for seed_value in model_seed_values:
+                    seed_instance_counts[seed_value] += 1
+                    seed_instance_index = seed_instance_counts[seed_value]
+
+                    if use_seed_subdirs:
+                        seed_label = f"seed_{seed_value}"
+                        if seed_instance_index > 1:
+                            seed_label = f"{seed_label}_{seed_instance_index}"
+                        relative_input_dir = os.path.join(seed_label, "input")
+                        relative_output_dir = os.path.join(seed_label, "output")
+                    else:
+                        seed_label = None
+                        relative_input_dir = "input"
+                        relative_output_dir = "output"
+
+                    job_specs.append({
+                        "seed_value": int(seed_value),
+                        "seed_label": seed_label,
+                        "relative_input_dir": relative_input_dir,
+                        "relative_output_dir": relative_output_dir,
+                        "model_seeds": [int(seed_value)],
+                    })
+            else:
+                job_specs.append({
+                    "seed_value": None,
+                    "seed_label": None,
+                    "relative_input_dir": "input",
+                    "relative_output_dir": "output",
+                    "model_seeds": [int(seed) for seed in model_seed_values],
+                })
+
+            for job_spec in job_specs:
+                seed_label = job_spec["seed_label"]
+                name = payload_name if payload_name is not None else model_name
+                if seed_label:
+                    name = f"{name}_{seed_label}"
+                payload = build_alphafold3_payload(
+                    name, copy.deepcopy(entries), job_spec["model_seeds"],
+                    bonded_atom_pairs=model_bonded_atom_pairs,
+                    user_ccd=model_user_ccd,
+                    user_ccd_path=model_user_ccd_path,
+                )
+                specs.append(dict(job_spec, model=model_name, payload=payload,
+                                  payload_name=name))
+
+        return specs
+
+    def buildAlphaFold3Payloads(
+        self,
+        only_models=None,
+        exclude_models=None,
+        model_seeds=None,
+        unpack_model_seeds=False,
+        ligands=None,
+        ligand_smiles=None,
+        bonded_atom_pairs=None,
+        user_ccd=None,
+        user_ccd_path=None,
+        unpaired_msa=None,
+        paired_msa=None,
+        templates=None,
+        modifications=None,
+        payload_names=None,
+        validate=True,
+        require_msa=False,
+        require_sanitised_name=False,
+    ):
+        """Build the AlphaFold 3 payloads for the selected models without touching the disk.
+
+        Same arguments as :meth:`writeAlphaFold3Inputs`, minus everything about files. Use it
+        when a workflow needs the payload identity (a digest, a diff against a pinned
+        definition) before deciding whether to write anything.
+
+        Returns
+        -------
+        list[dict]
+            One record per job with ``model``, ``payload_name``, ``seed_value``,
+            ``seed_label``, ``model_seeds`` and ``payload``.
+        """
+        specs = self._alphaFold3JobSpecs(
+            only_models=only_models, exclude_models=exclude_models, model_seeds=model_seeds,
+            unpack_model_seeds=unpack_model_seeds, ligands=ligands,
+            ligand_smiles=ligand_smiles, bonded_atom_pairs=bonded_atom_pairs,
+            user_ccd=user_ccd, user_ccd_path=user_ccd_path, unpaired_msa=unpaired_msa,
+            paired_msa=paired_msa, templates=templates, modifications=modifications,
+            payload_names=payload_names,
+        )
+        if validate:
+            for spec in specs:
+                failures = validate_alphafold3_payload(
+                    spec["payload"], require_msa=require_msa,
+                    require_sanitised_name=require_sanitised_name)
+                if failures:
+                    raise ValueError(
+                        f"AlphaFold 3 payload for model {spec['model']!r} is invalid: "
+                        + "; ".join(failures))
+        return specs
+
+    def writeAlphaFold3Inputs(
+        self,
+        job_folder,
+        only_models=None,
+        exclude_models=None,
+        model_seeds=None,
+        unpack_model_seeds=False,
+        ligands=None,
+        ligand_smiles=None,
+        bonded_atom_pairs=None,
+        user_ccd=None,
+        user_ccd_path=None,
+        unpaired_msa=None,
+        paired_msa=None,
+        templates=None,
+        modifications=None,
+        payload_names=None,
+        file_names=None,
+        layout='job_folders',
+        skip_finished=False,
+        json_indent=2,
+        json_sort_keys=False,
+        validate=True,
+        require_msa=False,
+        require_sanitised_name=False,
+    ):
+        """Write AlphaFold 3 JSON inputs, and nothing else.
+
+        This is the preparation-only entry point: it materializes input files and generates
+        **no** scheduler command, no runner invocation and no ``sbatch`` line, so a staged
+        workflow can build, digest, seal or review its inputs long before anything is
+        submitted. :meth:`setUpAlphaFold3` calls it and then wraps the same written jobs in
+        launcher commands.
+
+        Parameters
+        ----------
+        job_folder : str
+            Root folder that will contain the inputs.
+        only_models, exclude_models, model_seeds, unpack_model_seeds, ligands, ligand_smiles,
+        bonded_atom_pairs, user_ccd, user_ccd_path : optional
+            As in :meth:`setUpAlphaFold3`.
+        unpaired_msa, paired_msa : str or dict, optional
+            Precomputed A3M alignments written to the protein chains. Accepts a single value
+            applied to every protein chain, a dict mapping model names (or ``"default"``/
+            ``"*"``) to such a value, or a dict mapping model names to a per-chain dict keyed
+            by chain ID. An empty string is a valid statement that the chain has no
+            alignment; ``None`` leaves the field out.
+        templates : list or dict, optional
+            AlphaFold 3 ``templates`` entries, with the same per-model/per-chain selection.
+            ``[]`` states that the chain carries no template, which together with a non-empty
+            ``unpairedMsa`` and a ``pairedMsa`` that is present makes the data pipeline skip
+            both the MSA and the template search.
+        modifications : list or dict, optional
+            AlphaFold 3 ``modifications`` entries (``ptmType`` plus 1-based ``ptmPosition``),
+            with the same per-model/per-chain selection. Positions are checked against the
+            chain's own sequence length.
+        payload_names : str or dict, optional
+            Override the AlphaFold 3 job ``name``, which is otherwise the model name. Useful
+            when the file name and the in-payload job name follow different conventions.
+        file_names : str or dict, optional
+            Override the written file stem, which is otherwise the model name.
+        layout : {'job_folders', 'flat'}, optional
+            ``'job_folders'`` reproduces the :meth:`setUpAlphaFold3` layout
+            (``<job_folder>/<model>/input/<file>.json`` with a sibling ``output`` directory).
+            ``'flat'`` writes ``<job_folder>/<file>.json`` and creates no run directories.
+        skip_finished : bool, optional
+            Skip jobs whose ``output`` directory already contains a ``ranking_scores.csv``.
+            Only meaningful for the ``'job_folders'`` layout.
+        json_indent, json_sort_keys : optional
+            Formatting of the written JSON. The defaults reproduce the historical
+            :meth:`setUpAlphaFold3` output byte for byte; ``json_sort_keys=True`` is useful
+            when the file digest must be stable against key-order changes.
+        validate : bool, optional
+            Check every payload with :func:`validate_alphafold3_payload` before writing, and
+            raise ``ValueError`` on the first invalid payload.
+        require_msa, require_sanitised_name : bool, optional
+            Passed to the validator; see :func:`validate_alphafold3_payload`.
+
+        Returns
+        -------
+        list[dict]
+            One record per written job: ``model``, ``payload_name``, ``path``, ``sha256``,
+            ``bytes``, ``payload``, ``seed_value``, ``seed_label``, ``model_seeds`` and, for
+            the ``'job_folders'`` layout, ``model_dir``, ``input_dir``, ``output_dir``,
+            ``relative_input_dir`` and ``relative_output_dir``.
+        """
+        if layout not in ('job_folders', 'flat'):
+            raise ValueError("layout must be 'job_folders' or 'flat'.")
+        if skip_finished and layout != 'job_folders':
+            raise ValueError("skip_finished needs the 'job_folders' layout, which is where the "
+                             "output directory of a finished job lives.")
+
+        specs = self.buildAlphaFold3Payloads(
+            only_models=only_models, exclude_models=exclude_models, model_seeds=model_seeds,
+            unpack_model_seeds=unpack_model_seeds, ligands=ligands,
+            ligand_smiles=ligand_smiles, bonded_atom_pairs=bonded_atom_pairs,
+            user_ccd=user_ccd, user_ccd_path=user_ccd_path, unpaired_msa=unpaired_msa,
+            paired_msa=paired_msa, templates=templates, modifications=modifications,
+            payload_names=payload_names, validate=validate, require_msa=require_msa,
+            require_sanitised_name=require_sanitised_name,
+        )
+
+        os.makedirs(job_folder, exist_ok=True)
+
+        model_names = set(self.sequences_names)
+        written = []
+        for spec in specs:
+            model_name = spec["model"]
+            file_stem = _af3_resolve_model_field(file_names, "file_names", model_name,
+                                                 model_names)
+            if file_stem is not None and not isinstance(file_stem, str):
+                raise TypeError("file_names values must be strings.")
+            if file_stem is None:
+                file_stem = model_name
+
+            record = dict(spec)
+            if layout == 'job_folders':
+                model_dir = os.path.join(job_folder, model_name)
+                os.makedirs(model_dir, exist_ok=True)
+                input_dir = os.path.join(model_dir, spec["relative_input_dir"])
+                output_dir = os.path.join(model_dir, spec["relative_output_dir"])
+                os.makedirs(input_dir, exist_ok=True)
+                os.makedirs(output_dir, exist_ok=True)
+                if skip_finished and _af3_output_is_finished(output_dir):
+                    continue
+                json_path = os.path.join(input_dir, f"{file_stem}.json")
+                record.update({"model_dir": model_dir, "input_dir": input_dir,
+                               "output_dir": output_dir})
+            else:
+                json_path = os.path.join(job_folder, f"{file_stem}.json")
+
+            text = json.dumps(spec["payload"], indent=json_indent,
+                              sort_keys=json_sort_keys) + "\n"
+            with open(json_path, 'w') as json_fd:
+                json_fd.write(text)
+
+            encoded = text.encode("utf-8")
+            record.update({"path": json_path, "file_stem": file_stem,
+                           "sha256": hashlib.sha256(encoded).hexdigest(),
+                           "bytes": len(encoded)})
+            written.append(record)
+
+        return written
+
     def setUpAlphaFold3(
         self,
         job_folder,
@@ -456,8 +1484,13 @@ class sequenceModels:
         bonded_atom_pairs=None,
         user_ccd=None,
         user_ccd_path=None,
+        unpaired_msa=None,
+        paired_msa=None,
+        templates=None,
+        modifications=None,
         skip_finished=False,
         benchmark=False,
+        validate=False,
     ):
         """Create AF3 job folders, per-model JSONs and sbatch commands.
 
@@ -525,6 +1558,10 @@ class sequenceModels:
             ``userCCDPath`` field. Accepts either a single path applied to
             every model or a dict mapping model names (or ``"default"``/``"*"``)
             to paths. Mutually exclusive with ``user_ccd`` for the same model.
+        unpaired_msa, paired_msa, templates, modifications : optional
+            Per-protein AlphaFold 3 fields, with the per-model and per-chain
+            selection documented in :meth:`writeAlphaFold3Inputs`. They are
+            written into the same payloads this method then wraps in commands.
         skip_finished : bool, optional
             When ``True`` jobs that already contain completed AF3 outputs
             (detected via an existing ``ranking_scores.csv`` under the
@@ -532,9 +1569,17 @@ class sequenceModels:
         benchmark : bool, optional
             When ``True`` prints start/end timestamps and elapsed seconds for
             the ``bsc_alphafold`` command in each generated job command.
+        validate : bool, optional
+            Check each payload with :func:`validate_alphafold3_payload` before
+            writing it. Defaults to ``False``, which preserves the historical
+            behaviour of this method.
 
         Notes
         -----
+        The inputs themselves are written by :meth:`writeAlphaFold3Inputs`, which is the
+        entry point to use when a workflow must materialize AlphaFold 3 inputs without
+        generating or launching any scheduler command.
+
         The generated commands assume that an environment variable named
         ``WEIGHTS`` already points to the AlphaFold 3 parameters, and that a
         runnable ``runner`` script is available inside each per-model folder.
@@ -548,443 +1593,68 @@ class sequenceModels:
             One multi-line command per prepared AF3 job.
         """
 
-        def _normalise_to_list(value):
-            if value is None:
-                return [1]
-            if isinstance(value, int):
-                return [int(value)]
-            if isinstance(value, (list, tuple, set)):
-                if not value:
-                    return [1]
-                return [int(v) for v in value]
-            raise TypeError(
-                'model_seeds must be an int, iterable of ints or a dictionary mapping models to seeds'
-            )
 
-        def _seeds_for_model(model_name):
-            if isinstance(model_seeds, dict):
-                if model_name in model_seeds:
-                    return _normalise_to_list(model_seeds[model_name])
-                # Allow usage of generic entries such as "default" or "*"
-                for generic_key in ('default', '*'):
-                    if generic_key in model_seeds:
-                        return _normalise_to_list(model_seeds[generic_key])
-                return _normalise_to_list(None)
-            return _normalise_to_list(model_seeds)
-
-        def _ensure_id_list(chain_id, fallback_index):
-            if isinstance(chain_id, (list, tuple)):
-                return [str(i) for i in chain_id]
-            if chain_id is None:
-                return [chr(ord('A') + fallback_index)]
-            chain_str = str(chain_id)
-            if not chain_str:
-                return [chr(ord('A') + fallback_index)]
-            return [chain_str]
-
-        def _sequence_entries(seq_obj):
-            if isinstance(seq_obj, str):
-                return [{"protein": {"id": "A", "sequence": seq_obj}}]
-
-            if isinstance(seq_obj, dict):
-                entries = []
-                for idx, (chain_id, chain_seq) in enumerate(seq_obj.items()):
-                    if chain_seq is None:
-                        continue
-                    ids = _ensure_id_list(chain_id, idx)
-                    protein_id = ids[0] if len(ids) == 1 else ids
-                    entries.append({
-                        "protein": {
-                            "id": protein_id,
-                            "sequence": str(chain_seq)
-                        }
-                    })
-                if entries:
-                    return entries
-
-            if isinstance(seq_obj, (list, tuple)):
-                entries = []
-                for idx, chain_seq in enumerate(seq_obj):
-                    if chain_seq is None:
-                        continue
-                    chain_id = chr(ord('A') + idx)
-                    entries.append({
-                        "protein": {
-                            "id": chain_id,
-                            "sequence": str(chain_seq)
-                        }
-                    })
-                if entries:
-                    return entries
-
-            raise ValueError('Unsupported sequence format for AlphaFold3 JSON generation')
-
-        def _coerce_ligands(lig_spec, occupied_ids):
-            if not lig_spec:
-                return []
-
-            used_ids = set(occupied_ids)
-            counts_by_code = defaultdict(int)
-
-            def _sanitize_code(code):
-                base = re.sub(r"[^0-9A-Za-z]+", "", str(code).upper())
-                if not base:
-                    raise ValueError('Ligand CCD code must contain alphanumeric characters.')
-                return base
-
-            def _generate_id(code):
-                base = _sanitize_code(code)
-                idx = counts_by_code[base]
-                while True:
-                    if idx < 26:
-                        suffix = chr(ord('A') + idx)
-                    else:
-                        suffix = str(idx - 25)
-                    candidate = f"{base}{suffix}"
-                    idx += 1
-                    if candidate not in used_ids:
-                        counts_by_code[base] = idx
-                        used_ids.add(candidate)
-                        return candidate
-
-            def _entry(code):
-                return {
-                    "id": _generate_id(code),
-                    "ccdCodes": [_sanitize_code(code)]
-                }
-
-            entries = []
-
-            if isinstance(lig_spec, dict) and all(isinstance(v, int) for v in lig_spec.values()):
-                for code, count in lig_spec.items():
-                    if count < 1:
-                        raise ValueError(f'Ligand count for {code} must be positive.')
-                    for _ in range(count):
-                        entries.append(_entry(code))
-                occupied_ids.update(entry["id"] for entry in entries)
-                return entries
-
-            if isinstance(lig_spec, (list, tuple)):
-                if all(isinstance(item, dict) for item in lig_spec):
-                    for item in lig_spec:
-                        if "ccdCodes" not in item and "ccdCode" in item:
-                            item = dict(item)
-                            item["ccdCodes"] = item.pop("ccdCode")
-                        required_keys = {"id", "ccdCodes"}
-                        missing = required_keys - set(item)
-                        if missing:
-                            raise ValueError(f'Ligand entry {item} missing keys: {missing}')
-                        ligand_id = str(item["id"]).upper()
-                        if ligand_id in used_ids:
-                            raise ValueError('Ligand IDs must be unique and distinct from protein chains.')
-                        used_ids.add(ligand_id)
-                        codes = item["ccdCodes"]
-                        if isinstance(codes, str):
-                            codes = [codes]
-                        codes = [_sanitize_code(code) for code in codes]
-                        entries.append({
-                            "id": ligand_id,
-                            "ccdCodes": codes
-                        })
-                    occupied_ids.update(entry["id"] for entry in entries)
-                    return entries
-                if all(isinstance(item, str) for item in lig_spec):
-                    for code in lig_spec:
-                        entries.append(_entry(code))
-                    occupied_ids.update(entry["id"] for entry in entries)
-                    return entries
-                raise TypeError('Ligands list must contain either CCD codes or dictionaries matching the AF3 schema.')
-
-            if isinstance(lig_spec, str):
-                entry = _entry(lig_spec)
-                occupied_ids.add(entry["id"])
-                return [entry]
-
-            raise TypeError('Unsupported ligand specification format.')
-
-        def _ligands_for_model(model_name, occupied_ids):
-            if isinstance(ligands, dict):
-                if model_name in ligands:
-                    return _coerce_ligands(ligands[model_name], occupied_ids)
-                for alias in ('default', '*'):
-                    if alias in ligands:
-                        return _coerce_ligands(ligands[alias], occupied_ids)
-                if all(isinstance(v, int) for v in ligands.values()):
-                    return _coerce_ligands(ligands, occupied_ids)
-                return []
-            return _coerce_ligands(ligands, occupied_ids)
-
-        def _resolve_model_option(option, model_name):
-            if isinstance(option, dict):
-                if model_name in option:
-                    return option[model_name]
-                for alias in ('default', '*'):
-                    if alias in option:
-                        return option[alias]
-                return None
-            return option
-
-        def _normalize_atom_address(atom, option_name):
-            if not isinstance(atom, (list, tuple)) or len(atom) != 3:
-                raise TypeError(
-                    f'{option_name} atom addresses must be [entity_id, residue_id, atom_name].'
-                )
-
-            entity_id, residue_id, atom_name = atom
-            entity_id = str(entity_id).strip()
-            atom_name = str(atom_name).strip()
-            if not entity_id:
-                raise ValueError(f'{option_name} entity ids must not be empty.')
-            if not atom_name:
-                raise ValueError(f'{option_name} atom names must not be empty.')
-
-            try:
-                residue_id = int(residue_id)
-            except (TypeError, ValueError):
-                raise TypeError(f'{option_name} residue ids must be integers.') from None
-
-            return [entity_id, residue_id, atom_name]
-
-        def _normalize_bonded_atom_pairs(bonds):
-            if bonds is None:
-                return None
-            if not isinstance(bonds, (list, tuple)):
-                raise TypeError(
-                    'bonded_atom_pairs must be a list of AF3 bond pairs or a dictionary mapping models to such lists.'
-                )
-
-            normalized = []
-            for bond in bonds:
-                if not isinstance(bond, (list, tuple)) or len(bond) != 2:
-                    raise TypeError(
-                        'Each bonded_atom_pairs entry must contain exactly two atom addresses.'
-                    )
-                normalized.append([
-                    _normalize_atom_address(bond[0], 'bonded_atom_pairs'),
-                    _normalize_atom_address(bond[1], 'bonded_atom_pairs'),
-                ])
-            return normalized
-
-        def _normalize_user_ccd(ccd_text):
-            if ccd_text is None:
-                return None
-            if not isinstance(ccd_text, str):
-                raise TypeError(
-                    'user_ccd must be a string or a dictionary mapping models to strings.'
-                )
-            if not ccd_text.strip():
-                raise ValueError('user_ccd must not be empty.')
-            return ccd_text
-
-        def _normalize_user_ccd_path(path_value):
-            if path_value is None:
-                return None
-            try:
-                normalized_path = os.fspath(path_value)
-            except TypeError:
-                raise TypeError(
-                    'user_ccd_path must be a path-like value or a dictionary mapping models to path-like values.'
-                ) from None
-            if not normalized_path:
-                raise ValueError('user_ccd_path must not be empty.')
-            return normalized_path
-
-        if isinstance(only_models, str):
-            only_models = [only_models]
-        if exclude_models:
-            if isinstance(exclude_models, str):
-                exclude_models = [exclude_models]
-            else:
-                exclude_models = list(exclude_models)
-        else:
-            exclude_models = []
-
-        os.makedirs(job_folder, exist_ok=True)
-
-        def _launcher_cd_path(path_value):
-            normalized_path = os.path.normpath(path_value)
-            if os.path.isabs(normalized_path):
-                return os.path.relpath(normalized_path, start=os.getcwd())
-            return normalized_path
-
-        def _is_finished(output_dir):
-            if not os.path.isdir(output_dir):
-                return False
-            for root, _, files in os.walk(output_dir):
-                if "ranking_scores.csv" in files:
-                    return True
-            return False
-
-        selected_models = []
-        for model_name in self.sequences_names:
-            if only_models and model_name not in only_models:
-                continue
-            if model_name in exclude_models:
-                continue
-            selected_models.append(model_name)
-
-        if not selected_models:
-            return []
+        jobs = self.writeAlphaFold3Inputs(
+            job_folder,
+            only_models=only_models,
+            exclude_models=exclude_models,
+            model_seeds=model_seeds,
+            unpack_model_seeds=unpack_model_seeds,
+            ligands=ligands,
+            ligand_smiles=ligand_smiles,
+            bonded_atom_pairs=bonded_atom_pairs,
+            user_ccd=user_ccd,
+            user_ccd_path=user_ccd_path,
+            unpaired_msa=unpaired_msa,
+            paired_msa=paired_msa,
+            templates=templates,
+            modifications=modifications,
+            layout='job_folders',
+            skip_finished=skip_finished,
+            validate=validate,
+        )
 
         commands = []
+        for job in jobs:
+            model_name = job["model"]
+            seed_value = job["seed_value"]
+            relative_input_dir = job["relative_input_dir"]
+            relative_output_dir = job["relative_output_dir"]
 
-        for model_name in selected_models:
-            model_dir = os.path.join(job_folder, model_name)
-            os.makedirs(model_dir, exist_ok=True)
-
-            entries = _sequence_entries(self.sequences[model_name])
-            occupied_chain_ids = set()
-            for entry in entries:
-                protein_id = entry["protein"]["id"]
-                if isinstance(protein_id, str):
-                    occupied_chain_ids.add(protein_id.upper())
-                else:
-                    for pid in protein_id:
-                        occupied_chain_ids.add(str(pid).upper())
-            smiles_blocks = _normalize_smiles_entries(ligand_smiles)
-            for lig in smiles_blocks:
-                if not lig["smiles"] or not lig["smiles"].strip():
-                    raise ValueError(f"Empty SMILES for ligand id '{lig['id']}'.")
-                ligand_id = str(lig["id"])
-                if not ligand_id:
-                    raise ValueError("SMILES ligands require a non-empty id.")
-                ligand_id_upper = ligand_id.upper()
-                if ligand_id_upper in occupied_chain_ids:
-                    raise ValueError(f"Ligand id '{ligand_id}' already present in the complex.")
-                occupied_chain_ids.add(ligand_id_upper)
-                entries.append({
-                    "ligand": {
-                        "id": ligand_id,
-                        "smiles": lig["smiles"],
-                    }
-                })
-            base_payload = {
-                "name": model_name,
-                "modelSeeds": [],
-                "dialect": "alphafold3",
-                "version": 1
-            }
-            lig_spec = _ligands_for_model(model_name, occupied_chain_ids)
-            if lig_spec:
-                for ligand in lig_spec:
-                    entries.append({"ligand": ligand})
-
-            model_bonded_atom_pairs = _normalize_bonded_atom_pairs(
-                _resolve_model_option(bonded_atom_pairs, model_name)
-            )
-            model_user_ccd = _normalize_user_ccd(_resolve_model_option(user_ccd, model_name))
-            model_user_ccd_path = _normalize_user_ccd_path(
-                _resolve_model_option(user_ccd_path, model_name)
-            )
-            if model_user_ccd is not None and model_user_ccd_path is not None:
-                raise ValueError(
-                    f'Model {model_name!r} cannot define both user_ccd and user_ccd_path.'
-                )
-
-            model_seed_values = _seeds_for_model(model_name)
-            job_specs = []
-
-            if unpack_model_seeds:
-                use_seed_subdirs = len(model_seed_values) > 1
-                seed_instance_counts = defaultdict(int)
-
-                for seed_value in model_seed_values:
-                    seed_instance_counts[seed_value] += 1
-                    seed_instance_index = seed_instance_counts[seed_value]
-
-                    if use_seed_subdirs:
-                        seed_label = f"seed_{seed_value}"
-                        if seed_instance_index > 1:
-                            seed_label = f"{seed_label}_{seed_instance_index}"
-                        relative_input_dir = os.path.join(seed_label, "input")
-                        relative_output_dir = os.path.join(seed_label, "output")
-                    else:
-                        seed_label = None
-                        relative_input_dir = "input"
-                        relative_output_dir = "output"
-
-                    job_specs.append({
-                        "seed_value": int(seed_value),
-                        "seed_label": seed_label,
-                        "relative_input_dir": relative_input_dir,
-                        "relative_output_dir": relative_output_dir,
-                        "model_seeds": [int(seed_value)],
-                    })
+            if seed_value is None:
+                job_tag = model_name
             else:
-                job_specs.append({
-                    "seed_value": None,
-                    "seed_label": None,
-                    "relative_input_dir": "input",
-                    "relative_output_dir": "output",
-                    "model_seeds": [int(seed) for seed in model_seed_values],
-                })
+                job_tag = f"{model_name}|seed={seed_value}"
 
-            for job_spec in job_specs:
-                seed_value = job_spec["seed_value"]
-                seed_label = job_spec["seed_label"]
-                relative_input_dir = job_spec["relative_input_dir"]
-                relative_output_dir = job_spec["relative_output_dir"]
+            launcher_model_dir = _af3_launcher_cd_path(job["model_dir"])
 
-                input_dir = os.path.join(model_dir, relative_input_dir)
-                output_dir = os.path.join(model_dir, relative_output_dir)
-                os.makedirs(input_dir, exist_ok=True)
-                os.makedirs(output_dir, exist_ok=True)
-
-                if skip_finished and _is_finished(output_dir):
-                    continue
-
-                payload = dict(base_payload)
-                payload["modelSeeds"] = job_spec["model_seeds"]
-                payload["sequences"] = entries
-                if model_bonded_atom_pairs is not None:
-                    payload["bondedAtomPairs"] = model_bonded_atom_pairs
-                if model_user_ccd is not None:
-                    payload["userCCD"] = model_user_ccd
-                if model_user_ccd_path is not None:
-                    payload["userCCDPath"] = model_user_ccd_path
-
-                if seed_label:
-                    payload["name"] = f"{model_name}_{seed_label}"
-
-                json_path = os.path.join(input_dir, f"{model_name}.json")
-                with open(json_path, 'w') as json_fd:
-                    json.dump(payload, json_fd, indent=2)
-                    json_fd.write('\n')
-
-                if seed_value is None:
-                    job_tag = model_name
-                else:
-                    job_tag = f"{model_name}|seed={seed_value}"
-
-                launcher_model_dir = _launcher_cd_path(model_dir)
-
-                command_lines = [
-                    'AF3_START_DIR="$(pwd)"',
-                    f"cd {shlex.quote(launcher_model_dir)}",
-                ]
-                if benchmark:
-                    command_lines.append(
-                        f"echo \"[AF3][{job_tag}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\""
-                    )
-                    command_lines.append("AF_BENCH_START_TS=$(date +%s)")
+            command_lines = [
+                'AF3_START_DIR="$(pwd)"',
+                f"cd {shlex.quote(launcher_model_dir)}",
+            ]
+            if benchmark:
                 command_lines.append(
-                    f"bsc_alphafold {shlex.quote(relative_input_dir)} {shlex.quote(relative_output_dir)} $WEIGHTS"
+                    f"echo \"[AF3][{job_tag}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\""
                 )
-                if benchmark:
-                    command_lines.append("AF_BENCH_EXIT_CODE=$?")
-                    command_lines.append("AF_BENCH_END_TS=$(date +%s)")
-                    command_lines.append(
-                        "AF_BENCH_ELAPSED_SEC=$((AF_BENCH_END_TS-AF_BENCH_START_TS))"
-                    )
-                    command_lines.append(
-                        f"echo \"[AF3][{job_tag}] benchmark_end utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\") "
-                        "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\""
-                    )
-                command_lines.extend([
-                    f"sbatch {shlex.quote(runner_name)} {shlex.quote(relative_input_dir)}",
-                    'cd "$AF3_START_DIR"',
-                ])
-                commands.append("\n".join(command_lines) + "\n")
+                command_lines.append("AF_BENCH_START_TS=$(date +%s)")
+            command_lines.append(
+                f"bsc_alphafold {shlex.quote(relative_input_dir)} {shlex.quote(relative_output_dir)} $WEIGHTS"
+            )
+            if benchmark:
+                command_lines.append("AF_BENCH_EXIT_CODE=$?")
+                command_lines.append("AF_BENCH_END_TS=$(date +%s)")
+                command_lines.append(
+                    "AF_BENCH_ELAPSED_SEC=$((AF_BENCH_END_TS-AF_BENCH_START_TS))"
+                )
+                command_lines.append(
+                    f"echo \"[AF3][{job_tag}] benchmark_end utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\") "
+                    "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\""
+                )
+            command_lines.extend([
+                f"sbatch {shlex.quote(runner_name)} {shlex.quote(relative_input_dir)}",
+                'cd "$AF3_START_DIR"',
+            ])
+            commands.append("\n".join(command_lines) + "\n")
 
         return commands
 
