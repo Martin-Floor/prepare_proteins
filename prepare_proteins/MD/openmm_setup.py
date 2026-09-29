@@ -1992,9 +1992,19 @@ class openmm_md:
 
         gaff_version: 'gaff' (default) or 'gaff2'. Selects the GAFF version used to type and
         parameterize non-standard residues: antechamber atom types (-at), parmchk2 parameter set (-s)
-        and the leaprc sourced by tleap. MCPB.py fragment scripts are not affected.
+        and the leaprc sourced by tleap. Notes:
+          - Parameter files generated with 'gaff2' record it in <RES>.gaff_version. Reusing them with
+            another version raises, and reusing unrecorded files with 'gaff2' warns; pass
+            overwrite=True when switching versions.
+          - A mol2 supplied with skip_ligand_charge_computation=True keeps its own atom types.
+          - MCPB.py metal sites (mcpb_config/mcpb_site) are GAFF-only and are refused with 'gaff2'.
+          - The ligand-only build in setUpOpenMMSimulations(ligand_only=...) still sources
+            leaprc.gaff and does not honour this option.
         """
         _check_gaff_version(gaff_version)
+        if gaff_version == "gaff2" and (mcpb_config or mcpb_site):
+            raise ValueError("gaff_version='gaff2' is not supported with MCPB.py metal sites "
+                             "(mcpb_config/mcpb_site), which are parameterized with GAFF.")
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -3640,6 +3650,25 @@ class ligandParameters:
                            skip_ligand_charge_computation=False, run_acdoctor=True, gaff_version="gaff"):
         _check_gaff_version(gaff_version)
 
+        # Parameter files record the GAFF version that made them, so a reused mol2/frcmod from the
+        # other version is never combined silently with this version's leaprc.
+        version_path = self.resname+'.gaff_version'
+        if not overwrite and os.path.exists(version_path):
+            with open(version_path) as vf:
+                recorded_version = vf.read().strip()
+            if recorded_version != gaff_version:
+                raise ValueError(
+                    f"{self.resname} parameters in {os.getcwd()} were generated with {recorded_version}, "
+                    f"but gaff_version={gaff_version!r} was requested; pass overwrite=True to regenerate them."
+                )
+        elif (not overwrite and gaff_version != "gaff"
+              and (os.path.exists(self.resname+'.mol2') or os.path.exists(self.resname+'.frcmod'))):
+            warnings.warn(
+                f"Reusing {self.resname} parameter files of unrecorded GAFF version with "
+                f"gaff_version={gaff_version!r}; pass overwrite=True if they were made with another version.",
+                RuntimeWarning,
+            )
+
         def _run_acdoctor_on_mol2(mol2_file):
             marker_path = f".ffxml_generated_{self.resname.lower()}"
             if os.path.exists(marker_path) or os.path.exists(os.path.join(os.getcwd(), marker_path)):
@@ -3719,6 +3748,11 @@ class ligandParameters:
             command += _parmchk2_version_flag(gaff_version)
             command += '-f mol2\n'
             _run_command(command, self.command_log)
+
+        # Only non-default versions are recorded, so default runs write exactly the files they did before.
+        if gaff_version != "gaff" and (mol2_generated or need_parmchk):
+            with open(version_path, 'w') as vf:
+                vf.write(gaff_version+'\n')
 
         # Parameterize metal pdb if given
         if self.metal_pdb:

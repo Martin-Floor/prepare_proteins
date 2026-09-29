@@ -60,8 +60,12 @@ def _antechamber_and_parmchk2(commands):
 
 def test_get_amber_parameters_default_keeps_gaff_commands(tmp_path, monkeypatch):
     antechamber, parmchk2 = _antechamber_and_parmchk2(_run_get_amber_parameters(tmp_path, monkeypatch))
-    assert all("-at " not in c for c in antechamber)
+    assert antechamber == [
+        "antechamber -i LIG_renum.pdb -fi pdb -o LIG.mol2 -fo mol2 -pf y -c bcc -nc 0 -s 2",
+        "antechamber -i LIG_renum.pdb -fi pdb -o LIG.prepi -fo prepi -pf y -c bcc -nc 0 -s 2",
+    ]
     assert parmchk2 == "parmchk2 -i LIG.mol2 -o LIG.frcmod -f mol2"
+    assert not (tmp_path / "LIG.gaff_version").exists()
 
 
 def test_get_amber_parameters_gaff2_sets_atom_types_and_parmchk2_set(tmp_path, monkeypatch):
@@ -69,6 +73,7 @@ def test_get_amber_parameters_gaff2_sets_atom_types_and_parmchk2_set(tmp_path, m
     antechamber, parmchk2 = _antechamber_and_parmchk2(commands)
     assert all("-at gaff2 " in c for c in antechamber)
     assert parmchk2 == "parmchk2 -i LIG.mol2 -o LIG.frcmod -s 2 -f mol2"
+    assert (tmp_path / "LIG.gaff_version").read_text() == "gaff2\n"
 
 
 @pytest.mark.parametrize("bad", ["GAFF2", "gaff3", "", None])
@@ -146,3 +151,29 @@ def test_ambertools_backend_without_option_passes_nothing_extra(monkeypatch):
     monkeypatch.setattr(backend, "describe_model", lambda md: None)
     backend.prepare_model(FakeMD(), "params")
     assert received == {}
+
+
+def test_reusing_gaff2_parameters_with_default_version_raises(tmp_path, monkeypatch):
+    _run_get_amber_parameters(tmp_path, monkeypatch, gaff_version="gaff2")
+    (tmp_path / "LIG.mol2").write_text("")  # parameter files now exist and would be reused
+    with pytest.raises(ValueError, match="generated with gaff2"):
+        _run_get_amber_parameters(tmp_path, monkeypatch)
+
+
+def test_reusing_gaff2_parameters_with_overwrite_regenerates(tmp_path, monkeypatch):
+    _run_get_amber_parameters(tmp_path, monkeypatch, gaff_version="gaff2")
+    commands = _run_get_amber_parameters(tmp_path, monkeypatch, overwrite=True)
+    antechamber, _ = _antechamber_and_parmchk2(commands)
+    assert all("-at " not in c for c in antechamber)
+
+
+def test_reusing_unrecorded_parameters_with_gaff2_warns(tmp_path, monkeypatch):
+    (tmp_path / "LIG.mol2").write_text("")
+    (tmp_path / "LIG.frcmod").write_text("")
+    with pytest.warns(RuntimeWarning, match="unrecorded GAFF version"):
+        _run_get_amber_parameters(tmp_path, monkeypatch, gaff_version="gaff2")
+
+
+def test_gaff2_is_refused_with_mcpb_sites(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="MCPB"):
+        _write_tleap(tmp_path, monkeypatch, gaff_version="gaff2", mcpb_config={"sites": []})
