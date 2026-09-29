@@ -2031,7 +2031,8 @@ class openmm_md:
         salt_concentration: None (default: neutralizing ions only) or a molar NaCl concentration. After
         neutralizing, round(salt_concentration * N_water / 55.5) Na+/Cl- pairs are added with addIons2,
         where N_water is the number of waters solvatebox placed (counted in a first tleap pass). The
-        counts are written to <pdb_name>_salt.json in parameters_folder. Needs solvate=True and
+        effective setting (explicit null when no salt was requested) is written to <pdb_name>_salt.json after
+        every successful solvated build, and reuse of an existing system is refused when it differs. Needs solvate=True and
         add_counterions=True (not add_counterionsRand) and no membrane_system.
         """
         _check_gaff_version(gaff_version)
@@ -2217,14 +2218,24 @@ class openmm_md:
                         f"Reusing the existing system in {parameters_folder}, whose GAFF version is not "
                         f"recorded, with gaff_version={gaff_version!r}.", RuntimeWarning)
                 salt_record = os.path.join(parameters_folder, self.pdb_name + '_salt.json')
-                built_salt = None
+                record = None
                 if os.path.exists(salt_record):
                     with open(salt_record) as handle:
-                        built_salt = json.load(handle).get('salt_concentration_M')
-                if built_salt != salt_concentration:
+                        record = json.load(handle)
+                if record is None or 'salt_concentration_M' not in record:
+                    if salt_concentration is not None:
+                        raise ValueError(
+                            f"The existing system in {parameters_folder} has no salt record, so "
+                            f"salt_concentration={salt_concentration!r} cannot be verified; pass "
+                            "regenerate_amber_files=True and overwrite=True to rebuild it."
+                        )
+                    # Systems built before salt records existed: default request, kept working.
+                    warnings.warn(f"Reusing the existing system in {parameters_folder}, whose salt setting is "
+                                  "not recorded.", RuntimeWarning)
+                elif record['salt_concentration_M'] != salt_concentration:
                     raise ValueError(
                         f"The existing system in {parameters_folder} was built with salt_concentration="
-                        f"{built_salt!r}, but {salt_concentration!r} was requested; pass "
+                        f"{record['salt_concentration_M']!r}, but {salt_concentration!r} was requested; pass "
                         "regenerate_amber_files=True and overwrite=True to rebuild it."
                     )
 
@@ -3709,14 +3720,23 @@ class openmm_md:
             tlf.write('saveamberparm mol '+parameters_folder+'/'+self.pdb_name+'.prmtop '+parameters_folder+'/'+self.pdb_name+'.inpcrd\n')
             tlf.write('quit\n')
 
+        salt_record = os.path.join(parameters_folder, self.pdb_name + '_salt.json')
+        if os.path.exists(salt_record):
+            os.remove(salt_record)  # a rebuild must never inherit an earlier build's salt record
+        salt_counts = {'salt_concentration_M': None, 'n_water': None, 'nacl_pairs_added': 0}
         if salt_concentration is not None:
-            self._add_salt_to_tleap_input(parameters_folder, salt_concentration)
+            n_water, n_pairs = self._add_salt_to_tleap_input(parameters_folder, salt_concentration)
+            salt_counts = {'salt_concentration_M': salt_concentration, 'n_water': n_water,
+                           'nacl_pairs_added': n_pairs, 'rule': 'round(c * n_water / 55.5)'}
 
         prmtop_out = parameters_folder+'/'+self.pdb_name+'.prmtop'
         if os.path.exists(prmtop_out):
             os.remove(prmtop_out)  # so a failed run cannot leave an earlier or empty file looking valid
         ret = _run_command('tleap -s -f '+parameters_folder+'/tleap.in', self.command_log)
         _check_tleap_output(ret, prmtop_out, parameters_folder+'/tleap.in')
+        if solvate and not membrane_system:
+            with open(salt_record, 'w') as handle:  # written only after a successful build
+                json.dump(salt_counts, handle, indent=2)
 
         # Define prmtop and inpcrd file paths
         self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
@@ -3760,9 +3780,6 @@ class openmm_md:
         lines[neutralize_index + 1:neutralize_index + 1] = salt_lines
         with open(tleap_path, 'w') as handle:
             handle.write('\n'.join(lines) + '\n')
-        with open(os.path.join(parameters_folder, self.pdb_name + '_salt.json'), 'w') as handle:
-            json.dump({'salt_concentration_M': salt_concentration, 'n_water': n_water,
-                       'nacl_pairs_added': n_pairs, 'rule': 'round(c * n_water / 55.5)'}, handle, indent=2)
         return n_water, n_pairs
 
     def savePDB(self, output_file):

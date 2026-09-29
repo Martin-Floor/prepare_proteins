@@ -67,7 +67,8 @@ def test_default_adds_only_neutralizing_ions_and_runs_one_tleap(tmp_path, monkey
     ions = [l for l in lines if l.startswith("addIons")]
     assert ions == ["addIons2 mol Na+ 0", "addIons2 mol Cl- 0"]
     assert not any("tleap_salt_count" in c for c in commands)
-    assert not (folder / "model_salt.json").exists()
+    # every solvated build records its effective salt setting, here explicitly none
+    assert json.loads((folder / "model_salt.json").read_text())["salt_concentration_M"] is None
 
 
 def test_salt_adds_pairs_from_water_count_after_neutralizing(tmp_path, monkeypatch):
@@ -126,3 +127,45 @@ def test_reusing_a_system_with_the_same_salt_is_accepted(tmp_path, monkeypatch, 
     kw = {} if salt is None else {"salt_concentration": salt}
     _build(tmp_path, monkeypatch, n_water=3000, **kw)
     _build(tmp_path, monkeypatch, n_water=3000, **kw)
+
+
+@pytest.mark.parametrize("first,second", [(0.15, None), (None, 0.15)])
+def test_regeneration_replaces_the_salt_record(tmp_path, monkeypatch, first, second):
+    kw = lambda c: {} if c is None else {"salt_concentration": c}
+    _build(tmp_path, monkeypatch, n_water=3000, **kw(first))
+    _build(tmp_path, monkeypatch, n_water=3000, regenerate_amber_files=True, overwrite=True, **kw(second))
+    _build(tmp_path, monkeypatch, n_water=3000, **kw(second))  # reuse with the regenerated setting: fine
+    with pytest.raises(ValueError, match="salt_concentration"):
+        _build(tmp_path, monkeypatch, n_water=3000, **kw(first))  # the stale setting is refused
+
+
+@pytest.mark.parametrize("record", [None, "{}"])
+def test_unrecorded_salt_refuses_a_salt_request_and_warns_for_default(tmp_path, monkeypatch, record):
+    _build(tmp_path, monkeypatch, n_water=3000)
+    salt_json = tmp_path / "parameters" / "model_salt.json"
+    salt_json.unlink()
+    if record is not None:
+        salt_json.write_text(record)
+    with pytest.raises(ValueError, match="no salt record"):
+        _build(tmp_path, monkeypatch, n_water=3000, salt_concentration=0.15)
+    with pytest.warns(RuntimeWarning, match="salt setting is not recorded"):
+        _build(tmp_path, monkeypatch, n_water=3000)
+
+
+def test_failed_build_leaves_no_salt_record(tmp_path, monkeypatch):
+    pdb_path = tmp_path / "model.pdb"
+    pdb_path.write_text(MODEL_PDB)
+    md = openmm_setup.openmm_md(str(pdb_path))
+    md.setUpFF("amber14")
+
+    def fake(command, command_log=None):
+        if "tleap_salt_count.in" in command:
+            script = Path(command.split("-f ", 1)[1].strip()).read_text()
+            out = [l for l in script.splitlines() if l.startswith("savepdb")][0].split()[-1]
+            Path(out).write_text(_water_pdb(3000))
+        return 0  # the main tleap run "succeeds" but writes no topology
+
+    monkeypatch.setattr(openmm_setup, "_run_command", fake)
+    with pytest.raises(RuntimeError, match="valid topology"):
+        md.parameterizePDBLigands(str(tmp_path / "parameters"), salt_concentration=0.15)
+    assert not (tmp_path / "parameters" / "model_salt.json").exists()

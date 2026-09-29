@@ -257,3 +257,12 @@ def test_add_bonds_skips_bond_already_a_conect(tmp_path, monkeypatch):
                         lambda path: real(path) | {frozenset({("1", "CA"), ("2", "N")})})
     lines = _build_real_pdb4amber(tmp_path, monkeypatch, BONDED_PDB, add_bonds=[(("A", 1, "CA"), ("A", 2, "N"))])
     assert not any(l.startswith("bond ") for l in lines)
+
+
+def test_truncated_topology_passing_the_preliminary_check_fails_in_the_parser(tmp_path):
+    # _check_tleap_output only looks for the POINTERS flag; the full parse right after must reject truncation.
+    prmtop = tmp_path / "t.prmtop"
+    prmtop.write_text("%VERSION  VERSION_STAMP = V0001.000\n%FLAG POINTERS\n%FORMAT(10I8)\n       5\n")
+    openmm_setup._check_tleap_output(0, str(prmtop), "tleap.in")
+    with pytest.raises(Exception):
+        openmm_setup.AmberPrmtopFile(str(prmtop))
