@@ -40,9 +40,9 @@ def test_write_ligand_mol_files_writes_mol_and_preserves_formal_charge(tmp_path)
 
     pdb_text = (
         _pdb_line("ATOM", 1, "CA", "ALA", "A", 1, 0.0, 0.0, 0.0, "C")
-        + _pdb_line("HETATM", 2, "C1", "CAR", "A", 101, 0.0, 1.0, 0.0, "C")
-        + _pdb_line("HETATM", 3, "O1", "CAR", "A", 101, 1.2, 1.0, 0.0, "O", "1-")
-        + _pdb_line("HETATM", 4, "O2", "CAR", "A", 101, -1.2, 1.0, 0.0, "O")
+        + _pdb_line("HETATM", 2, "C1", "LGC", "A", 101, 0.0, 1.0, 0.0, "C")
+        + _pdb_line("HETATM", 3, "O1", "LGC", "A", 101, 1.2, 1.0, 0.0, "O", "1-")
+        + _pdb_line("HETATM", 4, "O2", "LGC", "A", 101, -1.2, 1.0, 0.0, "O")
         + "CONECT    2    3    4\n"
         + "END\n"
     )
@@ -50,15 +50,15 @@ def test_write_ligand_mol_files_writes_mol_and_preserves_formal_charge(tmp_path)
 
     paths, report = models.writeLigandMolFiles(tmp_path / "mol_files", return_report=True)
 
-    assert set(paths) == {"CAR"}
-    output_path = Path(paths["CAR"])
+    assert set(paths) == {"LGC"}
+    output_path = Path(paths["LGC"])
     assert output_path.exists()
 
     mol = Chem.MolFromMolFile(str(output_path), removeHs=False)
     assert mol is not None
     assert Chem.GetFormalCharge(mol) == -1
 
-    assert report.loc[0, "resname"] == "CAR"
+    assert report.loc[0, "resname"] == "LGC"
     assert report.loc[0, "output_path"] == str(output_path.resolve())
     assert report.loc[0, "formal_charge"] == -1
     assert report.loc[0, "block_source"] == "source"

@@ -2014,7 +2014,7 @@ class openmm_md:
                                run_acdoctor=True,
                                ligand_xml_files=None, solvatebox_buffer=12.0, solvatebox_iso=False,
                                mcpb_config=None, mcpb_site=None, membrane_system=None, gaff_version="gaff",
-                               salt_concentration=None):
+                               salt_concentration=None, require_ligand_charges=False):
         """Parameterize non-standard residues with AmberTools and build the Amber system with tleap.
 
         gaff_version: 'gaff' (default) or 'gaff2'. Selects the GAFF version used to type and
@@ -2027,6 +2027,9 @@ class openmm_md:
           - MCPB.py metal sites (mcpb_config/mcpb_site) are GAFF-only and are refused with 'gaff2'.
           - The ligand-only build in setUpOpenMMSimulations(ligand_only=...) follows
             parameterization_options['gaff_version'] too.
+
+        charges: {residue name: integer net charge}, matched case-insensitively. A ligand whose charges are computed
+        without an entry is treated as neutral with a warning; require_ligand_charges=True makes that an error.
 
         salt_concentration: None (default: neutralizing ions only) or a molar NaCl concentration. After
         neutralizing, round(salt_concentration * N_water / 55.5) Na+/Cl- pairs are added with addIons2,
@@ -2616,6 +2619,9 @@ class openmm_md:
             key_lower = key_str.lower()
             if key_lower in mapping:
                 return mapping[key_lower]
+            for candidate, value in mapping.items():  # any other casing, e.g. "Lig"
+                if str(candidate).upper() == key_upper:
+                    return value
             return None
 
         def _stage_external_mol2(residue_name, source_path, mark_for_conversion=False):
@@ -3006,10 +3012,8 @@ class openmm_md:
                     metal_pdb[metal_residue] = '../'+metal_residue+'_parameters/'+metal_residue+'.pdb'
                     metal_charge[metal_residue] = charges[metal_residue]
 
-            if charges and residue in charges:
-                charge = charges[residue]
-            else:
-                charge = 0
+            given = _get_case_insensitive(charges or {}, residue)
+            charge = given if given is not None else 0
 
             sdf_entry = _get_case_insensitive(ligand_sdf_files or {}, residue)
             if sdf_entry:
@@ -3051,6 +3055,18 @@ class openmm_md:
 
             if residue in skip_parameterization_residues:
                 continue
+
+            # A ligand whose charges are computed here needs its net charge; without one it used to be treated as
+            # neutral silently. Warn (or raise with require_ligand_charges=True) only when charges are computed.
+            reuses_staged = (build_full_system and not export_per_residue_ffxml and not use_mcpb and not overwrite
+                             and os.path.exists(os.path.join(par_folder[residue], f'{residue}.prepi'))
+                             and os.path.exists(os.path.join(par_folder[residue], f'{residue}.frcmod')))
+            if given is None and not skip_ligand_charge_computation and not reuses_staged:
+                message = (f"No net charge given for ligand {residue}; its AM1-BCC charges are computed for a "
+                           f"NEUTRAL molecule. Pass charges={{'{residue}': <integer>}} if it is charged.")
+                if require_ligand_charges:
+                    raise ValueError(message + " (require_ligand_charges=True)")
+                warnings.warn(message, UserWarning)
 
             _convert_staged_mol2(residue, charge, skip_ligand_charge_computation)
 

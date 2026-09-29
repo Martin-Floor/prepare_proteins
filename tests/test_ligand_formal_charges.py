@@ -38,9 +38,9 @@ def _write_models(tmp_path, model_pdbs, *, conect_update=True):
 def test_get_ligand_formal_charges_uses_source_pdb_charge_fields(tmp_path):
     pdb_text = (
         _pdb_line("ATOM", 1, "CA", "ALA", "A", 1, 0.0, 0.0, 0.0, "C")
-        + _pdb_line("HETATM", 2, "C1", "CAR", "A", 101, 0.0, 1.0, 0.0, "C")
-        + _pdb_line("HETATM", 3, "O1", "CAR", "A", 101, 1.2, 1.0, 0.0, "O", "1-")
-        + _pdb_line("HETATM", 4, "O2", "CAR", "A", 101, -1.2, 1.0, 0.0, "O")
+        + _pdb_line("HETATM", 2, "C1", "LGC", "A", 101, 0.0, 1.0, 0.0, "C")
+        + _pdb_line("HETATM", 3, "O1", "LGC", "A", 101, 1.2, 1.0, 0.0, "O", "1-")
+        + _pdb_line("HETATM", 4, "O2", "LGC", "A", 101, -1.2, 1.0, 0.0, "O")
         + "CONECT    2    3    4\n"
         + "END\n"
     )
@@ -48,8 +48,8 @@ def test_get_ligand_formal_charges_uses_source_pdb_charge_fields(tmp_path):
 
     charges, report = models.getLigandFormalCharges(return_report=True)
 
-    assert charges == {"CAR": -1}
-    assert report.loc[0, "resname"] == "CAR"
+    assert charges == {"LGC": -1}
+    assert report.loc[0, "resname"] == "LGC"
     assert report.loc[0, "formal_charge"] == -1
     assert report.loc[0, "block_source"] == "source"
 
