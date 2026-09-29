@@ -189,6 +189,28 @@ def _parmchk2_version_flag(gaff_version):
     return "-s 2 " if _check_gaff_version(gaff_version) == "gaff2" else ""
 
 
+def _read_gaff_version_marker(path):
+    """GAFF version recorded in a <RES>.gaff_version file, or None when there is none."""
+    if not os.path.exists(path):
+        return None
+    with open(path) as handle:
+        return handle.read().strip() or None
+
+
+def _tleap_gaff_version(tleap_path):
+    """GAFF version a tleap input sources ('gaff', 'gaff2'), or None if it sources neither or is absent."""
+    if not os.path.exists(tleap_path):
+        return None
+    with open(tleap_path) as handle:
+        sources = {line.split()[1] for line in handle
+                   if line.startswith("source ") and len(line.split()) > 1}
+    if "leaprc.gaff2" in sources:
+        return "gaff2"
+    if "leaprc.gaff" in sources:
+        return "gaff"
+    return None
+
+
 def _normalize_residue_id(value):
     """Return a residue identifier preserving integers when possible."""
     if value is None:
@@ -2165,6 +2187,17 @@ class openmm_md:
 
         if os.path.exists(parameters_folder+'/'+self.pdb_name+'.prmtop') and os.path.exists(parameters_folder+'/'+self.pdb_name+'.inpcrd'):
             if not overwrite:
+                built_version = _tleap_gaff_version(os.path.join(parameters_folder, 'tleap.in'))
+                if built_version is not None and built_version != gaff_version:
+                    raise ValueError(
+                        f"The existing system in {parameters_folder} was built with {built_version}, but "
+                        f"gaff_version={gaff_version!r} was requested; pass regenerate_amber_files=True "
+                        "and overwrite=True to rebuild it."
+                    )
+                if built_version is None and gaff_version != "gaff":
+                    warnings.warn(
+                        f"Reusing the existing system in {parameters_folder}, whose GAFF version is not "
+                        f"recorded, with gaff_version={gaff_version!r}.", RuntimeWarning)
 
                 # Set topology and positions to amber's
                 self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
@@ -2695,6 +2728,7 @@ class openmm_md:
                 _register_frcmod_file(res_upper, dest_root)
                 provided_frcmod_residues.add(res_upper)
 
+        supplied_mol2_sources = {}  # residue -> user mol2 path, to find a GAFF version marker beside it
         if extra_mol2:
             def _iter_extra_mol2_sources(values):
                 if isinstance(values, Mapping):
@@ -2784,6 +2818,7 @@ class openmm_md:
                     _copyfile_if_needed(dest_root_mol2, canonical_root)
                 _stage_external_mol2(res_upper, dest_root_mol2, mark_for_conversion=res_upper not in provided_frcmod_residues)
                 provided_mol2_residues.add(res_upper)
+                supplied_mol2_sources[res_upper] = source_path
                 _register_mol2_file(res_upper, dest_root_mol2)
                 generated_path = generated_pdb_paths.get(res_upper)
                 if generated_path:
@@ -2807,6 +2842,21 @@ class openmm_md:
                             )
 
         skip_parameterization_residues = provided_mol2_residues & provided_frcmod_residues
+        for residue in sorted(skip_parameterization_residues - set(ffxml_converted or ())):
+            supplied_mol2 = supplied_mol2_sources.get(residue)
+            recorded_version = None
+            if supplied_mol2:
+                recorded_version = _read_gaff_version_marker(
+                    os.path.join(os.path.dirname(supplied_mol2), f"{residue}.gaff_version"))
+            if recorded_version is not None and recorded_version != gaff_version:
+                raise ValueError(
+                    f"Supplied parameters for {residue} are recorded as {recorded_version}, but "
+                    f"gaff_version={gaff_version!r} was requested."
+                )
+            if recorded_version is None and gaff_version != "gaff":
+                warnings.warn(
+                    f"Supplied mol2/frcmod for {residue} are used as given; their GAFF version is not "
+                    f"recorded and is assumed to match gaff_version={gaff_version!r}.", RuntimeWarning)
         if ffxml_converted:
             skip_parameterization_residues |= ffxml_converted
 
@@ -2976,6 +3026,12 @@ class openmm_md:
                 shutil.copyfile(gen_mol2, canonical_mol2)
                 if not residue_mol2_files[residue]:
                     _register_mol2_file(residue, canonical_mol2)
+            gen_version = os.path.join(folder, f"{residue}.gaff_version")
+            root_version = os.path.join(parameters_folder, f"{residue}.gaff_version")
+            if os.path.exists(gen_version):
+                shutil.copyfile(gen_version, root_version)
+            elif os.path.exists(root_version) and (os.path.exists(gen_mol2) or os.path.exists(gen_frcmod)):
+                os.remove(root_version)
             if os.path.exists(gen_frcmod):
                 dest_frcmod = os.path.join(parameters_folder, f"{residue}.frcmod")
                 shutil.copyfile(gen_frcmod, dest_frcmod)
@@ -3653,9 +3709,8 @@ class ligandParameters:
         # Parameter files record the GAFF version that made them, so a reused mol2/frcmod from the
         # other version is never combined silently with this version's leaprc.
         version_path = self.resname+'.gaff_version'
-        if not overwrite and os.path.exists(version_path):
-            with open(version_path) as vf:
-                recorded_version = vf.read().strip()
+        recorded_version = _read_gaff_version_marker(version_path)
+        if not overwrite and recorded_version is not None:
             if recorded_version != gaff_version:
                 raise ValueError(
                     f"{self.resname} parameters in {os.getcwd()} were generated with {recorded_version}, "
@@ -3700,6 +3755,7 @@ class ligandParameters:
         # Run antechamber to create a mol2 file with the atomic charges
         mol2_path = self.resname+'.mol2'
         mol2_generated = False
+        mol2_ok = False
         if not skip_ligand_charge_computation or overwrite:
             if not os.path.exists(mol2_path) or overwrite:
                 command = 'antechamber '
@@ -3712,7 +3768,7 @@ class ligandParameters:
                 command += '-nc '+str(ligand_charge)+' '
                 command += _antechamber_atom_type_flag(gaff_version)
                 command += '-s 2\n'
-                _run_command(command, self.command_log)
+                mol2_ok = _run_command(command, self.command_log) == 0 and os.path.exists(mol2_path)
                 mol2_generated = True
         elif not os.path.exists(mol2_path):
             raise FileNotFoundError(
@@ -3739,6 +3795,7 @@ class ligandParameters:
         # Run parmchk to check which forcefield parameters will be used
         frcmod_path = self.resname+'.frcmod'
         need_parmchk = overwrite or not os.path.exists(frcmod_path)
+        frcmod_ok = False
         if need_parmchk and not mol2_generated and run_acdoctor:
             _run_acdoctor_on_mol2(mol2_path)
         if need_parmchk:
@@ -3747,12 +3804,20 @@ class ligandParameters:
             command += '-o '+frcmod_path+' '
             command += _parmchk2_version_flag(gaff_version)
             command += '-f mol2\n'
-            _run_command(command, self.command_log)
+            frcmod_ok = _run_command(command, self.command_log) == 0 and os.path.exists(frcmod_path)
 
-        # Only non-default versions are recorded, so default runs write exactly the files they did before.
-        if gaff_version != "gaff" and (mol2_generated or need_parmchk):
-            with open(version_path, 'w') as vf:
-                vf.write(gaff_version+'\n')
+        # Record the version only when this call made both mol2 and frcmod successfully; a partial or
+        # failed regeneration leaves the provenance unknown. Fresh default runs write no marker, so they
+        # produce exactly the files they did before; an existing marker is always brought up to date.
+        if mol2_generated or need_parmchk:
+            if mol2_generated and mol2_ok and need_parmchk and frcmod_ok:
+                if gaff_version != "gaff" or os.path.exists(version_path):
+                    with open(version_path, 'w') as vf:
+                        vf.write(gaff_version+'\n')
+            else:
+                failed = (mol2_generated and not mol2_ok) or (need_parmchk and not frcmod_ok)
+                if os.path.exists(version_path) and (failed or overwrite or recorded_version != gaff_version):
+                    os.remove(version_path)
 
         # Parameterize metal pdb if given
         if self.metal_pdb:
