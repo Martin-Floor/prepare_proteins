@@ -24146,10 +24146,14 @@ if __name__ == "__main__":
         Parameters:
         - diffusion_samples: int. The number of diffusion samples to use for prediction.
         - use_msa_server: Bool. Whether to use the MSA server for sampling, it auto-generate the MSA using the mmseqs2 server (not for MN5) because no internet.
-        - msa_path: str. Path to the folder with the .a3m files.  It should contain the pre-computed MSA for the proteins. You need to run AF3 first (or something else) to generate the MSA
-            The name of the .a3m files should be the name of the model.
+        - msa_path: str. Path to the folder with the .a3m files. It should contain the pre-computed MSA for the proteins. You need to run AF3 first (or something else) to generate the MSA.
+            For a single-entry model the file is ``<msa_path>/<model>.a3m``.
+            When a model yields several protein entries (chains with distinct
+            sequences), each entry gets ``<msa_path>/<model>_<chain>.a3m``,
+            where ``<chain>`` is the first chain id of that entry. Chains that
+            share a sequence are emitted as one entry and therefore share one
+            MSA file.
             To run single sequence mode input "empty" for msa_path.
-            !!Not tested!!
         - sampling_steps: int. The number of sampling steps to use for prediction.
         - recycling_steps: int. The number of recycling steps to use for prediction.
             AF3 uses by default 25 diffusion_samples and 10 recycling_steps.
@@ -24163,8 +24167,14 @@ if __name__ == "__main__":
         - binder (str): chain of the binder/ligand to use to predict affinity. Only 1 binder is allowed
 
         chains : None, str, iterable or dict, optional
-            Chain selector per model used to pick the sequence for the Boltz2
-            input. Defaults to the first polymer chain per model.
+            Chain selector per model used to pick the sequences for the Boltz2
+            input. Defaults to the first polymer chain per model. Several
+            chains may be given (e.g. ``["A", "B"]`` or ``{"model": ["A", "B"]}``)
+            to model a complex; this is required when the ligand site is formed
+            at a subunit interface, since a monomer would not reproduce it.
+            Chains sharing a sequence are grouped into a single protein entry
+            with multiple ids, which is how Boltz expects a homo-oligomer.
+            Ligand chain ids continue after the protein chains.
 
         Returns:
         - jobs (list[str]): command string per batch per model
@@ -24178,46 +24188,86 @@ if __name__ == "__main__":
                 os.mkdir(job_folder+"/"+model)
 
         chain_selection = self._resolve_chain_selection(
-            chains, require_single=True
+            chains, require_single=False
         )
 
         for model in self.models_names:
-            chain_id = chain_selection.get(model)
-            sequence = None
+            chain_ids = chain_selection.get(model)
+            if isinstance(chain_ids, str):
+                chain_ids = [chain_ids]
 
-            if chain_id is not None:
-                sequence = self.chain_sequences.get(model, {}).get(chain_id)
+            # Resolve (chain_id, sequence) pairs for every requested chain.
+            chain_seqs = []
+            if chain_ids:
+                for chain_id in chain_ids:
+                    sequence = self.chain_sequences.get(model, {}).get(chain_id)
+                    if sequence in (None, ""):
+                        raise ValueError(
+                            f"No protein sequence found for model {model} (chain {chain_id})."
+                        )
+                    chain_seqs.append((chain_id, sequence))
             else:
                 sequence = self.sequences.get(model)
+                if sequence in (None, ""):
+                    raise ValueError(
+                        f"No protein sequence found for model {model} (chain {chain_ids})."
+                    )
+                chain_seqs.append(("A", sequence))
 
-            if sequence in (None, ""):
-                raise ValueError(
-                    f"No protein sequence found for model {model} (chain {chain_id})."
-                )
+            # Group identical sequences into a single protein entry with several
+            # chain ids, which is how Boltz expects a homo-oligomer and avoids
+            # duplicating the MSA. Order of first appearance is preserved.
+            grouped = []
+            for chain_id, sequence in chain_seqs:
+                for entry in grouped:
+                    if entry["sequence"] == sequence:
+                        entry["ids"].append(chain_id)
+                        break
+                else:
+                    grouped.append({"ids": [chain_id], "sequence": sequence})
+
+            protein_chain_ids = [cid for entry in grouped for cid in entry["ids"]]
 
         # Write the YAML file
             with open(job_folder+"/"+model +"/" + "boltz.yaml", "w") as iyf:
                 iyf.write('version: 1\n')
                 iyf.write('sequences:\n')
-                iyf.write('  - protein:\n')
-                iyf.write(f'      id: [{chain_id}]\n')
-                iyf.write(f'      sequence: {sequence}\n')
+                for entry in grouped:
+                    ids = ", ".join(entry["ids"])
+                    iyf.write('  - protein:\n')
+                    iyf.write(f'      id: [{ids}]\n')
+                    iyf.write(f'      sequence: {entry["sequence"]}\n')
 
-                if use_msa_server == False:
-                    iyf.write(f'      msa: {msa_path}+{model}.a3m\n')
+                    if use_msa_server == False:
+                        if msa_path == "empty":
+                            iyf.write('      msa: empty\n')
+                        else:
+                            # One MSA per distinct sequence. Single-entry models
+                            # keep the historical <msa_path>/<model>.a3m name;
+                            # multi-entry models are suffixed with the first
+                            # chain id of the entry so the files stay distinct.
+                            if len(grouped) == 1:
+                                a3m = f"{model}.a3m"
+                            else:
+                                a3m = f"{model}_{entry['ids'][0]}.a3m"
+                            iyf.write(f'      msa: {os.path.join(msa_path, a3m)}\n')
 
                 # CCD-coded ligands first (cofactors / metals), then SMILES.
+                # Ligand chains continue after the protein chains.
                 lig_chain_idx = 0
+                first_ligand_ord = (
+                    max(ord(str(cid)[0].upper()) for cid in protein_chain_ids) + 1
+                )
                 if ccd_ligands:
                     for ccd in ccd_ligands:
-                        ligand_chain = chr(ord('B') + lig_chain_idx)
+                        ligand_chain = chr(first_ligand_ord + lig_chain_idx)
                         iyf.write('  - ligand:\n')
                         iyf.write(f'      id: [{ligand_chain}]\n')
                         iyf.write(f"      ccd: {ccd}\n")
                         lig_chain_idx += 1
                 if ligands != None:
                     for ligand in ligands:
-                        ligand_chain = chr(ord('B') + lig_chain_idx)
+                        ligand_chain = chr(first_ligand_ord + lig_chain_idx)
                         iyf.write('  - ligand:\n')
                         iyf.write(f'      id: [{ligand_chain}]\n')
                         iyf.write(f"      smiles: '{ligand}'\n")
