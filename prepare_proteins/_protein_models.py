@@ -9837,6 +9837,196 @@ make sure of reading the target sequences with the function readTargetSequences(
             wild_type_pdb=wild_type_pdb,
         )
 
+    def prepareModelsAmber(
+        self,
+        output_folder,
+        ph=7.0,
+        protonation="propka",
+        forcefield="ff14SB",
+        write_mol2=True,
+        rdock_mol2=True,
+        strip_hydrogens=True,
+        models=None,
+        exclude_models=None,
+        tleap_executable="tleap",
+        overwrite=False,
+        **propka_kwargs,
+    ):
+        """
+        Fully prepare protein models without Schrodinger.
+
+        Integrates this package's Schrodinger-free building blocks - PROPKA
+        protonation-state assignment (:meth:`getModelsPropkaProtonationStates`)
+        and AMBER ``tleap`` (hydrogen and missing heavy-atom rebuilding, terminal
+        capping and atom typing) - to write, per model, a prepared PDB and,
+        optionally, an rDock-ready MOL2.
+
+        This is the Schrodinger-independent counterpart of the Schrodinger-based
+        ``saveModels(convert_to_mol2=True)`` path: it needs only AmberTools
+        (``tleap``) and ``propka``, and the MOL2 it writes is patched to the
+        ``PROTEIN``/``NO_CHARGES`` header that rDock 2013.1 parses (obabel's
+        ``SMALL``/``GASTEIGER`` MOL2 segfaults rDock).
+
+        Parameters
+        ==========
+        output_folder : str
+            Folder where prepared structures are written.
+        ph : float
+            pH used for PROPKA protonation-state assignment.
+        protonation : {"propka", None}
+            Source of protonation-state residue names. ``None`` keeps the input
+            residue names (tleap defaults then apply).
+        forcefield : str
+            Protein ``leaprc`` suffix loaded by tleap (e.g. ``"ff14SB"``).
+        write_mol2 : bool
+            Also write an AMBER-typed MOL2 (required for rDock).
+        rdock_mol2 : bool
+            Patch the MOL2 header to ``PROTEIN``/``NO_CHARGES`` for rDock.
+        strip_hydrogens : bool
+            Drop input hydrogens so tleap rebuilds them consistently with the
+            assigned protonation states.
+        models, exclude_models : str or list, optional
+            Restrict to / exclude specific models.
+        tleap_executable : str
+            tleap binary name or path.
+        overwrite : bool
+            Re-run even when outputs already exist.
+        **propka_kwargs
+            Forwarded to :meth:`getModelsPropkaProtonationStates`.
+
+        Returns
+        =======
+        dict
+            ``{model: {"pdb": prepared_pdb, "mol2": mol2_path_or_None}}``. Also
+            stored on ``self.amber_prepared_models``.
+
+        Notes
+        =====
+        Disulfide bonds are not auto-detected; pass ``cys_mode`` via
+        ``propka_kwargs`` and add explicit ``bond`` records if needed.
+        """
+        import shutil
+        import subprocess
+
+        if shutil.which(tleap_executable) is None:
+            raise RuntimeError(
+                "tleap executable '%s' not found on PATH; activate an "
+                "AmberTools-enabled environment." % tleap_executable
+            )
+        if protonation not in ("propka", None):
+            raise ValueError("protonation must be 'propka' or None")
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+
+        if isinstance(models, str):
+            models = [models]
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+        selected = [
+            m for m in self.models_names
+            if (models is None or m in models)
+            and (exclude_models is None or m not in exclude_models)
+        ]
+        if not selected:
+            raise ValueError("No models selected for preparation.")
+
+        renames = {}
+        if protonation == "propka":
+            renames = self.getModelsPropkaProtonationStates(
+                pH=ph, models=selected, return_mode="residue_names",
+                **propka_kwargs,
+            ) or {}
+
+        def _write_amber_input(struct, out_pdb, residue_renames):
+            # PROPKA keys are (chain_str, residue_int) -> state residue name
+            norm = {}
+            for key, name in (residue_renames or {}).items():
+                try:
+                    ch, rid = key
+                    norm[(str(ch).strip(), int(rid))] = str(name)
+                except (TypeError, ValueError):
+                    continue
+            tmp = out_pdb + ".raw"
+            _saveStructureToPDB(struct, tmp)
+            kept = []
+            with open(tmp) as fh:
+                for line in fh:
+                    if line.startswith(("ATOM", "HETATM")):
+                        if strip_hydrogens:
+                            element = line[76:78].strip()
+                            aname = line[12:16].strip().lstrip("0123456789")
+                            symbol = element or aname[:1]
+                            if symbol.upper() == "H":
+                                continue
+                        ch = line[21].strip()
+                        try:
+                            rid = int(line[22:26])
+                        except ValueError:
+                            rid = None
+                        new = norm.get((ch, rid))
+                        if new:
+                            line = line[:17] + ("%3s" % new) + line[20:]
+                        kept.append(line)
+                    elif line.startswith("TER"):
+                        kept.append(line)
+            kept.append("TER\nEND\n")
+            with open(out_pdb, "w") as fh:
+                fh.writelines(kept)
+            if os.path.exists(tmp):
+                os.remove(tmp)
+
+        def _patch_mol2_rdock(path):
+            # latin-1: tleap savemol2 writes non-ASCII bytes in the atom
+            # comment/status field; preserve them byte-for-byte (rDock ignores
+            # them under NO_CHARGES) instead of failing on UTF-8 decoding.
+            with open(path, encoding="latin-1") as fh:
+                text = fh.read()
+            with open(path, "w", encoding="latin-1") as fh:
+                fh.write(_mol2_text_to_rdock(text))
+
+        results = {}
+        for model in selected:
+            prepared_pdb = os.path.join(output_folder, model + ".pdb")
+            mol2_path = (
+                os.path.join(output_folder, model + ".mol2")
+                if write_mol2 else None
+            )
+            if (not overwrite and os.path.exists(prepared_pdb)
+                    and (mol2_path is None or os.path.exists(mol2_path))):
+                results[model] = {"pdb": prepared_pdb, "mol2": mol2_path}
+                continue
+
+            input_pdb = os.path.join(output_folder, "_%s_input.pdb" % model)
+            _write_amber_input(self.structures[model], input_pdb,
+                               renames.get(model, {}))
+
+            leap_script = os.path.join(output_folder, "_%s.leap" % model)
+            with open(leap_script, "w") as lf:
+                lf.write("source leaprc.protein.%s\n" % forcefield)
+                lf.write('mol = loadpdb "%s"\n' % os.path.abspath(input_pdb))
+                lf.write('savepdb mol "%s"\n' % os.path.abspath(prepared_pdb))
+                if write_mol2:
+                    lf.write('savemol2 mol "%s" 1\n'
+                             % os.path.abspath(mol2_path))
+                lf.write("quit\n")
+            log_path = os.path.join(output_folder, "_%s_tleap.log" % model)
+            with open(log_path, "w") as lg:
+                proc = subprocess.run(
+                    [tleap_executable, "-s", "-f",
+                     os.path.abspath(leap_script)],
+                    stdout=lg, stderr=subprocess.STDOUT, cwd=output_folder,
+                )
+            if proc.returncode != 0 or not os.path.exists(prepared_pdb):
+                raise RuntimeError(
+                    "tleap failed for model '%s'; see %s" % (model, log_path)
+                )
+            if write_mol2 and rdock_mol2 and os.path.exists(mol2_path):
+                _patch_mol2_rdock(mol2_path)
+            results[model] = {"pdb": prepared_pdb, "mol2": mol2_path}
+
+        self.amber_prepared_models = results
+        return results
+
     def setUprDockGrid(
         self,
         grid_folder,
@@ -9939,6 +10129,150 @@ make sure of reading the target sequences with the function readTargetSequences(
 
         return jobs
 
+    def prepareLigands(
+        self,
+        ligands,
+        output_folder,
+        n_conformers=1,
+        optimize=True,
+        add_hydrogens=True,
+        properties=None,
+        embed_seed=0,
+        combined_sdf=None,
+        overwrite=False,
+    ):
+        """
+        Generate 3D ligand conformers from SMILES for rDock/rxDock docking,
+        without Schrodinger.
+
+        Uses RDKit ETKDG embedding + MMFF optimization to write one ``<name>.sd``
+        per ligand into ``output_folder`` (the format consumed by
+        :meth:`setUprDockDocking`), and optionally a single combined SD. Pairs
+        with :meth:`prepareModelsAmber` to give a fully Schrodinger-free rxDock
+        pipeline (receptor + ligands + dock).
+
+        Parameters
+        ==========
+        ligands : dict | iterable | str
+            Either ``{name: smiles}``, an iterable of ``(name, smiles)`` pairs,
+            or a path to a CSV with name (``name``/``id``) and SMILES
+            (``smiles``/``SMILES``) columns.
+        output_folder : str
+            Folder where per-ligand ``<name>.sd`` files are written.
+        n_conformers : int
+            Conformers to embed per ligand (1 is typical; the docker samples poses).
+        optimize : bool
+            MMFF-optimize the embedded conformers.
+        add_hydrogens : bool
+            Add explicit hydrogens before embedding (recommended for docking).
+        properties : dict, optional
+            ``{name: {prop: value}}`` SD properties to embed (e.g. a reference
+            docking score) so they survive into the docked poses.
+        embed_seed : int
+            ETKDG random seed (reproducible coordinates).
+        combined_sdf : str, optional
+            If given, also write all ligands to this single SD file.
+        overwrite : bool
+            Re-embed even when a ligand's SD already exists.
+
+        Returns
+        =======
+        dict
+            ``{name: sd_path}`` for successfully prepared ligands. Failures
+            (unparseable SMILES, embedding failure) are skipped and reported.
+            Also stored on ``self.prepared_ligands``.
+        """
+        from rdkit import Chem
+        from rdkit.Chem import AllChem
+        from rdkit import RDLogger
+
+        RDLogger.DisableLog("rdApp.*")
+
+        # ---- normalise the ligand input to {name: smiles} ----
+        if isinstance(ligands, str):
+            import csv as _csv
+            lig = {}
+            with open(ligands) as fh:
+                reader = _csv.DictReader(fh)
+                ncol = next((c for c in ("name", "id", "Name", "ID")
+                             if c in reader.fieldnames), None)
+                scol = next((c for c in ("smiles", "SMILES", "Smiles")
+                             if c in reader.fieldnames), None)
+                if ncol is None or scol is None:
+                    raise ValueError(
+                        "CSV must contain name/id and smiles/SMILES columns")
+                for row in reader:
+                    lig[str(row[ncol])] = row[scol]
+        elif isinstance(ligands, dict):
+            lig = {str(k): v for k, v in ligands.items()}
+        else:
+            lig = {str(n): s for n, s in ligands}
+
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        properties = properties or {}
+
+        def _embed(name, smiles):
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return None
+            if add_hydrogens:
+                mol = Chem.AddHs(mol)
+            params = AllChem.ETKDGv3()
+            params.randomSeed = embed_seed
+            if n_conformers == 1:
+                if AllChem.EmbedMolecule(mol, params) != 0:
+                    return None
+                if optimize:
+                    try:
+                        AllChem.MMFFOptimizeMolecule(mol, maxIters=400)
+                    except Exception:
+                        pass
+            else:
+                cids = AllChem.EmbedMultipleConfs(mol, numConfs=n_conformers,
+                                                  params=params)
+                if len(cids) == 0:
+                    return None
+                if optimize:
+                    try:
+                        AllChem.MMFFOptimizeMoleculeConfs(mol, maxIters=400)
+                    except Exception:
+                        pass
+            mol.SetProp("_Name", name)
+            for key, val in properties.get(name, {}).items():
+                mol.SetProp(str(key), str(val))
+            return mol
+
+        written = {}
+        failed = []
+        combined = (Chem.SDWriter(combined_sdf) if combined_sdf else None)
+        for name, smiles in lig.items():
+            sd_path = os.path.join(output_folder, name + ".sd")
+            if not overwrite and os.path.exists(sd_path):
+                written[name] = sd_path
+                continue
+            mol = _embed(name, smiles)
+            if mol is None:
+                failed.append(name)
+                continue
+            w = Chem.SDWriter(sd_path)
+            for cid in range(mol.GetNumConformers()):
+                w.write(mol, confId=cid)
+            w.close()
+            if combined is not None:
+                for cid in range(mol.GetNumConformers()):
+                    combined.write(mol, confId=cid)
+            written[name] = sd_path
+        if combined is not None:
+            combined.close()
+
+        if failed:
+            print("prepareLigands: %d/%d ligands failed (embedding/SMILES): %s"
+                  % (len(failed), len(lig),
+                     ", ".join(failed[:10]) + (" ..." if len(failed) > 10 else "")))
+        self.prepared_ligands = written
+        return written
+
     def setUprDockDocking(
         self,
         grid_folder,
@@ -9987,6 +10321,77 @@ make sure of reading the target sequences with the function readTargetSequences(
                 jobs.append(command)
 
         return jobs
+
+    def setUpVinaDocking(self, docking_folder, ligand_files, center=None, box_size=(22, 22, 22),
+                         exhaustiveness=16, n_poses=10, box_center_selections=None,
+                         models=None, exclude_models=None):
+        """Dock ligands into each loaded model with AutoDock Vina (runs locally; Vina is fast).
+
+        Wraps :mod:`prepare_proteins.MD.vina_docking`: per model it writes a receptor PDBQT
+        (Open Babel), prepares each ligand PDBQT (meeko ``mk_prepare_ligand``), and runs Vina.
+
+        Parameters
+        ==========
+        docking_folder : str
+            Output folder; per-model subfolders hold the receptor/ligand PDBQT and poses.
+        ligand_files : str or list[str]
+            Ligand file(s) in SDF/MOL2/PDB.
+        center : (x,y,z) or dict {model: (x,y,z)}, optional
+            Search-box center. Omit and pass ``box_center_selections`` to derive it per model.
+        box_size : (x,y,z)
+            Search-box dimensions in Angstrom.
+        box_center_selections : list[(chain_id, residue_id, atom_name)], optional
+            If given, the box center is the geometric center of these atoms (``atom_name=None``
+            selects the whole residue) -- e.g. the catalytic residues of the active site.
+        exhaustiveness, n_poses : int
+            Vina search effort and number of poses to keep.
+
+        Returns
+        =======
+        dict : ``{model: {ligand_name: {'scores': [...], 'poses_pdbqt': path, ...}}}``.
+
+        Note
+        ====
+        Vina's scoring under-weights strong salt-bridge electrostatics, so highly-charged
+        ligands may dock in an extended rather than compact salt-bridged pose; focus the box
+        and/or refine the top pose with MD when a specific reactive conformation is required.
+        """
+        from .MD.vina_docking import dock as _vina_dock, box_center_from_pdb
+        from Bio.PDB import PDBIO
+
+        if isinstance(models, str):
+            models = [models]
+        if isinstance(exclude_models, str):
+            exclude_models = [exclude_models]
+        if isinstance(ligand_files, str):
+            ligand_files = [ligand_files]
+        if center is None and box_center_selections is None:
+            raise ValueError("Provide either 'center' or 'box_center_selections'.")
+        selected = [m for m in self.models_names
+                    if (models is None or m in models)
+                    and (exclude_models is None or m not in exclude_models)]
+        if not selected:
+            raise ValueError("No models selected for docking.")
+        os.makedirs(docking_folder, exist_ok=True)
+        io = PDBIO()
+        results = {}
+        for model in selected:
+            mdir = os.path.join(docking_folder, model)
+            os.makedirs(mdir, exist_ok=True)
+            receptor_pdb = os.path.join(mdir, model + ".pdb")
+            io.set_structure(self.structures[model])
+            io.save(receptor_pdb)
+            if box_center_selections is not None:
+                c = box_center_from_pdb(receptor_pdb, box_center_selections)
+            else:
+                c = center[model] if isinstance(center, dict) else center
+            results[model] = {}
+            for ligand in ligand_files:
+                lname = os.path.splitext(os.path.basename(ligand))[0]
+                results[model][lname] = _vina_dock(
+                    receptor_pdb, ligand, c, output_folder=mdir, box_size=tuple(box_size),
+                    exhaustiveness=exhaustiveness, n_poses=n_poses, name=lname)
+        return results
 
     def analyseRdockDockings(self, docking_folder,protocol="score"):
         """
@@ -25095,6 +25500,26 @@ def readSilentScores(silent_file):
     scores = scores.sort_index()
 
     return scores
+
+
+def _mol2_text_to_rdock(text):
+    """Return MOL2 text with the @<TRIPOS>MOLECULE block set to PROTEIN /
+    NO_CHARGES.
+
+    rDock 2013.1 only parses a receptor MOL2 when the molecule type is
+    ``PROTEIN`` and the charge type is ``NO_CHARGES``; obabel's
+    ``SMALL``/``GASTEIGER`` output makes it segfault. The molecule type and
+    charge type are the third and fourth lines of the @<TRIPOS>MOLECULE record.
+    """
+    lines = text.splitlines()
+    for i, l in enumerate(lines):
+        if l.strip() == "@<TRIPOS>MOLECULE":
+            if i + 3 < len(lines):
+                lines[i + 3] = "PROTEIN"
+            if i + 4 < len(lines):
+                lines[i + 4] = "NO_CHARGES"
+            break
+    return "\n".join(lines) + "\n"
 
 
 def _readPDB(name, pdb_file):
