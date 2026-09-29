@@ -179,3 +179,29 @@ def test_sdf_route_strict_mode_raises_before_the_sdf_charge_run(tmp_path, monkey
     with pytest.raises(ValueError, match="require_ligand_charges"):
         _build(tmp_path, monkeypatch, require_ligand_charges=True, ligand_sdf_files={"LIG": {"path": str(sdf)}})
     assert not (tmp_path / "parameters" / "LIG_parameters" / "LIG.mol2").exists()
+
+
+def test_rc_charge_model_reads_charges_and_does_not_warn(tmp_path, monkeypatch):
+    # cached mol2 and frcmod, prepi missing: the prepi run with charge_model='rc' reads charges, computes none
+    cmds, msgs = _build(tmp_path, monkeypatch, stage=("LIG.mol2", "LIG.frcmod"), charge_model="rc",
+                        require_ligand_charges=True)
+    assert not msgs
+
+
+def test_missing_metal_charge_is_refused():
+    with pytest.raises(ValueError, match="No charge given for metal ZN of ligand LIG"):
+        openmm_setup._metal_charge({"LIG": -1}, "ZN", "LIG")
+    with pytest.raises(ValueError, match="No charge given for metal ZN"):
+        openmm_setup._metal_charge(None, "ZN", "LIG")
+
+
+@pytest.mark.parametrize("key", ["ZN", "zn", "Zn"])
+def test_metal_charge_lookup_is_case_insensitive(key):
+    assert openmm_setup._metal_charge({"LIG": -1, key: 2}, "ZN", "LIG") == 2
+
+
+def test_metal_charge_call_site_uses_the_helper():
+    import inspect
+    src = inspect.getsource(openmm_setup.openmm_md.parameterizePDBLigands)
+    assert "metal_charge[metal_residue] = _metal_charge(charges, metal_residue, residue)" in src
+    assert "charges[metal_residue]" not in src

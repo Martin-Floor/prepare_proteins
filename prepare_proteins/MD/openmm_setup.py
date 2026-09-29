@@ -191,6 +191,17 @@ def _pdb_conect_bonds(pdb_path):
     return bonds
 
 
+def _metal_charge(charges, metal_residue, ligand_residue):
+    """Charge of a metal bound to a ligand, from `charges` (any key casing). A missing entry is an error: the
+    metal's charge must never reach metalpdb2mol2.py as None."""
+    wanted = str(metal_residue).upper()
+    for key, value in (charges or {}).items():
+        if str(key).upper() == wanted:
+            return value
+    raise ValueError(f"No charge given for metal {metal_residue} of ligand {ligand_residue}; "
+                     f"pass charges={{'{metal_residue}': <integer>}}.")
+
+
 def _missing_ligand_charge(residue, charge_method, require):
     """Called right before an antechamber command that computes charges for `residue` without a supplied net
     charge: warn that it is treated as neutral, or raise when require is True (require_ligand_charges)."""
@@ -3032,7 +3043,7 @@ class openmm_md:
                 metal_charge = {}
                 for metal_residue in metal_ligand[residue]:
                     metal_pdb[metal_residue] = '../'+metal_residue+'_parameters/'+metal_residue+'.pdb'
-                    metal_charge[metal_residue] = _get_case_insensitive(charges or {}, metal_residue)
+                    metal_charge[metal_residue] = _metal_charge(charges, metal_residue, residue)
 
             given = _get_case_insensitive(charges or {}, residue)
             charge = given if given is not None else 0
@@ -3922,7 +3933,7 @@ class ligandParameters:
                 command += '-nc '+str(ligand_charge)+' '
                 command += _antechamber_atom_type_flag(gaff_version)
                 command += '-s 2\n'
-                if not ligand_charge_given:
+                if not ligand_charge_given and charge_model != 'rc':  # rc reads charges, computes none
                     _missing_ligand_charge(self.resname, charge_model, require_ligand_charge)
                 mol2_ok = _run_command(command, self.command_log) == 0 and os.path.exists(mol2_path)
                 mol2_generated = True
@@ -3946,7 +3957,7 @@ class ligandParameters:
                 command += '-nc '+str(ligand_charge)+' '
                 command += _antechamber_atom_type_flag(gaff_version)
                 command += '-s 2\n'
-                if not ligand_charge_given and not mol2_generated:  # warned once per residue
+                if not ligand_charge_given and not mol2_generated and charge_model != 'rc':  # once per residue
                     _missing_ligand_charge(self.resname, charge_model, require_ligand_charge)
                 _run_command(command, self.command_log)
 
