@@ -206,7 +206,7 @@ def test_parameterize_pdb_ligands_writes_lipid_tleap_setup_for_membranes(tmp_pat
             command_log.append({"command": command.rstrip(), "returncode": 0})
         prmtop = parameters_folder / f"{md.pdb_name}.prmtop"
         inpcrd = parameters_folder / f"{md.pdb_name}.inpcrd"
-        prmtop.write_text("")
+        prmtop.write_text("%FLAG POINTERS\n")
         inpcrd.write_text("")
         return 0
 

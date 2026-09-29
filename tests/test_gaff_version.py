@@ -106,7 +106,7 @@ def _write_tleap(tmp_path, monkeypatch, _expect_tleap=True, **kwargs):
             self.positions = md.modeller.positions
 
     def fake_run_command(command, command_log=None):
-        (parameters_folder / f"{md.pdb_name}.prmtop").write_text("")
+        (parameters_folder / f"{md.pdb_name}.prmtop").write_text("%FLAG POINTERS\n")
         (parameters_folder / f"{md.pdb_name}.inpcrd").write_text("")
         return 0
 

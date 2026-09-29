@@ -51,7 +51,7 @@ def _build(tmp_path, monkeypatch, n_water=1000, **kwargs):
             out = [l for l in script.splitlines() if l.startswith("savepdb")][0].split()[-1]
             Path(out).write_text(_water_pdb(n_water))
         else:
-            (parameters_folder / f"{md.pdb_name}.prmtop").write_text("")
+            (parameters_folder / f"{md.pdb_name}.prmtop").write_text("%FLAG POINTERS\n")
             (parameters_folder / f"{md.pdb_name}.inpcrd").write_text("")
         return 0
 

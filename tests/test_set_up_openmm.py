@@ -1349,9 +1349,6 @@ def test_ligand_only_build_follows_gaff2_option(tmp_path, monkeypatch):
     assert scripts and all(s.splitlines()[0] == "source leaprc.gaff2" for s in scripts)
 
 
-@pytest.mark.xfail(strict=True, raises=UnboundLocalError,
-                   reason="pre-existing bug: rerunning ligand_only with existing packs hits an unset "
-                          "'skip_argument' in setUpOpenMMSimulations before the cache check is reached")
 def test_ligand_only_cached_inputs_of_other_version_are_refused(tmp_path, monkeypatch):
     _run_ligand_only_setup(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="built with gaff"):
@@ -1361,3 +1358,10 @@ def test_ligand_only_cached_inputs_of_other_version_are_refused(tmp_path, monkey
 def test_ligand_only_rejects_invalid_gaff_version(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="gaff_version"):
         _run_ligand_only_setup(tmp_path, monkeypatch, gaff_version="gaff3")
+
+
+def test_ligand_only_rerun_with_existing_packs_reuses_inputs(tmp_path, monkeypatch):
+    # Regression: a rerun where every ligand pack already exists used to hit an unset 'skip_argument'.
+    first = _run_ligand_only_setup(tmp_path, monkeypatch)
+    second = _run_ligand_only_setup(tmp_path, monkeypatch)
+    assert first and second == []  # cached prmtop/inpcrd reused, no new tleap run

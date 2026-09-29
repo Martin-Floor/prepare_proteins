@@ -47,7 +47,7 @@ def _ensure_openmm(feature: str = "OpenMM functionality") -> None:
             "Install the 'openmm' package (e.g. `pip install openmm`) to enable this functionality."
         ) from OPENMM_IMPORT_ERROR
 
-aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYM', 'CYX', 'ACE', 'NME']
+aa3 = list(aa3)+['HID', 'HIE', 'HIP', 'ASH', 'GLH', 'CYM', 'CYX', 'ACE', 'NME', 'NHE']
 ions = ['MG', 'NA', 'CL', 'CU']
 aa3 += ions
 
@@ -162,6 +162,41 @@ def _run_command(command, command_log=None):
     if entry is not None:
         entry["returncode"] = ret
     return ret
+
+
+def _pdb_conect_bonds(pdb_path):
+    """Inter- and intra-residue bonds a PDB declares in CONECT records, as frozensets of (resid, atom name)."""
+    serial_to_atom, bonds = {}, set()
+    with open(pdb_path) as handle:
+        lines = handle.readlines()
+    for line in lines:
+        if line.startswith(('ATOM', 'HETATM')):
+            try:
+                serial_to_atom[int(line[6:11])] = (int(line[22:26]), line[12:16].strip())
+            except ValueError:
+                continue
+    for line in lines:
+        if line.startswith('CONECT'):
+            fields = [line[i:i + 5] for i in range(6, len(line.rstrip('\n')), 5)]
+            serials = [int(f) for f in fields if f.strip()]
+            for partner in serials[1:]:
+                a, b = serial_to_atom.get(serials[0]), serial_to_atom.get(partner)
+                if a and b:
+                    bonds.add(frozenset((a, b)))
+    return bonds
+
+
+def _check_tleap_output(returncode, prmtop_path, tleap_input):
+    """Raise when tleap failed or wrote no usable topology (tleap can exit 0 after a fatal error)."""
+    ok = returncode == 0 and os.path.exists(prmtop_path) and os.path.getsize(prmtop_path) > 0
+    if ok:
+        with open(prmtop_path) as handle:
+            ok = '%FLAG POINTERS' in handle.read(4096)
+    if not ok:
+        raise RuntimeError(
+            f"tleap did not produce a valid topology {prmtop_path} (exit status {returncode}); "
+            f"see the tleap output for {tleap_input} (e.g. leap.log in the working folder)."
+        )
 
 
 from .gaff_version import (  # noqa: E402  (shared with _protein_models, which must not need OpenMM)
@@ -2340,6 +2375,9 @@ class openmm_md:
             for i,residue in enumerate(chain.residues()):
 
                 res_tuple = (chain.id, int(residue.id))
+                if residue.name == 'NH2':
+                    # OpenMM's PDB reader renames the Amber C-terminal amide cap NHE to NH2; ff14SB knows NHE.
+                    residue.name = 'NHE'
                 if residue_names and res_tuple in residue_names:
                     residue.name = residue_names[res_tuple]
 
@@ -3611,9 +3649,17 @@ class openmm_md:
                     renum_chain, renum_res = saved_to_renum.get((saved_chain, saved_res), (saved_chain, saved_res))
                     return renum_chain, renum_res, atom_name
 
+                conect_bonds = _pdb_conect_bonds(renum_pdb)
                 for bond in add_bonds:
                     atom1 = _locate_atom(bond[0])
                     atom2 = _locate_atom(bond[1])
+                    key = frozenset(((atom1[1], atom1[2]), (atom2[1], atom2[2])))
+                    if key in conect_bonds:
+                        # tleap already creates this bond from the CONECT record; a second `bond` command
+                        # makes it fail ("1-4: cannot add bond").
+                        print(f'Bond {atom1[1]}.{atom1[2]}-{atom2[1]}.{atom2[2]} is already a CONECT record; '
+                              'not adding it again.')
+                        continue
                     tlf.write(
                         f'bond mol.{atom1[1]}.{atom1[2]} '
                         f'mol.{atom2[1]}.{atom2[2]}\n'
@@ -3641,11 +3687,16 @@ class openmm_md:
                 tlf.write('savepdb mol '+parameters_folder+'/'+self.pdb_name+'_amber.pdb\n')
 
             tlf.write('saveamberparm mol '+parameters_folder+'/'+self.pdb_name+'.prmtop '+parameters_folder+'/'+self.pdb_name+'.inpcrd\n')
+            tlf.write('quit\n')
 
         if salt_concentration is not None:
             self._add_salt_to_tleap_input(parameters_folder, salt_concentration)
 
-        _run_command('tleap -s -f '+parameters_folder+'/tleap.in', self.command_log)
+        prmtop_out = parameters_folder+'/'+self.pdb_name+'.prmtop'
+        if os.path.exists(prmtop_out):
+            os.remove(prmtop_out)  # so a failed run cannot leave an earlier or empty file looking valid
+        ret = _run_command('tleap -s -f '+parameters_folder+'/tleap.in', self.command_log)
+        _check_tleap_output(ret, prmtop_out, parameters_folder+'/tleap.in')
 
         # Define prmtop and inpcrd file paths
         self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
@@ -3782,7 +3833,13 @@ class ligandParameters:
         mol2_path = self.resname+'.mol2'
         mol2_generated = False
         mol2_ok = False
-        if not skip_ligand_charge_computation or overwrite:
+        # A staged prepi and frcmod are what tleap loads; generating a mol2 would only repeat the charge
+        # calculation, and its result would be unused.
+        staged_prepi_and_frcmod = (not overwrite and os.path.exists(self.resname+'.prepi')
+                                   and os.path.exists(self.resname+'.frcmod'))
+        if staged_prepi_and_frcmod:
+            pass
+        elif not skip_ligand_charge_computation or overwrite:
             if not os.path.exists(mol2_path) or overwrite:
                 command = 'antechamber '
                 command += '-i '+self.resname+'_renum.pdb '

@@ -15620,14 +15620,15 @@ make sure of reading the target sequences with the function readTargetSequences(
                         "Disable skip_preparation or provide pre-generated packs."
                     )
 
-                if missing_packs and not skip_preparation:
-                    external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
-                    skip_for_param = set(skip_ligands_upper)
-                    if ligand_only_selector != ALL_LIGANDS:
-                        skip_for_param.update(
-                            lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
-                        )
-                    skip_argument = list(skip_for_param) if skip_for_param else None
+                # Needed whether or not packs are missing: a rerun with every pack present still prepares the
+                # model below (existing files are reused), so these must always be defined.
+                external_params = metal_parameters if metal_parameters else resolved_ligand_pack_root
+                skip_for_param = set(skip_ligands_upper)
+                if ligand_only_selector != ALL_LIGANDS:
+                    skip_for_param.update(
+                        lig.upper() for lig in model_ligands if lig.upper() not in selected_ligands_set
+                    )
+                skip_argument = list(skip_for_param) if skip_for_param else None
                 resolved_solvatebox_buffer = _resolve_model_option(solvatebox_buffer, model, default=12.0)
                 resolved_mcpb_site = _resolve_mcpb_config_option(mcpb_site, model)
                 resolved_mcpb_config = _resolve_mcpb_config_option(mcpb_config, model)
