@@ -191,6 +191,16 @@ def _pdb_conect_bonds(pdb_path):
     return bonds
 
 
+def _missing_ligand_charge(residue, charge_method, require):
+    """Called right before an antechamber command that computes charges for `residue` without a supplied net
+    charge: warn that it is treated as neutral, or raise when require is True (require_ligand_charges)."""
+    message = (f"No net charge given for ligand {residue}; its {charge_method} charges are computed for a NEUTRAL "
+               f"molecule. Pass charges={{'{residue}': <integer>}} if it is charged.")
+    if require:
+        raise ValueError(message + " (require_ligand_charges=True)")
+    warnings.warn(message, UserWarning)
+
+
 def _check_tleap_output(returncode, prmtop_path, tleap_input):
     """Raise when tleap failed or wrote no usable topology (tleap can exit 0 after a fatal error)."""
     ok = returncode == 0 and os.path.exists(prmtop_path) and os.path.getsize(prmtop_path) > 0
@@ -2039,6 +2049,14 @@ class openmm_md:
         add_counterions=True (not add_counterionsRand) and no membrane_system.
         """
         _check_gaff_version(gaff_version)
+        if charges:
+            normalized_charges = {}
+            for key, value in charges.items():
+                upper = str(key).upper()
+                if upper in normalized_charges and normalized_charges[upper] != value:
+                    raise ValueError(f"charges gives different values for {upper!r} under keys differing only in case.")
+                normalized_charges[upper] = value
+            charges = normalized_charges
         if salt_concentration is not None:
             if not isinstance(salt_concentration, (int, float)) or isinstance(salt_concentration, bool) \
                     or salt_concentration <= 0:
@@ -2962,6 +2980,8 @@ class openmm_md:
                 export_ffxml_targets = {str(export_per_residue_ffxml).strip().upper()}
 
         # Create parameters for each molecule
+        charge_given_residues = set()
+
         def _convert_staged_mol2(residue_name, ligand_charge, skip_charge_computation=False):
             res_upper = residue_name.upper()
             if res_upper not in mol2_conversion_targets:
@@ -2976,6 +2996,8 @@ class openmm_md:
             if os.path.exists(temp_output):
                 os.remove(temp_output)
             charge_value = ligand_charge if ligand_charge is not None else 0
+            if residue_name.upper() not in charge_given_residues:
+                _missing_ligand_charge(res_upper, 'bcc', require_ligand_charges)
             command = (
                 'antechamber '
                 f'-i {shlex.quote(mol2_path)} '
@@ -3010,10 +3032,12 @@ class openmm_md:
                 metal_charge = {}
                 for metal_residue in metal_ligand[residue]:
                     metal_pdb[metal_residue] = '../'+metal_residue+'_parameters/'+metal_residue+'.pdb'
-                    metal_charge[metal_residue] = charges[metal_residue]
+                    metal_charge[metal_residue] = _get_case_insensitive(charges or {}, metal_residue)
 
             given = _get_case_insensitive(charges or {}, residue)
             charge = given if given is not None else 0
+            if given is not None:
+                charge_given_residues.add(residue.upper())
 
             sdf_entry = _get_case_insensitive(ligand_sdf_files or {}, residue)
             if sdf_entry:
@@ -3028,6 +3052,8 @@ class openmm_md:
                 staged_mol2 = os.path.join(par_folder[residue], f"{residue}.mol2")
                 if not os.path.exists(staged_mol2) or overwrite:
                     charge_flag = 'rc' if skip_ligand_charge_computation else charge_method_override
+                    if charge_flag != 'rc' and given is None:
+                        _missing_ligand_charge(residue, charge_flag, require_ligand_charges)
                     command = (
                         'antechamber '
                         f'-i {shlex.quote(staged_sdf)} '
@@ -3056,18 +3082,6 @@ class openmm_md:
             if residue in skip_parameterization_residues:
                 continue
 
-            # A ligand whose charges are computed here needs its net charge; without one it used to be treated as
-            # neutral silently. Warn (or raise with require_ligand_charges=True) only when charges are computed.
-            reuses_staged = (build_full_system and not export_per_residue_ffxml and not use_mcpb and not overwrite
-                             and os.path.exists(os.path.join(par_folder[residue], f'{residue}.prepi'))
-                             and os.path.exists(os.path.join(par_folder[residue], f'{residue}.frcmod')))
-            if given is None and not skip_ligand_charge_computation and not reuses_staged:
-                message = (f"No net charge given for ligand {residue}; its AM1-BCC charges are computed for a "
-                           f"NEUTRAL molecule. Pass charges={{'{residue}': <integer>}} if it is charged.")
-                if require_ligand_charges:
-                    raise ValueError(message + " (require_ligand_charges=True)")
-                warnings.warn(message, UserWarning)
-
             _convert_staged_mol2(residue, charge, skip_ligand_charge_computation)
 
             if metal_parameters and residue in parameters_folders:
@@ -3085,7 +3099,9 @@ class openmm_md:
                                        skip_ligand_charge_computation=skip_ligand_charge_computation,
                                        run_acdoctor=run_acdoctor, gaff_version=gaff_version,
                                        reuse_staged_prepi=(build_full_system and not export_per_residue_ffxml
-                                                           and not use_mcpb))
+                                                           and not use_mcpb),
+                                       ligand_charge_given=given is not None,
+                                       require_ligand_charge=require_ligand_charges)
             os.chdir('../'*len(par_folder[residue].split('/')))
 
         # Copy newly generated parameters to the root folder so they can be reused directly.
@@ -3834,7 +3850,7 @@ class ligandParameters:
 
     def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False,
                            skip_ligand_charge_computation=False, run_acdoctor=True, gaff_version="gaff",
-                           reuse_staged_prepi=False):
+                           reuse_staged_prepi=False, ligand_charge_given=True, require_ligand_charge=False):
         _check_gaff_version(gaff_version)
 
         # Parameter files record the GAFF version that made them, so a reused mol2/frcmod from the
@@ -3906,6 +3922,8 @@ class ligandParameters:
                 command += '-nc '+str(ligand_charge)+' '
                 command += _antechamber_atom_type_flag(gaff_version)
                 command += '-s 2\n'
+                if not ligand_charge_given:
+                    _missing_ligand_charge(self.resname, charge_model, require_ligand_charge)
                 mol2_ok = _run_command(command, self.command_log) == 0 and os.path.exists(mol2_path)
                 mol2_generated = True
         elif not os.path.exists(mol2_path):
@@ -3928,6 +3946,8 @@ class ligandParameters:
                 command += '-nc '+str(ligand_charge)+' '
                 command += _antechamber_atom_type_flag(gaff_version)
                 command += '-s 2\n'
+                if not ligand_charge_given and not mol2_generated:  # warned once per residue
+                    _missing_ligand_charge(self.resname, charge_model, require_ligand_charge)
                 _run_command(command, self.command_log)
 
         # Run parmchk to check which forcefield parameters will be used
