@@ -261,3 +261,16 @@ def test_supplied_pair_recorded_as_other_version_is_refused(tmp_path, monkeypatc
     mol2, frcmod = _supplied_pair(tmp_path, version="gaff")
     with pytest.raises(ValueError, match="recorded as gaff"):
         _write_tleap(tmp_path, monkeypatch, gaff_version="gaff2", extra_mol2=mol2, extra_frcmod=frcmod)
+
+
+def test_supplied_pair_provenance_is_carried_to_the_exported_copies(tmp_path, monkeypatch):
+    mol2, frcmod = _supplied_pair(tmp_path, version="gaff2")
+    _write_tleap(tmp_path, monkeypatch, gaff_version="gaff2", extra_mol2=mol2, extra_frcmod=frcmod)
+    root_marker = tmp_path / "parameters" / "LIG.gaff_version"
+    assert root_marker.read_text() == "gaff2\n"
+    # Reusing the exported copies under the default version is refused, not silently accepted.
+    exported = {"LIG": str(tmp_path / "parameters" / "LIG.mol2")}, {"LIG": str(tmp_path / "parameters" / "LIG.frcmod")}
+    reuse = tmp_path / "reuse"
+    reuse.mkdir()
+    with pytest.raises(ValueError, match="recorded as gaff2"):
+        _write_tleap(reuse, monkeypatch, extra_mol2=exported[0], extra_frcmod=exported[1])

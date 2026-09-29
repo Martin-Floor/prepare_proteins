@@ -2857,6 +2857,16 @@ class openmm_md:
                 warnings.warn(
                     f"Supplied mol2/frcmod for {residue} are used as given; their GAFF version is not "
                     f"recorded and is assumed to match gaff_version={gaff_version!r}.", RuntimeWarning)
+            # Staged and exported copies of the supplied pair carry its provenance, known or unknown.
+            copy_dirs = [parameters_folder] + ([par_folder[residue]] if residue in par_folder else [])
+            for copy_dir in copy_dirs:
+                copy_marker = os.path.join(copy_dir, f"{residue}.gaff_version")
+                if recorded_version is not None:
+                    os.makedirs(copy_dir, exist_ok=True)
+                    with open(copy_marker, "w") as handle:
+                        handle.write(recorded_version + "\n")
+                elif os.path.exists(copy_marker):
+                    os.remove(copy_marker)
         if ffxml_converted:
             skip_parameterization_residues |= ffxml_converted
 
