@@ -164,6 +164,31 @@ def _run_command(command, command_log=None):
     return ret
 
 
+_GAFF_VERSIONS = ("gaff", "gaff2")
+
+
+def _check_gaff_version(gaff_version):
+    """Validate a GAFF version name ('gaff' or 'gaff2') and return it."""
+    if gaff_version not in _GAFF_VERSIONS:
+        raise ValueError(f"gaff_version must be one of {_GAFF_VERSIONS}, got {gaff_version!r}.")
+    return gaff_version
+
+
+def _gaff_leaprc(gaff_version):
+    """tleap force-field file for the GAFF version."""
+    return "leaprc.gaff2" if _check_gaff_version(gaff_version) == "gaff2" else "leaprc.gaff"
+
+
+def _antechamber_atom_type_flag(gaff_version):
+    """antechamber atom-type option; empty for GAFF, keeping the default commands unchanged."""
+    return "-at gaff2 " if _check_gaff_version(gaff_version) == "gaff2" else ""
+
+
+def _parmchk2_version_flag(gaff_version):
+    """parmchk2 parameter-set option; empty for GAFF, keeping the default commands unchanged."""
+    return "-s 2 " if _check_gaff_version(gaff_version) == "gaff2" else ""
+
+
 def _normalize_residue_id(value):
     """Return a residue identifier preserving integers when possible."""
     if value is None:
@@ -1962,7 +1987,14 @@ class openmm_md:
                                ligand_sdf_files=None, export_per_residue_ffxml=False,
                                run_acdoctor=True,
                                ligand_xml_files=None, solvatebox_buffer=12.0, solvatebox_iso=False,
-                               mcpb_config=None, mcpb_site=None, membrane_system=None):
+                               mcpb_config=None, mcpb_site=None, membrane_system=None, gaff_version="gaff"):
+        """Parameterize non-standard residues with AmberTools and build the Amber system with tleap.
+
+        gaff_version: 'gaff' (default) or 'gaff2'. Selects the GAFF version used to type and
+        parameterize non-standard residues: antechamber atom types (-at), parmchk2 parameter set (-s)
+        and the leaprc sourced by tleap. MCPB.py fragment scripts are not affected.
+        """
+        _check_gaff_version(gaff_version)
 
         def _changeGaussianCPUS(gaussian_com_file, cpus):
             tmp = open('file.tmp', 'w')
@@ -2834,6 +2866,7 @@ class openmm_md:
                 '-c bcc '
                 f'-nc {charge_value} '
                 f'-rn {res_upper} '
+                f'{_antechamber_atom_type_flag(gaff_version)}'
                 '-s 2 '
                 '-pf y\n'
             )
@@ -2888,6 +2921,7 @@ class openmm_md:
                         f'-c {charge_flag} '
                         f'-nc {charge} '
                         f'-rn {residue} '
+                        f'{_antechamber_atom_type_flag(gaff_version)}'
                         '-s 2\n'
                     )
                     ret = _run_command(command, self.command_log)
@@ -2920,7 +2954,7 @@ class openmm_md:
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
                                        metal_charge=metal_charge,charge_model=charge_model,
                                        skip_ligand_charge_computation=skip_ligand_charge_computation,
-                                       run_acdoctor=run_acdoctor)
+                                       run_acdoctor=run_acdoctor, gaff_version=gaff_version)
             os.chdir('../'*len(par_folder[residue].split('/')))
 
         # Copy newly generated parameters to the root folder so they can be reused directly.
@@ -3061,7 +3095,7 @@ class openmm_md:
                 tlin = os.path.join(parameters_folder, f"{residue}_ffxml.leap")
                 with open(tlin, "w") as tl:
                     tl.write("source leaprc.protein.ff14SB\n")
-                    tl.write("source leaprc.gaff\n")
+                    tl.write(f"source {_gaff_leaprc(gaff_version)}\n")
                     tl.write(f'loadamberparams "{frcmod_candidates[0]}"\n')
                     tl.write(f'{residue} = loadmol2 "{mol2_candidates[0]}"\n')
                     tl.write(f'saveamberparm {residue} "{tmp_prmtop}" "{tmp_inpcrd}"\n')
@@ -3328,7 +3362,7 @@ class openmm_md:
         with open(parameters_folder+'/tleap.in', 'w') as tlf:
             mol2_loaded_residues = set()
             tlf.write('source leaprc.protein.ff14SB\n')
-            tlf.write('source leaprc.gaff\n')
+            tlf.write(f'source {_gaff_leaprc(gaff_version)}\n')
             tlf.write('source leaprc.water.tip3p\n')
             if membrane_system:
                 for tleap_source in membrane_system["tleap_sources"]:
@@ -3603,7 +3637,9 @@ class ligandParameters:
             raise ValueError('A PDB with a single residue must be given for parameterization!')
 
     def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False,
-                           skip_ligand_charge_computation=False, run_acdoctor=True):
+                           skip_ligand_charge_computation=False, run_acdoctor=True, gaff_version="gaff"):
+        _check_gaff_version(gaff_version)
+
         def _run_acdoctor_on_mol2(mol2_file):
             marker_path = f".ffxml_generated_{self.resname.lower()}"
             if os.path.exists(marker_path) or os.path.exists(os.path.join(os.getcwd(), marker_path)):
@@ -3645,6 +3681,7 @@ class ligandParameters:
                 command += '-pf y '
                 command += '-c '+charge_model+' '
                 command += '-nc '+str(ligand_charge)+' '
+                command += _antechamber_atom_type_flag(gaff_version)
                 command += '-s 2\n'
                 _run_command(command, self.command_log)
                 mol2_generated = True
@@ -3666,6 +3703,7 @@ class ligandParameters:
                 command += '-pf y '
                 command += '-c '+charge_model+' '
                 command += '-nc '+str(ligand_charge)+' '
+                command += _antechamber_atom_type_flag(gaff_version)
                 command += '-s 2\n'
                 _run_command(command, self.command_log)
 
@@ -3678,6 +3716,7 @@ class ligandParameters:
             command  = 'parmchk2 '
             command += '-i '+mol2_path+' '
             command += '-o '+frcmod_path+' '
+            command += _parmchk2_version_flag(gaff_version)
             command += '-f mol2\n'
             _run_command(command, self.command_log)
 
