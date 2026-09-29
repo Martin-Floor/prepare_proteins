@@ -879,6 +879,7 @@ from . import MD, _atom_selectors, alignment, rosettaScripts
 from ._resources import module_available, resource_listdir, resource_path, resource_stream
 from .analysis import find_neighbours_in_pdb
 from .MD.parameterization import get_backend
+from .MD import gaff_version as _gaff_version_helpers
 from .MD.parameterization.utils import DEFAULT_PARAMETERIZATION_SKIP_RESIDUES
 
 
@@ -15395,6 +15396,9 @@ make sure of reading the target sequences with the function readTargetSequences(
                 return str(metadata.get("state", "")).strip().lower() == "submitted"
             return False
 
+        # The ligand-only build follows the same GAFF version as the main parameterization.
+        ligand_only_gaff_version = _gaff_version_helpers._check_gaff_version(backend_options.get("gaff_version", "gaff"))
+
         def _ensure_ligand_only_inputs(model_name, ligand_name, packs, allow_generate):
             ligand_key = ligand_name.upper()
             base_tag = f"{model_name}_{ligand_key}"
@@ -15404,6 +15408,17 @@ make sure of reading the target sequences with the function readTargetSequences(
             existing_inpcrd = next((candidate for candidate in inpcrd_candidates if os.path.exists(candidate)), None)
             model_ligand_pdb = os.path.join(ligand_parameters_folder, f"{base_tag}.pdb")
             if os.path.exists(prmtop_path) and existing_inpcrd:
+                cached_tleap = os.path.join(ligand_parameters_folder, f"{base_tag}_ligand_only.leap")
+                built_version = _gaff_version_helpers._tleap_gaff_version(cached_tleap)
+                if built_version is not None and built_version != ligand_only_gaff_version:
+                    raise ValueError(
+                        f"Ligand-only inputs {prmtop_path} were built with {built_version}, but "
+                        f"gaff_version={ligand_only_gaff_version!r} was requested; remove them to rebuild."
+                    )
+                if built_version is None and ligand_only_gaff_version != "gaff":
+                    warnings.warn(
+                        f"Reusing ligand-only inputs {prmtop_path}, whose GAFF version is not recorded, "
+                        f"with gaff_version={ligand_only_gaff_version!r}.", RuntimeWarning)
                 return prmtop_path, existing_inpcrd
 
             if not allow_generate:
@@ -15491,7 +15506,7 @@ make sure of reading the target sequences with the function readTargetSequences(
 
             tleap_script = os.path.join(ligand_parameters_folder, f"{base_tag}_ligand_only.leap")
             with open(tleap_script, 'w') as tlf:
-                tlf.write('source leaprc.gaff\n')
+                tlf.write(f'source {_gaff_version_helpers._gaff_leaprc(ligand_only_gaff_version)}\n')
                 tlf.write('source leaprc.water.tip3p\n')
                 for frcmod in frcmod_paths:
                     tlf.write(f'loadamberparams "{_posix_path(frcmod)}"\n')

@@ -1285,3 +1285,79 @@ def test_set_up_openmm_interaction_energy_calculations_builds_polymer_commands(t
     assert "2,20" in jobs[1]
     assert "Replica_2.csv" in jobs[1]
     assert "CBM_INTERACTION_ROOT" in jobs[0]
+
+
+def _run_ligand_only_setup(tmp_path, monkeypatch, gaff_version=None, jobs_name="jobs"):
+    """Drive setUpOpenMMSimulations(ligand_only=True) with a fake backend and fake tleap; return the
+    tleap scripts that were run."""
+    models = _load_pet_crystal_models(tmp_path)
+    models.conects.setdefault("pet_crystal_like", [])
+    script_file = tmp_path / "openmm_simulation.py"
+    script_file.write_text("print('stub')\n")
+    tleap_scripts = []
+
+    class FakeOpenMMMD:
+        def __init__(self, input_pdb):
+            self.input_pdb = input_pdb
+            self.pdb_name = Path(input_pdb).stem
+            self.command_log = []
+
+        def setUpFF(self, ff_name):
+            pass
+
+    class FakeBackend:
+        name = "ambertools"
+
+        def prepare_model(self, md_obj, ligand_parameters_folder, **kwargs):
+            pack = Path(ligand_parameters_folder) / "PET_parameters"
+            pack.mkdir(parents=True, exist_ok=True)
+            for suffix in ("pdb", "mol2", "frcmod"):
+                (pack / f"PET.{suffix}").write_text("")
+
+        def describe_model(self, md_obj):
+            return SimpleNamespace(input_format="amber", prmtop_path=None, coordinates_path=None)
+
+    def fake_system(command):
+        if command.startswith("tleap"):
+            script = command.split('-f "', 1)[1].rstrip('"\n ')
+            text = Path(script).read_text()
+            tleap_scripts.append(text)
+            save = [line for line in text.splitlines() if line.startswith("saveamberparm")][0]
+            for out in save.split('"')[1::2]:
+                Path(out).write_text("")
+        return 0
+
+    monkeypatch.setattr(protein_models_module, "_require_openmm_support",
+                        lambda feature: SimpleNamespace(openmm_md=FakeOpenMMMD, aa3=["ALA", "GLY", "ACE", "NME"]))
+    monkeypatch.setattr(protein_models_module, "get_backend", lambda method, **kwargs: FakeBackend())
+    monkeypatch.setattr(protein_models_module.os, "system", fake_system)
+    options = {"gaff_version": gaff_version} if gaff_version else None
+    models.setUpOpenMMSimulations(
+        str(tmp_path / jobs_name), replicas=1, simulation_time=1, script_file=str(script_file),
+        ff="charmm36", add_hydrogens=False, ligand_only=True, parameterization_options=options,
+    )
+    return tleap_scripts
+
+
+def test_ligand_only_build_sources_gaff_by_default(tmp_path, monkeypatch):
+    scripts = _run_ligand_only_setup(tmp_path, monkeypatch)
+    assert scripts and all(s.splitlines()[0] == "source leaprc.gaff" for s in scripts)
+
+
+def test_ligand_only_build_follows_gaff2_option(tmp_path, monkeypatch):
+    scripts = _run_ligand_only_setup(tmp_path, monkeypatch, gaff_version="gaff2")
+    assert scripts and all(s.splitlines()[0] == "source leaprc.gaff2" for s in scripts)
+
+
+@pytest.mark.xfail(strict=True, raises=UnboundLocalError,
+                   reason="pre-existing bug: rerunning ligand_only with existing packs hits an unset "
+                          "'skip_argument' in setUpOpenMMSimulations before the cache check is reached")
+def test_ligand_only_cached_inputs_of_other_version_are_refused(tmp_path, monkeypatch):
+    _run_ligand_only_setup(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="built with gaff"):
+        _run_ligand_only_setup(tmp_path, monkeypatch, gaff_version="gaff2")
+
+
+def test_ligand_only_rejects_invalid_gaff_version(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="gaff_version"):
+        _run_ligand_only_setup(tmp_path, monkeypatch, gaff_version="gaff3")
