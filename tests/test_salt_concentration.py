@@ -110,3 +110,19 @@ def test_ambertools_backend_forwards_salt_concentration(monkeypatch):
     monkeypatch.setattr(backend, "describe_model", lambda md: None)
     backend.prepare_model(FakeMD(), "params")
     assert received == {"gaff_version": "gaff2", "salt_concentration": 0.15}
+
+
+@pytest.mark.parametrize("first,second", [(None, 0.15), (0.15, None), (0.15, 0.10)])
+def test_reusing_a_system_with_other_salt_is_refused(tmp_path, monkeypatch, first, second):
+    kw1 = {} if first is None else {"salt_concentration": first}
+    _build(tmp_path, monkeypatch, n_water=3000, **kw1)
+    kw2 = {} if second is None else {"salt_concentration": second}
+    with pytest.raises(ValueError, match="salt_concentration"):
+        _build(tmp_path, monkeypatch, n_water=3000, **kw2)
+
+
+@pytest.mark.parametrize("salt", [None, 0.15])
+def test_reusing_a_system_with_the_same_salt_is_accepted(tmp_path, monkeypatch, salt):
+    kw = {} if salt is None else {"salt_concentration": salt}
+    _build(tmp_path, monkeypatch, n_water=3000, **kw)
+    _build(tmp_path, monkeypatch, n_water=3000, **kw)

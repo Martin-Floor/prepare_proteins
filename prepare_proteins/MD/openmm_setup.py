@@ -165,24 +165,29 @@ def _run_command(command, command_log=None):
 
 
 def _pdb_conect_bonds(pdb_path):
-    """Inter- and intra-residue bonds a PDB declares in CONECT records, as frozensets of (resid, atom name)."""
+    """Bonds a PDB declares in CONECT records, as frozensets of (residue number string, atom name).
+
+    Serials are matched as the raw fixed-width strings, so any encoding a writer uses beyond 99999 (hex,
+    hybrid-36) is handled as long as ATOM/HETATM and CONECT use the same one. A serial that overflows its
+    5-column field is refused rather than misread."""
     serial_to_atom, bonds = {}, set()
     with open(pdb_path) as handle:
         lines = handle.readlines()
     for line in lines:
         if line.startswith(('ATOM', 'HETATM')):
-            try:
-                serial_to_atom[int(line[6:11])] = (int(line[22:26]), line[12:16].strip())
-            except ValueError:
-                continue
+            if len(line) > 11 and line[11] not in (' ', '\n'):
+                raise ValueError(f"Unsupported atom serial format (overflows columns 7-11) in {pdb_path}: {line.rstrip()}")
+            serial_to_atom[line[6:11].strip()] = (line[22:26].strip(), line[12:16].strip())
     for line in lines:
         if line.startswith('CONECT'):
-            fields = [line[i:i + 5] for i in range(6, len(line.rstrip('\n')), 5)]
-            serials = [int(f) for f in fields if f.strip()]
-            for partner in serials[1:]:
-                a, b = serial_to_atom.get(serials[0]), serial_to_atom.get(partner)
-                if a and b:
-                    bonds.add(frozenset((a, b)))
+            body = line.rstrip('\n')
+            fields = [body[i:i + 5].strip() for i in range(6, len(body), 5)]
+            fields = [f for f in fields if f]
+            for partner in fields[1:]:
+                a, b = serial_to_atom.get(fields[0]), serial_to_atom.get(partner)
+                if a is None or b is None:
+                    raise ValueError(f"CONECT record names an unknown atom serial in {pdb_path}: {body}")
+                bonds.add(frozenset((a, b)))
     return bonds
 
 
@@ -2211,6 +2216,17 @@ class openmm_md:
                     warnings.warn(
                         f"Reusing the existing system in {parameters_folder}, whose GAFF version is not "
                         f"recorded, with gaff_version={gaff_version!r}.", RuntimeWarning)
+                salt_record = os.path.join(parameters_folder, self.pdb_name + '_salt.json')
+                built_salt = None
+                if os.path.exists(salt_record):
+                    with open(salt_record) as handle:
+                        built_salt = json.load(handle).get('salt_concentration_M')
+                if built_salt != salt_concentration:
+                    raise ValueError(
+                        f"The existing system in {parameters_folder} was built with salt_concentration="
+                        f"{built_salt!r}, but {salt_concentration!r} was requested; pass "
+                        "regenerate_amber_files=True and overwrite=True to rebuild it."
+                    )
 
                 # Set topology and positions to amber's
                 self.prmtop_file = parameters_folder+'/'+self.pdb_name+'.prmtop'
@@ -3040,7 +3056,9 @@ class openmm_md:
             lig_par.getAmberParameters(ligand_charge=charge, overwrite=overwrite,
                                        metal_charge=metal_charge,charge_model=charge_model,
                                        skip_ligand_charge_computation=skip_ligand_charge_computation,
-                                       run_acdoctor=run_acdoctor, gaff_version=gaff_version)
+                                       run_acdoctor=run_acdoctor, gaff_version=gaff_version,
+                                       reuse_staged_prepi=(build_full_system and not export_per_residue_ffxml
+                                                           and not use_mcpb))
             os.chdir('../'*len(par_folder[residue].split('/')))
 
         # Copy newly generated parameters to the root folder so they can be reused directly.
@@ -3649,11 +3667,13 @@ class openmm_md:
                     renum_chain, renum_res = saved_to_renum.get((saved_chain, saved_res), (saved_chain, saved_res))
                     return renum_chain, renum_res, atom_name
 
-                conect_bonds = _pdb_conect_bonds(renum_pdb)
+                # tleap loads renum_pdb unless the MCPB route supplies its own PDB; only then can the CONECT
+                # records of renum_pdb stand for the bonds tleap creates.
+                conect_bonds = set() if use_mcpb else _pdb_conect_bonds(renum_pdb)
                 for bond in add_bonds:
                     atom1 = _locate_atom(bond[0])
                     atom2 = _locate_atom(bond[1])
-                    key = frozenset(((atom1[1], atom1[2]), (atom2[1], atom2[2])))
+                    key = frozenset(((str(atom1[1]), atom1[2]), (str(atom2[1]), atom2[2])))
                     if key in conect_bonds:
                         # tleap already creates this bond from the CONECT record; a second `bond` command
                         # makes it fail ("1-4: cannot add bond").
@@ -3780,7 +3800,8 @@ class ligandParameters:
             raise ValueError('A PDB with a single residue must be given for parameterization!')
 
     def getAmberParameters(self, charge_model='bcc', ligand_charge=0, metal_charge=None, overwrite=False,
-                           skip_ligand_charge_computation=False, run_acdoctor=True, gaff_version="gaff"):
+                           skip_ligand_charge_computation=False, run_acdoctor=True, gaff_version="gaff",
+                           reuse_staged_prepi=False):
         _check_gaff_version(gaff_version)
 
         # Parameter files record the GAFF version that made them, so a reused mol2/frcmod from the
@@ -3835,7 +3856,8 @@ class ligandParameters:
         mol2_ok = False
         # A staged prepi and frcmod are what tleap loads; generating a mol2 would only repeat the charge
         # calculation, and its result would be unused.
-        staged_prepi_and_frcmod = (not overwrite and os.path.exists(self.resname+'.prepi')
+        # Only on request (reuse_staged_prepi): FFXML export, MCPB staging and ligand-only builds read the mol2.
+        staged_prepi_and_frcmod = (reuse_staged_prepi and not overwrite and os.path.exists(self.resname+'.prepi')
                                    and os.path.exists(self.resname+'.frcmod'))
         if staged_prepi_and_frcmod:
             pass
