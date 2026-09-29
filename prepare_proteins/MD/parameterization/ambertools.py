@@ -13,8 +13,9 @@ class AmberToolsBackend(ParameterizationBackend):
     def prepare_model(self, openmm_md, parameters_folder: str, **kwargs: Any) -> ParameterizationResult:
         kwargs.pop("verbose", None)
         # Backend options come from setUpOpenMMSimulations(parameterization_options=...).
-        if "gaff_version" in self.options:
-            kwargs.setdefault("gaff_version", self.options["gaff_version"])
+        for option in ("gaff_version", "salt_concentration"):
+            if option in self.options:
+                kwargs.setdefault(option, self.options[option])
         openmm_md.parameterizePDBLigands(parameters_folder, **kwargs)
         result = self.describe_model(openmm_md)
         mcpb_config = getattr(openmm_md, "mcpb_config", None)

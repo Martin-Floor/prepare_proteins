@@ -1973,7 +1973,8 @@ class openmm_md:
                                ligand_sdf_files=None, export_per_residue_ffxml=False,
                                run_acdoctor=True,
                                ligand_xml_files=None, solvatebox_buffer=12.0, solvatebox_iso=False,
-                               mcpb_config=None, mcpb_site=None, membrane_system=None, gaff_version="gaff"):
+                               mcpb_config=None, mcpb_site=None, membrane_system=None, gaff_version="gaff",
+                               salt_concentration=None):
         """Parameterize non-standard residues with AmberTools and build the Amber system with tleap.
 
         gaff_version: 'gaff' (default) or 'gaff2'. Selects the GAFF version used to type and
@@ -1986,8 +1987,21 @@ class openmm_md:
           - MCPB.py metal sites (mcpb_config/mcpb_site) are GAFF-only and are refused with 'gaff2'.
           - The ligand-only build in setUpOpenMMSimulations(ligand_only=...) follows
             parameterization_options['gaff_version'] too.
+
+        salt_concentration: None (default: neutralizing ions only) or a molar NaCl concentration. After
+        neutralizing, round(salt_concentration * N_water / 55.5) Na+/Cl- pairs are added with addIons2,
+        where N_water is the number of waters solvatebox placed (counted in a first tleap pass). The
+        counts are written to <pdb_name>_salt.json in parameters_folder. Needs solvate=True and
+        add_counterions=True (not add_counterionsRand) and no membrane_system.
         """
         _check_gaff_version(gaff_version)
+        if salt_concentration is not None:
+            if not isinstance(salt_concentration, (int, float)) or isinstance(salt_concentration, bool) \
+                    or salt_concentration <= 0:
+                raise ValueError("salt_concentration must be a positive number (mol/L) or None.")
+            if not solvate or not add_counterions or add_counterionsRand or membrane_system:
+                raise ValueError("salt_concentration needs solvate=True, add_counterions=True, "
+                                 "add_counterionsRand=False and no membrane_system.")
         if gaff_version == "gaff2" and (mcpb_config or mcpb_site):
             raise ValueError("gaff_version='gaff2' is not supported with MCPB.py metal sites "
                              "(mcpb_config/mcpb_site), which are parameterized with GAFF.")
@@ -3628,6 +3642,9 @@ class openmm_md:
 
             tlf.write('saveamberparm mol '+parameters_folder+'/'+self.pdb_name+'.prmtop '+parameters_folder+'/'+self.pdb_name+'.inpcrd\n')
 
+        if salt_concentration is not None:
+            self._add_salt_to_tleap_input(parameters_folder, salt_concentration)
+
         _run_command('tleap -s -f '+parameters_folder+'/tleap.in', self.command_log)
 
         # Define prmtop and inpcrd file paths
@@ -3641,6 +3658,41 @@ class openmm_md:
         self.modeller.topology = prmtop.topology
         self.modeller.positions = inpcrd.positions
         self._refresh_positions_cache()
+
+    def _add_salt_to_tleap_input(self, parameters_folder, salt_concentration):
+        """Count the waters solvatebox places (first tleap pass) and add the NaCl pairs for
+        salt_concentration after the neutralizing ions in tleap.in."""
+        tleap_path = os.path.join(parameters_folder, 'tleap.in')
+        with open(tleap_path) as handle:
+            lines = handle.read().splitlines()
+        solvate_index = next(i for i, line in enumerate(lines) if line.startswith('solvatebox '))
+        neutralize_index = max(i for i, line in enumerate(lines) if line.startswith('addIons2 mol '))
+        count_pdb = os.path.join(parameters_folder, self.pdb_name + '_salt_count.pdb')
+        count_script = os.path.join(parameters_folder, 'tleap_salt_count.in')
+        with open(count_script, 'w') as handle:
+            handle.write('\n'.join(lines[:solvate_index + 1]) + '\n')
+            handle.write(f'savepdb mol {count_pdb}\nquit\n')
+        ret = _run_command(f'tleap -s -f {count_script}', self.command_log)
+        if ret != 0 or not os.path.exists(count_pdb):
+            raise RuntimeError(f'tleap water-count pass failed ({count_script}).')
+        # One oxygen per water; counting atoms avoids residue-number wrap-around in large boxes.
+        n_water = 0
+        with open(count_pdb) as handle:
+            for line in handle:
+                if (line.startswith(('ATOM', 'HETATM')) and line[17:20].strip() in ('WAT', 'HOH')
+                        and line[12:16].strip() == 'O'):
+                    n_water += 1
+        if n_water == 0:
+            raise RuntimeError(f'No waters found in the water-count pass ({count_pdb}).')
+        n_pairs = int(round(salt_concentration * n_water / 55.5))
+        salt_lines = [f'addIons2 mol Na+ {n_pairs}', f'addIons2 mol Cl- {n_pairs}'] if n_pairs else []
+        lines[neutralize_index + 1:neutralize_index + 1] = salt_lines
+        with open(tleap_path, 'w') as handle:
+            handle.write('\n'.join(lines) + '\n')
+        with open(os.path.join(parameters_folder, self.pdb_name + '_salt.json'), 'w') as handle:
+            json.dump({'salt_concentration_M': salt_concentration, 'n_water': n_water,
+                       'nacl_pairs_added': n_pairs, 'rule': 'round(c * n_water / 55.5)'}, handle, indent=2)
+        return n_water, n_pairs
 
     def savePDB(self, output_file):
         with open(output_file, 'w') as of:
