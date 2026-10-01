@@ -707,6 +707,50 @@ def _af3_normalize_user_ccd_path(path_value):
     return normalized_path
 
 
+def _af3_chains_missing_fields(payload):
+    """Describe which protein chains of a payload lack unpairedMsa, pairedMsa or templates.
+
+    Returns "" when every protein chain sets all three (an empty string and an empty list count as set),
+    otherwise a short description naming the chains and the fields they lack.
+    """
+    missing = []
+    chains = [e["protein"] for e in (payload or {}).get("sequences", [])
+              if isinstance(e, dict) and "protein" in e]
+    if not chains:
+        return "no protein chain"
+    for chain in chains:
+        lacks = [name for name, key in (("unpairedMsa", "unpairedMsa"), ("pairedMsa", "pairedMsa"),
+                                        ("templates", "templates")) if chain.get(key) is None]
+        if lacks:
+            missing.append(f"chain {chain.get('id')}: {', '.join(lacks)}")
+    return "; ".join(missing)
+
+
+def _af3_payload_has_all_chain_fields(json_path):
+    """True when every protein chain of a written payload sets unpairedMsa, pairedMsa and templates.
+
+    AF3 only skips its search when those fields are truthy, and its featuriser requires all three to be
+    present once the pipeline is off, so this is the condition for running with --norun_data_pipeline.
+    """
+    if not json_path:
+        return False
+    try:
+        with open(json_path) as fh:
+            payload = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    return not _af3_chains_missing_fields(payload)
+
+
+# Site binds for a direct AF3 container call, matching the MN5 `bsc_alphafold` wrapper
+# (/apps/ACC/ALPHAFOLD/3.0.0/bin/bsc_alphafold). Override per call with container_binds=.
+_AF3_DEFAULT_BINDS = (
+    "/apps/ACC/CUDA/12.6:/usr/local/cuda",
+    "/apps/ACC/CUDA/12.6/targets/x86_64-linux/lib:/usr/local/nvidia/lib",
+    "/apps/ACC/ALPHAFOLD/3.0.0:/root/alphafold",
+)
+
+
 def _af3_launcher_cd_path(path_value):
     """Normalise a model directory for a launcher ``cd``, relative to the current directory."""
     normalized_path = os.path.normpath(path_value)
@@ -1491,6 +1535,8 @@ class sequenceModels:
         skip_finished=False,
         benchmark=False,
         validate=False,
+        run_data_pipeline=None,
+        container_binds=None,
     ):
         """Create AF3 job folders, per-model JSONs and sbatch commands.
 
@@ -1520,7 +1566,9 @@ class sequenceModels:
             Defaults to ``False`` (single AF3 job per model with all seeds in
             ``modelSeeds``).
         runner_name : str, optional
-            File name for the sbatch runner script expected inside each model folder.
+            Unused, kept for backward compatibility. The generated command runs inference itself (through
+            ``bsc_alphafold`` or, when the data pipeline must be off, the container directly), so no sbatch
+            runner script is created or submitted.
         ligands : optional
             Ligand specification applied to every model (unless a per-model entry
             is provided). Accepts one of the following forms:
@@ -1581,8 +1629,10 @@ class sequenceModels:
         generating or launching any scheduler command.
 
         The generated commands assume that an environment variable named
-        ``WEIGHTS`` already points to the AlphaFold 3 parameters, and that a
-        runnable ``runner`` script is available inside each per-model folder.
+        ``WEIGHTS`` already points to the AlphaFold 3 parameters. No runner
+        script is needed: the command runs inference itself. When the data
+        pipeline must be off, it also needs ``ALPHAFOLD_CONTAINER`` and
+        ``ALPHAFOLD_DATA_PATH``, both set by the ``alphafold/3.x`` module.
         The launcher ``cd`` path is normalized relative to the current working
         directory so the returned commands remain portable across mirrored
         project roots.
@@ -1593,6 +1643,33 @@ class sequenceModels:
             One multi-line command per prepared AF3 job.
         """
 
+
+        if run_data_pipeline is False:
+            # Build the payloads first (this touches no disk) and check the chains they actually carry:
+            # a per-model or per-chain mapping can cover one chain and not another, and AF3's featuriser
+            # needs unpairedMsa, pairedMsa and templates on EVERY protein chain once the pipeline is off.
+            # Checking the arguments alone would let an incomplete payload be written before the refusal.
+            _preview = self.buildAlphaFold3Payloads(
+                only_models=only_models, exclude_models=exclude_models, model_seeds=model_seeds,
+                unpack_model_seeds=unpack_model_seeds, ligands=ligands, ligand_smiles=ligand_smiles,
+                bonded_atom_pairs=bonded_atom_pairs, user_ccd=user_ccd, user_ccd_path=user_ccd_path,
+                unpaired_msa=unpaired_msa, paired_msa=paired_msa, templates=templates,
+                modifications=modifications, validate=False)
+            for _rec in _preview:
+                _bad = _af3_chains_missing_fields(_rec["payload"])
+                if _bad:
+                    raise ValueError(
+                        f"run_data_pipeline=False, but model {_rec['model']!r} would be written without "
+                        f"{_bad}: AF3's featuriser needs unpairedMsa, pairedMsa and templates on every "
+                        "protein chain once the pipeline is off. An empty string and an empty list are "
+                        "valid values for a single-sequence run."
+                    )
+
+        if run_data_pipeline and any(x is not None for x in (unpaired_msa, paired_msa, templates)):
+            raise ValueError(
+                "run_data_pipeline=True with unpaired_msa/paired_msa/templates: AF3 would search again and "
+                "overwrite the supplied fields, so the run would not have the MSA status asked for."
+            )
 
         jobs = self.writeAlphaFold3Inputs(
             job_folder,
@@ -1613,6 +1690,11 @@ class sequenceModels:
             skip_finished=skip_finished,
             validate=validate,
         )
+
+        # Default: run the pipeline unless alignments or templates were supplied for this call, in which
+        # case searching again would overwrite them. Pass run_data_pipeline explicitly to override.
+        # Whether the data pipeline runs is decided per written payload below, from the fields the
+        # payload actually carries, not from the arguments of this call.
 
         commands = []
         for job in jobs:
@@ -1637,9 +1719,47 @@ class sequenceModels:
                     f"echo \"[AF3][{job_tag}] benchmark_start utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\")\""
                 )
                 command_lines.append("AF_BENCH_START_TS=$(date +%s)")
-            command_lines.append(
-                f"bsc_alphafold {shlex.quote(relative_input_dir)} {shlex.quote(relative_output_dir)} $WEIGHTS"
-            )
+            # AF3 skips its MSA and template search only when a chain's unpairedMsa, pairedMsa or
+            # templates field is TRUTHY (src/alphafold3/data/pipeline.py, process_protein_chain).
+            # Empty strings are falsy, so a payload built for a single-sequence run still triggers a
+            # full search unless --norun_data_pipeline is passed. The bsc_alphafold wrapper takes three
+            # positional arguments and forwards no flags, so that case calls the container directly.
+            # AF3's featuriser needs unpairedMsa, pairedMsa AND templates on every protein chain when the
+            # pipeline does not run; a payload carrying only some of them would fail at inference. Read the
+            # payload that was actually written and decide from it.
+            _payload_path = job.get("path")   # recorded by writeAlphaFold3Inputs; the stem is sanitised there
+            _complete = _af3_payload_has_all_chain_fields(_payload_path)
+            if run_data_pipeline is None:
+                _pipeline_off = _complete
+            else:
+                _pipeline_off = not run_data_pipeline
+                if _pipeline_off and not _complete:
+                    raise ValueError(
+                        f"run_data_pipeline=False for model {model_name!r}, but its payload does not set "
+                        "unpairedMsa, pairedMsa and templates on every protein chain; AF3 would fail at "
+                        "featurisation. Supply all three (an empty string and an empty list are valid)."
+                    )
+            if _pipeline_off:
+                binds = (list(_AF3_DEFAULT_BINDS) if container_binds is None else list(container_binds))
+                bind_args = [shlex.quote(b) for b in binds] + [
+                    f'"$(readlink -f {shlex.quote(relative_input_dir)})":/root/af_input',
+                    f'"$(readlink -f {shlex.quote(relative_output_dir)})":/root/af_output',
+                    '"$WEIGHTS":/root/models',
+                    '"$ALPHAFOLD_DATA_PATH":/root/public_databases',
+                ]
+                command_lines.append(
+                    "singularity exec --nv "
+                    + " ".join(f"--bind {b}" for b in bind_args)
+                    + " --pwd /root/alphafold $ALPHAFOLD_CONTAINER"
+                    " python /root/alphafold/run_alphafold.py"
+                    " --input_dir=/root/af_input --output_dir=/root/af_output"
+                    " --model_dir=/root/models --db_dir=/root/public_databases"
+                    " --norun_data_pipeline"
+                )
+            else:
+                command_lines.append(
+                    f"bsc_alphafold {shlex.quote(relative_input_dir)} {shlex.quote(relative_output_dir)} $WEIGHTS"
+                )
             if benchmark:
                 command_lines.append("AF_BENCH_EXIT_CODE=$?")
                 command_lines.append("AF_BENCH_END_TS=$(date +%s)")
@@ -1650,13 +1770,506 @@ class sequenceModels:
                     f"echo \"[AF3][{job_tag}] benchmark_end utc=$(date -u +\\\"%Y-%m-%dT%H:%M:%SZ\\\") "
                     "elapsed_seconds=$AF_BENCH_ELAPSED_SEC exit_code=$AF_BENCH_EXIT_CODE\""
                 )
-            command_lines.extend([
-                f"sbatch {shlex.quote(runner_name)} {shlex.quote(relative_input_dir)}",
-                'cd "$AF3_START_DIR"',
-            ])
+            # No `sbatch <runner>` here: the call above already runs inference for this input directory.
+            # Emitting one would try to launch a script this function never creates, and could submit a
+            # duplicate job. `runner_name` is kept for backward compatibility and is unused.
+            command_lines.append('cd "$AF3_START_DIR"')
             commands.append("\n".join(command_lines) + "\n")
 
         return commands
+
+    # --- Cofolding setups brought in from the MN5 working copy, 2026-10-01 -------------------
+    # Chai-1, Protenix, RFAA and the original ESMFold setup existed only in
+    # /gpfs/projects/bsc72/mfloor/prepare_proteins_dev, which is not under version control and had
+    # diverged from this repository in both directions. They are moved here unchanged so that the
+    # repository is the single library; the AlphaFold-3 code of that copy was NOT brought over,
+    # since this repository's version is the newer one.
+    def _iter_chain_seqs(self, model_name):
+        """Yield (chain_id, sequence) for a model, handling str/dict/list."""
+        seq_obj = self.sequences[model_name]
+        if isinstance(seq_obj, str):
+            yield "A", seq_obj
+        elif isinstance(seq_obj, dict):
+            for chain_id, chain_seq in seq_obj.items():
+                if chain_seq is None:
+                    continue
+                yield str(chain_id), str(chain_seq)
+        elif isinstance(seq_obj, (list, tuple)):
+            for idx, chain_seq in enumerate(seq_obj):
+                if chain_seq is None:
+                    continue
+                yield chr(ord("A") + idx), str(chain_seq)
+        else:
+            raise TypeError(
+                f"Unsupported sequence type for model {model_name}: {type(seq_obj)}"
+            )
+    def setUpProtenixCalculation(
+        self,
+        job_folder,
+        seeds=None,
+        sample=5,
+        cycle=4,
+        step=200,
+        use_msa=False,
+        msa_dir=None,
+        use_default_params=True,
+        skip_finished=True,
+    ):
+        """
+        Set up Protenix structure prediction (ByteDance open AF3 reproduction).
+
+        Builds one JSON input per model and one shell command per model invoking
+        ``protenix predict``. Default seeds [1..20] × sample 5 → 100 poses/model.
+
+        Returned commands work with ``bsc_calculations.mn5.jobArrays(jobs,
+        program="protenix", ...)``.
+
+        Parameters
+        ==========
+        job_folder : str
+            Workspace root.
+        seeds : list[int] | None
+            Diffusion sampler seeds. Default ``list(range(1, 21))``.
+        sample : int
+            ``--sample`` per call. Default 5.
+        cycle, step : int
+            Pairformer recycle / diffusion step counts.
+        use_msa : bool
+            Whether to pass ``--use_msa True``. Requires ``msa_dir``.
+        msa_dir : str | None
+            Folder with precomputed MSAs laid out as ``<msa_dir>/<model>/<chain>/``
+            containing ``non_pairing.a3m`` (and optionally ``pairing.a3m``).
+        use_default_params : bool
+            Pass ``--use_default_params True`` (recommended).
+        skip_finished : bool
+            Wrap each command with a ``[ -f <last_cif> ] || ...`` guard.
+
+        Returns
+        =======
+        jobs : list[str]
+        """
+        import json as _json
+
+        os.makedirs(job_folder, exist_ok=True)
+        inputs_dir = os.path.join(job_folder, "inputs")
+        output_dir = os.path.join(job_folder, "output")
+        os.makedirs(inputs_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+
+        if seeds is None:
+            seeds = list(range(1, 21))
+        if not seeds:
+            raise ValueError("seeds list cannot be empty.")
+        if use_msa and not msa_dir:
+            raise ValueError("use_msa=True requires msa_dir to be provided.")
+
+        seeds_csv = ",".join(str(s) for s in seeds)
+        last_seed = seeds[-1]
+        last_sample = sample - 1
+
+        jobs = []
+        for model in self.sequences_names:
+            seq_entries = []
+            for cid, seq in self._iter_chain_seqs(model):
+                entry = {
+                    "proteinChain": {
+                        "sequence": seq.upper(),
+                        "count": 1,
+                    }
+                }
+                if use_msa:
+                    entry["proteinChain"]["msa"] = {
+                        "precomputed_msa_dir": os.path.join(msa_dir, model, cid),
+                    }
+                seq_entries.append(entry)
+            if not seq_entries:
+                raise ValueError(f"No sequences found for model {model}.")
+
+            spec = [{"sequences": seq_entries, "name": model}]
+            with open(os.path.join(inputs_dir, f"{model}.json"), "w") as fh:
+                _json.dump(spec, fh, indent=2)
+
+            last_cif = (
+                f"{output_dir}/{model}/seed_{last_seed}/predictions/"
+                f"{model}_seed_{last_seed}_sample_{last_sample}.cif"
+            )
+            cmd_parts = [
+                "protenix predict",
+                f"  --input {inputs_dir}/{model}.json",
+                f"  --out_dir {output_dir}",
+                f"  --seeds {seeds_csv}",
+                f"  --cycle {cycle} --step {step} --sample {sample}",
+                f"  --use_msa {'True' if use_msa else 'False'}",
+            ]
+            if use_default_params:
+                cmd_parts.append("  --use_default_params True")
+            cmd = " \\\n".join(cmd_parts)
+            if skip_finished:
+                cmd = f"[ -f {last_cif} ] || ({cmd})"
+            jobs.append(cmd)
+
+        return jobs
+    def setUpChai1Calculation(
+        self,
+        job_folder,
+        seeds=None,
+        samples_per_seed=5,
+        msa_directory=None,
+        skip_finished=True,
+    ):
+        """
+        Set up Chai-1 structure prediction.
+
+        Writes one FASTA per model and one shell command per (model, seed) call.
+        Each call: ``chai-lab fold <fasta> <out_dir> --seed S --num-diffn-samples K``.
+        Default 5 seeds × 5 samples = 25 poses; for 100 poses pass
+        ``seeds=list(range(1, 21))``.
+
+        Returned commands work with ``mn5.jobArrays(jobs, program="chai1", ...)``.
+
+        Parameters
+        ==========
+        job_folder : str
+        seeds : list[int] | None
+            Default ``list(range(1, 6))`` (5 seeds).
+        samples_per_seed : int
+            ``--num-diffn-samples`` per call. Default 5.
+        msa_directory : str | None
+            Folder of ``<sha256(seq)>.aligned.pqt`` files (Chai's MSA cache format).
+            Convert AF3-derived a3m via ``chai-lab merge-a3m-in-directory``.
+        skip_finished : bool
+            Wrap commands with ``[ -f <last_cif> ] || ...`` guards.
+
+        Returns
+        =======
+        jobs : list[str]
+            One command per (model × seed). 181 complexes × 20 seeds = 3620 cmds —
+            consider ``group_jobs_by`` in mn5.jobArrays.
+        """
+        os.makedirs(job_folder, exist_ok=True)
+        inputs_dir = os.path.join(job_folder, "inputs")
+        output_dir = os.path.join(job_folder, "output")
+        os.makedirs(inputs_dir, exist_ok=True)
+        os.makedirs(output_dir, exist_ok=True)
+
+        if seeds is None:
+            seeds = list(range(1, 6))
+        if not seeds:
+            raise ValueError("seeds list cannot be empty.")
+
+        msa_arg = f" --msa-directory {msa_directory}" if msa_directory else ""
+
+        jobs = []
+        for model in self.sequences_names:
+            fasta_lines = []
+            for cid, seq in self._iter_chain_seqs(model):
+                fasta_lines.append(f">protein|name={cid}\n{seq.upper()}")
+            if not fasta_lines:
+                raise ValueError(f"No sequences for model {model}.")
+            fasta_path = os.path.join(inputs_dir, f"{model}.fasta")
+            with open(fasta_path, "w") as fh:
+                fh.write("\n".join(fasta_lines) + "\n")
+
+            os.makedirs(os.path.join(output_dir, model), exist_ok=True)
+            for s in seeds:
+                seed_out = os.path.join(output_dir, model, f"seed_{s}")
+                os.makedirs(seed_out, exist_ok=True)
+                # chai-lab writes the models directly into the seed directory (v0.6.1, checked
+                # 2026-09-30: output/<model>/seed_<s>/pred.model_idx_<k>.cif). Earlier versions used a
+                # "predictions" subdirectory, so both are accepted — with only the old path, the guard
+                # never matched and skip_finished silently re-ran every completed seed.
+                last_name = f"pred.model_idx_{samples_per_seed - 1}.cif"
+                last_cif = os.path.join(seed_out, last_name)
+                last_cif_legacy = os.path.join(seed_out, "predictions", last_name)
+                cmd = (
+                    f"chai-lab fold {fasta_path} {seed_out} "
+                    f"--seed {s} --num-diffn-samples {samples_per_seed}{msa_arg}"
+                )
+                if skip_finished:
+                    cmd = f"[ -f {last_cif} ] || [ -f {last_cif_legacy} ] || ({cmd})"
+                jobs.append(cmd)
+
+        return jobs
+    def setUpRFAACalculation(
+        self,
+        job_folder,
+        weights_path="/gpfs/projects/bsc72/weights/rfaa/RFAA_paper_weights.pt",
+        hhdb_path="/gpfs/projects/bsc72/databases/pdb100_2021Mar03/pdb100_2021Mar03",
+        rfaa_repo="/gpfs/projects/bsc72/Programs/RoseTTAFold-All-Atom",
+        hhsuite_bin="/gpfs/projects/bsc72/Programs/hhsuite-3.3.0/bin",
+        precomputed_msa_dir=None,
+        hhsearch_cpus=4,
+        skip_finished=True,
+    ):
+        """
+        Set up RoseTTAFold-All-Atom (RFAA) structure prediction.
+
+        Builds per-model Hydra YAML configs, per-chain FASTA inputs, and one shell
+        command per model that, at run time, (a) calls ``hhsearch`` against the
+        pdb100 templates DB to populate ``t000_.hhr`` + ``t000_.atab`` from the
+        precomputed a3m MSA, then (b) invokes ``python -m rf2aa.run_inference``.
+
+        Returned commands work with ``mn5.jobArrays(jobs, program="rfaa", ...)``;
+        the ``rfaa`` registry exports ``PATH``, ``HHLIB``, and the venv activation
+        so plain ``hhsearch`` / ``python -m rf2aa.run_inference`` resolve.
+
+        Parameters
+        ----------
+        weights_path : str
+            Path to ``RFAA_paper_weights.pt`` (default: shared bsc72 location).
+        hhdb_path : str
+            Prefix of the pdb100 hhsuite DB (i.e. up to and including
+            ``pdb100_2021Mar03``; hhsearch appends ``_hhm.ffindex`` etc.).
+        rfaa_repo : str
+            Clone of RoseTTAFold-All-Atom; added to ``PYTHONPATH`` in the cmd.
+        hhsuite_bin : str
+            Directory containing the ``hhsearch`` binary.
+        precomputed_msa_dir : str or None
+            Directory holding ``<model>_<chain>.a3m`` files (e.g. extracted from
+            an AF3 run). REQUIRED — RFAA without an MSA produces meaningless
+            template hits and crashes on empty ``.hhr``.
+        hhsearch_cpus : int
+            ``-cpu`` flag passed to hhsearch (per chain).
+        skip_finished : bool
+            Wrap the command in a sentinel check so completed jobs are skipped.
+        """
+        if precomputed_msa_dir is None:
+            raise ValueError(
+                "setUpRFAACalculation requires precomputed_msa_dir "
+                "(e.g. the AF3-derived a3m directory). RFAA needs an MSA."
+            )
+
+        os.makedirs(job_folder, exist_ok=True)
+
+        jobs = []
+        for model in self.sequences_names:
+            chain_seqs = list(self._iter_chain_seqs(model))
+            if not chain_seqs:
+                raise ValueError(f"No sequences for model {model}.")
+
+            # Absolute: the generated command changes into mdir, so paths built from a relative
+            # job_folder would afterwards resolve against the wrong directory.
+            mdir = os.path.abspath(os.path.join(job_folder, model))
+            os.makedirs(os.path.join(mdir, "input"), exist_ok=True)
+
+            for cid, seq in chain_seqs:
+                fasta = os.path.join(mdir, "input", f"{model}_{cid}.fasta")
+                with open(fasta, "w") as fh:
+                    fh.write(f">{cid}\n{seq.upper()}\n")
+
+            yaml_lines = ["defaults:", "  - base", "", f"job_name: {model}", "",
+                          "protein_inputs:"]
+            for cid, _ in chain_seqs:
+                yaml_lines.append(f"  {cid}:")
+                yaml_lines.append(f"    fasta_file: input/{model}_{cid}.fasta")
+            yaml_lines.append("")
+            yaml_lines.append("database_params:")
+            yaml_lines.append(f"  hhdb: \"{hhdb_path}\"")
+            yaml_lines.append(f"checkpoint_path: {weights_path}")
+            with open(os.path.join(mdir, f"{model}.yaml"), "w") as fh:
+                fh.write("\n".join(yaml_lines) + "\n")
+
+            # Stage the precomputed a3m into each chain's RFAA cache dir.
+            from pathlib import Path as _Path
+            hhsearch_steps = []
+            for cid, _seq in chain_seqs:
+                cache_dir = _Path(mdir) / model / cid
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                # Absolute: the symlink lives in a nested cache directory, so a relative
+                # precomputed_msa_dir would be resolved from there and point nowhere.
+                src_a3m = _Path(precomputed_msa_dir).resolve() / f"{model}_{cid}.a3m"
+                if src_a3m.is_file():
+                    dst = cache_dir / "t000_.msa0.a3m"
+                    if not dst.exists():
+                        dst.symlink_to(src_a3m)
+                # hhsearch step. Use if/then/fi so partial-resume states behave
+                # the same as fresh runs and an hhsearch failure short-circuits
+                # via the enclosing `set -e` instead of leaking into the next
+                # chain's logic (which the older `&&/||` form mishandled).
+                hhr = cache_dir / "t000_.hhr"
+                atab = cache_dir / "t000_.atab"
+                a3m = cache_dir / "t000_.msa0.a3m"
+                hhsearch_steps.append(
+                    f"if [ ! -s {hhr} ] || [ ! -s {atab} ]; then "
+                    f"{hhsuite_bin}/hhsearch "
+                    f"-i {a3m} -o {hhr} -atab {atab} "
+                    f"-d {hhdb_path} -cpu {hhsearch_cpus} -v 1; "
+                    f"fi"
+                )
+
+            # RFAA writes its prediction to <mdir>/<model>.pdb.
+            sentinel = os.path.join(mdir, f"{model}.pdb")
+            # Wrap whole pipeline in `set -e` so any step's failure aborts the run.
+            cmd_body = (
+                f"set -e; "
+                f"export PYTHONPATH={rfaa_repo}:$PYTHONPATH; "
+                f"cd {mdir}; "
+                + "; ".join(hhsearch_steps)
+                + f"; python -m rf2aa.run_inference -cd {mdir} --config-name {model}"
+            )
+            if skip_finished:
+                cmd_body = f"[ -f {sentinel} ] || ({cmd_body})"
+            jobs.append(cmd_body)
+
+        return jobs
+    def setUpESMFoldCalculation(
+        self,
+        job_folder,
+        model_path="/gpfs/projects/bsc72/Programs/models/esmfold_v1",
+        linker_length=25,
+        chunk_size=64,
+        skip_finished=True,
+    ):
+        """Set up ESMFold inference for protein-peptide complexes (HuggingFace EsmForProteinFolding).
+
+        Multi-chain handling: concatenate ``chainA + 'G'*linker_length + chainB``
+        and fold as a single chain via the canonical glycine-linker hack. The
+        emitted command (one per model) writes ``<job_folder>/<model>/<model>.pdb``
+        with the linker stripped and chains re-labelled A and B.
+
+        For protein-only single-chain models, no linker is inserted.
+
+        Returned commands are designed to be submitted via ``mn5.jobArrays(jobs,
+        program="esmfold", ...)``; the registry exports the anaconda module and
+        HuggingFace offline flags so weights load from the cached path.
+
+        Parameters
+        ----------
+        job_folder : str
+            Workspace directory.
+        model_path : str
+            Local ESMFold v1 weights (HuggingFace checkpoint dir).
+        linker_length : int
+            Poly-G linker between chains; ignored for single-chain inputs.
+        chunk_size : int
+            ``model.trunk.set_chunk_size`` value; lower trades speed for memory.
+        skip_finished : bool
+            Sentinel-guard so completed models are skipped on resume.
+        """
+        os.makedirs(job_folder, exist_ok=True)
+        # Write a single inference helper script in the job_folder so each model's
+        # command can call it.  Avoids duplicating the inference logic per job.
+        helper = os.path.join(job_folder, "_esmfold_run.py")
+        helper_src = f'''"""ESMFold inference helper (auto-generated by setUpESMFoldCalculation)."""
+import json, os, sys, argparse, time
+import torch
+from transformers import AutoTokenizer, EsmForProteinFolding
+from transformers.models.esm.openfold_utils.feats import atom14_to_atom37
+from transformers.models.esm.openfold_utils.protein import Protein as OFProtein, to_pdb
+
+MODEL_PATH = {model_path!r}
+LINKER_LEN = {linker_length}
+
+_model = None
+_tok = None
+
+def _load():
+    global _model, _tok
+    if _model is not None:
+        return
+    _tok = AutoTokenizer.from_pretrained(MODEL_PATH, local_files_only=True)
+    m = EsmForProteinFolding.from_pretrained(MODEL_PATH, local_files_only=True)
+    assert torch.cuda.is_available(), "GPU required for ESMFold"
+    m = m.cuda()
+    m.esm = m.esm.half()
+    torch.backends.cuda.matmul.allow_tf32 = True
+    m.trunk.set_chunk_size({chunk_size})
+    m.eval()
+    _model = m
+
+def _split_pdb_into_chains(pdb_text, prot_len, linker_len):
+    if linker_len <= 0 or prot_len <= 0:
+        return pdb_text
+    cutoff = prot_len + linker_len
+    out, new_b, last_b_src = [], 0, -1
+    for line in pdb_text.splitlines():
+        if not (line.startswith("ATOM") or line.startswith("HETATM")):
+            if line.startswith("TER"):
+                continue
+            out.append(line); continue
+        try: resi = int(line[22:26])
+        except ValueError: out.append(line); continue
+        if 1 <= resi <= prot_len:
+            out.append(line[:21] + "A" + line[22:])
+        elif resi > cutoff:
+            if resi != last_b_src:
+                new_b += 1; last_b_src = resi
+            out.append(line[:21] + "B" + f"{{new_b:>4d}}" + line[26:])
+    final, last_chain = [], None
+    for ln in out:
+        if ln.startswith("ATOM") and ln[21] != last_chain and last_chain is not None:
+            final.append("TER")
+        final.append(ln)
+        if ln.startswith("ATOM"):
+            last_chain = ln[21]
+    if last_chain is not None:
+        final.append("TER")
+    return "\\n".join(final) + "\\nEND\\n"
+
+def fold_one(model_name, sequences, out_pdb, out_plddt):
+    """sequences: ordered list of chain sequences (1 or 2)."""
+    _load()
+    if len(sequences) == 1:
+        seq = sequences[0]; prot_len = len(seq); linker = 0
+    elif len(sequences) == 2:
+        prot_len = len(sequences[0])
+        linker = LINKER_LEN
+        seq = sequences[0] + ("G" * linker) + sequences[1]
+    else:
+        raise ValueError(f"ESMFold helper supports 1 or 2 chains, got {{len(sequences)}}")
+    ids = _tok([seq], padding=False, add_special_tokens=False)["input_ids"]
+    ids = torch.tensor(ids, device="cuda")
+    with torch.no_grad():
+        out = _model(ids)
+    pos = atom14_to_atom37(out["positions"][-1], out)
+    out_cpu = {{k: v.detach().cpu().numpy() for k, v in out.items()}}
+    pos = pos.detach().cpu().numpy()
+    pred = OFProtein(
+        aatype=out_cpu["aatype"][0],
+        atom_positions=pos[0],
+        atom_mask=out_cpu["atom37_atom_exists"][0],
+        residue_index=out_cpu["residue_index"][0] + 1,
+        b_factors=out_cpu["plddt"][0],
+        chain_index=None,
+    )
+    text = _split_pdb_into_chains(to_pdb(pred), prot_len, linker)
+    os.makedirs(os.path.dirname(out_pdb), exist_ok=True)
+    with open(out_pdb, "w") as f: f.write(text)
+    with open(out_plddt, "w") as f: f.write(f"{{float(out_cpu['plddt'][0].mean()):.4f}}\\n")
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", required=True)
+    p.add_argument("--seqs", required=True, help="JSON list of chain sequences")
+    p.add_argument("--out-pdb", required=True)
+    p.add_argument("--out-plddt", required=True)
+    a = p.parse_args()
+    fold_one(a.model, json.loads(a.seqs), a.out_pdb, a.out_plddt)
+'''
+        with open(helper, "w") as fh:
+            fh.write(helper_src)
+
+        jobs = []
+        for model in self.sequences_names:
+            chain_seqs = list(self._iter_chain_seqs(model))
+            if not chain_seqs:
+                raise ValueError(f"No sequences for model {model}.")
+            mdir = os.path.join(job_folder, model)
+            os.makedirs(mdir, exist_ok=True)
+            seqs_json = "[" + ",".join(f'"{s.upper()}"' for _cid, s in chain_seqs) + "]"
+            out_pdb = os.path.join(mdir, f"{model}.pdb")
+            out_plddt = os.path.join(mdir, f"{model}_plddt.txt")
+            cmd = (
+                f"python {helper} --model {model} "
+                f"--seqs '{seqs_json}' "
+                f"--out-pdb {out_pdb} "
+                f"--out-plddt {out_plddt}"
+            )
+            if skip_finished:
+                cmd = f"[ -f {out_pdb} ] || ({cmd})"
+            jobs.append(cmd)
+        return jobs
+
 
     def copyModelsFromAlphaFoldCalculation(self, af_folder, output_folder, prefix='',
                                            return_missing=False, copy_all=False):

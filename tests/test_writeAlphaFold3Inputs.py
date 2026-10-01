@@ -192,7 +192,12 @@ def test_set_up_alphafold3_writes_the_same_bytes_as_the_preparation_only_api(tmp
     from_writer = (tmp_path / "prepared" / "modelA" / "input" / "modelA.json").read_text()
     assert from_commands == from_writer
     # The command-generating method still generates commands; the writer never does.
-    assert len(commands) == 1 and "sbatch runner input" in commands[0]
+    # The command no longer submits a second job, and because this payload sets unpairedMsa,
+    # pairedMsa and templates on every chain it must call the container with --norun_data_pipeline:
+    # bsc_alphafold forwards no flags, and without it AF3 searches again over the supplied alignment
+    # (its pipeline tests those fields for truthiness, so empty ones do not disable the search).
+    assert len(commands) == 1 and "sbatch" not in commands[0]
+    assert "--norun_data_pipeline" in commands[0]
 
 
 def test_validate_alphafold3_payload_reports_the_reason_for_each_defect():
