@@ -23,7 +23,6 @@ def test_set_up_alphafold3_unpacked_seeds_use_relative_cd(tmp_path, monkeypatch)
         'AF3_START_DIR="$(pwd)"',
         f"cd {shlex.quote(expected_model_dir)}",
         "bsc_alphafold seed_1/input seed_1/output $WEIGHTS",
-        "sbatch runner seed_1/input",
         'cd "$AF3_START_DIR"',
     ]
 
@@ -48,7 +47,6 @@ def test_set_up_alphafold3_combined_seeds_use_relative_cd(tmp_path, monkeypatch)
         'AF3_START_DIR="$(pwd)"',
         f"cd {shlex.quote(expected_model_dir)}",
         "bsc_alphafold input output $WEIGHTS",
-        "sbatch runner input",
         'cd "$AF3_START_DIR"',
     ]
 
@@ -97,3 +95,35 @@ def test_set_up_alphafold3_rejects_user_ccd_and_user_ccd_path_for_same_model(tmp
             user_ccd={"modelA": "data_CUSTOM\n#\n"},
             user_ccd_path={"modelA": tmp_path / "custom_components.cif"},
         )
+
+
+def test_set_up_alphafold3_no_runner_submission(tmp_path, monkeypatch):
+    """The emitted command must not submit a second job: bsc_alphafold already runs inference for the
+    input directory, and no runner script is created, so an `sbatch <runner>` line would either fail on a
+    missing script or duplicate the work (removed 2026-10-01)."""
+    monkeypatch.chdir(tmp_path)
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    jobs = models.setUpAlphaFold3(str(tmp_path / "af3"), model_seeds=[1])
+    assert "sbatch" not in jobs[0]
+
+
+def test_set_up_alphafold3_pipeline_off_requires_all_fields(tmp_path, monkeypatch):
+    """run_data_pipeline=False without all three chain fields must be refused before anything is written:
+    AF3's featuriser needs unpairedMsa, pairedMsa and templates once the pipeline is off."""
+    monkeypatch.chdir(tmp_path)
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    folder = tmp_path / "af3_bad"
+    with pytest.raises(ValueError):
+        models.setUpAlphaFold3(str(folder), model_seeds=[1], run_data_pipeline=False)
+    assert not folder.exists() or not list(folder.rglob("*.json"))
+
+
+def test_set_up_alphafold3_pipeline_off_with_fields(tmp_path, monkeypatch):
+    """With all three fields supplied, the command calls the container with --norun_data_pipeline, because
+    the bsc_alphafold wrapper forwards no flags and empty MSA fields alone would still trigger a search."""
+    monkeypatch.chdir(tmp_path)
+    models = prepare_proteins.sequenceModels({"modelA": "ACDEFGHIK"})
+    jobs = models.setUpAlphaFold3(str(tmp_path / "af3_ss"), model_seeds=[1],
+                                  unpaired_msa="", paired_msa="", templates=[])
+    assert "--norun_data_pipeline" in jobs[0]
+    assert "bsc_alphafold" not in jobs[0]
