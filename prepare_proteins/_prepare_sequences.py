@@ -14,6 +14,8 @@ import subprocess
 from collections import defaultdict
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import ipywidgets as widgets
 import matplotlib.pyplot as plt
@@ -3199,6 +3201,214 @@ class sequenceModels:
 
         if return_finished:
             return finished
+
+        return jobs
+
+    def setUpBioEmu2(
+        self,
+        job_folder,
+        num_samples=8,
+        *,
+        models=None,
+        mode="equilibrium",
+        batch_size=None,
+        seed=None,
+        num_steps=None,
+        bioemu2_executable="bioemu2",
+        checkpoint_path=None,
+        msa_cache_dir=None,
+        sampler=None,
+        physicality_filter=None,
+        cache_dir=None,
+    ):
+        """Write BioEmu 2 protein systems and return one shell command per model.
+
+        Each model's ``system.yaml`` and ``run.sh`` live under ``job_folder``.
+        BioEmu 2 writes ``output/topology.cif``, ``output/samples.xtc``, and
+        ``output/physicality.json``. All samples, including rejected frames,
+        remain in the trajectory. Use the report to select frames for analysis.
+
+        ``models`` selects a name or an iterable of names from ``self.sequences``.
+        Protein chains can be supplied as a single sequence, a list of up to
+        26 sequences, or a mapping from explicit alphanumeric chain IDs to
+        sequences.
+        ``mode`` is ``"equilibrium"`` or ``"structure"``. Sample count, batch
+        size, seed, and denoising steps are passed through to the upstream CLI.
+
+        Set ``bioemu2_executable`` to the executable in the BioEmu 2 environment,
+        or make it available on PATH. ``checkpoint_path`` refers to the checkpoint
+        on the execution host, with its matching ``config.yaml`` beside it.
+        For offline execution, also populate ``msa_cache_dir`` with BioEmu 2
+        cache entries for the selected sequences. **The upstream CLI takes no
+        alignment argument**: it reads ``BIOEMU2_MSA_CACHE`` and, on a miss,
+        queries ``https://api.colabfold.com``. Setting a cache directory does
+        not disable that query -- it only changes where a hit is looked for --
+        so a cache entry must already exist for every sequence, and the CLI
+        must not be run with unpublished sequences on any host from which a
+        miss could reach the public service.
+
+        The upstream *Python* API does accept an alignment directly:
+        ``get_msa(system, source=Path(...))`` reads a local A3M and
+        ``EmuSession(..., msa=msa)`` consumes it, with no cache-or-network
+        step. That is the route to use for sequences that must never leave the
+        host, and the fallback if the CLI cache route fails.
+
+        ``cache_dir`` places all four upstream caches under one directory --
+        ``BIOEMU2_MSA_CACHE``, ``BIOEMU2_EMBEDS_CACHE``, ``BIOEMU2_CCD_CACHE``
+        and ``BIOEMU2_TEMPLATE_CACHE``. Without it each defaults beneath
+        ``~/.cache/bioemu2``, which writes into the execution host's home
+        directory. ``msa_cache_dir`` overrides the MSA cache alone.
+
+        ``sampler`` selects the upstream sampling algorithm (``edm`` by
+        default upstream) and ``physicality_filter`` selects the per-frame
+        physicality checks; both are recorded in the launcher so a run's
+        effective settings are readable from the job directory.
+
+        Reuse a job directory with identical inputs and settings to resume
+        interrupted sampling. Use a separate job directory for changed inputs
+        or settings, and run one process per output directory.
+        """
+        subcommands = {
+            "equilibrium": "sample-equilibrium",
+            "structure": "predict-structure",
+        }
+        if mode not in subcommands:
+            raise ValueError("mode must be 'equilibrium' or 'structure'.")
+
+        if isinstance(num_samples, bool) or not isinstance(num_samples, int) or num_samples < 1:
+            raise ValueError("num_samples must be a positive integer.")
+        for name, value in (
+            ("batch_size", batch_size),
+            ("num_steps", num_steps),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ValueError(f"{name} must be a positive integer.")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise ValueError("seed must be an integer.")
+
+        executable = os.fspath(bioemu2_executable)
+        if not executable:
+            raise ValueError("bioemu2_executable must name an executable.")
+        if not isinstance(bioemu2_executable, str) or os.sep in executable:
+            executable = os.path.abspath(os.path.expanduser(executable))
+        arguments = [
+            executable, subcommands[mode], "--system", "system.yaml",
+            "--out", "output", "--num-samples", str(num_samples),
+        ]
+        for flag, value in (
+            ("--batch-size", batch_size),
+            ("--seed", seed),
+            ("--num-steps", num_steps),
+        ):
+            if value is not None:
+                arguments.extend((flag, str(value)))
+        for flag, value in (
+            ("--sampler", sampler),
+            ("--physicality-filter", physicality_filter),
+        ):
+            if value is not None:
+                if not isinstance(value, str) or not value:
+                    raise ValueError(f"{flag} must be a non-empty string.")
+                arguments.extend((flag, value))
+        if checkpoint_path is not None:
+            checkpoint = os.path.abspath(os.path.expanduser(checkpoint_path))
+            arguments.extend(("--checkpoint-path", checkpoint))
+        # Every upstream cache otherwise defaults beneath ~/.cache/bioemu2 on the execution host.
+        environment = {}
+        if cache_dir is not None:
+            root = os.path.abspath(os.path.expanduser(cache_dir))
+            environment["BIOEMU2_MSA_CACHE"] = os.path.join(root, "colabfold_msa")
+            environment["BIOEMU2_EMBEDS_CACHE"] = os.path.join(root, "embeds")
+            environment["BIOEMU2_CCD_CACHE"] = os.path.join(root, "ccd")
+            environment["BIOEMU2_TEMPLATE_CACHE"] = os.path.join(root, "templates")
+        if msa_cache_dir is not None:
+            environment["BIOEMU2_MSA_CACHE"] = os.path.abspath(os.path.expanduser(msa_cache_dir))
+        if environment:
+            arguments[:0] = ["env"] + [
+                f"{name}={value}" for name, value in sorted(environment.items())
+            ]
+        launcher = (
+            '#!/usr/bin/env bash\n'
+            'cd -- "$(dirname -- "$0")" || exit 1\n'
+            f'exec {shlex.join(arguments)}\n'
+        )
+
+        if models is None:
+            selected = self.sequences
+        elif isinstance(models, str):
+            selected = {models: self.sequences[models]}
+        else:
+            selected = {model: self.sequences[model] for model in models}
+
+        job_folder = Path(job_folder).expanduser()
+        inputs = {}
+        for model in selected:
+            if (
+                not isinstance(model, str)
+                or model in {"", ".", ".."}
+                or any(character in model for character in ("/", "\x00", "\n", "\r"))
+            ):
+                raise ValueError(f"Invalid BioEmu 2 model directory name: {model!r}.")
+            model_sequence = self.sequences[model]
+            if isinstance(model_sequence, str):
+                chains = (("A", model_sequence),)
+            elif isinstance(model_sequence, dict):
+                chains = model_sequence.items()
+            elif isinstance(model_sequence, (list, tuple)):
+                chains = (
+                    (chr(ord("A") + index), sequence)
+                    for index, sequence in enumerate(model_sequence)
+                )
+            else:
+                raise TypeError(f"Unsupported sequence type for model {model!r}.")
+            entities = []
+            chain_ids = set()
+            for chain_id, sequence in chains:
+                if sequence is None:
+                    continue
+                chain_id = str(chain_id)
+                if not re.fullmatch(r"[A-Za-z0-9]{1,4}", chain_id) or chain_id in chain_ids:
+                    raise ValueError(f"Invalid or duplicate chain ID {chain_id!r} in {model!r}.")
+                chain_ids.add(chain_id)
+                sequence = "".join(str(sequence).split()).upper()
+                if not re.fullmatch(r"[ACDEFGHIKLMNPQRSTVWYX]+", sequence):
+                    raise ValueError(f"Invalid protein sequence in {model!r}, chain {chain_id!r}.")
+                entities.append(
+                    {"entity_type": "protein", "asym_ids": [chain_id], "sequence": sequence}
+                )
+            if not entities:
+                raise ValueError(f"No protein chains in {model!r}.")
+            # JSON is a YAML subset and keeps sequence and chain IDs quoted.
+            system = json.dumps({"entities": entities, "bonds": []}, indent=2) + "\n"
+            inputs[model] = {"system.yaml": system, "run.sh": launcher}
+
+        if not inputs:
+            return []
+        job_folder.mkdir(parents=True, exist_ok=True)
+        jobs = []
+        for model, files in inputs.items():
+            model_folder = job_folder / model
+            if not model_folder.exists():
+                # Publish both job inputs together so an interrupted setup can be retried.
+                with TemporaryDirectory(dir=job_folder, prefix=".bioemu2-") as staging:
+                    prepared = Path(staging) / "job"
+                    prepared.mkdir()
+                    for filename, content in files.items():
+                        (prepared / filename).write_text(content, encoding="utf-8")
+                    try:
+                        prepared.rename(model_folder)
+                    except OSError:
+                        if not model_folder.is_dir():
+                            raise
+            for filename, content in files.items():
+                destination = model_folder / filename
+                if not destination.is_file() or destination.read_text(encoding="utf-8") != content:
+                    raise FileExistsError(
+                        f"Existing BioEmu 2 job differs at {destination}. Use a new job directory."
+                    )
+            jobs.append(f"bash -- {shlex.quote(str(model_folder / 'run.sh'))}\n")
 
         return jobs
 
